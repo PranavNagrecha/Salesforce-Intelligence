@@ -83,8 +83,17 @@ const buildPath = join(root, 'packages/cli/build.mjs');
  * precise re-inline guard stayed green (antlr refs 7 of 80, external import
  * string retained, worker 15 KB). Headroom (~430 KB) is again deliberate, and
  * 8.2 MB is still ~5 MB below a re-inlined bundle.
+ *
+ * RAISED AT INTEGRATION (8_200_000 -> 8_800_000), fifth round: sprint 2 merged
+ * the review fixes, save re-entry, value-aware writer search, the access and
+ * callout follow-ups, and the token diet, which keeps each core tool's long
+ * form as `reference` beside its new short description (two strings where
+ * there was one). The merged bundle measured 8_205_648. The re-inline guards
+ * stayed green (antlr refs and the external import string unchanged, worker
+ * 16 KB). Headroom (~590 KB) is deliberate, and 8.8 MB is still ~4 MB below a
+ * re-inlined bundle.
  */
-const MAX_BYTES = 8_200_000;
+const MAX_BYTES = 8_800_000;
 /** Leftover string mentions of the external import path are fine; grammar class bodies are not. */
 const MAX_ANTLR_REFS = 80;
 /** Worker ships parsers/apex-ast logic but must not re-inline the ANTLR grammar. */

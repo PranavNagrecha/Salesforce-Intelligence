@@ -1,0 +1,32 @@
+---
+/**
+ * CtaBlock — the end-of-page call to action: try the question on the demo org
+ * with one command, then connect your own org. Used at the end of posts,
+ * how-to and use-case pages.
+ */
+import TryDemo from "./TryDemo.astro";
+
+interface Props {
+  title?: string;
+  /** A question the reader can ask the demo org right after installing it. */
+  question?: string;
+  /** Optional matching use-case or how-to page. */
+  related?: { href: string; label: string };
+}
+const {
+  title = "Try it on the demo org",
+  question = "Can I delete the Amount field on Invoice?",
+  related,
+} = Astro.props;
+---
+
+<aside class="cta-block" aria-label="Try sf-intelligence">
+  <h2>{title}</h2>
+  <p>Add the built-in demo org to your AI assistant, then ask: <strong>“{question}”</strong> No Salesforce login needed.</p>
+  <TryDemo id="cta-try" title="One command" note="Free. Read-only. Runs on your computer." />
+  <div class="btns">
+    <a class="btn btn-secondary" href="/demo">See real answers</a>
+    <a class="btn btn-secondary" href="/getting-started">Connect your own org</a>
+    {related && <a class="text-link" href={related.href}>{related.label} <span aria-hidden="true">&rarr;</span></a>}
+  </div>
+</aside>

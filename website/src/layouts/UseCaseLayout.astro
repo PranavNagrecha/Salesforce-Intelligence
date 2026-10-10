@@ -1,0 +1,157 @@
+---
+/**
+ * UseCaseLayout — an outcome page: the job in plain words, a short answer, a
+ * real answer from the demo org, how to ask, what it checks and can't see,
+ * the tools one level down (for developers), cross-links and the demo CTA.
+ *
+ * Extra explanation goes in the default slot and renders as prose after the
+ * real answer. Counts in copy come from the answer data, never typed.
+ */
+import Base from "./Base.astro";
+import AnswerCard from "../components/AnswerCard.astro";
+import AnswerTabs from "../components/AnswerTabs.astro";
+import CtaBlock from "../components/CtaBlock.astro";
+import FaqBlock, { type Faq } from "../components/FaqBlock.astro";
+import type { DemoAnswer } from "../data/demo-answers.ts";
+import site from "../data/site.ts";
+import siteData from "../data/site-data.json";
+import "../styles/pages.css";
+
+interface Link { href: string; label: string; note?: string }
+interface Props {
+  title: string;
+  description: string;
+  path: string;
+  heading: string;
+  lede: string;
+  /** Breadcrumb leaf. */
+  crumb: string;
+  /** Who the page is for, e.g. "Admins and architects". */
+  audience?: string;
+  /** The answer-first box (HTML, 40-60 words). */
+  short: string;
+  answers: DemoAnswer[];
+  /** Sentence above the real answer. */
+  answerIntro?: string;
+  asks: string[];
+  checks: string[];
+  limits: string[];
+  /** Bare tool names (no "sfi." prefix); each links to its /tools anchor. */
+  tools: string[];
+  related: Link[];
+  faqs?: Faq[];
+  cta: { question: string; related?: { href: string; label: string } };
+  dateModified: string;
+}
+
+const {
+  title, description, path, heading, lede, crumb, audience, short, answers, answerIntro,
+  asks, checks, limits, tools, related, faqs, cta, dateModified,
+} = Astro.props;
+
+const url = new URL(path, site.url).href;
+const jsonld = [
+  {
+    "@type": "TechArticle",
+    "@id": `${url}#article`,
+    headline: heading,
+    description,
+    dateModified,
+    inLanguage: "en",
+    author: { "@id": `${site.url}/#author` },
+    publisher: { "@id": `${site.url}/#org` },
+    mainEntityOfPage: { "@id": `${url}#webpage` },
+    about: { "@id": `${site.url}/#software` },
+  },
+];
+const hasProse = Astro.slots.has("default");
+---
+
+<Base
+  title={title}
+  description={description}
+  path={path}
+  breadcrumbs={[{ name: "Use cases", path: "/use-cases" }, { name: crumb, path }]}
+  jsonld={jsonld}
+  dateModified={dateModified}
+>
+  <section class="page-hero">
+    <div class="wrap">
+      <nav class="crumbs" aria-label="Breadcrumb">
+        <a href="/">Home</a><span class="sep" aria-hidden="true">/</span><a href="/use-cases">Use cases</a>
+      </nav>
+      <h1>{heading}</h1>
+      <p class="lede" set:html={lede} />
+      {audience && <p class="page-meta">For {audience}</p>}
+    </div>
+  </section>
+
+  <div class="page-body">
+    <div class="wrap">
+      <div class="answer-first narrow">
+        <span class="label">Short answer</span>
+        <p set:html={short} />
+      </div>
+
+      <section class="block" aria-labelledby="real-answer">
+        <h2 id="real-answer">A real answer from the demo org</h2>
+        <p>{answerIntro ?? "Asked of Verdant, the made-up solar company that ships inside sf-intelligence. Every component in the answer is named, so you can check it."}</p>
+        {answers.length === 1
+          ? <AnswerCard answer={answers[0]} level={3} />
+          : <AnswerTabs answers={answers} idPrefix="uc" label="Example answers" level={3} />}
+        <p class="meta-line">Recorded with sf-intelligence {siteData.version} on the built-in demo org. The wording is ours; the facts are the tool’s. <a href="/demo">More real answers</a>.</p>
+      </section>
+
+      {hasProse && (
+        <div class="prose">
+          <slot />
+        </div>
+      )}
+
+      <section class="block" aria-labelledby="ask">
+        <h2 id="ask">Ask it like this</h2>
+        <p>Use your own object and field names. If a name matches more than one thing, it asks which one you mean.</p>
+        <ul class="ask-list">
+          {asks.map((a) => <li>{a}</li>)}
+        </ul>
+      </section>
+
+      <section class="block" aria-labelledby="checks">
+        <h2 id="checks">What it checks, and what it can’t see</h2>
+        <div class="split">
+          <div class="panel">
+            <h3>Checks</h3>
+            <ul class="ticks">{checks.map((c) => <li set:html={c} />)}</ul>
+          </div>
+          <div class="panel tint">
+            <h3>Can’t see</h3>
+            <ul class="ticks minus">{limits.map((c) => <li set:html={c} />)}</ul>
+          </div>
+        </div>
+        <details class="dev-details">
+          <summary>For developers: the tools behind this</summary>
+          <p>Your assistant picks these from the plain-language question. You never have to name them.</p>
+          <ul>
+            {tools.map((t) => <li><a href={`/tools#${t}`}><code>sfi.{t}</code></a></li>)}
+          </ul>
+        </details>
+      </section>
+
+      {faqs && faqs.length > 0 && (
+        <section class="block" aria-labelledby="faq">
+          <h2 id="faq">Questions</h2>
+          <FaqBlock faqs={faqs} />
+        </section>
+      )}
+
+      <nav class="block narrow" aria-labelledby="related">
+        <h2 id="related">Related</h2>
+        <ul class="link-list">
+          {related.map((r) => <li><a href={r.href}>{r.label}</a>{r.note && <span> · {r.note}</span>}</li>)}
+        </ul>
+      </nav>
+
+      <CtaBlock question={cta.question} related={cta.related} />
+    </div>
+  </div>
+</Base>

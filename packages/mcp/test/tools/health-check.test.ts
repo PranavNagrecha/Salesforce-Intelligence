@@ -226,7 +226,11 @@ describe('healthCheckHandler: CR-P3-3 confirmed-empty vs unconfirmed-empty cover
     ).toBe(false);
   });
 
-  it('reports degraded when the same empty type is NOT retrieveConfirmed (honesty preserved)', async () => {
+  // FR-01 (FAIL-BEFORE/PASS-AFTER): an unconfirmed-empty type is a COVERAGE gap,
+  // still disclosed (coverageGaps + coverage.partialTypes), but it no longer
+  // flips `status` — before, every real vault and the official demo read
+  // `degraded`, so the documented install check could never pass.
+  it('discloses the unconfirmed empty type as a coverage gap without degrading status (honesty preserved)', async () => {
     const ctx: Context = {
       vaultRoot,
       graph: store,
@@ -241,12 +245,112 @@ describe('healthCheckHandler: CR-P3-3 confirmed-empty vs unconfirmed-empty cover
     const result = await healthCheckHandler(ctx, {});
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value.data.status).toBe('degraded');
+    expect(result.value.data.status).toBe('healthy');
+    expect(result.value.data.coverage.partialTypes).toContain('SharingRule');
     expect(
-      result.value.data.issues.some(
+      result.value.data.coverageGaps.some(
         (i) => i.includes('coverage is partial') && i.includes('SharingRule'),
       ),
     ).toBe(true);
+    expect(result.value.data.issues.some((i) => i.includes('coverage is partial'))).toBe(false);
+  });
+
+  // FAIL-BEFORE/PASS-AFTER: FR-01 moved ALL partial rows to coverageGaps, so a
+  // refresh whose retrieve ERRORED for a family read `healthy` with no issue.
+  // A failed retrieve is a refresh failure, not a family the org lacks.
+  it('keeps an errored retrieve in `issues` (degraded) while capped rows stay coverage gaps', async () => {
+    const ctx: Context = {
+      vaultRoot,
+      graph: store,
+      manifest: {
+        ...baseManifest(realHash),
+        coverage: [
+          { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+          { type: 'Flow', requested: true, retrieved: 0, errored: true, neverModeled: false },
+          { type: 'Report', requested: true, retrieved: 5, errored: false, neverModeled: false, capped: true },
+        ],
+      },
+    };
+    const result = await healthCheckHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.status).toBe('degraded');
+    const failed = result.value.data.issues.find((i) => i.includes('retrieve failed'));
+    expect(failed).toContain('Flow');
+    expect(failed).not.toContain('Report');
+    const gap = result.value.data.coverageGaps.find((i) => i.includes('coverage is partial'));
+    expect(gap).toContain('Report');
+    expect(gap).not.toContain('Flow');
+  });
+
+  // FAIL-BEFORE/PASS-AFTER (second review): Report/Dashboard rows START
+  // `pending` (fold-erased node count) and only a report pull clears that. The
+  // fix pass counted every pending row as "retrieve failed — re-run refresh",
+  // so the `sfi demo` / `--no-reports` / `--no-pull` manifest shape (pending,
+  // retrieved 0, no reportsCap) read degraded for a retrieve that never ran.
+  it('a demo-shaped manifest (pending Report/Dashboard, no report pull) is a coverage gap, not a failed retrieve', async () => {
+    const ctx: Context = {
+      vaultRoot,
+      graph: store,
+      manifest: {
+        ...baseManifest(realHash),
+        coverage: [
+          { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+          { type: 'Dashboard', requested: true, retrieved: 0, errored: false, neverModeled: false, pending: true },
+          { type: 'Report', requested: true, retrieved: 0, errored: false, neverModeled: false, pending: true },
+        ],
+      },
+    };
+    const result = await healthCheckHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.issues.some((i) => i.includes('retrieve failed'))).toBe(false);
+    expect(result.value.data.status).toBe('healthy');
+    const gap = result.value.data.coverageGaps.find((i) => i.includes('coverage is partial'));
+    expect(gap).toContain('Report');
+    expect(gap).toContain('Dashboard');
+  });
+
+  it('a report pull that landed none of a non-zero org total stays a failed retrieve', async () => {
+    const ctx: Context = {
+      vaultRoot,
+      graph: store,
+      manifest: {
+        ...baseManifest(realHash),
+        reportsCap: { reports: { total: 40, retrieved: 0 }, dashboards: { total: 0, retrieved: 0 } },
+        coverage: [
+          { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+          { type: 'Dashboard', requested: true, retrieved: 0, errored: false, neverModeled: false, pending: true },
+          { type: 'Report', requested: true, retrieved: 0, errored: false, neverModeled: false, pending: true },
+        ],
+      },
+    };
+    const result = await healthCheckHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.status).toBe('degraded');
+    const failed = result.value.data.issues.find((i) => i.includes('retrieve failed'));
+    expect(failed).toContain('Report');
+    expect(failed).not.toContain('Dashboard');
+  });
+
+  it('a capped-only vault (reports pulled up to the cap by design) stays healthy', async () => {
+    const ctx: Context = {
+      vaultRoot,
+      graph: store,
+      manifest: {
+        ...baseManifest(realHash),
+        coverage: [
+          { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+          { type: 'Report', requested: true, retrieved: 5, errored: false, neverModeled: false, capped: true },
+        ],
+      },
+    };
+    const result = await healthCheckHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.status).toBe('healthy');
+    expect(result.value.data.issues).toEqual([]);
   });
 });
 
@@ -326,6 +430,43 @@ describe('healthCheckHandler: profile-grant integrity degradation (PROFILE-COBAT
       i.includes('profiles retrieved without permission grants — co-listing likely lost'),
     );
     expect(issue).toBe(REASON);
+  });
+});
+
+// WOW-12 — FAIL-BEFORE/PASS-AFTER: an offline `--no-pull` refresh with no
+// cached describe drops the describe-only standard fields of the core
+// objects. Only the terminal and manifest.standardFieldDescribe said so; no
+// MCP surface read it, so a host got "field not found" with no hedge.
+describe('healthCheckHandler: standard-field describe gap (WOW-12)', () => {
+  let vaultRoot: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    vaultRoot = await mkdtemp(join(tmpdir(), 'sfi-mcp-health-describe-'));
+    const realHash = await seedSourceTree(vaultRoot);
+    const built = await openContext(vaultRoot, {
+      ...baseManifest(realHash),
+      standardFieldDescribe: { fromLive: [], fromCache: ['Contact'], skipped: ['Account', 'Case'], offline: true },
+    });
+    ctx = built.ctx;
+    store = built.store;
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    await rm(vaultRoot, { recursive: true, force: true });
+  });
+
+  it('reports degraded and names the objects whose standard fields are incomplete', async () => {
+    const result = await healthCheckHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.status).toBe('degraded');
+    const issue = result.value.data.issues.find((i) => i.startsWith('standard fields for Account, Case are incomplete'));
+    expect(issue).toContain('offline (--no-pull)');
+    expect(issue).toContain('may still exist');
+    expect(issue).not.toContain('Contact');
   });
 });
 
@@ -425,20 +566,22 @@ describe('healthCheckHandler: uncovered metadata types', () => {
     await rm(vaultRoot, { recursive: true, force: true });
   });
 
-  it('reports degraded with reason "uncovered-types-detected" when skip count exceeds threshold', async () => {
+  // FR-01: unrecognised source directories are a coverage gap — disclosed with
+  // its structured reason and check, never an integrity failure.
+  it('discloses reason "uncovered-types-detected" as a coverage gap when skip count exceeds threshold', async () => {
     const result = await healthCheckHandler(ctx, {});
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value.data.status).toBe('degraded');
+    expect(result.value.data.status).toBe('healthy');
     expect(result.value.data.reason).toBe('uncovered-types-detected');
     expect(result.value.data.checks.uncoveredTypesOk).toBe(false);
     expect(
-      result.value.data.issues.some((issue) =>
+      result.value.data.coverageGaps.some((issue) =>
         issue.includes('vault skipped'),
       ),
     ).toBe(true);
     expect(
-      result.value.data.issues.some((issue) =>
+      result.value.data.coverageGaps.some((issue) =>
         issue.includes('sfi status --skipped'),
       ),
     ).toBe(true);
@@ -1051,5 +1194,114 @@ describe('healthCheckHandler: duplicate source paths (DUPLICATE-SOURCE detect+di
     expect(result.value.data.status).toBe('degraded');
     expect(result.value.data.issues.join('\n')).toContain('source/main/default/');
     expect(result.value.data.issues.join('\n')).toContain('DIFFERING content');
+  });
+});
+
+/**
+ * CH-2 (FAIL-BEFORE/PASS-AFTER): a family the manifest certifies as
+ * confirmed-empty while the vault's own declared edges name members of it is
+ * NOT covered. Before, coverage_report listed it partial while health_check
+ * (and every summarizeCoverage-backed caveat) still called it covered.
+ */
+describe('healthCheckHandler: referenced-but-absent family (CH-2)', () => {
+  let vaultRoot: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    vaultRoot = await mkdtemp(join(tmpdir(), 'sfi-mcp-health-rba-'));
+    const realHash = await seedSourceTree(vaultRoot);
+    const built = await openContext(vaultRoot, {
+      ...baseManifest(realHash),
+      coverage: [
+        { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false, retrieveConfirmed: true },
+        { type: 'EmailTemplate', requested: true, retrieved: 0, errored: false, neverModeled: false, retrieveConfirmed: true },
+      ],
+    });
+    ctx = built.ctx;
+    store = built.store;
+    const seed: ExtractionResult = {
+      nodes: [
+        {
+          id: 'CustomObject:Invoice__c',
+          type: 'CustomObject',
+          apiName: 'Invoice__c',
+          label: null,
+          parentId: null,
+          sourcePath: 'x',
+          lastModifiedDate: null,
+          lastModifiedBy: null,
+          apiVersion: null,
+          properties: {},
+        },
+      ],
+      edges: [
+        {
+          fromId: 'CustomObject:Invoice__c',
+          toId: 'EmailTemplate:Billing/Invoice_Sent',
+          edgeType: 'references',
+          confidence: 'declared',
+          source: 'test',
+          properties: {},
+        },
+      ],
+    };
+    const imp = await importExtractionResults(store, [seed]);
+    if (!imp.ok) throw new Error(`seed import failed: ${imp.error.message}`);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    await rm(vaultRoot, { recursive: true, force: true });
+  });
+
+  it('reports the contradicted family as a partial coverage gap, never covered', async () => {
+    const result = await healthCheckHandler(ctx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.coverage.coveredTypes).not.toContain('EmailTemplate');
+    expect(result.value.data.coverage.partialTypes).toContain('EmailTemplate');
+    expect(result.value.data.coverage.missingCoverage).toContain('EmailTemplate');
+    expect(result.value.data.coverageGaps.join(' ')).toContain('EmailTemplate');
+  });
+});
+
+/**
+ * PERF-6 (FAIL-BEFORE/PASS-AFTER): the source-tree hash is cached per process
+ * behind a stat fingerprint; a content change still invalidates it.
+ */
+describe('healthCheckHandler: cached source hash (PERF-6)', () => {
+  let vaultRoot: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    vaultRoot = await mkdtemp(join(tmpdir(), 'sfi-mcp-health-cache-'));
+    const realHash = await seedSourceTree(vaultRoot);
+    const built = await openContext(vaultRoot, baseManifest(realHash));
+    ctx = built.ctx;
+    store = built.store;
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    await rm(vaultRoot, { recursive: true, force: true });
+  });
+
+  it('does not re-hash an unchanged tree, and still detects an edit', async () => {
+    const { resetHealthCheckHashCache, cachedSourceHashCount } = await import(
+      '../../src/tools/health-check.js'
+    );
+    resetHealthCheckHashCache();
+    const first = await healthCheckHandler(ctx, {});
+    expect(first.ok && first.value.data.checks.sourceHashMatches).toBe(true);
+    // The full hash is now cached behind the fingerprint …
+    expect(cachedSourceHashCount()).toBe(1);
+    const second = await healthCheckHandler(ctx, {});
+    expect(second.ok && second.value.data.checks.sourceHashMatches).toBe(true);
+    // … and a content change still invalidates it (no stale cached verdict).
+    await writeFile(join(vaultRoot, 'source', 'added.txt'), 'changed content');
+    const third = await healthCheckHandler(ctx, {});
+    expect(third.ok && third.value.data.checks.sourceHashMatches).toBe(false);
   });
 });

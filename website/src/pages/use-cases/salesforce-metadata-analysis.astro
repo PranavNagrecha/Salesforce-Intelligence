@@ -1,88 +1,64 @@
 ---
-import DocPage from "../../layouts/DocPage.astro";
-import site from "../../data/site.ts";
-import siteData from "../../data/site-data.json";
-
-const title = "Salesforce Metadata Analysis Tool for Fields, Flows, Apex & Permissions";
-const description =
-  "Search and analyze Salesforce fields, objects, Flows, Apex, permissions and dependencies from a local, read-only metadata vault.";
-
-const jsonld = [
-  {
-    "@type": "TechArticle",
-    headline: "Salesforce metadata analysis for AI agents",
-    description: "How sf-intelligence lets AI agents analyze Salesforce metadata from a local, read-only org vault.",
-    author: { "@id": `${site.url}/#org` },
-    publisher: { "@id": `${site.url}/#org` },
-    dateModified: "2026-07-29",
-    mainEntityOfPage: `${site.url}/use-cases/salesforce-metadata-analysis`,
-  },
-];
+import UseCaseLayout from "../../layouts/UseCaseLayout.astro";
+import { objectBrief } from "../../data/demo-answers.ts";
+import { orgTour } from "../../data/page-answers.ts";
 ---
 
-<DocPage
-  title={title}
-  description={description}
+<UseCaseLayout
+  title="Salesforce Metadata Analysis in Plain Language"
+  description="Ask about your Salesforce org's objects, fields, flows, Apex, permissions and integrations in plain words, and get answers from its real metadata."
   path="/use-cases/salesforce-metadata-analysis"
-  heading="Analyze Salesforce metadata with grounded, read-only org intelligence"
-  intro="sf-intelligence gives AI agents a read-only way to analyze Salesforce metadata: schema, fields, Flows, Apex, permission models, integrations, OmniStudio, and generated documentation from one local org vault."
-  crumbs={[{ label: "use-cases", href: "/use-cases" }, { label: "metadata-analysis", href: "/use-cases/salesforce-metadata-analysis" }]}
-  breadcrumbs={[{ name: "Use cases", path: "/use-cases" }, { name: "Salesforce metadata analysis", path: "/use-cases/salesforce-metadata-analysis" }]}
-  jsonld={jsonld}
+  heading="Understand an org you didn’t build"
+  lede="Find out what’s in a Salesforce org, what each object is for, and how the pieces connect, by asking. Answers come from the org’s own metadata, not from what Salesforce orgs usually look like."
+  crumb="Metadata analysis"
+  audience="new admins, developers and consultants"
+  short="Ask your AI assistant “give me a tour of this org” or “brief me on the Invoice object”. sf-intelligence reads a snapshot of the org’s metadata (objects, fields, flows, Apex, permissions, integrations) and answers from it, naming each component. If a name is misspelled or matches several things, it asks which one you mean."
+  answers={[orgTour, objectBrief]}
+  answerIntro="Two orientation questions asked of Verdant, the demo org: the whole org first, then one object."
+  asks={[
+    "Give me a tour of this org.",
+    "Brief me on the Invoice object.",
+    "What fields does Project have, and which are required?",
+    "Is there already a field for customer health?",
+    "What external systems does this org talk to?",
+    "Generate a data dictionary for Invoice.",
+  ]}
+  checks={[
+    "<strong>Objects and fields</strong>, including record types, picklist values and relationships",
+    "<strong>Automation</strong>: flows, workflow, approval processes and assignment rules",
+    "<strong>Code</strong>: Apex classes and triggers, Lightning components and Visualforce",
+    "<strong>Access</strong>: profiles, permission sets, sharing rules and roles",
+    "<strong>Integrations</strong>: named credentials, endpoints and platform events, plus OmniStudio",
+  ]}
+  limits={[
+    "Business records. It reads setup, not data, unless you turn on the optional live mode",
+    "Kinds of metadata your refresh didn’t pull. Answers name them",
+    "What people meant a field for, beyond its description and help text",
+  ]}
+  tools={["org_card", "org_overview", "object_360", "list_components", "search_components", "resolve", "generate_data_dictionary", "integration_map"]}
+  related={[
+    { href: "/blog/salesforce-data-dictionary", label: "How to create a Salesforce data dictionary", note: "guide" },
+    { href: "/use-cases/consultants", label: "For consultants", note: "org discovery on client orgs" },
+    { href: "/use-cases/salesforce-dependency-analysis", label: "Dependency analysis", note: "use case" },
+    { href: "/demo#demo-object-brief", label: "The full Invoice brief", note: "demo" },
+  ]}
+  faqs={[
+    {
+      q: "What if I don’t know the exact API name?",
+      a: "Ask with the words you have, typos included. It matches names loosely, and when several components could fit it asks which one you mean instead of picking one.",
+    },
+    {
+      q: "Can it write documentation for me?",
+      a: "Yes. It can produce a one-page brief of an object, a data dictionary, an admin handbook, an architecture overview or an onboarding doc, each dated with the snapshot it came from.",
+    },
+    {
+      q: "How current are the answers?",
+      a: "As current as your last refresh. Run a refresh after the org changes; the health check tells you when the snapshot is out of date.",
+    },
+  ]}
+  cta={{ question: objectBrief.question, related: { href: "/use-cases/consultants", label: "Org discovery for consultants" } }}
+  dateModified="2026-10-10"
 >
-  <section>
-    <div class="container">
-      <div class="prose">
-        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-29</p>
-        <div class="hero-demo" style="margin:0 0 30px;">
-          <p class="hero-demo-kicker">query a real org vault in 2 minutes - no org, no auth</p>
-          <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
-          <p class="hero-demo-note">Then ask <em>"give me an overview of this org"</em>, <em>"what fields does the Project object have?"</em>, <em>"explain the <code>Project__c.Margin_Percent__c</code> formula"</em>, or even a misspelling like <em>"where's the <code>paymnet</code> object?"</em> to watch the resolver ask instead of guess. Synthetic "Verdant Energy" org - 12 custom objects, Flows, Apex, profiles, OmniStudio - served fully offline: no Salesforce login, no <code>sf</code> CLI, nothing to configure. <a href="/getting-started#demo">more on the demo →</a></p>
-        </div>
-
-        <h2 id="what">What metadata analysis means here</h2>
-        <p>Most Salesforce search tools stop at file search or raw metadata retrieval. sf-intelligence builds a queryable knowledge base from the retrieved org metadata, then exposes that knowledge through a Salesforce MCP server. The result is plain-language metadata analysis that stays grounded in the org you actually indexed.</p>
-
-        <h2 id="questions">Questions this page targets</h2>
-        <ul>
-          <li>"What fields exist on Account, and which are custom?"</li>
-          <li>"Which Flows update this field?"</li>
-          <li>"What Apex classes reference this object?"</li>
-          <li>"Which permission sets grant access to this field?"</li>
-          <li>"Generate a data dictionary for this Salesforce org."</li>
-          <li>"Explain this org to a new admin or developer."</li>
-        </ul>
-
-        <h2 id="coverage">Metadata families covered</h2>
-        <table class="doc-table">
-          <thead><tr><th>Area</th><th>Examples</th></tr></thead>
-          <tbody>
-            <tr><td>Schema</td><td>Objects, fields, record types, picklists, layouts, tabs</td></tr>
-            <tr><td>Automation</td><td>Flows, workflow, approval processes, assignment and escalation rules</td></tr>
-            <tr><td>Code</td><td>Apex classes, triggers, call graph, test coverage signals</td></tr>
-            <tr><td>Security</td><td>Profiles, permission sets, field-level security, object access, sharing metadata</td></tr>
-            <tr><td>Integrations</td><td>Named credentials, remote sites, endpoints, outbound messages, platform events</td></tr>
-            <tr><td>Documentation</td><td>Data dictionary, admin handbook, architecture overview, onboarding docs</td></tr>
-          </tbody>
-        </table>
-
-        <h2 id="why-ai">Why AI agents need a grounded metadata layer</h2>
-        <p>A general model can explain Salesforce concepts, but it cannot know your org's custom fields, naming conventions, automations, package boundaries, and security model. sf-intelligence does more than dump those facts into the prompt for the model to guess with: every answer is grounded in the metadata you actually retrieved and cited to a canonical component id. And beyond retrieval, a deterministic, org-independent concept model - <strong>143 concepts / 195 rules</strong> of general Salesforce truth - reasons over the structure: <code>sfi.interpret</code> joins that model against the graph to match curated structural patterns (master-detail cascade, junction objects, read-only roll-up fields, stacked record-triggered flows) and returns cited, confidence-tiered claims, with no LLM inference and no live call. So Claude, Cursor, Codex, or another MCP client answers from grounded evidence instead of training-data guesses.</p>
-
-        <h2 id="next">Related searches</h2>
-        <p>For blast-radius work, see <a href="/use-cases/salesforce-dependency-analysis">Salesforce dependency analysis</a>. For client setup, see <a href="/use-cases/claude-salesforce-mcp">Claude Salesforce MCP setup</a>. For the complete tool surface, browse <a href="/tools">all {siteData.toolCount} Salesforce MCP tools</a>.</p>
-
-        <div style="padding-top:36px;">
-          <div class="cta-box">
-            <h2 class="screen-type">Analyze your org metadata locally.</h2>
-            <p>Install once, run a read-only refresh, then ask metadata questions in plain language.</p>
-            <div class="cta-actions">
-              <a class="btn btn-solid" href="/getting-started">install sf-intelligence</a>
-              <a class="btn btn-ghost" href="/capabilities">capability map</a>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
-</DocPage>
+  <h2>Why not paste the metadata into a chatbot?</h2>
+  <p>A real org has thousands of components, far more than fits in a chat. A general assistant fills the gaps with what orgs usually look like, which is how you get confident answers about fields that don’t exist. sf-intelligence keeps the whole snapshot on your computer and hands your assistant only the facts a question needs, each one named so you can check it.</p>
+</UseCaseLayout>

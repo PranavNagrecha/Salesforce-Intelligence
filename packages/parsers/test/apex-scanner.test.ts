@@ -755,3 +755,22 @@ describe('scanApexSource — managed-package namespaced local types (LOCAL_DECL_
     expect(result.value.fieldAccesses).toEqual([]);
   });
 });
+
+describe('scanApexSource — built-in names are case-insensitive (WOW-10)', () => {
+  it('FAIL-BEFORE/PASS-AFTER: lowercase system/string/database calls are not Apex class calls', () => {
+    const src = `public class Lower {
+  public void run(Account a) {
+    system.debug('x');
+    Boolean b = string.isBlank(a.Name);
+    database.insert(a);
+  }
+}`;
+    const result = scanApexSource(src);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const classes = result.value.methodCalls.map((c) => c.className.toLowerCase());
+    expect(classes).not.toContain('system');
+    expect(classes).not.toContain('string');
+    expect(classes).not.toContain('database');
+  });
+});

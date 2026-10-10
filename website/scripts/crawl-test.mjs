@@ -3,6 +3,7 @@
  * crawl-test.mjs — crawler-friendliness gate for the sf-intelligence site.
  *
  *   node scripts/crawl-test.mjs [baseUrl]     # default http://localhost:4455
+ *   node scripts/crawl-test.mjs [baseUrl] --no-layout   # skip the browser check
  *
  * Point it at a running preview of the build (`npm run preview -- --port 4455`)
  * or at the live site. It fetches the sitemap and, for every URL, asserts the
@@ -11,7 +12,11 @@
  * sitemap page is orphaned from the home page. Exit code is non-zero on any
  * failure, so it works as a CI gate. No dependencies (Node 20+ global fetch).
  * ========================================================================== */
-const BASE = (process.argv[2] || "http://localhost:4455").replace(/\/$/, "");
+import { launch } from "./lib/chrome.mjs";
+
+const args = process.argv.slice(2);
+const SKIP_LAYOUT = args.includes("--no-layout");
+const BASE = (args.find((a) => !a.startsWith("--")) || "http://localhost:4455").replace(/\/$/, "");
 
 let failures = 0;
 const fail = (url, msg) => { failures++; console.error(`  ✗ ${url}\n      ${msg}`); };
@@ -68,12 +73,12 @@ for (const path of sitemapUrls) {
   const h1 = countMatches(body, /<h1[\s>]/gi);
   if (h1 !== 1) fail(path, `expected 1 <h1>, found ${h1}`);
 
-  // title length 10–90 (upper bound raised for the v0.2.4 SEO release: the audit's
-  // page-build-specs use keyword-front-loaded titles up to ~87 chars — Google
-  // truncates the tail near ~60 chars, but the primary keyword leads on purpose).
-  const title = between(body, "<title>", "</title>");
+  // title length 10–60 (search results cut near 60; verify-markup enforces the
+  // same cap on dist/, this re-checks what the server actually returns).
+  const rawTitle = between(body, "<title>", "</title>");
+  const title = rawTitle && rawTitle.replace(/&amp;/g, "&").replace(/&#39;|&apos;/g, "'").replace(/&quot;/g, '"');
   if (!title) fail(path, `no <title>`);
-  else if (title.length < 10 || title.length > 90) fail(path, `title length ${title.length} out of 10–90: "${title}"`);
+  else if (title.length < 10 || title.length > 60) fail(path, `title length ${title.length} out of 10–60: "${title}"`);
 
   // meta description 70–170
   const descTag = (body.match(/<meta[^>]+name="description"[^>]*>/i) || [])[0];
@@ -174,6 +179,61 @@ ok(`robots.txt checked`);
     if (robots.length && /noindex/i.test(robots[0][0]) && !canons.length) {
       ok(`404 page is noindex with no canonical`);
     }
+  }
+}
+
+// ---- 8. no horizontal overflow at phone widths (headless Chrome) ----
+// The header clipped its menu button at 360px on every page, and /tools
+// scrolled ~190px sideways at 390px, while every check above stayed green:
+// none of them lays the page out. This one does, at both widths, in the
+// light colour scheme, and names the elements that stick out.
+if (SKIP_LAYOUT) {
+  console.log("  - layout check skipped (--no-layout)");
+} else {
+  const WIDTHS = [360, 390];
+  let browser;
+  try {
+    browser = await launch();
+  } catch (e) {
+    fail("layout", `${e.message} Pass --no-layout to skip this check explicitly.`);
+  }
+  if (browser) {
+    let overflowing = 0;
+    for (const width of WIDTHS) {
+      const page = await browser.newPage({ width, height: 800 });
+      for (const path of sitemapUrls) {
+        await page.goto(BASE + path);
+        const r = await page.evaluate(`() => {
+          const de = document.documentElement;
+          const vw = de.clientWidth;
+          const over = Math.max(de.scrollWidth, document.body.scrollWidth) - vw;
+          const offenders = [];
+          if (over > 0) {
+            for (const el of document.querySelectorAll("body *")) {
+              const b = el.getBoundingClientRect();
+              if (b.width === 0 || b.right <= vw + 1) continue;
+              let a = el.parentElement, contained = false;
+              while (a && a !== document.body) {
+                if (/(auto|scroll|hidden|clip)/.test(getComputedStyle(a).overflowX)) { contained = true; break; }
+                a = a.parentElement;
+              }
+              if (!contained) offenders.push(el.tagName.toLowerCase() + (el.className && typeof el.className === "string" ? "." + el.className.trim().split(/\\s+/).join(".") : "") + " right=" + Math.round(b.right));
+              if (offenders.length >= 4) break;
+            }
+          }
+          const btn = document.querySelector(".menu-btn, [aria-controls='site-nav']");
+          const bb = btn && btn.offsetParent !== null ? btn.getBoundingClientRect() : null;
+          return { over, offenders, menuClipped: bb ? bb.right > vw + 0.5 : false, vw };
+        }`);
+        if (r.over > 0 || r.menuClipped) {
+          overflowing++;
+          fail(path, `${width}px: page is ${r.over}px wider than the viewport` + (r.menuClipped ? ", menu button clipped" : "") + (r.offenders.length ? ` — ${r.offenders.join(", ")}` : ""));
+        }
+      }
+      await page.close();
+    }
+    await browser.close();
+    if (!overflowing) ok(`no horizontal overflow at ${WIDTHS.join(" / ")}px on ${sitemapUrls.length} pages`);
   }
 }
 

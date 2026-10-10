@@ -4,8 +4,8 @@
 
 | Version | Supported |
 | --- | --- |
-| 0.3.x (current public release) | Yes |
-| 0.2.x and earlier | No |
+| 0.4.x (current public release) | Yes |
+| 0.3.x and earlier | No |
 | Pre-0.1 / maintainer-only snapshots | No |
 
 <!-- The first row's minor line is asserted against packages/cli/package.json by

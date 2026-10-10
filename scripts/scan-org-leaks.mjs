@@ -3,12 +3,20 @@
  * Scan for customer org identifiers and real schema leaks.
  * Usage:
  *   node scripts/scan-org-leaks.mjs [--strict] [--git-history] [--paths dir ...]
- * Exit 1 if any hit in --strict mode.
+ * Exit 1 if any hit in --strict mode; exit 2 if the org blocklist is broken,
+ * or missing under --strict without --allow-no-blocklist.
  */
 import { execSync } from 'node:child_process';
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import {
+  allowNoBlocklistFromEnv,
+  assertBlocklistPresent,
+  describeBlocklist,
+  loadForbiddenNames,
+} from './lib/forbidden-names.mjs';
 
 const args = process.argv.slice(2);
 const strict = args.includes('--strict');
@@ -40,27 +48,24 @@ const SKIP_FILES = new Set([
 
 /**
  * Real org-specific identifiers live ONLY in the gitignored maintainer config
- * `scripts/forbidden-names.local.json` (the same file the release guard reads) —
- * they are NEVER baked into this committed file. Without the config (public
- * clone / CI) the scanner runs only the generic structural check (PATH-org-kb),
- * which is correct: a public-clean tree has no private-org names left to find.
- * Config shape: { "scannerPatterns": ["regex", ...], "historyTerms": ["literal", ...] }
- * (`patterns` — the guard's key — is also honored for back-compat.)
+ * `scripts/forbidden-names.local.json` — never in this committed file. The
+ * ONE loader (`scripts/lib/forbidden-names.mjs`) fails CLOSED: a broken file
+ * always aborts the scan, and in --strict mode a MISSING blocklist is a
+ * failure unless `--allow-no-blocklist` / SFI_ALLOW_NO_BLOCKLIST=1 says a
+ * generic-only scan is acceptable (contributors, fork-PR CI). Either way the
+ * scan prints how many patterns it loaded, so a vacuous pass is visible.
  */
-function loadLocalConfig() {
-  const local = join(dirname(fileURLToPath(import.meta.url)), 'forbidden-names.local.json');
-  if (!existsSync(local)) return { patterns: [], historyTerms: [] };
-  try {
-    const cfg = JSON.parse(readFileSync(local, 'utf8'));
-    const raw = [...(cfg.scannerPatterns ?? []), ...(cfg.patterns ?? [])];
-    const patterns = raw.map((p, i) => ({ id: `LOCAL-${i}`, re: new RegExp(p, 'i') }));
-    return { patterns, historyTerms: cfg.historyTerms ?? [] };
-  } catch {
-    return { patterns: [], historyTerms: [] };
-  }
+let blocklist;
+try {
+  blocklist = loadForbiddenNames(process.env.SFI_FORBIDDEN_NAMES_PATH || undefined);
+  assertBlocklistPresent(blocklist, { strict, allowNoBlocklist: allowNoBlocklistFromEnv(args) });
+} catch (e) {
+  console.error(`scan-org-leaks: FAILED — ${e instanceof Error ? e.message : String(e)}`);
+  process.exit(2);
 }
-
-const { patterns: ALL_PATTERNS, historyTerms: GIT_HISTORY_TERMS } = loadLocalConfig();
+console.log(`scan-org-leaks: ${describeBlocklist(blocklist)}`);
+const ALL_PATTERNS = blocklist.scannerPatterns.map((p, i) => ({ id: `LOCAL-${i}`, re: new RegExp(p, 'i') }));
+const GIT_HISTORY_TERMS = blocklist.historyTerms;
 
 function walk(dir, files = []) {
   let st;

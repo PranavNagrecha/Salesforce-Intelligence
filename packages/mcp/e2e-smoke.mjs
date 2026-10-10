@@ -146,7 +146,9 @@ try {
     'initialize returns server instructions teaching resolve-first',
     instructions.includes('sfi.resolve') &&
       instructions.includes('sfi.capabilities') &&
-      instructions.includes('FIRST'),
+      // Rule 1 reads "Resolve first." since the instructions were trimmed;
+      // the casing is not the contract, the rule is.
+      /resolve first/i.test(instructions),
     instructions ? instructions.slice(0, 80) : '(no instructions on initialize)',
   );
 

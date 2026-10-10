@@ -1,0 +1,46 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+import GuideCards from "../../components/GuideCards.astro";
+import CtaBlock from "../../components/CtaBlock.astro";
+import site from "../../data/site.ts";
+import { cards } from "../../lib/guides.ts";
+
+const title = "Salesforce How-To Guides for Admins | sf-intelligence";
+const description =
+  "Step-by-step answers to everyday Salesforce admin questions: what updates a field, what breaks if you delete a value, and whether a deployment is risky.";
+
+const list = cards.filter((c) => c.section === "how-to");
+const more = cards.filter((c) => c.kind === "guide" && c.section !== "how-to");
+
+const jsonld = [
+  { "@type": "CollectionPage", name: "Salesforce how-to guides", description, isPartOf: { "@id": `${site.url}/#website` } },
+  {
+    "@type": "ItemList",
+    itemListElement: list.map((c, i) => ({ "@type": "ListItem", position: i + 1, name: c.title, url: `${site.url}${c.href}` })),
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/how-to"
+  heading="How-to guides"
+  intro="Plain answers to the questions Salesforce admins and developers ask before they change something. Each guide shows how to do it by hand in Setup, then how to get the same answer in one question."
+  crumbs={[{ label: "How-to guides", href: "/how-to" }]}
+  breadcrumbs={[{ name: "How-to guides", path: "/how-to" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <GuideCards cards={list} />
+
+      <h2 class="hub-h2">More guides</h2>
+      <GuideCards cards={more} />
+
+      <div class="article-aside">
+        <CtaBlock />
+      </div>
+    </div>
+  </section>
+</DocPage>

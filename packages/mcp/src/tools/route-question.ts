@@ -77,6 +77,7 @@ import {
   type RouteContextApplied,
   type RouteResult,
 } from '../intent-router.js';
+import { isLivePlaneEnvEnabled } from '../live-plane-env.js';
 import { detectRefusalShape, type RefusalKind, type RefusalShape } from '../refusal-gates.js';
 import {
   CONF_MIN_COVERAGE,
@@ -89,6 +90,13 @@ import {
 import type { Context } from '../server.js';
 
 import { analysisCategory, oneLiner } from './catalog-gateway.js';
+import {
+  bindEntityArgs,
+  bindQuestionLiterals,
+  missingRequiredArgs,
+  toolsDeclaringArg,
+  type BindableEntity,
+} from './entity-arg-binding.js';
 import { resolveGlossaryAlias } from './resolve.js';
 import { V01_TOOLS } from './roster.js';
 import { CORE_PROFILE_TOOLS, toolProfile } from './tool-profile.js';
@@ -351,10 +359,15 @@ export const routeQuestionInputSchema = z.object({
 
 export type RouteQuestionInput = z.infer<typeof routeQuestionInputSchema>;
 
-/** One executable call for a routed tool (P13-GW-router-envelope). */
+/** One call for a routed tool (P13-GW-router-envelope). */
 export interface RouteInvocation {
   readonly tool: string;
   readonly args: Readonly<Record<string, unknown>>;
+  /**
+   * Required args of the routed tool that could not be bound — the step is
+   * NOT executable as-is; fill these (e.g. via sfi.resolve) first.
+   */
+  readonly missingArgs?: readonly string[];
 }
 
 export interface RouteQuestionOutput {
@@ -406,7 +419,8 @@ export interface RouteQuestionOutput {
   readonly trust: TrustSummary;
   /**
    * Present ONLY when the server runs `SFI_TOOL_PROFILE=core`: the routed
-   * tools expressed as executable calls — core-roster tools directly, every
+   * tools expressed as calls (a step whose required args could not be bound
+   * carries `missingArgs` and is not executable as-is) — core-roster tools directly, every
    * other tool as the catalog-gateway envelope
    * `{ tool: 'sfi.run_analysis', args: { name, args } }` (byte-identical
    * output to a direct call), with the route's `suggestedArgs` threaded to
@@ -578,13 +592,15 @@ const extractEntityQuery = (question: string, intent: string): string | null => 
   // from the returned phrase below so the resolver ranks the bare name and the
   // type-guard adapts the route to whatever family it lands on.
   const typedMatch = question.match(
-    /\b(?:the\s+)?([A-Za-z][A-Za-z0-9_]*(?:[\s_-]+[A-Za-z][A-Za-z0-9_]*){0,5}\s+(?:object|field|flow|class|trigger|layout|profile|permission\s+set|record\s+type|validation\s+rule|report|dashboard|logic))(?:\s+(?:on|for|of)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9_]*)(?:\s+object)?)?\b/i,
+    /\b(?:the\s+)?([A-Za-z][A-Za-z0-9_]*(?:[\s_-]+[A-Za-z][A-Za-z0-9_]*){0,5}\s+(?:object|field|picklist|checkbox|flow|class|trigger|layout|profile|permission\s+set|record\s+type|validation\s+rule|report|dashboard|logic))(?:\s+(?:on|for|of)\s+(?:the\s+)?([A-Za-z][A-Za-z0-9_]*)(?:\s+object)?)?\b/i,
   );
   const typedPhrase = typedMatch?.[1];
   if (typedPhrase === undefined) return null;
   const cleaned = typedPhrase
     .replace(
-      /^(?:(?:what|whats|whatever|which|who|whos|where|wheres|when|why|how|hows|is|are|can|does|do|did|show|find|explain|locate|list|walk|through|pull|give|gimme|tell|about|break|down|compare|effective|calls?|invokes?|references?|owns?|edit|read|view|access|change|delete|remove|possible|values?|apex|api|version|data|type|for|of|the|this|that|in|on|to|used|assigned|set|every|all|each|any|me|my|us|a|an)\s+)+/i,
+      // ROUTE-08: conditional / action lead-ins ("if I turn off the …", "can I
+      // safely delete the …") are verbs of the question, not part of the name.
+      /^(?:(?:what|whats|whatever|which|who|whos|where|wheres|when|why|how|hows|is|are|can|does|do|did|show|find|explain|locate|list|walk|through|pull|give|gimme|tell|about|break|down|compare|effective|calls?|invokes?|references?|owns?|edit|read|view|access|change|delete|remove|possible|values?|apex|api|version|data|type|for|of|the|this|that|in|on|to|used|assigned|set|every|all|each|any|me|my|us|a|an|if|i|we|you|turn|turned|off|disable|deactivate|rename|modify|drop|would|will|should|could|safely|happens?|from(?=\s+(?:the|an?)\s)|changing|removing|deleting)\s+)+/i,
       '',
     )
     .trim();
@@ -593,7 +609,7 @@ const extractEntityQuery = (question: string, intent: string): string | null => 
   ) return null;
   const distinctive = cleaned
     .replace(
-      /\b(?:object|field|flow|class|trigger|page|layout|profile|permission|set|record|type|validation|rule|report|dashboard|data|logic)\b/gi,
+      /\b(?:object|field|picklist|checkbox|flow|class|trigger|page|layout|profile|permission|set|record|type|validation|rule|report|dashboard|data|logic)\b/gi,
       '',
     )
     .replace(/[^A-Za-z0-9_]+/g, '');
@@ -617,7 +633,7 @@ const extractEntityQuery = (question: string, intent: string): string | null => 
  * fragments with lowercase verbs/pronouns — no).
  */
 const NAME_IGNORABLE_WORD =
-  /^(?:object|field|flow|class|trigger|page|layout|profile|permission|set|record|type|validation|rule|report|dashboard|logic|named|of|and|or|the|a|an|for)$/i;
+  /^(?:object|field|picklist|checkbox|flow|class|trigger|page|layout|profile|permission|set|record|type|validation|rule|report|dashboard|logic|named|of|and|or|the|a|an|for)$/i;
 export const looksLikeComponentName = (query: string): boolean => {
   const words = query.trim().split(/\s+/);
   if (words.length <= 1) return true;
@@ -653,7 +669,9 @@ const inferEntityTypes = (
   if (intent === 'what-if-method-signature') return ['ApexClass'];
   if (query.includes('.') && !/\sclass$/i.test(query)) return ['CustomField'];
   if (/__(?:mdt|e|x|b|kav)$/i.test(query) || /(?:^object\s|\sobject(?:\s+on\s+\w+)?$)/i.test(query)) return ['CustomObject'];
-  if (/(?:^field\s|\sfield(?:\s+on\s+\w+)?$)/i.test(query)) return ['CustomField'];
+  // A picklist / checkbox is a field TYPE, so "the Status picklist on Case" is a
+  // field reference (ROUTE-06: it previously yielded no entity at all).
+  if (/(?:^(?:field|picklist|checkbox)\s|\s(?:field|picklist|checkbox)(?:\s+on\s+\w+)?$)/i.test(query)) return ['CustomField'];
   if (/(?:^flow\s|\sflow$)/i.test(query)) return ['Flow'];
   if (/(?:^class\s|\sclass$)/i.test(query)) return ['ApexClass'];
   if (/(?:^trigger\s|\strigger$)/i.test(query)) return ['ApexTrigger'];
@@ -1217,10 +1235,41 @@ export const resolvedTypeForGuard = (
  * because the swap happens BEFORE the funnel fusion, explain_flow/get_impact
  * also surface in toolCandidates. Exported for drift-proof unit tests.
  */
+/** The access audit that needs a FIELD; an object entity swaps it out (ROUTE-04). */
+const FIELD_ONLY_ACCESS_TOOL = 'sfi.field_access_audit';
+
 export const applyComponentTypeGuard = (
   route: RouteResult,
   resolvedType: string | null,
 ): RouteResult => {
+  // ROUTE-04 / WOW-7: an object-access question ("who can see the X object")
+  // matched the FIELD access rule. The RESOLVED type decides, not the wording:
+  // an object entity swaps the field-only audit for the object-access tools.
+  if (resolvedType === 'CustomObject' && route.tools.includes(FIELD_ONLY_ACCESS_TOOL)) {
+    const swapped = [
+      ...route.tools.filter((t) => ROUTE_PREAMBLE_TOOLS.has(t)),
+      'sfi.who_can_access_object',
+      'sfi.object_access_audit',
+      ...route.tools.filter(
+        (t) =>
+          !ROUTE_PREAMBLE_TOOLS.has(t) &&
+          t !== FIELD_ONLY_ACCESS_TOOL &&
+          t !== 'sfi.who_can_access_object' &&
+          t !== 'sfi.object_access_audit',
+      ),
+    ];
+    const originalTools = route.tools;
+    return {
+      ...route,
+      tools: swapped,
+      reason:
+        `${route.reason} The named entity resolved to an object, so the field-only access ` +
+        `audit was replaced with the object-access tools.`,
+      plan: route.plan.map((step) =>
+        step.tools === originalTools ? { ...step, tools: swapped } : step,
+      ),
+    };
+  }
   if (resolvedType !== 'Flow') return route;
   const incompatible = new Set(
     route.tools.filter((tool) => {
@@ -1441,21 +1490,233 @@ const mergeRouteHintsIntoCandidates = (
       });
     }
   }
+  // ROUTE-02: on a HIGH-confidence route, a stacked complement (interpret,
+  // get_edges, ...) must never outrank the route's own primary tool just
+  // because the flat bonus landed on a non-zero cosine.
+  const primary = route.tools.find((t) => !ROUTE_PREAMBLE_TOOLS.has(t));
+  const primaryRow = primary !== undefined ? byTool.get(primary) : undefined;
+  if (route.confidence === 'high' && primaryRow !== undefined) {
+    for (const tool of route.tools) {
+      const row = byTool.get(tool);
+      if (row === undefined || tool === primary || ROUTE_PREAMBLE_TOOLS.has(tool)) continue;
+      if (row.score >= primaryRow.score) {
+        byTool.set(tool, {
+          ...row,
+          score: Math.max(0, Math.round((primaryRow.score - 0.001) * 1000) / 1000),
+        });
+      }
+    }
+  }
   return [...byTool.values()]
     .sort((a, b) => b.score - a.score || a.tool.localeCompare(b.tool))
     .slice(0, k);
+};
+
+/** Tools that need the save `event` (and object) the route derived. */
+const SAVE_EVENT_TOOLS: ReadonlySet<string> = new Set([
+  'sfi.what_happens_on_save',
+  'sfi.order_of_execution',
+]);
+
+/** A resolved component to bind into every recommended call (ROUTE-01). */
+interface EntityBinding {
+  readonly winner: BindableEntity;
+  readonly methodName?: string;
+}
+
+/**
+ * Final per-tool args: the route's own args, the save event shared by the
+ * save-order siblings, and the resolved entity bound under each tool's OWN
+ * declared key (entity-arg-binding.ts). A type-incompatible tool is left
+ * unbound — except a field named on an object-only tool, which binds the
+ * field's parent object.
+ */
+const bindToolArgs = (
+  tool: string,
+  args: Readonly<Record<string, unknown>>,
+  baseArgs: Readonly<Record<string, unknown>>,
+  binding: EntityBinding | null,
+): Readonly<Record<string, unknown>> => {
+  let out: Record<string, unknown> = { ...args };
+  if (SAVE_EVENT_TOOLS.has(tool)) {
+    if (out['event'] === undefined && out['events'] === undefined && typeof baseArgs['event'] === 'string') {
+      out['event'] = baseArgs['event'];
+    }
+    if (out['objectApiName'] === undefined && typeof baseArgs['objectApiName'] === 'string') {
+      out['objectApiName'] = baseArgs['objectApiName'];
+    }
+    // order_of_execution has no `upsert`; a two-event save is insert + update.
+    if (tool === 'sfi.order_of_execution' && out['event'] === 'upsert') {
+      delete out['event'];
+      out['events'] = ['insert', 'update'];
+    }
+  }
+  if (binding === null) return out;
+  let entity = binding.winner;
+  const compatible = TOOL_COMPATIBLE_TYPES.get(tool);
+  if (compatible !== undefined && !compatible.has(entity.type)) {
+    if (
+      entity.type === 'CustomField' &&
+      compatible.has('CustomObject') &&
+      entity.parentApiName !== null
+    ) {
+      entity = {
+        id: `CustomObject:${entity.parentApiName}`,
+        type: 'CustomObject',
+        apiName: entity.parentApiName,
+        parentApiName: null,
+      };
+    } else {
+      return out;
+    }
+  }
+  const bound = bindEntityArgs(tool, entity, binding.methodName);
+  if (bound !== null) out = { ...out, ...bound };
+  return out;
+};
+
+/**
+ * DEV-02 / A01: an `objectApiName` a regex deriver scraped from prose
+ * ('figure' from "figure out", 'same' from "the same object") is junk. Check it
+ * against the vault: a real object (by api name, case-insensitively, or by
+ * label — 'Invoice' → Invoice__c, FR-04) is canonicalized; an all-lowercase
+ * word that names no object is DROPPED (returned null). Anything else is kept
+ * (a standard object the vault never retrieved is still a valid name).
+ */
+const canonicalObjectArg = async (
+  ctx: Context,
+  value: string,
+  cache: Map<string, string | null>,
+): Promise<string | null> => {
+  const hit = cache.get(value);
+  if (hit !== undefined) return hit;
+  let out: string | null = value;
+  const direct = await getNodeById(ctx.graph, `CustomObject:${value}` as ComponentId);
+  if (!(direct.ok && direct.value !== null)) {
+    const r = await resolveComponents(ctx.graph, value, { limit: 5, types: ['CustomObject'] });
+    const lower = value.toLowerCase();
+    const match = r.ok
+      ? r.value.candidates.find(
+          (c) =>
+            c.apiName.toLowerCase() === lower ||
+            c.apiName.toLowerCase() === `${lower}__c` ||
+            (c.label ?? '').toLowerCase() === lower,
+        )
+      : undefined;
+    if (match !== undefined) out = match.apiName;
+    else if (/^[a-z]+$/.test(value)) out = null;
+  }
+  cache.set(value, out);
+  return out;
+};
+
+const OBJECT_PROBE_STOPWORDS = new Set([
+  'what', 'whats', 'which', 'when', 'where', 'who', 'why', 'how', 'does', 'do', 'did',
+  'the', 'and', 'for', 'with', 'from', 'that', 'this', 'into', 'runs', 'run', 'fires',
+  'fire', 'happens', 'happen', 'saved', 'save', 'saves', 'saving', 'record', 'records',
+  'someone', 'gets', 'get', 'order', 'execution', 'insert', 'inserted', 'update',
+  'updated', 'edit', 'edits', 'edited', 'delete', 'deleted', 'created', 'create',
+  'automation', 'trigger', 'triggers', 'flow', 'flows', 'all', 'everything', 'out',
+  'figure', 'same', 'object', 'objects', 'new', 'one', 'any', 'there', 'are', 'is',
+]);
+
+/**
+ * The ONE object a question's words name, checked against the vault (api name
+ * or label, case-insensitive). `null` when none or several match — never a
+ * guess. Bounded: at most 6 probes.
+ */
+const probeObjectMention = async (ctx: Context, question: string): Promise<string | null> => {
+  const words = [
+    ...new Set(
+      question
+        .split(/[^A-Za-z0-9_]+/)
+        .filter((w) => w.length >= 3 && !OBJECT_PROBE_STOPWORDS.has(w.toLowerCase())),
+    ),
+  ].slice(0, 6);
+  const found = new Set<string>();
+  for (const word of words) {
+    const lower = word.toLowerCase();
+    const r = await resolveComponents(ctx.graph, word, { limit: 5, types: ['CustomObject'] });
+    if (!r.ok) continue;
+    const hit = r.value.candidates.find(
+      (c) =>
+        c.apiName.toLowerCase() === lower ||
+        c.apiName.toLowerCase() === `${lower}__c` ||
+        (c.label ?? '').toLowerCase() === lower,
+    );
+    if (hit !== undefined) found.add(hit.apiName);
+  }
+  return found.size === 1 ? [...found][0]! : null;
+};
+
+/**
+ * Live plane switched on for this process (ROUTE-07 ranking only). Reads the
+ * shared env switch (`live-plane-env.ts`) alone: the router must not import the
+ * live-consent seam (plane import guard), and a stored grant without the switch only means live rows sink below
+ * vault rows — they stay listed, nothing is hidden.
+ */
+const livePlaneAvailable = (): boolean =>
+  process.env['SFI_TRANSPORT'] !== 'http' && isLivePlaneEnvEnabled();
+
+const HIDDEN_TOOLS: ReadonlySet<string> = new Set(
+  V01_TOOLS.filter((t) => t.hidden === true).map((t) => t.name),
+);
+
+/**
+ * `Class.method` (DEV-03 / ROUTE-08): a dotted reference whose LEFT side is
+ * exactly an Apex class/trigger in the vault (and not an object) is a method
+ * reference, never `Object.Field`. Returns the class query + method, or null.
+ */
+const splitApexMethodReference = async (
+  ctx: Context,
+  query: string,
+): Promise<{ readonly classQuery: string; readonly type: ComponentType; readonly methodName: string } | null> => {
+  const m = /^([A-Za-z][A-Za-z0-9_]*)\.([A-Za-z][A-Za-z0-9_]*)$/.exec(query.trim());
+  if (m === null) return null;
+  const [, left, right] = m as unknown as [string, string, string];
+  if (/__[a-z]+$/i.test(right)) return null;
+  const objectHit = await getNodeById(ctx.graph, `CustomObject:${left}` as ComponentId);
+  if (objectHit.ok && objectHit.value !== null) return null;
+  const r = await resolveComponents(ctx.graph, left, {
+    limit: 5,
+    types: ['ApexClass', 'ApexTrigger'],
+  });
+  if (!r.ok) return null;
+  const cls = r.value.candidates.find((c) => c.apiName.toLowerCase() === left.toLowerCase());
+  return cls === undefined ? null : { classQuery: cls.apiName, type: cls.type, methodName: right };
+};
+
+/** Evidence order: an exact winner first, then by score (B08 / C02). */
+const evidenceOrder = <T extends { readonly score: number; readonly matchKind: string }>(
+  rows: readonly T[],
+  exactWinnerFirst: boolean,
+): T[] => {
+  const head = exactWinnerFirst && rows.length > 0 ? [rows[0]!] : [];
+  const rest = (exactWinnerFirst ? rows.slice(1) : [...rows]).sort(
+    (a, b) =>
+      (a.matchKind === 'exact' ? 0 : 1) - (b.matchKind === 'exact' ? 0 : 1) ||
+      b.score - a.score,
+  );
+  return [...head, ...rest];
 };
 
 const invokeFromArgsMap = (
   route: RouteResult,
   argsByTool: ReadonlyMap<string, Readonly<Record<string, unknown>>>,
 ): readonly RouteInvocation[] =>
-  route.tools.map((tool): RouteInvocation => {
-    const args = argsByTool.get(tool) ?? {};
-    return CORE_PROFILE_TOOLS.has(tool)
-      ? { tool, args }
-      : { tool: 'sfi.run_analysis', args: { name: tool, args } };
-  });
+  route.tools.map((tool): RouteInvocation => invocationFor(tool, argsByTool.get(tool) ?? {}));
+
+/** A core tool directly, any other through the gateway; unbound required args named. */
+const invocationFor = (
+  tool: string,
+  args: Readonly<Record<string, unknown>>,
+): RouteInvocation => {
+  const missing = missingRequiredArgs(tool, args);
+  const call: RouteInvocation = CORE_PROFILE_TOOLS.has(tool)
+    ? { tool, args }
+    : { tool: 'sfi.run_analysis', args: { name: tool, args } };
+  return missing.length > 0 ? { ...call, missingArgs: missing } : call;
+};
 
 /** Stable-rerank the funnel candidates so the requested mode's family leads. */
 const rerankForMode = (
@@ -2393,6 +2654,26 @@ export const routeQuestionHandler = async (
   // a perfectly clear question (eval family A). Resolve exactly the object the
   // routed tool needs (already derived into suggestedArgs), or nothing.
   const saveOrderIntent = SAVE_ORDER_INTENTS.has(route.intent);
+  // ROUTE-10: the regex object deriver misses plain phrasings ("when a Case is
+  // saved"). For a save-order intent with no object, ask the VAULT which word
+  // of the question names exactly one object — never another regex.
+  // A regex-derived object that names nothing in the vault ('figure' from
+  // "figure out") is dropped FIRST, so it can neither be bound nor raise a false
+  // premise check; the vault probe then finds the real object word.
+  if (saveOrderIntent) {
+    const derived = route.suggestedArgs?.['objectApiName'];
+    let objectApiName: string | null =
+      typeof derived === 'string'
+        ? await canonicalObjectArg(ctx, derived, new Map())
+        : null;
+    if (objectApiName === null) objectApiName = await probeObjectMention(ctx, input.question);
+    const rest = { ...(route.suggestedArgs ?? {}) };
+    delete rest['objectApiName'];
+    route = {
+      ...route,
+      suggestedArgs: objectApiName !== null ? { ...rest, objectApiName } : rest,
+    };
+  }
   const suggestedObject = route.suggestedArgs?.['objectApiName'];
   // RESIDUAL 1: for a single-entity explain/fetch, a trailing comparison aside
   // ("…, is it the same as the bar calc?") is rhetoric about the SAME answer,
@@ -2471,6 +2752,24 @@ export const routeQuestionHandler = async (
         contextGhostComponentId = previous.componentId;
       }
       // A graph read error is FAIL-OPEN: context simply is not applied.
+    }
+  }
+
+  // DEV-03 / ROUTE-08: `Class.method` is a method reference, not Object.Field —
+  // resolve the CLASS and carry the method so it can be bound (methodName).
+  let methodRef: string | undefined;
+  if (entityQuery !== null && contextExactResolution === null) {
+    const apexRef = await splitApexMethodReference(ctx, entityQuery);
+    if (apexRef !== null) {
+      entityQuery = apexRef.classQuery;
+      entityTypes = [apexRef.type];
+      methodRef = apexRef.methodName;
+    } else if (/\s+class$/i.test(entityQuery)) {
+      const bareClass = entityQuery.replace(/\s+class$/i, '');
+      const dotted = new RegExp(`\\b${bareClass.replace(/[^A-Za-z0-9_]/g, '')}\\.([A-Za-z][A-Za-z0-9_]*)\\b`).exec(
+        input.question,
+      );
+      if (dotted?.[1] !== undefined) methodRef = dotted[1];
     }
   }
 
@@ -3432,13 +3731,83 @@ export const routeQuestionHandler = async (
   // the current vault by default (P14-FEEDBACK-gaplog-scope).
   const logged =
     input.logGap === true ? await logGapIfAny(route, undefined, ctx.vaultRoot) : null;
-  const routeToolArgs = await buildRouteToolArgsMap(route, ctx);
+  const rawRouteToolArgs = await buildRouteToolArgsMap(route, ctx);
+  // ROUTE-01 / FR-04 / DEV-02: bind the component the router ALREADY resolved
+  // into every recommended call, under each tool's own declared key. Only an
+  // EXACT, unblocked, premise-clean winner is bound — unsure ⇒ unbound, and the
+  // candidate row says which required args are still missing.
+  const winnerRow =
+    !executionBlocked && !premiseFlagged && refinedEntityResolution?.disposition === 'exact'
+      ? refinedEntityResolution.candidates[0]
+      : undefined;
+  const binding: EntityBinding | null =
+    winnerRow !== undefined
+      ? {
+          winner: {
+            id: winnerRow.id,
+            type: winnerRow.type,
+            apiName: winnerRow.apiName,
+            parentApiName: winnerRow.parentApiName,
+          },
+          ...(methodRef !== undefined ? { methodName: methodRef } : {}),
+        }
+      : null;
+  const baseArgs = route.suggestedArgs ?? {};
+  const objectArgCache = new Map<string, string | null>();
+  const droppedObjectArgs = new Set<string>();
+  const finalizeArgs = async (
+    tool: string,
+    args: Readonly<Record<string, unknown>>,
+  ): Promise<Readonly<Record<string, unknown>>> => {
+    // ROUTE-06: literals the question states (a quoted picklist value, a
+    // "to <type>" target) bind to the tool's own required value args.
+    const bound = bindQuestionLiterals(tool, bindToolArgs(tool, args, baseArgs, binding), input.question);
+    const obj = bound['objectApiName'];
+    if (typeof obj !== 'string' || obj.length === 0) return bound;
+    const canon = await canonicalObjectArg(ctx, obj, objectArgCache);
+    if (canon === null) {
+      droppedObjectArgs.add(obj);
+      const rest = { ...bound };
+      delete rest['objectApiName'];
+      return rest;
+    }
+    return canon === obj ? bound : { ...bound, objectApiName: canon };
+  };
+  const routeToolArgs = new Map<string, Readonly<Record<string, unknown>>>();
+  for (const [tool, args] of rawRouteToolArgs) {
+    if (tool === 'sfi.resolve') {
+      routeToolArgs.set(tool, entityQuery !== null ? { query: entityQuery } : {});
+    } else {
+      routeToolArgs.set(tool, ROUTE_PREAMBLE_TOOLS.has(tool) ? args : await finalizeArgs(tool, args));
+    }
+  }
+  const primaryTool = route.tools.find((t) => !ROUTE_PREAMBLE_TOOLS.has(t));
+  const primaryArgs = primaryTool !== undefined ? routeToolArgs.get(primaryTool) : undefined;
+  if (primaryArgs !== undefined && Object.keys(primaryArgs).length > 0) {
+    route = { ...route, suggestedArgs: primaryArgs };
+  }
+  if (droppedObjectArgs.size > 0) {
+    route = {
+      ...route,
+      reason:
+        `${route.reason} Dropped objectApiName ${[...droppedObjectArgs].map((o) => `'${o}'`).join(', ')}: ` +
+        `no such object in this vault (a word from the question, not an object name) — name the object.`,
+    };
+  }
   // P13-GW-router-envelope: under the core profile the client only holds 18
-  // schemas, so the route also carries EXECUTABLE calls — gateway envelopes
-  // for non-core tools (run_analysis is byte-identical to a direct call).
-  const invoke =
+  // schemas, so the route also carries calls — gateway envelopes for non-core
+  // tools (run_analysis is byte-identical to a direct call); a step with
+  // unbound required args says so in `missingArgs`. A
+  // resolve step is executable only with a query, and pointless once bound.
+  const invokeRoute: RouteResult = {
+    ...route,
+    tools: route.tools.filter(
+      (t) => t !== 'sfi.resolve' || (binding === null && entityQuery !== null),
+    ),
+  };
+  let invoke =
     toolProfile() === 'core' && !executionBlocked
-      ? invokeFromArgsMap(route, routeToolArgs)
+      ? invokeFromArgsMap(invokeRoute, routeToolArgs)
       : undefined;
   // CAE-03b semantic funnel is PRIMARY: in the default HYBRID mode, surface the
   // meaning-ranked candidates + guidance for EVERY routable question and let the
@@ -3450,11 +3819,91 @@ export const routeQuestionHandler = async (
   // A funnel-advisory route reuses the EXACT candidate list stage 7 gated on
   // (P2 §3): recomputing over the replaced route would re-enter the regex-bonus
   // fusion (intent is no longer 'unrouted') and let gate and output disagree.
+  const rawCandidates = wantCandidates
+    ? advisoryCandidates ?? buildFunnelCandidates(route, input.question, routeToolArgs, input.mode)
+    : [];
+  const boundCandidates: ToolCandidate[] = [];
+  let methodRows: ToolCandidate[] = [];
+  for (const candidate of rawCandidates) {
+    // CH-5: a hidden retired alias is not invocable under core — never offer it.
+    if (HIDDEN_TOOLS.has(candidate.tool)) continue;
+    // ROUTE-04: the entity resolved to an OBJECT, so the field-only access audit
+    // (swapped out of the route by applyComponentTypeGuard) is not offered back
+    // through the funnel — with no field to bind it would run org-wide.
+    if (binding?.winner.type === 'CustomObject' && candidate.tool === FIELD_ONLY_ACCESS_TOOL) {
+      continue;
+    }
+    const args =
+      routeToolArgs.get(candidate.tool) ??
+      (await finalizeArgs(candidate.tool, candidate.suggestedArgs ?? {}));
+    const missing = missingRequiredArgs(candidate.tool, args);
+    const { suggestedArgs: _prev, missingArgs: _prevMissing, ...row } = candidate;
+    boundCandidates.push({
+      ...row,
+      ...(Object.keys(args).length > 0 ? { suggestedArgs: args } : {}),
+      ...(missing.length > 0 ? { missingArgs: missing } : {}),
+    });
+  }
+  // A04 / ROUTE-08: "what does Class.method do?" matched no rule, so the host
+  // got no method tool although the class resolved exactly and the method was
+  // parsed. Append the tools that take a method (derived from their schemas),
+  // bound, at low confidence after the meaning-ranked rows — executable first.
+  if (
+    wantCandidates &&
+    binding?.methodName !== undefined &&
+    (binding.winner.type === 'ApexClass' || binding.winner.type === 'ApexTrigger')
+  ) {
+    const present = new Set(boundCandidates.map((c) => c.tool));
+    const rows: ToolCandidate[] = [];
+    for (const tool of toolsDeclaringArg(['methodName', 'method'])) {
+      if (HIDDEN_TOOLS.has(tool) || present.has(tool)) continue;
+      const args = await finalizeArgs(tool, {});
+      const missing = missingRequiredArgs(tool, args);
+      rows.push({
+        tool,
+        score: 0,
+        cosine: 0,
+        category: null,
+        ...resolveCandidatePlane(tool),
+        confidence: 'low',
+        ...(Object.keys(args).length > 0 ? { suggestedArgs: args } : {}),
+        ...(missing.length > 0 ? { missingArgs: missing } : {}),
+      });
+    }
+    // At most 3, so a routed method question's shortlist is not flooded.
+    methodRows = [
+      ...rows.filter((r) => r.missingArgs === undefined),
+      ...rows.filter((r) => r.missingArgs !== undefined),
+    ].slice(0, 3);
+    boundCandidates.push(...methodRows);
+  }
+  // An UNROUTED method question's invoke would otherwise be the generic
+  // fallback: offer the bound, executable method tools instead.
+  if (invoke !== undefined && route.intent === 'unrouted') {
+    const runnable = methodRows.filter((r) => r.missingArgs === undefined);
+    if (runnable.length > 0) {
+      invoke = runnable.map((r) => invocationFor(r.tool, r.suggestedArgs ?? {}));
+    }
+  }
+  // ROUTE-07: with the live plane OFF for this vault, a live-only tool cannot
+  // answer — keep it listed (consent can be granted) but below every vault row.
+  const liveOk = boundCandidates.some((c) => c.liveRequired)
+    ? livePlaneAvailable()
+    : true;
   const toolCandidates = withCandidateFacts(
-    wantCandidates
-      ? advisoryCandidates ?? buildFunnelCandidates(route, input.question, routeToolArgs, input.mode)
-      : [],
+    liveOk
+      ? boundCandidates
+      : [
+          ...boundCandidates.filter((c) => !c.liveRequired),
+          ...boundCandidates.filter((c) => c.liveRequired),
+        ],
   );
+  if (entityEvidence !== undefined) {
+    entityEvidence = {
+      ...entityEvidence,
+      candidates: evidenceOrder(entityEvidence.candidates, entityEvidence.disposition === 'exact'),
+    };
+  }
   const guidance =
     toolCandidates.length > 0 ? guidanceForMode(input.mode, toolCandidates) : undefined;
   return ok({

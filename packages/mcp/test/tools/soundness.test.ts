@@ -325,3 +325,71 @@ describe('soundnessFromIds (real graph)', () => {
     expect(s.blindSpots).toEqual([]);
   });
 });
+
+/**
+ * A05 / C07 / C02 (FAIL-BEFORE/PASS-AFTER): get_impact's soundness claimed
+ * `complete: true` for any root other than CustomField / CustomObject. Custom
+ * labels referenced from formula fields, and Aura callers of an @AuraEnabled
+ * class, are not graph edges — the shared referrer-coverage table names them.
+ */
+describe('soundnessForImpactWalk: referrer-coverage table (A05/C07/C02)', () => {
+  it('a CustomLabel root is partial and names the formula-field referrer kind', () => {
+    const label = typedNode('CustomLabel:Invoice_Term', 'CustomLabel');
+    const s = soundnessForImpactWalk([label], 'CustomLabel', label);
+    expect(s.complete).toBe(false);
+    expect(s.staticCoverage).toBe('partial');
+    const spot = s.blindSpots.find((b) => b.kind === 'unwalked-referrer-class');
+    expect(spot?.referrerClasses).toContain('formula fields / validation rules ($Label)');
+  });
+
+  it('an ApexClass root with @AuraEnabled methods is partial (controller-less Aura bundles are not edges)', () => {
+    const cls = {
+      ...apexNode('ApexClass:InvoiceController', []),
+      properties: { qualityIssues: [], hasAuraEnabledMethod: true },
+    };
+    const s = soundnessForImpactWalk([cls], 'ApexClass', cls);
+    expect(s.complete).toBe(false);
+    const spot = s.blindSpots.find((b) => b.kind === 'unwalked-referrer-class');
+    expect(spot?.referrerClasses?.join(' ')).toContain('Aura server actions in bundles with no declared controller');
+    // Aura bundles WITH a declared controller are method-level edges now.
+    expect(spot?.referrerClasses?.join(' ')).not.toContain('Aura controller JS method calls');
+  });
+
+  // FAIL-BEFORE/PASS-AFTER: the table encoded only the CURRENT builder's
+  // tiers, so a vault built before method-level Aura edges existed was judged
+  // as if it had them — "Aura callers checked" with no edge in the graph.
+  it('judges a vault by the builder that built it (older builder -> class-level Aura callers)', () => {
+    const cls = {
+      ...apexNode('ApexClass:InvoiceController', []),
+      properties: { qualityIssues: [], hasAuraEnabledMethod: true },
+    };
+    const old = soundnessForImpactWalk([cls], 'ApexClass', cls, '0.3.3');
+    const oldSpot = old.blindSpots.find((b) => b.kind === 'unwalked-referrer-class');
+    expect(oldSpot?.referrerClasses).toContain(
+      'Aura controller JS method calls (c.<method>) (class-level only)',
+    );
+    const current = soundnessForImpactWalk([cls], 'ApexClass', cls, '99.0.0');
+    const curSpot = current.blindSpots.find((b) => b.kind === 'unwalked-referrer-class');
+    expect(curSpot?.referrerClasses?.join(' ')).not.toContain('Aura controller JS method calls');
+
+    const label = typedNode('CustomLabel:Invoice_Term', 'CustomLabel');
+    const oldLabel = soundnessForImpactWalk([label], 'CustomLabel', label, '0.3.3');
+    expect(
+      oldLabel.blindSpots.find((b) => b.kind === 'unwalked-referrer-class')?.referrerClasses,
+    ).toContain('Apex System.Label references');
+    // An unknown builder version never moves the tiers on a guess.
+    const unknown = soundnessForImpactWalk([label], 'CustomLabel', label, null);
+    expect(
+      unknown.blindSpots.find((b) => b.kind === 'unwalked-referrer-class')?.referrerClasses,
+    ).not.toContain('Apex System.Label references');
+  });
+
+  it('keeps the field/object referrer classes byte-identical (derived from the same table)', () => {
+    expect(UNWALKED_REFERRER_CLASSES).toEqual([
+      'roll-up source coupling',
+      'layout placement',
+      'flow decision/filter reads',
+      'tab/app membership',
+    ]);
+  });
+});

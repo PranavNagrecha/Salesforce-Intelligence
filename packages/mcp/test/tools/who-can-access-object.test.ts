@@ -247,21 +247,21 @@ afterAll(async () => {
 
 describe('whoCanAccessObjectHandler', () => {
   it('rejects a non-CustomObject componentId with invalid-query', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: 'Profile:Admin' });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: 'Profile:Admin' });
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.kind).toBe('invalid-query');
   });
 
   it('returns component-not-found for an unknown object', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: 'CustomObject:Nope__c' });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: 'CustomObject:Nope__c' });
     expect(r.ok).toBe(false);
     if (r.ok) return;
     expect(r.error.kind).toBe('component-not-found');
   });
 
   it('enumerates object-permission, god-mode, and sharing-rule access paths', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: OBJ });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: OBJ });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const { granters, owd, owdGrantsAllInternalUsers } = r.value.data;
@@ -283,7 +283,7 @@ describe('whoCanAccessObjectHandler', () => {
   });
 
   it('CR-CAP-12: expands a shared group into its (transitive) members as granter rows', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: OBJ, limit: 250 });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: OBJ, limit: 250 });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const byId = new Map(r.value.data.granters.map((g) => [`${g.granterId}|${g.via}`, g]));
@@ -309,7 +309,7 @@ describe('whoCanAccessObjectHandler', () => {
   // CR-CAP-05b: a roleAndSubordinates owner rule shares to Role:VP_Sales; the
   // descend must enumerate the named role AND every subordinate role below it.
   it('CR-CAP-05b: expands a roleAndSubordinates rule into the role subtree', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: OBJ, limit: 250 });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: OBJ, limit: 250 });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const byId = new Map(r.value.data.granters.map((g) => [`${g.granterId}|${g.via}`, g]));
@@ -330,7 +330,7 @@ describe('whoCanAccessObjectHandler', () => {
   // CR-CAP-05b OVER-GRANT GATE: the MANAGER (parent) of the shared role must
   // NEVER be listed — that would be an over-grant to the wrong principals.
   it('CR-CAP-05b: never lists a role ABOVE the shared role (managers)', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: OBJ, limit: 250 });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: OBJ, limit: 250 });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const ids = new Set(r.value.data.granters.map((g) => g.granterId));
@@ -340,7 +340,7 @@ describe('whoCanAccessObjectHandler', () => {
   // CR-CAP-05b GATE: a plain-role target with NO inheritance marker emits ONLY
   // the verbatim role row, zero descendants (proves the expansion is gated).
   it('CR-CAP-05b: a plain-role rule (no inheritance marker) does NOT expand', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: OBJ, limit: 250 });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: OBJ, limit: 250 });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const byId = new Map(r.value.data.granters.map((g) => [`${g.granterId}|${g.via}`, g]));
@@ -354,7 +354,7 @@ describe('whoCanAccessObjectHandler', () => {
   // CR-04: Delete and Create capabilities are enumerated independently — the
   // old exclusive else-if chain NEVER read allowDelete and subsumed allowCreate.
   it('emits independent object-permission-delete and -create rows (CR-04)', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: OBJ });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: OBJ });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const byId = new Map(r.value.data.granters.map((g) => [`${g.granterId}|${g.via}`, g]));
@@ -371,7 +371,7 @@ describe('whoCanAccessObjectHandler', () => {
   // emits MULTIPLE independently-addressable rows — the old chain hid the lower
   // capabilities behind Modify-All.
   it('emits independent read/edit rows for a grantor that also has Modify-All (CR-04)', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: OBJ });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: OBJ });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const byId = new Map(r.value.data.granters.map((g) => [`${g.granterId}|${g.via}`, g]));
@@ -389,7 +389,7 @@ describe('whoCanAccessObjectHandler', () => {
   });
 
   it('flags a public OWD as granting all internal users', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: PUBLIC_OBJ });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: PUBLIC_OBJ });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.owdGrantsAllInternalUsers).toBe(true);
@@ -397,7 +397,7 @@ describe('whoCanAccessObjectHandler', () => {
   });
 
   it('always discloses record-level blind spots', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: OBJ });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: OBJ });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.confidence).toBe('declared');
@@ -406,7 +406,7 @@ describe('whoCanAccessObjectHandler', () => {
   });
 
   it('caveats god-mode rows and adds a blind spot when the object has restriction rules', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: RESTRICTED_OBJ });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: RESTRICTED_OBJ });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const god = r.value.data.granters.find((g) => g.via === 'system-modify-all-data');
@@ -419,7 +419,7 @@ describe('whoCanAccessObjectHandler', () => {
   });
 
   it('keeps god-mode rows clean on an object without restriction rules', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: OBJ });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: OBJ });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const god = r.value.data.granters.find((g) => g.via === 'system-modify-all-data');
@@ -428,7 +428,7 @@ describe('whoCanAccessObjectHandler', () => {
   });
 
   it('paginates the granter list while keeping the summary complete', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: OBJ, limit: 2 });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: OBJ, limit: 2 });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.granters.length).toBe(2);
@@ -453,7 +453,7 @@ describe('whoCanAccessObjectHandler', () => {
         ],
       },
     };
-    const r = await whoCanAccessObjectHandler(covCtx, { componentId: OBJ });
+    const r = await whoCanAccessObjectHandler(covCtx, { view: 'paths', componentId: OBJ });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(
@@ -468,7 +468,7 @@ describe('whoCanAccessObjectHandler', () => {
   // SharingRule-not-retrieved blindSpot — coverageKnown is false, so legacy
   // vaults stay quiet (only the static BLIND_SPOTS are present).
   it('does NOT add the SharingRule blindSpot for a legacy manifest with no coverage array', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: OBJ });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: OBJ });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(
@@ -480,7 +480,7 @@ describe('whoCanAccessObjectHandler', () => {
   // the reached roles are still listed, a blindSpot discloses the incomplete
   // subtree + /sfi-refresh, and NO fabricated role row is emitted.
   it('CR-CAP-05b: discloses an incomplete role subtree without over-granting', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: INCOMPLETE_OBJ, limit: 250 });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: INCOMPLETE_OBJ, limit: 250 });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const ids = new Set(r.value.data.granters.map((g) => g.granterId));
@@ -497,7 +497,7 @@ describe('whoCanAccessObjectHandler', () => {
   // CR-CAP-05b INTERNAL: the internal-vs-portal exclusion cannot be applied
   // offline; the subtree is enumerated AND a disclosure says so.
   it('CR-CAP-05b: discloses that the internal-subordinates filter is not applied offline', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: INTERNAL_OBJ, limit: 250 });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: INTERNAL_OBJ, limit: 250 });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const ids = new Set(r.value.data.granters.map((g) => g.granterId));
@@ -510,7 +510,7 @@ describe('whoCanAccessObjectHandler', () => {
 
   // CR-CAP-05b CYCLE: a malformed back-edge must terminate (no infinite loop).
   it('CR-CAP-05b: a back-edge cycle terminates via the visited-set', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: CYCLE_OBJ, limit: 250 });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: CYCLE_OBJ, limit: 250 });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const ids = new Set(r.value.data.granters.map((g) => g.granterId));
@@ -538,7 +538,7 @@ describe('whoCanAccessObjectHandler — the default page represents every kind',
   const PAGE = 5;
 
   it('a page smaller than the largest kind still carries every kind', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: SKEW_OBJ, limit: PAGE });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: SKEW_OBJ, limit: PAGE });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const kinds = new Set(r.value.data.granters.map((g) => g.granterType));
@@ -550,7 +550,7 @@ describe('whoCanAccessObjectHandler — the default page represents every kind',
 
   it('the id-ASC order this replaced would have shown ZERO profiles on that page', async () => {
     // Documents the defect: re-derive the OLD page from the complete set.
-    const all = await whoCanAccessObjectHandler(ctx, { componentId: SKEW_OBJ, limit: 250 });
+    const all = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: SKEW_OBJ, limit: 250 });
     expect(all.ok).toBe(true);
     if (!all.ok) return;
     const idSorted = [...all.value.data.granters].sort((a, b) =>
@@ -561,7 +561,7 @@ describe('whoCanAccessObjectHandler — the default page represents every kind',
   });
 
   it('summary.byGranterType reports TRUE per-kind totals and names a sample of each', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: SKEW_OBJ, limit: PAGE });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: SKEW_OBJ, limit: PAGE });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const { summary } = r.value.data;
@@ -596,7 +596,7 @@ describe('whoCanAccessObjectHandler — the default page represents every kind',
    * was actually cut from, not the underlying `granterId` sort.
    */
   it('a truncated page carries a resume pointer describing the rows it shipped', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: SKEW_OBJ, limit: PAGE });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: SKEW_OBJ, limit: PAGE });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const d = r.value.data;
@@ -619,7 +619,7 @@ describe('whoCanAccessObjectHandler — the default page represents every kind',
     let pages = 0;
     let total = -1;
     while (offset !== null) {
-      const page = await whoCanAccessObjectHandler(ctx, {
+      const page = await whoCanAccessObjectHandler(ctx, { view: 'paths',
         componentId: SKEW_OBJ,
         limit: PAGE,
         offset,
@@ -644,14 +644,14 @@ describe('whoCanAccessObjectHandler — the default page represents every kind',
   });
 
   it('paging still enumerates every row exactly once', async () => {
-    const all = await whoCanAccessObjectHandler(ctx, { componentId: SKEW_OBJ, limit: 250 });
+    const all = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: SKEW_OBJ, limit: 250 });
     expect(all.ok).toBe(true);
     if (!all.ok) return;
     const total = all.value.data.summary.total;
 
     const seen: string[] = [];
     for (let offset = 0; offset < total; offset += PAGE) {
-      const page = await whoCanAccessObjectHandler(ctx, {
+      const page = await whoCanAccessObjectHandler(ctx, { view: 'paths',
         componentId: SKEW_OBJ,
         limit: PAGE,
         offset,
@@ -737,7 +737,7 @@ describe('whoCanAccessObjectHandler — whole-response byte budget', () => {
     ctx: Context,
     args: { componentId: string; limit?: number; offset?: number },
   ): Promise<EnvelopePage> => {
-    const r = await whoCanAccessObjectHandler(ctx, args);
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', ...args });
     if (!r.ok) throw new Error(`handler failed: ${r.error.message}`);
     const envelope = jsonResult(r.value, { args });
     const block = envelope.content[0];
@@ -900,7 +900,7 @@ describe('whoCanAccessObjectHandler — whole-response byte budget', () => {
   });
 
   it('a small in-budget request is unaffected (no shrink, byte-identical shape)', async () => {
-    const r = await whoCanAccessObjectHandler(budgetCtx, { componentId: BUDGET_OBJ, limit: 40 });
+    const r = await whoCanAccessObjectHandler(budgetCtx, { view: 'paths', componentId: BUDGET_OBJ, limit: 40 });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.limit).toBe(40);
@@ -950,7 +950,7 @@ describe('whoCanAccessObjectHandler — sourceRuleId disambiguates same-type sha
   });
 
   it('FAIL-BEFORE/PASS-AFTER: two rules of the same type sharing with the same group are addressable', async () => {
-    const r = await whoCanAccessObjectHandler(dupCtx, { componentId: DUPKEY_OBJ });
+    const r = await whoCanAccessObjectHandler(dupCtx, { view: 'paths', componentId: DUPKEY_OBJ });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const rows = r.value.data.granters.filter((g) => g.granterId === 'Group:Shared_Target');
@@ -970,7 +970,7 @@ describe('whoCanAccessObjectHandler — sourceRuleId disambiguates same-type sha
   });
 
   it('object-permission and god-mode rows carry no sourceRuleId (already unique on granterId|via)', async () => {
-    const r = await whoCanAccessObjectHandler(ctx, { componentId: OBJ });
+    const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: OBJ });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const objectPermRow = r.value.data.granters.find((g) => g.via === 'object-permission-read');

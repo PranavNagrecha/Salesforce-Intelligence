@@ -761,3 +761,84 @@ describe('findCodeUsagesHandler — output cursor (CR-22)', () => {
     expect(replay.error.kind).toBe('invalid-query');
   });
 });
+
+// =============================================================================
+// DEV-11: object-level usages roll up child-field code edges. A batch class
+// that loops `for (Invoice__c r : rows)` and writes `r.Status__c` has a FIELD
+// edge but no OBJECT edge — it was missing from "which classes use
+// Invoice__c?" while its test class (which queried the object) was listed.
+// =============================================================================
+describe('findCodeUsagesHandler — object roll-up of child-field edges (DEV-11)', () => {
+  let rdir: string;
+  let rstore: GraphStore;
+  let rctx: Context;
+  const OBJ = 'CustomObject:Invoice__c';
+  const STATUS = 'CustomField:Invoice__c.Status__c';
+  const AMOUNT = 'CustomField:Invoice__c.Amount__c';
+
+  beforeAll(async () => {
+    rdir = mkdtempSync(join(tmpdir(), 'sfi-fcu-rollup-'));
+    const opened = await openGraph(join(rdir, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    rstore = opened.value;
+    const e = (fromId: string, toId: string, edgeType: Edge['edgeType'], confidence: Edge['confidence'] = 'parsed'): Edge => ({
+      fromId, toId, edgeType, confidence, source: 'apex-ast', properties: {},
+    });
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: OBJ, type: 'CustomObject', apiName: 'Invoice__c' }),
+        makeNode({ id: STATUS, type: 'CustomField', apiName: 'Invoice__c.Status__c' }),
+        makeNode({ id: AMOUNT, type: 'CustomField', apiName: 'Invoice__c.Amount__c' }),
+        makeNode({ id: 'ApexClass:InvoiceBatch', type: 'ApexClass', apiName: 'InvoiceBatch' }),
+        makeNode({ id: 'ApexClass:InvoiceBatchTest', type: 'ApexClass', apiName: 'InvoiceBatchTest' }),
+        makeNode({ id: 'Flow:Invoice_Flow', type: 'Flow', apiName: 'Invoice_Flow' }),
+      ],
+      edges: [
+        e(OBJ, STATUS, 'parentOf'),
+        e(OBJ, AMOUNT, 'parentOf'),
+        e('ApexClass:InvoiceBatch', STATUS, 'writesTo'),
+        e('ApexClass:InvoiceBatch', AMOUNT, 'writesTo', 'heuristic'),
+        e('ApexClass:InvoiceBatchTest', OBJ, 'readsFrom'),
+        e('ApexClass:InvoiceBatchTest', STATUS, 'readsFrom'),
+        e('Flow:Invoice_Flow', STATUS, 'writesTo'),
+      ],
+    };
+    const imported = await importExtractionResults(rstore, [seed]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    rctx = { vaultRoot: rdir, manifest: FIXTURE_MANIFEST, graph: rstore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(rstore);
+    rmSync(rdir, { recursive: true, force: true });
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a class touching the object only through fields is listed, with viaFields', async () => {
+    const r = await findCodeUsagesHandler(rctx, { targetId: OBJ });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const batch = r.value.data.usages.filter((u) => u.id === 'ApexClass:InvoiceBatch');
+    expect(batch).toHaveLength(1);
+    expect(batch[0]?.edgeType).toBe('writesTo');
+    expect(batch[0]?.properties).toEqual({
+      rolledUpFrom: 'CustomField',
+      viaFields: [AMOUNT, STATUS],
+      confidence: 'heuristic',
+    });
+  });
+
+  it('a referrer with a DIRECT object edge is not double-listed for that edge type; non-code referrers stay out', async () => {
+    const r = await findCodeUsagesHandler(rctx, { targetId: OBJ });
+    if (!r.ok) throw new Error('handler failed');
+    const test = r.value.data.usages.filter((u) => u.id === 'ApexClass:InvoiceBatchTest');
+    expect(test.map((u) => u.edgeType)).toEqual(['readsFrom']);
+    expect(test[0]?.properties['rolledUpFrom']).toBeUndefined();
+    expect(r.value.data.usages.some((u) => u.id === 'Flow:Invoice_Flow')).toBe(false);
+  });
+
+  it('honours the edgeTypes filter on rolled-up usages', async () => {
+    const r = await findCodeUsagesHandler(rctx, { targetId: OBJ, edgeTypes: ['readsFrom'] });
+    if (!r.ok) throw new Error('handler failed');
+    expect(r.value.data.usages.some((u) => u.id === 'ApexClass:InvoiceBatch')).toBe(false);
+  });
+});

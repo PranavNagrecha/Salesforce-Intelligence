@@ -96,4 +96,11 @@ export {
   securityPostureMetricsFromFindingCount,
 } from './tools/security-posture-metric.js';
 export { semanticCandidates } from './semantic-funnel.js';
+export {
+  deriveComponentFromPath,
+  parseDiffComponents,
+  parseManifestComponents,
+  parseSourcePathEntries,
+} from './tools/change-set-input.js';
+export type { ChangeComponent, ChangeSetKind } from './tools/change-set-input.js';
 export type { ToolCandidate } from './semantic-funnel.js';

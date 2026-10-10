@@ -297,10 +297,20 @@ const NAMED_FIELD_ID =
  */
 const deriveSaveEvent = (
   q: string,
-): 'insert' | 'update' | 'delete' | 'undelete' => {
+): 'insert' | 'update' | 'upsert' | 'delete' | 'undelete' => {
   if (/\b(undelet|restor)/.test(q)) return 'undelete';
-  if (/\b(creat|insert)/.test(q)) return 'insert';
+  const creates = /\b(creat|insert)/.test(q);
+  const updates = /\b(updat|edit)/.test(q);
+  // "inserted or updated" / "created/edited" is BOTH paths: `upsert` covers
+  // insert + update, so insert-only automations are not left out. No single
+  // event covers delete together with a save ("saved or deleted"): that ask
+  // gets the delete path only, and the host must make a second call for save.
+  if (creates && updates) return 'upsert';
+  if (creates) return 'insert';
   if (/\b(delet|remov)/.test(q)) return 'delete';
+  // A bare "saved / saves" names no single DML event — a save is an insert OR
+  // an update. Only an explicit update verb narrows to `update`.
+  if (!updates && /\bsav(?:e|ed|es|ing)\b/.test(q)) return 'upsert';
   return 'update';
 };
 
@@ -699,19 +709,31 @@ const deriveLayoutForUserArgs = (
   q: string,
   question?: string,
 ): Readonly<Record<string, unknown>> | undefined => {
-  const source = (question ?? q).toLowerCase();
+  // ROUTE-03: never a hard-coded org-specific profile id. The ONLY id emitted
+  // is the platform-standard System Administrator API name (`Admin`, the same
+  // in every org); any other "<Name> profile" phrase is passed through as the
+  // tool's natural `profileName` selector, which layout_for_user resolves (or
+  // refuses) against the vault itself.
+  const raw = question ?? q;
+  const source = raw.toLowerCase();
   const objectApiName = deriveObjectApiFromQuestion(q, question);
   let profileId: string | undefined;
-  if (/\bfaculty[-\s]?profile\b|\bfaculty\b/.test(source)) {
-    profileId = 'Profile:Faculty';
-  } else if (/\b(system\s+administrator|admin)\s+profile\b|\badmin\b/.test(source)) {
-    profileId = 'Profile:System Administrator';
-  } else if (/\bintegration\b|\bapi\b.*\buser\b/.test(source)) {
-    profileId = 'Profile:Minimum Access - Salesforce';
+  let profileName: string | undefined;
+  if (/\b(system\s+administrator|sys\s*admin|admin)\b/.test(source)) {
+    profileId = 'Profile:Admin';
+  } else {
+    const named = raw.match(/\b([A-Za-z][A-Za-z0-9_]*)[-\s]profile\b/)?.[1];
+    if (
+      named !== undefined &&
+      !/^(?:a|an|the|which|what|this|that|my|their|user|same|each|every|any|whose)$/i.test(named)
+    ) {
+      profileName = named;
+    }
   }
   const args: Record<string, unknown> = {};
   if (objectApiName !== undefined) args.objectApiName = objectApiName;
   if (profileId !== undefined) args.profileId = profileId;
+  if (profileName !== undefined) args.profileName = profileName;
   return Object.keys(args).length > 0 ? args : undefined;
 };
 
@@ -5645,7 +5667,9 @@ const RULES: readonly Rule[] = [
   {
     intent: 'event-subscribers',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.event_subscribers', 'sfi.cdc_subscribers'],
+    // CH-5: `sfi.cdc_subscribers` is a hidden retired alias (not invocable
+    // under core) — its survivor is event_topology.
+    tools: ['sfi.resolve', 'sfi.event_subscribers', 'sfi.event_topology'],
     liveRequired: false,
     needsResolve: true,
     reason: 'Who subscribes to a specific platform event / change data capture channel.',
@@ -5748,10 +5772,13 @@ const RULES: readonly Rule[] = [
     // needs "safe to delete"/"can i delete" — none match "which fields ... safely delete".
     intent: 'field-cleanup-candidates',
     plane: 'vault',
-    tools: ['sfi.field_cleanup_candidates', 'sfi.unused_fields_deep'],
+    // CH-5: field_cleanup_candidates is a hidden retired alias; its survivor is
+    // unused_fields_deep { format: 'cleanup' }.
+    tools: ['sfi.unused_fields_deep'],
     liveRequired: false,
     needsResolve: false,
-    reason: 'Ranked field cleanup candidates safe to delete (field_cleanup_candidates).',
+    suggestArgs: () => ({ format: 'cleanup' }),
+    reason: 'Ranked field cleanup candidates safe to delete (unused_fields_deep format:cleanup).',
     patterns: [/\b(which|what)\s+fields?\b[^.?!]{0,25}\bsafely\s+delete\b/],
   },
   {
@@ -5869,6 +5896,45 @@ const RULES: readonly Rule[] = [
       /\bblast\s+radius\b[^.?!]{0,40}\blive\b/,
     ],
   },
+  // ROUTE-06: the two specific what-if rules below sit BEFORE the generic
+  // impact-analysis rule — first match wins, and its /what breaks|impact/ swallowed them.
+  {
+    // M1 — field-TYPE change what-if. The combined what-if-field rule below grades
+    // top-1 = what_if_make_field_required, so change-field-type can never win there.
+    // Key on the field-type framing (from-picklist-to-<type> / "field type" / "data type").
+    intent: 'what-if-change-field-type',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.what_if_change_field_type', 'sfi.what_if_make_field_required'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Simulated field-TYPE change with blast radius (what_if_change_field_type).',
+    patterns: [
+      /\bfrom\s+(?:a\s+)?picklist\s+to\s+(?:a\s+)?(?:text|number|formula|lookup|date|currency|checkbox|multi[-\s]?select)\b/,
+      /\bchang\w*\b[^.?!]{0,40}\bfield\s+type\b/,
+      /\bfield\s+type\b[^.?!]{0,40}\bchang\w*/,
+      /\bchang\w*\b[^.?!]{0,40}\bdata\s+type\b/,
+      // ROUTE-06: "changing X from currency to number" — a from-<type>-to-<type>
+      // change of any field type, not only from picklist.
+      /\bchang\w*\b[^?!]{0,60}\bfrom\s+(?:a\s+)?(?:text|number|currency|percent|date|date\s*time|picklist|checkbox|email|phone|url|lookup|formula|long\s+text(?:\s+area)?)\s+to\s+(?:a\s+|an\s+)?(?:text|number|currency|percent|date|date\s*time|picklist|checkbox|email|phone|url|lookup|formula|long\s+text(?:\s+area)?)\b/,
+    ],
+  },
+  {
+    // M2 — remove-picklist-VALUE what-if. Same combined-rule top-1 problem as M1.
+    // Key on a remove/delete verb + "picklist value".
+    intent: 'what-if-remove-picklist-value',
+    plane: 'vault',
+    tools: ['sfi.resolve', 'sfi.what_if_remove_picklist_value', 'sfi.what_if_make_field_required'],
+    liveRequired: false,
+    needsResolve: true,
+    reason: 'Simulated removal of a picklist VALUE with blast radius (what_if_remove_picklist_value).',
+    patterns: [
+      /\b(remov\w*|delet\w*|drop\w*|retir\w*)\b[^.?!]{0,40}\bpicklist\s+value\b/,
+      /\bpicklist\s+value\b[^.?!]{0,40}\b(remov\w*|delet\w*|drop\w*|retir\w*)\b/,
+      // ROUTE-06: "remove 'Former Member' from the Status picklist" — a quoted
+      // VALUE removed from a named picklist, without the literal "picklist value".
+      /\b(remov\w*|delet\w*|drop\w*|retir\w*)\b\s+['"‘“][^'"’”]{1,60}['"’”]\s+from\b[^.?!]{0,60}\bpicklist\b/,
+    ],
+  },
   {
     intent: 'impact-analysis',
     plane: 'vault',
@@ -5899,37 +5965,6 @@ const RULES: readonly Rule[] = [
       // a field-type what-if (those say "field"/"required"/"picklist value").
       /\b(remov\w*|delet\w*|drop\w*)\b[^.?!]{0,40}\brecord\s+type\b[^]*\b(assume|assumes?|kept|keep|rely|relies|reference|expect)\w*/,
       /\bwhat\s+if\s+i\s+(remov\w*|delet\w*|drop\w*)\b[^.?!]{0,40}\brecord\s+type\b/,
-    ],
-  },
-  {
-    // M1 — field-TYPE change what-if. The combined what-if-field rule below grades
-    // top-1 = what_if_make_field_required, so change-field-type can never win there.
-    // Key on the field-type framing (from-picklist-to-<type> / "field type" / "data type").
-    intent: 'what-if-change-field-type',
-    plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.what_if_change_field_type', 'sfi.what_if_make_field_required'],
-    liveRequired: false,
-    needsResolve: true,
-    reason: 'Simulated field-TYPE change with blast radius (what_if_change_field_type).',
-    patterns: [
-      /\bfrom\s+(?:a\s+)?picklist\s+to\s+(?:a\s+)?(?:text|number|formula|lookup|date|currency|checkbox|multi[-\s]?select)\b/,
-      /\bchang\w*\b[^.?!]{0,40}\bfield\s+type\b/,
-      /\bfield\s+type\b[^.?!]{0,40}\bchang\w*/,
-      /\bchang\w*\b[^.?!]{0,40}\bdata\s+type\b/,
-    ],
-  },
-  {
-    // M2 — remove-picklist-VALUE what-if. Same combined-rule top-1 problem as M1.
-    // Key on a remove/delete verb + "picklist value".
-    intent: 'what-if-remove-picklist-value',
-    plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.what_if_remove_picklist_value', 'sfi.what_if_make_field_required'],
-    liveRequired: false,
-    needsResolve: true,
-    reason: 'Simulated removal of a picklist VALUE with blast radius (what_if_remove_picklist_value).',
-    patterns: [
-      /\b(remov\w*|delet\w*|drop\w*|retir\w*)\b[^.?!]{0,40}\bpicklist\s+value\b/,
-      /\bpicklist\s+value\b[^.?!]{0,40}\b(remov\w*|delet\w*|drop\w*|retir\w*)\b/,
     ],
   },
   {
@@ -6291,7 +6326,11 @@ const RULES: readonly Rule[] = [
   {
     intent: 'history-change',
     plane: 'vault',
-    tools: ['sfi.org_history', 'sfi.changed_since'],
+    // ARCH-10: diff_snapshots names the added/removed/modified components.
+    // what_changed_since_refresh is deliberately NOT listed: as a route
+    // secondary it is capped below the primary, while unlisted its own meaning
+    // score ranks it first (ROUTE-11).
+    tools: ['sfi.org_history', 'sfi.changed_since', 'sfi.diff_snapshots'],
     liveRequired: false,
     needsResolve: false,
     reason: 'What changed between refreshes comes from the continuous-learning store.',
@@ -6449,10 +6488,11 @@ const RULES: readonly Rule[] = [
     // different tool (matched earlier) so exclude "churn since".
     intent: 'metadata-churn',
     plane: 'vault',
-    tools: ['sfi.churn', 'sfi.diff_snapshots'],
+    // CH-5: sfi.churn is a hidden retired alias; diff_snapshots is its survivor.
+    tools: ['sfi.diff_snapshots'],
     liveRequired: false,
     needsResolve: false,
-    reason: 'A metadata churn digest for the vault (churn).',
+    reason: 'A metadata churn digest for the vault (diff_snapshots).',
     patterns: [
       /\bmetadata\s+churn\b/,
       /\bchurn\b(?!\s+since\b)/,
@@ -6780,10 +6820,13 @@ const RULES: readonly Rule[] = [
     // below which would otherwise claim it on find_component_usages.
     intent: 'apex-usages',
     plane: 'vault',
-    tools: ['sfi.resolve', 'sfi.find_apex_usages'],
+    // CH-5: find_apex_usages is a hidden retired alias folded into
+    // find_code_usages (narrow with nodeTypes: ApexClass/ApexTrigger).
+    tools: ['sfi.resolve', 'sfi.find_code_usages'],
     liveRequired: false,
     needsResolve: true,
-    reason: 'Where a class/method is used in other Apex code (find_apex_usages), an Apex-to-Apex usage scope.',
+    suggestArgs: () => ({ nodeTypes: ['ApexClass', 'ApexTrigger'] }),
+    reason: 'Where a class/method is used in other Apex code (find_code_usages narrowed to Apex), an Apex-to-Apex usage scope.',
     patterns: [
       /\bused\b[^?!]{0,25}\bapex\s+code\b/,
       /\b(in|other)\s+apex\s+code\b/,

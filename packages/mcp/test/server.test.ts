@@ -558,12 +558,13 @@ describe('tool profiles (P13-GW-profiles)', () => {
     }
   });
 
-  it('an unknown profile value falls back to full (never an empty roster)', () => {
+  // PERF-2: an unknown value used to fall back to FULL, so a user trying to
+  // SHRINK the roster ('tiny', 'minimal') silently got the largest one. It now
+  // falls back to core — still never an empty roster.
+  it('an unknown profile value falls back to core (never an empty roster, never the full one)', () => {
     process.env['SFI_TOOL_PROFILE'] = 'tiny';
-    expect(toolProfile()).toBe('full');
-    expect(advertisedTools()).toHaveLength(
-      V01_TOOLS.filter((t) => !t.hidden).length,
-    );
+    expect(toolProfile()).toBe('core');
+    expect(advertisedTools()).toHaveLength(CORE_PROFILE_TOOLS.size);
   });
 });
 

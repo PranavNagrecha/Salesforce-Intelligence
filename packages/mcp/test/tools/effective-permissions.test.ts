@@ -171,13 +171,13 @@ describe('effectivePermissionsHandler', () => {
     expect(r.value.data.summary.apexClasses).toBe(1);
   });
 
-  it('always discloses the PSG / app-tab / record-access boundaries', async () => {
+  it('always discloses the PSG / app / record-access boundaries', async () => {
     const r = await effectivePermissionsHandler(ctx, { profileId: 'Profile:Sales' });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.confidence).toBe('declared');
     expect(r.value.data.disclosures.some((d) => d.includes('GROUP membership'))).toBe(true);
-    expect(r.value.data.disclosures.some((d) => d.includes('App and tab'))).toBe(true);
+    expect(r.value.data.disclosures.some((d) => d.includes('App visibility is a separate surface'))).toBe(true);
   });
 
   // CR-CAP-10: custom permissions are unioned with per-container attribution and

@@ -41,14 +41,48 @@ describe('setupStatusPayload', () => {
     expect(data['status']).toBe('setup-required');
   });
 
-  it('names the authed orgs so the user can pick one', () => {
+  it('names the authed orgs so the user can pick one — but never picks one itself (FR-02)', () => {
     const data = setupStatusPayload(baseState()).data as Record<string, unknown>;
     expect(data['authenticatedOrgs']).toEqual(['Acme-Prod', 'Acme-UAT']);
-    // The first alias is threaded into the copy-pasteable command rather than a
-    // placeholder the user has to decode.
-    expect((data['nextSteps'] as readonly string[]).join('\n')).toContain(
-      'Acme-Prod',
-    );
+    // FAIL-BEFORE: `authedOrgs[0]` (just the first row of `sf org list`) was
+    // threaded into the init/refresh commands as if the user had chosen it.
+    const text = (data['nextSteps'] as readonly string[]).join('\n');
+    expect(text).not.toContain('Acme-Prod');
+    expect(text).toContain('--target-org <your-org-alias>');
+  });
+
+  it('names the sf default org as a labelled hint, not a choice (FR-02)', () => {
+    const data = setupStatusPayload(baseState({ defaultOrg: 'Acme-UAT' })).data as Record<string, unknown>;
+    const text = (data['nextSteps'] as readonly string[]).join('\n');
+    expect(text).toContain('--target-org <your-org-alias>');
+    expect(text).toContain('your sf default org is `Acme-UAT`');
+  });
+
+  it('never suggests pinning the path it already searched (FR-02)', () => {
+    // FAIL-BEFORE: launched from `/`, the fix offered was `--vault /org-kb` —
+    // the exact path that had just failed.
+    const data = setupStatusPayload(
+      baseState({ cwd: '/', expectedVaultRoot: '/org-kb' }),
+    ).data as Record<string, unknown>;
+    const text = (data['nextSteps'] as readonly string[]).join('\n');
+    expect(text).not.toContain('--vault /org-kb');
+    expect(text).toContain('--vault <absolute path to your project>/org-kb');
+    expect(String(data['pinVaultExample'])).not.toContain("'/org-kb'");
+  });
+
+  it('tells a typo\'d --vault apart from "build a new vault" (FR-02)', () => {
+    const data = setupStatusPayload(
+      baseState({ reason: 'vault-path-not-found', bindSource: '--vault', expectedVaultRoot: '/nonexistent/org-kb' }),
+    ).data as Record<string, unknown>;
+    const steps = data['nextSteps'] as readonly string[];
+    expect(steps[0]).toContain('does not exist');
+    expect(steps[0]).toContain('/nonexistent/org-kb');
+    expect(String(data['summary'])).toMatch(/typo/);
+  });
+
+  it('does not claim the server restarts by itself (FR-02)', () => {
+    const text = (setupStatusPayload(baseState()).data as Record<string, unknown>)['nextSteps'] as readonly string[];
+    expect(text.join('\n')).toMatch(/does not reload by itself/);
   });
 
   it('tells a user with no vault to run init before refresh', () => {
@@ -116,8 +150,8 @@ describe('setupStatusPayload', () => {
     const data = setupStatusPayload(baseState()).data as Record<string, unknown>;
     const expected =
       process.platform === 'win32'
-        ? "$env:SFI_VAULT = '/home/someone/Documents/org-kb'"
-        : "export SFI_VAULT='/home/someone/Documents/org-kb'";
+        ? "$env:SFI_VAULT = '<absolute path to your project>\\org-kb'"
+        : "export SFI_VAULT='<absolute path to your project>/org-kb'";
     expect(data['pinVaultExample']).toBe(expected);
   });
 
@@ -129,6 +163,64 @@ describe('setupStatusPayload', () => {
     expect((data['nextSteps'] as readonly string[]).join('\n')).toContain(
       '<your-org-alias>',
     );
+  });
+});
+
+// FR-02 follow-up — FAIL-BEFORE/PASS-AFTER: for a mistyped explicit path,
+// `detail` still said "Run `sfi init` followed by `sfi refresh`" and the
+// handshake said "the knowledge base is not built yet", both contradicting
+// nextSteps ("check it for a typo"); for vault-missing the refresh step said
+// "in that project" with no project named earlier.
+describe('setup guidance is consistent per reason', () => {
+  const typo = baseState({
+    reason: 'vault-path-not-found',
+    bindSource: '--vault',
+    expectedVaultRoot: '/srv/projects/acme/org-kb-typo',
+  });
+
+  it('a mistyped path gets a detail that does not tell the user to run init', () => {
+    const data = setupStatusPayload(typo).data as Record<string, unknown>;
+    expect(data['detail']).not.toMatch(/sfi init/);
+    expect(data['detail']).toContain('/srv/projects/acme/org-kb-typo');
+  });
+
+  it('a mistyped path gets handshake instructions about the path, not "not built yet"', async () => {
+    const server = createSetupServer(typo);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '1' }, { capabilities: {} });
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+    const instructions = client.getInstructions() ?? '';
+    expect(instructions).not.toMatch(/not built yet/);
+    expect(instructions).toContain('configured vault path does not exist');
+    await client.close();
+  });
+
+  // FAIL-BEFORE/PASS-AFTER (second review): the redirect for any non-setup tool
+  // and the setup tool's own description said "no knowledge base for this
+  // project yet" for a mistyped path too — the "not built" story this
+  // per-reason guidance exists to avoid.
+  it('a mistyped path gets a tool-call redirect about the path, not "not built yet"', async () => {
+    const server = createSetupServer(typo);
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+    const client = new Client({ name: 'test', version: '1' }, { capabilities: {} });
+    await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+    const result = await client.callTool({ name: 'sfi.get_impact', arguments: {} });
+    const text = (result.content as readonly { text: string }[])[0]!.text;
+    expect(text).not.toMatch(/no knowledge base for this project yet/);
+    expect(text).toContain('does not exist');
+    const tools = await client.listTools();
+    expect(tools.tools[0]?.description).not.toMatch(/for this project yet/);
+    await client.close();
+  });
+
+  it('vault-missing names the project directory the refresh must run in', () => {
+    const steps = (
+      setupStatusPayload(baseState({ reason: 'vault-missing', expectedVaultRoot: '/srv/projects/acme/org-kb' }))
+        .data as Record<string, unknown>
+    )['nextSteps'] as readonly string[];
+    const refresh = steps.find((s) => s.includes('sf-intelligence refresh')) ?? '';
+    expect(refresh).not.toContain('in that project');
+    expect(refresh).toContain('/srv/projects/acme');
   });
 });
 
@@ -164,6 +256,8 @@ describe('createSetupServer over a real MCP transport', () => {
     // not to guess even if it never thinks to ask.
     const instructions = client.getInstructions() ?? '';
     expect(instructions).toContain('sfi.setup_status');
+    // FR-02: FAIL-BEFORE it promised 'this server restarts with the full tool set' — it has no watcher.
+    expect(instructions).not.toMatch(/this server restarts/);
     expect(instructions).toMatch(/do not guess|Do not guess/);
     await client.close();
   });
@@ -187,6 +281,8 @@ describe('createSetupServer over a real MCP transport', () => {
     ) as { data: Record<string, unknown> };
     expect(body.data['status']).toBe('setup-required');
     expect(body.data['authenticatedOrgs']).toEqual(['Acme-Prod', 'Acme-UAT']);
+    // Text-only, like the vault server: the envelope is sent once.
+    expect(result.structuredContent).toBeUndefined();
     await client.close();
   });
 

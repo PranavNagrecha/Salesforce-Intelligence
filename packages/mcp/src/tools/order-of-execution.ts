@@ -90,6 +90,8 @@ import {
   buildDuplicateRuleStep,
   DUPLICATE_RULE_TYPES,
 } from './soe-duplicate-rules.js';
+import { flowMatchesEvent, triggerMatchesEvent, workflowMatchesEvent } from './soe-event-match.js';
+import { classifyAfterSaveFlowTiming, flowStepFacts } from './soe-flow-timing.js';
 import {
   AUTOMATION_PHASES,
   type BoundableStep,
@@ -104,10 +106,23 @@ import {
   tallyPhaseCounts,
 } from './soe-payload-bounds.js';
 import {
+  buildSoeReentry,
+  REENTRY_NOT_CHECKED,
+  type ReentryStepLike,
+  type SoeReentry,
+} from './soe-reentry.js';
+import {
+  describeRollupRecalc,
   findRollupRecalcSteps,
   rollupScanTruncationNote,
   type RollupRecalcStep,
 } from './soe-rollup-recalc.js';
+import {
+  bypassWarnings,
+  enrichTriggerStepsWithHandlerEffects,
+  SOE_HANDLER_EFFECTS_NOTE,
+  type SoeHandlerEffects,
+} from './soe-trigger-effects.js';
 import {
   type AmbiguousPhaseForEvent,
   buildWithinPhaseOrderCaveat,
@@ -119,6 +134,7 @@ import {
   sortFlowFirersByTriggerOrder,
   TRIGGER_ORDER_NOT_EXTRACTED_CAVEAT,
 } from './soe-trigger-order.js';
+import { isTimeTriggeredEdge } from './time-triggered-write.js';
 
 // Re-export the shared phase-omission contract so this module's public surface
 // is unchanged after the definitions moved to soe-payload-bounds. `AUTOMATION_PHASES`
@@ -134,7 +150,7 @@ export type { SoePhase, SoePhaseCounts, SoePhaseOmission };
  * not a silent drift. The two SOE tools must stay in lockstep.
  */
 const DISCLOSURE =
-  "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Duplicate rules are modeled as their own `duplicate-rules` phase, running after before-triggers and validation but BEFORE the save — evaluated on insert/update only, with the effective Block/Allow/Alert/Report operations surfaced per rule. Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Parent Summary (roll-up) fields that aggregate this object recalculate in the `post-save-rollup-recalc` phase, capped to ONE level — a grandparent's own rollup on that recalculated parent is NOT walked — and the parent's own triggers/flows/workflows that its recalculated save would fire are NOT expanded (no re-entrancy). Entitlement-process and milestone-type METADATA is modeled elsewhere in the vault (R6-18: `EntitlementProcess`/`MilestoneType` nodes, queryable via `sfi.get_component` / `sfi.get_edges`, including each milestone's declared target `minutesToComplete` as of R7-C7) — but this composition does NOT simulate entitlement milestones as an order-of-execution phase: whether a specific record is currently on-track or breached against those target minutes is live, per-record timer data this offline vault cannot hold. Criteria-based sharing recalculation — the FINAL step in Salesforce's documented order-of-execution, evaluated after every phase modeled here (including post-save-async) — is also NOT modeled: a save that causes a record to newly match or stop matching a criteria-based sharing rule's criteria triggers a sharing recalculation this composition does not surface. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.";
+  "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Duplicate rules are modeled as their own `duplicate-rules` phase, running after before-triggers and validation but BEFORE the save — evaluated on insert/update only, with the effective Block/Allow/Alert/Report operations surfaced per rule. Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once; `reentry` names the steps that write back to this object, what the documented second pass re-runs, and any visible recursion guard. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Parent Summary (roll-up) fields that aggregate this object recalculate in the `post-save-rollup-recalc` phase, capped to ONE level — a grandparent's own rollup on that recalculated parent is NOT walked — and the parent's own triggers/flows/workflows that its recalculated save would fire are NOT expanded (no re-entrancy). Entitlement-process and milestone-type METADATA is modeled elsewhere in the vault (R6-18: `EntitlementProcess`/`MilestoneType` nodes, queryable via `sfi.get_component` / `sfi.get_edges`, including each milestone's declared target `minutesToComplete` as of R7-C7) — but this composition does NOT simulate entitlement milestones as an order-of-execution phase: whether a specific record is currently on-track or breached against those target minutes is live, per-record timer data this offline vault cannot hold. Criteria-based sharing recalculation — the FINAL step in Salesforce's documented order-of-execution, evaluated after every phase modeled here (including post-save-async) — is also NOT modeled: a save that causes a record to newly match or stop matching a criteria-based sharing rule's criteria triggers a sharing recalculation this composition does not surface. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.";
 
 /**
  * The four DML events the generic SOE diagram surfaces. `upsert` is
@@ -335,6 +351,8 @@ export interface SoeStepAction {
   readonly kind: string;
   readonly targetId?: ComponentId;
   readonly description: string;
+  /** Set when the action is performed by Apex the trigger calls (see soe-trigger-effects). */
+  readonly via?: ComponentId;
 }
 
 /**
@@ -353,6 +371,18 @@ export interface SoeStep {
   readonly apiName: string;
   readonly conditional?: SoeStepCondition;
   readonly actions: readonly SoeStepAction[];
+  /** ApexTrigger steps only: the handler chain walked and any bypass switch it reads. */
+  readonly handlerEffects?: SoeHandlerEffects;
+  /** Flow steps: declared Flow Trigger Order (omitted when none). */
+  readonly triggerOrder?: number;
+  /** Flow steps: fires only on the save that CHANGES the record to meet its entry criteria. */
+  readonly onlyWhenChangedToMeet?: true;
+  /**
+   * After-save Flow steps: `async-only` = runs after the save commits (async /
+   * scheduled path), never in the save; `unknown` = vault predates the
+   * property, so immediate-vs-scheduled could not be told. Omitted = immediate.
+   */
+  readonly timing?: 'async-only' | 'unknown';
   /**
    * Count of `actions` dropped from this step to keep the response under the
    * MCP payload budget (see {@link enforceSoeByteBudget}). Present only on a
@@ -429,6 +459,14 @@ export interface SoePerEvent {
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface OrderOfExecutionOutput {
   readonly objectApiName: string;
+  /**
+   * WOW-2. One line per trigger whose bypass-switch record (custom metadata the
+   * trigger's dispatcher reads) sets a bypass flag: the trigger may not run.
+   */
+  readonly triggerBypassWarnings?: readonly string[];
+  /** SAVE-REENTRY: see `what_happens_on_save`; write-backs across the composed events, named by component. */
+  readonly reentry?: SoeReentry;
+  readonly reentryNotChecked?: string;
   /**
    * Echoes the object scope ACTUALLY resolved so a host never assumes an alias
    * it passed (`object` / `objectId` / `componentId`) was honored — the silent
@@ -704,65 +742,11 @@ export type OrderOfExecutionInput = z.infer<typeof orderOfExecutionInputSchema>;
 // ---------------------------------------------------------------------------
 // Re-used composition primitives.
 //
-// These match the helpers in `what-happens-on-save.ts` byte-for-byte.
-// Duplicating them here keeps the tool-module boundary clean (the
-// what_happens_on_save module is not a public API surface to other
-// tools), and the duplication is small — two ~30-line helpers plus
-// the per-phase fetchers. If the helpers ever grow, factoring them
-// into a shared `soe-composition.ts` helper module is the next step;
-// for v2.0e the per-module duplication is the simpler shape.
+// The event matchers come from `soe-event-match.ts`, shared with
+// `what_happens_on_save` (the copies here had drifted: a flow with no
+// `recordTriggerType` was dropped from every chain). The per-phase
+// fetchers below still mirror `what-happens-on-save.ts`.
 // ---------------------------------------------------------------------------
-
-const workflowMatchesEvent = (
-  triggerType: unknown,
-  event: SoeEvent,
-): boolean => {
-  if (typeof triggerType !== 'string') return false;
-  if (event === 'delete' || event === 'undelete') return false;
-  if (event === 'insert') {
-    return (
-      triggerType === 'onCreateOnly' ||
-      triggerType === 'onCreateOrTriggeringUpdate' ||
-      triggerType === 'onAllChanges' ||
-      triggerType === 'onCreateOrAllChanges'
-    );
-  }
-  // event === 'update'
-  return (
-    triggerType === 'onCreateOrTriggeringUpdate' ||
-    triggerType === 'onAllChanges' ||
-    triggerType === 'onCreateOrAllChanges'
-  );
-};
-
-const flowMatchesEvent = (
-  recordTriggerType: unknown,
-  event: SoeEvent,
-): boolean => {
-  if (typeof recordTriggerType !== 'string') return false;
-  if (event === 'undelete') return false;
-  if (event === 'delete') return recordTriggerType === 'Delete';
-  if (event === 'insert') {
-    return recordTriggerType === 'Create' || recordTriggerType === 'CreateAndUpdate';
-  }
-  // event === 'update'
-  return recordTriggerType === 'Update' || recordTriggerType === 'CreateAndUpdate';
-};
-
-const triggerMatchesEvent = (
-  events: unknown,
-  event: SoeEvent,
-  timing: 'before' | 'after',
-): boolean => {
-  if (!Array.isArray(events)) return false;
-  for (const e of events) {
-    if (typeof e !== 'string') continue;
-    if (!e.startsWith(`${timing} `)) continue;
-    const action = e.slice(timing.length + 1);
-    if (action === event) return true;
-  }
-  return false;
-};
 
 const surfaceFirstCondition = async (
   ctx: Context,
@@ -794,7 +778,12 @@ const surfaceFirstCondition = async (
   });
 };
 
-const buildActions = async (
+/**
+ * A firer's save-time actions: its outgoing edges except the structural
+ * `parentOf` / `triggersOn` / `firesWhen`. The ONE implementation —
+ * `what_happens_on_save` reuses it, so the two save-order tools cannot drift.
+ */
+export const buildFirerActions = async (
   ctx: Context,
   firerId: ComponentId,
 ): Promise<Result<readonly SoeStepAction[], string>> => {
@@ -809,6 +798,18 @@ const buildActions = async (
       edge.edgeType === 'triggersOn' ||
       edge.edgeType === 'firesWhen'
     ) {
+      continue;
+    }
+    // A time-triggered workflow field update is SCHEDULED by this save but runs
+    // later in its own transaction — shown as such, never as a save-time write.
+    if (isTimeTriggeredEdge(edge)) {
+      if (edge.edgeType === 'writesTo') {
+        actions.push({
+          kind: 'schedulesTimeTriggeredWrite',
+          targetId: edge.toId,
+          description: `time-triggered field update of ${edge.toId} — scheduled by this save, runs later in its own transaction (not on this save)`,
+        });
+      }
       continue;
     }
     // APEX-RECEIVER-VERIFIED. Apex-scanner artifacts used to be dropped HERE by
@@ -835,7 +836,7 @@ const buildStep = async (
 ): Promise<Result<SoeStep, string>> => {
   const conditionResult = await surfaceFirstCondition(ctx, firer.id);
   if (!conditionResult.ok) return err(conditionResult.error);
-  const actionsResult = await buildActions(ctx, firer.id);
+  const actionsResult = await buildFirerActions(ctx, firer.id);
   if (!actionsResult.ok) return err(actionsResult.error);
   const base: Omit<SoeStep, 'conditional'> = {
     phase,
@@ -1057,7 +1058,7 @@ const composeForEvent = async (
     if (!flowMatchesEvent(recordTriggerType, event)) continue;
     const stepResult = await buildStep(ctx, firer, 'before-save-flows', stepIndex);
     if (!stepResult.ok) return err(stepResult.error);
-    soe.push(stepResult.value);
+    soe.push({ ...stepResult.value, ...flowStepFacts(firer) });
     stepIndex += 1;
   }
 
@@ -1240,19 +1241,14 @@ const composeForEvent = async (
   const scheduledOnlyAfterSaveFlows: Node[] = [];
   for (const { firer, recordTriggerType } of orderedAfterSaveFlows) {
     if (!flowMatchesEvent(recordTriggerType, event)) continue;
-    const hasImmediateConnector = firer.properties['hasImmediateConnector'] as boolean | undefined;
-    const scheduledPathTypes = firer.properties['scheduledPathTypes'] as string[] | undefined;
-    const isScheduledOnly =
-      hasImmediateConnector === false &&
-      Array.isArray(scheduledPathTypes) &&
-      scheduledPathTypes.length > 0;
-    if (isScheduledOnly) {
+    const timing = classifyAfterSaveFlowTiming(firer);
+    if (timing === 'async-only') {
       scheduledOnlyAfterSaveFlows.push(firer);
       continue;
     }
     const stepResult = await buildStep(ctx, firer, 'post-save-flows', stepIndex);
     if (!stepResult.ok) return err(stepResult.error);
-    soe.push(stepResult.value);
+    soe.push({ ...stepResult.value, ...flowStepFacts(firer, timing) });
     stepIndex += 1;
   }
 
@@ -1294,7 +1290,7 @@ const composeForEvent = async (
         {
           kind: 'recalculates',
           targetId: rollup.parentObjectId,
-          description: `recalculates ${rollup.summaryOperation ?? 'unknown-operation'}(${rollup.summarizedField ?? 'record count'}) on ${rollup.parentObjectId}`,
+          description: describeRollupRecalc(rollup),
         },
       ],
     });
@@ -1317,7 +1313,7 @@ const composeForEvent = async (
   for (const firer of scheduledOnlyAfterSaveFlows) {
     const stepResult = await buildStep(ctx, firer, 'post-save-async', stepIndex);
     if (!stepResult.ok) return err(stepResult.error);
-    soe.push(stepResult.value);
+    soe.push({ ...stepResult.value, ...flowStepFacts(firer, 'async-only') });
     asyncFanOut += 1;
     stepIndex += 1;
   }
@@ -1369,6 +1365,10 @@ export interface ComposedSoeForEvents {
    * was partitioned — the caller must say so.
    */
   readonly refGrounding: SoeRefGroundingCensus;
+  /** WOW-2. True when any trigger step was enriched from its handler chain. */
+  readonly handlerEnriched: boolean;
+  /** WOW-2. Triggers whose bypass-switch record sets a bypass flag. */
+  readonly triggerBypassWarnings: readonly string[];
 }
 
 /**
@@ -1452,6 +1452,18 @@ export const composeSoeForEvents = async (
   // SObject here; anything that does not is demoted out of `actions` with a
   // typed reason. As a single query it leaves the pinned "query count does not
   // scale with object fan-out" budget unchanged.
+  // WOW-2. Follow each trigger into its handler/dispatcher Apex (shared with
+  // what_happens_on_save) BEFORE receiver verification, so via-handler writes
+  // are verified like any other action.
+  const handlerEnriched = await enrichTriggerStepsWithHandlerEffects(
+    ctx.graph,
+    allComposedSteps as unknown as Parameters<typeof enrichTriggerStepsWithHandlerEffects>[1],
+    objectApiName,
+  );
+  const triggerBypassWarnings = bypassWarnings(
+    allComposedSteps as unknown as Parameters<typeof bypassWarnings>[0],
+  );
+
   const receiverVerification = await verifyStepActionReceivers(
     ctx.graph,
     allComposedSteps as unknown as ReceiverVerifiableStep[],
@@ -1474,6 +1486,8 @@ export const composeSoeForEvents = async (
     rollupScanTruncated: rollupResult.value.scanTruncated,
     receiverVerification,
     refGrounding,
+    handlerEnriched,
+    triggerBypassWarnings,
   });
 };
 
@@ -1583,8 +1597,22 @@ export const orderOfExecutionHandler = async (
     requestedEvents,
   );
   if (!composed.ok) return err(composed.error);
-  const { objectModeled, flowCensus, receiverVerification } = composed.value;
+  const { objectModeled, flowCensus, receiverVerification, handlerEnriched, triggerBypassWarnings } =
+    composed.value;
   const refGroundingCensus = composed.value.refGrounding;
+  // SAVE-REENTRY (shared with what_happens_on_save). Step indices are per
+  // event here, so write-backs are named by component, not by `step`.
+  const reentrySteps: ReentryStepLike[] = Object.entries(composed.value.byEvent).flatMap(([event, perEvent]) =>
+    (perEvent?.soe ?? []).map((st) => ({
+      event,
+      phase: st.phase,
+      componentId: st.componentId,
+      componentType: st.componentType,
+      ...(st.timing === undefined ? {} : { timing: st.timing }),
+      ...(st.handlerEffects === undefined ? {} : { handlerEffects: st.handlerEffects }),
+    })),
+  );
+  const reentry = await buildSoeReentry(ctx, input.objectApiName, reentrySteps);
 
   const byEvent: Partial<Record<SoeEvent, SoePerEvent>> = {};
   for (const event of requestedEvents) {
@@ -1696,10 +1724,15 @@ export const orderOfExecutionHandler = async (
       readonly caveat: string;
     };
     coverageCaveat?: typeof TRIGGER_ORDER_NOT_EXTRACTED_CAVEAT;
+    triggerBypassWarnings?: readonly string[];
+    reentry?: SoeReentry;
+    reentryNotChecked?: string;
   } = {
     objectApiName: input.objectApiName,
     appliedScope,
     objectModeled,
+    ...(triggerBypassWarnings.length > 0 ? { triggerBypassWarnings } : {}),
+    ...(reentry === null ? { reentryNotChecked: REENTRY_NOT_CHECKED } : { reentry }),
     // FIX 3 (1)+(2). `inactiveHeadline` is GONE: it was
     // `inactiveConfigured.map(apiName).join(', ')` — the same names the array
     // already carried, restated as prose, for ~11% of the budget and zero new
@@ -1715,7 +1748,7 @@ export const orderOfExecutionHandler = async (
     // `attachEnvelopeHonesty`'s rebuild-from-base keeps it on every pass
     // instead of dropping it. Always appended: a zero census must read as
     // CHECKED, and a failed probe must read as NOT CHECKED.
-    disclosure: `${composeSoeDisclosure(DISCLOSURE, objectModeled)}${soeReceiverVerificationNote(receiverVerification)}`,
+    disclosure: `${composeSoeDisclosure(DISCLOSURE, objectModeled)}${soeReceiverVerificationNote(receiverVerification)}${handlerEnriched ? ` ${SOE_HANDLER_EFFECTS_NOTE}` : ''}`,
   };
 
   // The org-wide Summary-field scan behind post-save-rollup-recalc hit the
@@ -1880,8 +1913,14 @@ export const orderOfExecutionHandler = async (
   // `data` (scaffolding included) obey the same envelope law as
   // `what_happens_on_save`: it stays within budget instead of re-inflating past
   // it and forcing the global guard to mangle the disclosure.
+  // ARCH-11. An UNPAGED view sheds from the most crowded phase (typically a
+  // long validation-rule run) before it touches the tail, so after-triggers,
+  // after-save flows and duplicate rules stay named. A paged view keeps tail
+  // drops: its resume offset assumes a kept prefix.
+  const stepDropStrategy = data.paging === undefined ? 'largest-phase-first' : 'tail';
   let budget = enforceSoeByteBudget(data, containers, {
     budgetBytes: soeBudgetBytes() - OOE_HONESTY_RESERVE_BYTES,
+    stepDropStrategy,
   });
   const soeOnlyBytes = sizeOfBytes(data);
   attachEnvelopeHonesty(budget);
@@ -1897,6 +1936,7 @@ export const orderOfExecutionHandler = async (
     const budget2 = enforceSoeByteBudget(data, containers, {
       budgetBytes:
         soeBudgetBytes() - honestyBytes - OOE_HONESTY_RESERVE_BYTES,
+      stepDropStrategy,
     });
     budget = {
       truncated: budget.truncated || budget2.truncated,
@@ -1904,6 +1944,10 @@ export const orderOfExecutionHandler = async (
       conditionalsTrimmed:
         budget.conditionalsTrimmed + budget2.conditionalsTrimmed,
       stepsOmitted: budget.stepsOmitted + budget2.stepsOmitted,
+      ...(budget.stepsDroppedFromLargestPhase === true ||
+      budget2.stepsDroppedFromLargestPhase === true
+        ? { stepsDroppedFromLargestPhase: true }
+        : {}),
     };
     attachEnvelopeHonesty(budget);
   }

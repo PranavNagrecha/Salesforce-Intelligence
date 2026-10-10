@@ -1,104 +1,64 @@
 ---
-import DocPage from "../../layouts/DocPage.astro";
-import site from "../../data/site.ts";
-
-const title = "Where Is This Salesforce Field Used? Dependency Analysis Guide";
-const description =
-  "Trace a Salesforce field across Flows, Apex, validation rules, layouts, permissions and other metadata, with evidence confidence and known gaps.";
-
-const faq = [
-  {
-    q: "How do I find where a Salesforce field is used?",
-    a: "Salesforce's built-in Where is this used? button covers many reference types but misses some (formula text, certain Apex references) and only works one field at a time in Setup. sf-intelligence answers the question from a dependency graph plus a source grep of the retrieved metadata, so you can ask 'where is Account.Industry__c used?' in plain language and get Flows, Apex, layouts, validation rules, reports, and more in one answer.",
-  },
-  {
-    q: "Does it find field references inside Apex and formulas?",
-    a: "Yes - it parses Apex and formula source and reports references with a confidence label. Static analysis can't see dynamic SOQL or reflective field access, so those edges are marked heuristic and it tells you plainly that 'no references found' means 'no static evidence', not a guarantee the field is unused.",
-  },
-  {
-    q: "Can it tell me if a field is safe to delete?",
-    a: "That's the related question - see what breaks if you delete a field. Usage tells you what references a field; the delete simulation weighs those references and adds coverage caveats before giving a verdict.",
-  },
-];
-
-const jsonld = [
-  {
-    "@type": "TechArticle",
-    headline: "Where is a Salesforce field used?",
-    description,
-    author: { "@id": `${site.url}/#org` },
-    publisher: { "@id": `${site.url}/#org` },
-    dateModified: "2026-07-29",
-    mainEntityOfPage: `${site.url}/use-cases/where-is-a-field-used`,
-  },
-  {
-    "@type": "FAQPage",
-    mainEntity: faq.map((f) => ({ "@type": "Question", name: f.q, acceptedAnswer: { "@type": "Answer", text: f.a } })),
-  },
-];
+import UseCaseLayout from "../../layouts/UseCaseLayout.astro";
+import { fieldDependents, whereUsed } from "../../data/page-answers.ts";
 ---
 
-<DocPage
-  title={title}
-  description={description}
+<UseCaseLayout
+  title="Where Is This Salesforce Field Used? Find Every Reference"
+  description="Find every flow, Apex class, formula, layout and sharing rule that uses a Salesforce field, in one question, with a list of what wasn't checked."
   path="/use-cases/where-is-a-field-used"
   heading="Where is this field used?"
-  intro={`The everyday admin question that means clicking through Setup one field at a time - or asking an AI agent once and getting every Flow, Apex class, layout, report, and validation rule that touches it, grounded in your real metadata.`}
-  crumbs={[{ label: "use-cases", href: "/use-cases" }, { label: "field usage", href: "/use-cases/where-is-a-field-used" }]}
-  breadcrumbs={[{ name: "Use cases", path: "/use-cases" }, { name: "Where is a field used?", path: "/use-cases/where-is-a-field-used" }]}
-  jsonld={jsonld}
+  lede="Instead of clicking through Setup one field at a time, ask once and get every flow, class, formula, layout and sharing rule that touches the field, each one named."
+  crumb="Where a field is used"
+  audience="admins and developers"
+  short="Ask your AI assistant “where is the Status field on Invoice used?”. sf-intelligence looks through your org’s metadata snapshot and lists every component that reads, writes or depends on the field, says how each one was found, and names the kinds of metadata it couldn’t check, so an empty answer isn’t mistaken for “unused”."
+  answers={[whereUsed, fieldDependents]}
+  answerIntro="Two fields on Verdant, the demo org: one with a short answer, one used all over the org."
+  asks={[
+    "Where is the Status field on Invoice used?",
+    "What uses Opportunity.Region__c?",
+    "Which flows and classes touch the Amount field?",
+    "Is anything still using Contact.Legacy_Status__c?",
+  ]}
+  checks={[
+    "<strong>Apex classes and triggers</strong>, from the parsed source, plus a text search for anything the parser missed",
+    "<strong>Flows</strong> that read or set the field, and the conditions that start them",
+    "<strong>Formulas, roll-ups and validation rules</strong>",
+    "<strong>Page layouts, sharing rules and analytics</strong> that reference it",
+    "<strong>Lightning components and Visualforce</strong>, when your refresh pulled them",
+  ]}
+  limits={[
+    "Field names put together at run time in Apex",
+    "Reports beyond the ones your refresh pulled",
+    "Managed packages, integrations and data loads",
+    "Kinds of metadata your refresh skipped. Each answer names them",
+  ]}
+  tools={["find_component_usages", "field_360", "find_field_anywhere", "get_impact", "find_code_usages"]}
+  related={[
+    { href: "/use-cases/what-breaks-if-you-delete-a-field", label: "What breaks if I delete this field?", note: "the same check, with a verdict" },
+    { href: "/use-cases/salesforce-dependency-analysis", label: "Dependency analysis", note: "for flows, classes and objects" },
+    { href: "/blog/delete-unused-salesforce-fields", label: "Can I delete this Salesforce field?", note: "guide" },
+    { href: "/blog/salesforce-data-dictionary", label: "How to create a Salesforce data dictionary", note: "guide" },
+  ]}
+  faqs={[
+    {
+      q: "How is this different from Salesforce’s “Where is this used?” button?",
+      a: "The button covers many reference types, one field at a time, inside Setup. sf-intelligence answers from a snapshot of the whole org, in plain language, and adds a text search of the source for references the dependency data doesn’t record. It also tells you which kinds of metadata it couldn’t check.",
+    },
+    {
+      q: "Does it find references inside Apex and formulas?",
+      a: "Yes. It parses Apex and formula source and reports each reference with how it was found. Field names assembled at run time are invisible to any static check, so “nothing found” means “no evidence in the metadata”, not a guarantee.",
+    },
+    {
+      q: "Does it work on standard fields?",
+      a: "Yes. A normal refresh reads the standard fields of the core objects from your org, so you can ask the same way, for example “where is Account.Industry used?”.",
+    },
+  ]}
+  cta={{ question: whereUsed.question, related: { href: "/use-cases/what-breaks-if-you-delete-a-field", label: "Before you delete a field" } }}
+  dateModified="2026-10-10"
 >
-  <section>
-    <div class="container">
-      <div class="prose">
-        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-29</p>
-        <div class="callout">
-          <p><strong>Short answer:</strong> Ask sf-intelligence <em>"where is Account.Industry__c used?"</em> and it returns every component that references the field - Flows, Apex, layouts, validation rules, reports - from a dependency graph plus a source grep of your retrieved metadata, each reference labelled with its confidence. One question replaces a field-by-field crawl through Setup.</p>
-        </div>
-
-        <div class="hero-demo" style="margin:0 0 30px;">
-          <p class="hero-demo-kicker">trace a field across a real org in 2 minutes - no org, no auth</p>
-          <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
-          <p class="hero-demo-note">Then ask <em>"where is <code>Invoice__c.Amount__c</code> used across the org?"</em> - in the demo org that field is summed by a roll-up on the parent, feeds a formula, and is written by Apex, so you see the declared, parsed, and heuristic tiers side by side in one answer. Synthetic "Verdant Energy" org, served fully offline: no Salesforce login, no <code>sf</code> CLI, nothing to configure. <a href="/getting-started#demo">more on the demo →</a></p>
-        </div>
-
-        <h2 id="how">How it works</h2>
-        <p>When you name a field, the router resolves it to a canonical ID (and asks a clarifying question if several match), then walks the incoming edges in the dependency graph and grep-scans the source for any reference the graph doesn't already model. You can hand it whatever you already have - a bare field name, an object plus field, or a fuzzy substring - and the answer echoes the resolved scope it applied back as <code>appliedScope</code>, so you can confirm it landed on the field you meant rather than a same-named neighbour:</p>
-        <div class="code-block"><div class="cb-head"><span class="fname">claude - sf-intelligence</span></div><pre><span class="tok-p">›</span> where is the Industry field on Account used?
-▸ 7 components reference <span class="tok-k">CustomField:Account.Industry__c</span>:
-  ValidationRule · Flow · ApexClass(2) · Layout · Report · FieldSet
-  provenance offline_snapshot · edges: declared, parsed, heuristic</pre></div>
-
-        <h2 id="what-it-catches">What it catches</h2>
-        <table class="doc-table">
-          <thead><tr><th>Reference type</th><th>Confidence</th></tr></thead>
-          <tbody>
-            <tr><td>Layouts, field sets, validation rules, record types</td><td><strong>declared</strong> - Salesforce states it directly</td></tr>
-            <tr><td>Flows, formulas, Apex (parsed source)</td><td><strong>parsed</strong> - from AST/XML parsing</td></tr>
-            <tr><td>Dynamic SOQL / reflective Apex mentions</td><td><strong>heuristic</strong> - grep-level, spot-check it</td></tr>
-          </tbody>
-        </table>
-
-        <h2 id="tools">The tools behind it</h2>
-        <ul>
-          <li><code>find_field_anywhere</code> - lexical search for a field across every retrieved component.</li>
-          <li><code>field_360</code> - the full profile of a field: definition, references, what fires when it changes.</li>
-          <li><code>find_component_usages</code> - the universal "where is X used" dispatcher for any component, not just fields.</li>
-        </ul>
-
-        <h2 id="limits">Honest limits</h2>
-        <p>Usage answers are only as complete as your last refresh and the metadata you retrieved. Dynamic field access is invisible to static analysis, so it labels heuristic matches and never reports a confident "unused" it can't back up. See <a href="/trust">how it's tested</a>.</p>
-        <p>That distinction matters most when you are planning a cleanup, because a usage result of zero is the exact moment people over-read the evidence. For what a zero does and doesn't license - which references block a delete outright, which ones break something quietly weeks later, and why field population is the wrong signal to sort a backlog by - read <a href="/blog/delete-unused-salesforce-fields">the dependency-first method for deciding whether a Salesforce field is safe to delete</a>.</p>
-
-        <h2 id="faq">Frequently asked</h2>
-        {faq.map((f) => (<details class="faq-item"><summary>{f.q}</summary><div class="answer"><p>{f.a}</p></div></details>))}
-
-        <div style="padding-top:36px;"><div class="cta-box">
-          <h2 class="screen-type">Ask once, not field by field.</h2>
-          <p>Register the read-only MCP server and ask where anything is used.</p>
-          <div class="cta-actions"><a class="btn btn-solid" href="/getting-started">get started</a><a class="btn btn-ghost" href="/use-cases/what-breaks-if-you-delete-a-field">what breaks if I delete it?</a></div>
-        </div></div>
-      </div>
-    </div>
-  </section>
-</DocPage>
+  <h2>Usage first, verdict second</h2>
+  <p>“Where is it used?” and “can I delete it?” sound like the same question, but they aren’t. The first gives you a list. The second weighs that list and adds what wasn’t checked before it says yes or no. Start here when you’re exploring a field you didn’t build. Move to <a href="/use-cases/what-breaks-if-you-delete-a-field">what breaks if I delete it</a> when you’re about to change it.</p>
+  <h2>Access isn’t usage</h2>
+  <p>Profiles and permission sets that grant access to a field are listed separately from the components that use it. A permission set that can see a field doesn’t stop you deleting it. A flow that sets it does.</p>
+</UseCaseLayout>

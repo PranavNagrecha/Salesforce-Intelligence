@@ -152,6 +152,39 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
+  it('FAIL-BEFORE/PASS-AFTER: a field used only as a report FILTER criterion gets an edge; cross-filter and pseudo-columns do not', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Invoice_Filter.report-meta.xml');
+      await writeFile(
+        path,
+        [
+          '<Report><reportType>ContactList</reportType>',
+          '<columns><field>FIRST_NAME</field></columns>',
+          '<filter><criteriaItems><column>Contact.Is_Verified__c</column><operator>equals</operator><value>0</value></criteriaItems>',
+          '<criteriaItems><column>Region__c</column><operator>equals</operator><value>x</value></criteriaItems>',
+          '<criteriaItems><column>CONTACT_RECORDTYPE</column><operator>equals</operator><value>Contact.Client</value></criteriaItems></filter>',
+          '<crossFilters><criteriaItems><column>Status__c</column></criteriaItems><relatedTable>Invoices__r</relatedTable></crossFilters>',
+          '<sortColumn>Contact.Rank__c</sortColumn>',
+          '</Report>',
+        ].join(''),
+      );
+      const result = await extractReport(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const targets = result.value.edges.map((edge) => edge.toId);
+      expect(targets).toContain('CustomField:Contact.Is_Verified__c');
+      expect(targets).toContain('CustomField:Contact.Region__c');
+      expect(targets).toContain('CustomField:Contact.Rank__c');
+      // A cross-filter column is a bare name on the RELATED object — never
+      // scoped to the report object.
+      expect(targets).not.toContain('CustomField:Contact.Status__c');
+      expect(targets).not.toContain('CustomField:Contact.CONTACT_RECORDTYPE');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('scopes bare report columns via standard reportType', async () => {
     const dir = await makeTemp();
     try {

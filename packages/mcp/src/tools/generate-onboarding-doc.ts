@@ -74,10 +74,32 @@ const GLOSSARY_LABEL_MAX_OBJECT_COUNT = 5;
  */
 const GLOSSARY_TOP_N = 30;
 
-/** Zod schema for the `sfi.generate_onboarding_doc` tool input. */
-export const generateOnboardingDocInputSchema = z.object({
-  personaFocus: z.enum(['admin', 'developer']).optional(),
-});
+/**
+ * Zod schema for the `sfi.generate_onboarding_doc` tool input.
+ *
+ * STRICT: this document is ORG-WIDE. A host asking to "document the Case object
+ * for a new hire" passes `objectApiName`, and a non-strict schema stripped it and
+ * returned the whole-org tour as if it answered the object question. An unknown
+ * key is refused with the tool that does answer it.
+ */
+export const generateOnboardingDocInputSchema = z
+  .object(
+    {
+      personaFocus: z.enum(['admin', 'developer']).optional(),
+    },
+    {
+      errorMap: (issue, ctx) =>
+        issue.code === z.ZodIssueCode.unrecognized_keys
+          ? {
+              message:
+                `Unknown argument '${issue.keys.join("', '")}'. \`sfi.generate_onboarding_doc\` is ORG-WIDE and ` +
+                'accepts only `personaFocus`. To document ONE object, call `sfi.object_360` with ' +
+                '`{ "objectApiName": "<Object>", "format": "handbook" }`.',
+            }
+          : { message: ctx.defaultError },
+    },
+  )
+  .strict();
 
 /** Parsed input shape. */
 export type GenerateOnboardingDocInput = z.infer<

@@ -78,12 +78,14 @@ stops the flow; do not proceed.
 Run:
 
 ```bash
-sf org list --json
+sf org list --skip-connection-status --json
 ```
 
-Parse the JSON for the alias the user is refreshing (or the
-default). If the alias is not present, or its `connectedStatus` is
-not `Connected`, stop and tell the user:
+This reads the local login list only — it does not contact any org,
+so it carries no `connectedStatus` for non-scratch orgs; never gate
+on that field. Parse the JSON for the alias (or username) the user is
+refreshing (or the default). If it is not present, stop and tell the
+user:
 
 > "The `sf` CLI isn't authenticated to `<alias>`. Run
 > `sf org login web --alias <alias>` (or `sf org login web
@@ -194,10 +196,9 @@ Stop and ask the user when:
   the previous manifest (e.g., `CustomField: 312 → 8`) and the user
   did not pass `--types`. Something pulled an empty package; ask
   before treating this as the new ground truth.
-- `sf org list` shows the target alias as `Connected` but
-  `connectedStatus` is followed by a refresh-token expiry warning.
-  Surface the warning; the next retrieve may succeed once before
-  failing.
+- The retrieve fails with an auth error (expired or revoked refresh
+  token) although the alias is in the local login list. Surface the
+  re-authentication message above; do not retry.
 - The user wants you to "refresh just one object" or "just the
   fields on Account." The `--types` filter scopes by **metadata
   type**, not by individual component. Tell them: refresh is
@@ -212,8 +213,8 @@ Stop and ask the user when:
 
 Before telling the user the refresh is done, confirm:
 
-- [ ] Did I run `sf org list --json` (or read prior output) and
-      confirm the target alias is `Connected`?
+- [ ] Did I run `sf org list --skip-connection-status --json` (or read
+      prior output) and confirm the target alias is in the list?
 - [ ] Did I tell the user — **before** running the command — that
       this could take 5–15 minutes?
 - [ ] Did I read `org-kb/meta/manifest.json` after the run and

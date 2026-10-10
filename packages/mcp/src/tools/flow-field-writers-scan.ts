@@ -20,6 +20,13 @@ export interface SupplementalFlowFieldWriter {
   readonly apiName: string;
   readonly fieldApiName: string;
   readonly mechanism: 'inputAssignments' | 'assignToReference';
+  /**
+   * `scoped` — the write's target object resolved to the asked-about object.
+   * `unresolved` — an `<inputAssignments>` DML whose object could not be
+   * resolved from source: a LEAD, not proof the Flow writes this object.
+   * (A DML resolved to a DIFFERENT object is never returned.)
+   */
+  readonly objectScope: 'scoped' | 'unresolved';
 }
 
 /**
@@ -116,6 +123,12 @@ export interface SupplementalFlowWriterScanResult {
   readonly scannedCount: number;
   /** Total Flow nodes in the vault (M). Resolved exactly when truncated. */
   readonly totalCount: number;
+  /**
+   * `<inputAssignments>` field-name matches dropped because every DML that
+   * assigned the field resolved to a DIFFERENT object (same field name, other
+   * object — `Name`, `Status`, `OwnerId` …).
+   */
+  readonly otherObjectMatchesDropped: number;
 }
 
 /**
@@ -214,51 +227,108 @@ const parseSObjectVariables = (xml: string): ReadonlyMap<string, string> => {
 };
 
 /**
- * Scan one Flow's XML for writes to `{objectApiName}.{fieldApiName}`.
- *
- * Exported for unit tests: the read/write scoping (only `<inputAssignments>`
- * inside a `<recordCreates>` / `<recordUpdates>` DML denotes a WRITE — a
- * `<field>` inside `<filters>` / `<outputAssignments>` is a READ) is the
- * invariant these tests lock, without needing a fixture vault + graph.
+ * Objects whose CUSTOM fields are ONE physical field: `Activity` is the
+ * abstract parent and `Task` / `Event` share its custom field set, so a Flow
+ * that writes `Task.Foo__c` really does write `CustomField:Activity.Foo__c`.
  */
-export const scanFlowXml = (
+const ACTIVITY_POLYMORPHIC_OBJECTS: ReadonlySet<string> = new Set(['activity', 'task', 'event']);
+
+/** Salesforce object api names are case-insensitive; Activity/Task/Event alias. */
+export const sameObjectScope = (a: string, b: string): boolean => {
+  const x = a.toLowerCase();
+  const y = b.toLowerCase();
+  return (
+    x === y || (ACTIVITY_POLYMORPHIC_OBJECTS.has(x) && ACTIVITY_POLYMORPHIC_OBJECTS.has(y))
+  );
+};
+
+/** The object a record-triggered Flow's `$Record` refers to, or null. */
+const flowTriggeringObject = (xml: string): string | null => {
+  const start = /<start>[\s\S]*?<\/start>/.exec(xml)?.[0];
+  if (start === undefined) return null;
+  return /<object>([^<]+)<\/object>/.exec(start)?.[1] ?? null;
+};
+
+/**
+ * Whether the `<recordCreates>`/`<recordUpdates>` that assign `fieldApiName`
+ * write `objectApiName`. The field NAME alone is not an identity — `Name`,
+ * `Status`, `OwnerId` exist on nearly every object — so each assigning DML's
+ * object is resolved: `<object>` → `$Record` via `<start>` → an SObject
+ * `<variables>` entry. `scoped` when any resolves to the object, `unresolved`
+ * when none does but at least one could not be resolved, `other-object` when
+ * every one resolved elsewhere, `none` when nothing assigns the field.
+ */
+export const classifyInputAssignmentsObjectScope = (
   xml: string,
   objectApiName: string,
   fieldApiName: string,
-): ReadonlyArray<{ fieldApiName: string; mechanism: SupplementalFlowFieldWriter['mechanism'] }> => {
-  const hits: Array<{ fieldApiName: string; mechanism: SupplementalFlowFieldWriter['mechanism'] }> =
-    [];
+): 'scoped' | 'unresolved' | 'other-object' | 'none' => {
+  const escaped = fieldApiName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const fieldTag = new RegExp(`<field>${escaped}</field>`);
   const sobjectVars = parseSObjectVariables(xml);
-
-  // recordCreates/recordUpdates `<inputAssignments><field>` — the ONLY place a
-  // bare `<field>` denotes a WRITE. The same tag also appears in `<filters>`
-  // (a read predicate on the start element / a record lookup / a decision) and
-  // in `<outputAssignments>` (reading a queried record's field into a var), so
-  // an UNSCOPED `<field>NAME</field>` match reported reads as writes — e.g. a
-  // field that only appears in a start-filter predicate became a phantom
-  // writer. Scope the match to `<inputAssignments>` blocks nested inside a
-  // record-create / record-update DML element. ($Record.<field> assignment
-  // writes are emitted by the graph extractor's after-save/before-save
-  // handler, which applies the persistence precondition; the supplemental scan
-  // deliberately does not re-derive them here.)
-  const escapedField = fieldApiName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const fieldTagPattern = new RegExp(`<field>${escapedField}</field>`);
-  const writesViaInputAssignments = (['recordCreates', 'recordUpdates'] as const).some(
-    (tag) => {
-      const dmlPattern = new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`, 'g');
-      let dml: RegExpExecArray | null;
-      while ((dml = dmlPattern.exec(xml)) !== null) {
-        const iaPattern = /<inputAssignments>[\s\S]*?<\/inputAssignments>/g;
-        let ia: RegExpExecArray | null;
-        while ((ia = iaPattern.exec(dml[0])) !== null) {
-          if (fieldTagPattern.test(ia[0])) return true;
-        }
+  const triggering = flowTriggeringObject(xml);
+  let sawUnresolved = false;
+  let sawAssigning = false;
+  for (const tag of ['recordCreates', 'recordUpdates'] as const) {
+    const dmlPattern = new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`, 'g');
+    let dml: RegExpExecArray | null;
+    while ((dml = dmlPattern.exec(xml)) !== null) {
+      const blk = dml[0];
+      const assigns = (blk.match(/<inputAssignments>[\s\S]*?<\/inputAssignments>/g) ?? []).some(
+        (ia) => fieldTag.test(ia),
+      );
+      if (!assigns) continue;
+      sawAssigning = true;
+      const declared = /<object>([^<]+)<\/object>/.exec(blk)?.[1];
+      if (declared !== undefined) {
+        if (sameObjectScope(declared, objectApiName)) return 'scoped';
+        continue;
       }
-      return false;
-    },
-  );
-  if (writesViaInputAssignments) {
-    hits.push({ fieldApiName, mechanism: 'inputAssignments' });
+      const ref = /<inputReference>([^<]+)<\/inputReference>/.exec(blk)?.[1];
+      const head = ref?.split('.')[0] ?? '';
+      const resolved =
+        ref === undefined ? null : head === '$Record' ? triggering : (sobjectVars.get(head) ?? null);
+      if (resolved === null) {
+        sawUnresolved = true;
+        continue;
+      }
+      if (sameObjectScope(resolved, objectApiName)) return 'scoped';
+    }
+  }
+  if (sawUnresolved) return 'unresolved';
+  return sawAssigning ? 'other-object' : 'none';
+};
+
+/** One scan hit, plus whether a same-named field on another object was skipped. */
+export interface FlowXmlWriteScan {
+  readonly hits: ReadonlyArray<{
+    fieldApiName: string;
+    mechanism: SupplementalFlowFieldWriter['mechanism'];
+    objectScope: SupplementalFlowFieldWriter['objectScope'];
+  }>;
+  readonly otherObjectMatchDropped: boolean;
+}
+
+/**
+ * Scan one Flow's XML for writes to `{objectApiName}.{fieldApiName}`.
+ *
+ * Exported for unit tests. Two invariants: only `<inputAssignments>` inside a
+ * `<recordCreates>` / `<recordUpdates>` DML denotes a WRITE (a `<field>` in
+ * `<filters>` / `<outputAssignments>` is a READ), and that DML must resolve to
+ * THIS object — a same-named field on another object is not a writer.
+ * ($Record.<field> assignment writes are minted by the graph extractor, which
+ * applies the persistence precondition; this scan does not re-derive them.)
+ */
+export const scanFlowXmlWrites = (
+  xml: string,
+  objectApiName: string,
+  fieldApiName: string,
+): FlowXmlWriteScan => {
+  const hits: Array<FlowXmlWriteScan['hits'][number]> = [];
+  const sobjectVars = parseSObjectVariables(xml);
+  const scope = classifyInputAssignmentsObjectScope(xml, objectApiName, fieldApiName);
+  if (scope === 'scoped' || scope === 'unresolved') {
+    hits.push({ fieldApiName, mechanism: 'inputAssignments', objectScope: scope });
   }
 
   // `<assignToReference>Var.Field</assignToReference>` on SObject vars for this object.
@@ -272,13 +342,20 @@ export const scanFlowXml = (
     const f = ref.slice(dot + 1);
     if (f !== fieldApiName) continue;
     const obj = sobjectVars.get(varName);
-    if (obj === objectApiName) {
-      hits.push({ fieldApiName: f, mechanism: 'assignToReference' });
+    if (obj !== undefined && sameObjectScope(obj, objectApiName)) {
+      hits.push({ fieldApiName: f, mechanism: 'assignToReference', objectScope: 'scoped' });
     }
   }
 
-  return hits;
+  return { hits, otherObjectMatchDropped: scope === 'other-object' };
 };
+
+/** {@link scanFlowXmlWrites} hits only (kept for callers that need no drop count). */
+export const scanFlowXml = (
+  xml: string,
+  objectApiName: string,
+  fieldApiName: string,
+): FlowXmlWriteScan['hits'] => scanFlowXmlWrites(xml, objectApiName, fieldApiName).hits;
 
 /**
  * Scan deployed Flow source files for writes to `{objectApiName}.{fieldApiName}`
@@ -335,9 +412,11 @@ export const scanSupplementalFlowFieldWriters = async (
       truncationCause: 'graph-error',
       scannedCount: 0,
       totalCount: 0,
+      otherObjectMatchesDropped: 0,
     };
   }
   const out: SupplementalFlowFieldWriter[] = [];
+  let otherObjectMatchesDropped = 0;
   let readCount = 0;
   let unreadableCount = 0;
   for (const node of flows.value.nodes) {
@@ -351,13 +430,15 @@ export const scanSupplementalFlowFieldWriters = async (
     try {
       const xml = await readFile(join(ctx.vaultRoot, node.sourcePath), 'utf-8');
       readCount += 1;
-      const hits = scanFlowXml(xml, objectApiName, fieldApiName);
-      for (const hit of hits) {
+      const scan = scanFlowXmlWrites(xml, objectApiName, fieldApiName);
+      if (scan.otherObjectMatchDropped) otherObjectMatchesDropped += 1;
+      for (const hit of scan.hits) {
         out.push({
           componentId: node.id,
           apiName: node.apiName,
           fieldApiName: hit.fieldApiName,
           mechanism: hit.mechanism,
+          objectScope: hit.objectScope,
         });
       }
     } catch {
@@ -398,5 +479,6 @@ export const scanSupplementalFlowFieldWriters = async (
     truncationCause,
     scannedCount,
     totalCount,
+    otherObjectMatchesDropped,
   };
 };

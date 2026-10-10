@@ -418,9 +418,10 @@ describe('whatIfRemovePicklistValueHandler', () => {
     expect(result.value.data.compatibility).toBe('breaking');
   });
 
-  it('returns review/safe when a DECLARED value has no impacts', async () => {
-    // `Banking` is declared on the field and appears in no component text —
-    // the only case where an empty impact list is an honest answer.
+  it('returns review/review when a DECLARED value has no impacts', async () => {
+    // `Banking` is declared on the field and appears in no component text.
+    // The verdict is `review`, not `safe`: `notChecked` still names families
+    // (report filters, path assistants, …) that were never read.
     const result = await whatIfRemovePicklistValueHandler(ctx, {
       fieldId: PICK_FIELD,
       value: 'Banking',
@@ -429,7 +430,8 @@ describe('whatIfRemovePicklistValueHandler', () => {
     if (!result.ok) return;
     expect(result.value.data.impacts.length).toBe(0);
     expect(result.value.data.compatibility).toBe('review');
-    expect(result.value.data.verdict).toBe('safe');
+    expect(result.value.data.verdict).toBe('review');
+    expect(result.value.data.notChecked.length).toBeGreaterThan(0);
     expect(result.value.data.valueState).toBe('active');
   });
 

@@ -8,7 +8,7 @@ import type { VaultManifest } from '@sf-intelligence/contracts';
 import { checkForUpdate, formatUpdateNotice } from '@sf-intelligence/core';
 import { saveManifest, vaultPaths } from '@sf-intelligence/vault';
 
-import { prepareMcp, resolveVaultBinding } from '../../src/commands/mcp.js';
+import { prepareMcp, resolveVaultBinding, setupReasonFor } from '../../src/commands/mcp.js';
 
 /** Build a unique temp working directory for each test. */
 const makeTempCwd = async (): Promise<string> => mkdtemp(join(tmpdir(), 'sfi-mcp-'));
@@ -269,6 +269,33 @@ describe('resolveVaultBinding — SFI_VAULT precedence', () => {
       bindSource: 'SFI_VAULT',
     });
   });
+
+  // FAIL-BEFORE/PASS-AFTER (second review, FR-02): every other command accepts
+  // "an org-kb folder or the folder that holds one" (vault-option.ts), but
+  // `sfi mcp` kept its own copy of the precedence and took the path verbatim,
+  // so `--vault <project dir>` booted setup mode saying "no vault — run sfi
+  // init" for a project that already held a built vault.
+  it('accepts the project folder that holds org-kb, like every other command', async () => {
+    const project = await mkdtemp(join(tmpdir(), 'sfi-mcp-bind-project-'));
+    try {
+      await mkdir(join(project, 'org-kb', 'meta'), { recursive: true });
+      expect(resolveVaultBinding(project, undefined)).toEqual({
+        vaultRoot: join(project, 'org-kb'),
+        bindSource: '--vault',
+      });
+      expect(resolveVaultBinding(undefined, project)).toEqual({
+        vaultRoot: join(project, 'org-kb'),
+        bindSource: 'SFI_VAULT',
+      });
+      // The org-kb folder itself still binds as-is.
+      expect(resolveVaultBinding(join(project, 'org-kb'), undefined)).toEqual({
+        vaultRoot: join(project, 'org-kb'),
+        bindSource: '--vault',
+      });
+    } finally {
+      await rm(project, { recursive: true, force: true });
+    }
+  });
 });
 
 /**
@@ -395,5 +422,36 @@ describe('sfi mcp — startup update nudge wiring', () => {
     // Awaiting in the test confirms it does settle and the .then() ran.
     await p;
     expect(thenRan).toBe(true);
+  });
+});
+
+// FR-02 — FAIL-BEFORE/PASS-AFTER: a typo'd explicit --vault was reported as
+// 'no-vault' ("run sfi init"), and a FILE path as 'vault-missing' ("found a
+// vault config"), instead of "the path you passed does not exist".
+describe('setupReasonFor (FR-02)', () => {
+  it('flags an explicit --vault / SFI_VAULT path that does not exist', async () => {
+    expect(await setupReasonFor('no-vault', '/nonexistent/sfi-typo/org-kb', '--vault')).toBe('vault-path-not-found');
+    expect(await setupReasonFor('no-vault', '/nonexistent/sfi-typo/org-kb', 'SFI_VAULT')).toBe('vault-path-not-found');
+  });
+
+  it('flags an explicit path that is a file, not a directory', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'sfi-setup-reason-'));
+    const file = join(dir, 'not-a-dir');
+    await writeFile(file, 'x', 'utf8');
+    try {
+      expect(await setupReasonFor('buildContext-failed', file, '--vault')).toBe('vault-path-not-found');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('keeps no-vault for the cwd default and for an existing explicit directory', async () => {
+    expect(await setupReasonFor('no-vault', '/nonexistent/x/org-kb', 'default ./org-kb')).toBe('no-vault');
+    const dir = await mkdtemp(join(tmpdir(), 'sfi-setup-reason-'));
+    try {
+      expect(await setupReasonFor('no-vault', dir, '--vault')).toBe('no-vault');
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

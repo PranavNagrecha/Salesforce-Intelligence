@@ -132,6 +132,19 @@ export const familyWasExtracted = (
 ): boolean => Object.prototype.hasOwnProperty.call(props, sentinelProperty);
 
 /**
+ * A list-valued family read with typed absence: `null` when the key was never
+ * extracted (NOT CHECKED), otherwise its entries (`[]` is a checked empty).
+ */
+export const extractedList = (
+  props: Readonly<Record<string, unknown>>,
+  key: string,
+): readonly unknown[] | null => {
+  if (!familyWasExtracted(props, key)) return null;
+  const value = props[key];
+  return Array.isArray(value) ? value : [];
+};
+
+/**
  * The importer's phantom marker: this edge's target resolves to no node in the
  * final node set. Stamped by `edgeRowParams()` on every import path, so it is
  * present on vaults built by any version carrying that function — the 0.1.11

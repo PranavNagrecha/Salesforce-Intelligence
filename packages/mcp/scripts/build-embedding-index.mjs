@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { env, pipeline } from '@huggingface/transformers';
 
 import { FUNNEL_UTTERANCES } from '../dist/src/funnel-utterances.js';
-import { V01_TOOLS } from '../dist/src/tools/index.js';
+import { V01_TOOLS, retrievalDocument } from '../dist/src/tools/index.js';
 
 const MODEL = 'Xenova/all-MiniLM-L6-v2';
 const DTYPE = 'q8';
@@ -56,7 +56,10 @@ const tEmbed = performance.now();
 for (const tool of V01_TOOLS) {
   const nameWords = tool.name.replace(/^sfi\./, '').replace(/_/g, ' ');
   const utterances = FUNNEL_UTTERANCES[tool.name] ?? [];
-  const parts = [`${nameWords}. ${tool.description}`, ...utterances];
+  // Same text the BM25 funnel indexes (`retrievalDocument`): the long-form
+  // `reference` when a tool has one, so a shorter advertised description never
+  // changes a vector.
+  const parts = [`${nameWords}. ${retrievalDocument(tool)}`, ...utterances];
   const rows = await embedBatch(parts);
   dim = rows[0].length;
   // Mean of part vectors, then re-normalize → one vector per tool (172 × dim).

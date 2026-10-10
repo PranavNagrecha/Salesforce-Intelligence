@@ -4,7 +4,7 @@ These are curated questions to try against the bundled demo org (a fictional
 residential solar installer) with **no Salesforce org of your own**:
 
 ```bash
-npx -y sf-intelligence demo        # or: sfi mcp --vault examples/demo-vault
+npx -y sf-intelligence demo   # builds the demo vault with the CLI you are running (first run ~10s)
 ```
 
 Each question is grounded in the demo org's real (synthetic) metadata and

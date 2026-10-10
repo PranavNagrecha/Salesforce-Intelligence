@@ -275,6 +275,8 @@ const fileExists = async (filePath: string): Promise<boolean> => {
 interface AuraScanResult {
   readonly componentRefs: readonly string[];
   readonly resourceRefs: readonly FrontendResourceRef[];
+  /** `component.get('c.method')` server-action method names, in source order. */
+  readonly serverActions: readonly string[];
   readonly warnings: readonly string[];
 }
 
@@ -291,6 +293,7 @@ const scanOne = (source: string, label: string): AuraScanResult => {
     return {
       componentRefs: [],
       resourceRefs: [],
+      serverActions: [],
       warnings: [
         `aura-scanner[${label}]: ${result.error.kind} at offset ${result.error.offset}: ${result.error.message}`,
       ],
@@ -298,6 +301,9 @@ const scanOne = (source: string, label: string): AuraScanResult => {
   }
   return {
     componentRefs: result.value.componentRefs.map((r) => r.componentName),
+    serverActions: result.value.apexCalls
+      .filter((c) => c.className === 'c')
+      .map((c) => c.methodName),
     resourceRefs: result.value.resourceRefs,
     warnings: [],
   };
@@ -417,6 +423,7 @@ export const extractAuraDefinitionBundle = async (
   const seenResourceRefs = new Set<string>();
   const resourceRefs: FrontendResourceRef[] = [];
   const warnings: string[] = [];
+  const serverActions = new Set<string>();
   const scans: { readonly label: string; readonly source: string | null }[] = [
     { label: 'markup', source: markup.source },
     { label: 'controller', source: controllerResult.value },
@@ -437,6 +444,9 @@ export const extractAuraDefinitionBundle = async (
       seenResourceRefs.add(key);
       resourceRefs.push(ref);
     }
+    // Server actions live in the JS files only; markup `{!c.x}` is a CLIENT
+    // controller action and never takes the `.get('c.x')` shape anyway.
+    if (label !== 'markup') for (const m of scanned.serverActions) serverActions.add(m);
     if (scanned.warnings.length > 0) warnings.push(...scanned.warnings);
   }
 
@@ -462,6 +472,23 @@ export const extractAuraDefinitionBundle = async (
       source: EDGE_SOURCE,
       properties: { role: 'controller' },
     });
+    // AURA-SERVER-ACTION-CALLS: each `component.get('c.method')` in the JS
+    // invokes THAT method on the declared Apex controller — one `callsApex`
+    // edge carrying every method, the shape method-level readers
+    // (call_graph, what_if_change_method_signature) key on. `heuristic`: the
+    // controller binding is declared, but the method names come from a regex
+    // over JS strings.
+    if (serverActions.size > 0) {
+      const methods = [...serverActions].sort();
+      rawEdges.push({
+        fromId: ownerId,
+        toId: `ApexClass:${apexController}`,
+        edgeType: 'callsApex',
+        confidence: 'heuristic',
+        source: EDGE_SOURCE,
+        properties: { methods, methodName: methods[0] ?? '', mechanism: 'auraServerAction' },
+      });
+    }
   }
   // $Label.c.X / $Resource.X value-provider tokens → references edges
   // (heuristic: regex tokens, not declarative imports).
@@ -480,6 +507,12 @@ export const extractAuraDefinitionBundle = async (
     // Only present when the markup declares a server-side Apex controller,
     // so JS-only / markup-only bundles keep their existing property shape.
     ...(apexController !== null ? { apexController } : {}),
+    // Server actions with NO controller on this bundle's root tag (an
+    // `extends` parent may declare it): the callee class is unknown, so no
+    // edge is minted — disclosed here instead of silently dropped.
+    ...(apexController === null && serverActions.size > 0
+      ? { unresolvedServerActions: [...serverActions].sort() }
+      : {}),
   };
   const properties =
     warnings.length === 0

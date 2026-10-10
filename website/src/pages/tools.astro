@@ -1,63 +1,117 @@
 ---
-import DocPage from "../layouts/DocPage.astro";
+import InfoPage from "../layouts/InfoPage.astro";
+import CtaBlock from "../components/CtaBlock.astro";
 import site from "../data/site.ts";
+import siteData from "../data/site-data.json";
 import toolsData from "../data/tools.json";
 
-const { toolCount, sections } = toolsData;
+/* Everything on this page comes from tools.json, which recalibrate.mjs builds
+ * from the product's own registry and default (core) profile. Nothing here is
+ * a typed count. */
+const { toolCount, core, sections } = toolsData;
+const coreSet = new Set(core);
+const bare = (n: string): string => n.replace(/^sfi\./, "");
+const byName = new Map(sections.flatMap((s) => s.tools.map((t) => [t.name, t.description] as const)));
+const listedCount = byName.size;
 
-const title = `${toolCount} Salesforce MCP Tools: Complete sf-intelligence Reference`;
-const description = `Search the complete sf-intelligence tool reference by metadata, dependency, permission, Apex, Flow, sharing and release-readiness task.`;
+/* The question each default tool answers, in plain words. Editorial copy;
+ * the tool list itself is derived. */
+const plain: Record<string, string> = {
+  "sfi.resolve": "Which component do you mean?",
+  "sfi.search_components": "Find a component by name or label",
+  "sfi.get_component": "Show me this component",
+  "sfi.list_components": "List every object, field, flow…",
+  "sfi.get_edges": "What is this directly connected to?",
+  "sfi.get_impact": "What breaks if I change this?",
+  "sfi.effective_permissions": "What does this profile and permission set mix allow?",
+  "sfi.order_of_execution": "What runs on insert, update, delete and undelete?",
+  "sfi.org_history": "What changed between refreshes?",
+  "sfi.health_check": "Is the snapshot healthy and current?",
+  "sfi.org_card": "Give me a quick card about this org",
+  "sfi.route_question": "Which tool fits this question?",
+  "sfi.synthesize_answer": "Is this answer backed by evidence?",
+  "sfi.capabilities": "What can you answer?",
+  "sfi.guidance": "General Salesforce best practice",
+  "sfi.list_analyses": "What other analyses are there?",
+  "sfi.describe_analysis": "How do I call this analysis?",
+  "sfi.run_analysis": "Run any analysis by name",
+  "sfi.live_consent": "Turn the live, read-only mode on or off",
+  "sfi.safe_to_delete_field": "Can I delete this field?",
+  "sfi.why_cant_user_see_record": "Why can’t this user see it?",
+  "sfi.who_can_access_object": "Who can reach this object?",
+  "sfi.field_access_audit": "Who can read or edit this field?",
+  "sfi.what_happens_on_save": "What runs when a record is saved?",
+  "sfi.org_overview": "Give me a tour of this org",
+};
 
-// ItemList schema of the grouped tool sections (upgrade over a plain table).
+const rest = sections
+  .map((s) => ({ label: s.label, tools: s.tools.filter((t) => !coreSet.has(t.name)) }))
+  .filter((s) => s.tools.length > 0);
+const slug = (label: string): string => label.toLowerCase().replace(/&/g, "and").replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+
+const title = "sf-intelligence Tools Reference (Salesforce MCP)";
+const description =
+  "Every read-only tool in sf-intelligence, the default set your AI assistant sees first, and the rest grouped by job, each with a link you can share or cite.";
 const jsonld = [
   {
     "@type": "ItemList",
-    name: `sf-intelligence tools (${toolCount})`,
-    numberOfItems: toolCount,
-    itemListElement: sections.map((s, i) => ({
+    "@id": `${site.url}/tools#list`,
+    name: "sf-intelligence tools",
+    numberOfItems: listedCount,
+    itemListElement: [...core, ...rest.flatMap((s) => s.tools.map((t) => t.name))].map((n, i) => ({
       "@type": "ListItem",
       position: i + 1,
-      name: s.label,
+      name: n,
+      url: `${site.url}/tools#${bare(n)}`,
     })),
   },
 ];
 ---
 
-<DocPage
+<InfoPage
   title={title}
   description={description}
   path="/tools"
-  heading={`All ${toolCount} Salesforce tools`}
-  intro={`The complete reference for every read-only tool sf-intelligence exposes for a Salesforce org - grouped by function, each with what it does. You never call these by name; an offline semantic router surfaces a ranked shortlist for each plain-language question and your AI host picks which to run. They are listed here for transparency and so AI assistants can cite them accurately.`}
-  crumbs={[{ label: "capabilities", href: "/capabilities" }, { label: "tools", href: "/tools" }]}
-  breadcrumbs={[{ name: "Capabilities", path: "/capabilities" }, { name: "All tools", path: "/tools" }]}
+  heading="Tools reference"
+  lede="You never have to name a tool. You ask in plain words and your AI assistant picks one. This page lists them all so you can see what’s there, link to one, or check what an answer used."
+  crumbs={[{ name: "Capabilities", path: "/capabilities" }, { name: "Tools", path: "/tools" }]}
+  meta={`For developers · sf-intelligence ${siteData.version}`}
   jsonld={jsonld}
 >
-  <section>
-    <div class="container">
-      {sections.map((s) => (
-        <article class="card" style="margin-bottom:18px;">
-          <h2 style="font-family:var(--mono); font-size:1.15rem; color:var(--fg-strong); margin-bottom:4px;">
-            {s.label} <span class="muted" style="font-size:.8rem;">· {s.tools.length}</span>
-          </h2>
-          <div class="toollist">
-            {s.tools.map((t) => (
-              <div class="row"><div class="tn">{t.name}</div><div class="td">{t.description}</div></div>
-            ))}
-          </div>
-        </article>
+  <section class="block" aria-labelledby="core">
+    <h2 id="core">The {core.length} tools your assistant sees first</h2>
+    <p>Out of the box the server shows your assistant a short default list, so it reads less and picks faster. Every other tool is still reachable through <a href="#run_analysis"><code>sfi.run_analysis</code></a>, and your assistant finds them with <a href="#list_analyses"><code>sfi.list_analyses</code></a>. To show every tool directly, set <code>SFI_TOOL_PROFILE=full</code> (see <a href="/configuration">Configuration</a>).</p>
+    <ul class="tool-list">
+      {core.map((n) => (
+        <li id={bare(n)}>
+          <span class="tn"><a href={`#${bare(n)}`}>{n}</a></span>
+          <span class="td"><span class="q">{plain[n] ?? ""}</span>{byName.get(n)}</span>
+        </li>
       ))}
-      <p class="muted center" style="margin-top:24px; font-size:.84rem;">{toolCount} tools registered in this build; a few back-compat aliases fold into their canonical tool and aren't listed separately. Grouping is by function for readability; some tools span more than one area. Generated from the product's tool registry.</p>
-      <div style="padding-top:38px;">
-        <div class="cta-box">
-          <h2 class="screen-type">See it in action</h2>
-          <p>You don't memorize these - you ask in plain language, the router surfaces the right shortlist, and your AI host runs them.</p>
-          <div class="cta-actions">
-            <a class="btn btn-solid" href="/getting-started">get started</a>
-            <a class="btn btn-ghost" href="/capabilities">capability overview</a>
-          </div>
-        </div>
-      </div>
-    </div>
+    </ul>
   </section>
-</DocPage>
+
+  <section class="block" aria-labelledby="all">
+    <h2 id="all">Everything else, by job</h2>
+    <p>{listedCount} tools in all, {listedCount - core.length} of them below. All read-only.</p>
+    <nav class="toc" aria-label="Tool groups">
+      {rest.map((s) => <a href={`#${slug(s.label)}`}>{s.label}</a>)}
+    </nav>
+    {rest.map((s) => (
+      <div class="tool-group">
+        <h3 id={slug(s.label)}>{s.label} <span class="count">{s.tools.length}</span></h3>
+        <ul class="tool-list">
+          {s.tools.map((t) => (
+            <li id={bare(t.name)}>
+              <span class="tn"><a href={`#${bare(t.name)}`}>{t.name}</a></span>
+              <span class="td">{t.description}</span>
+            </li>
+          ))}
+        </ul>
+      </div>
+    ))}
+    <p class="meta-line">{toolCount} tools are registered in this build. {toolCount - listedCount > 0 ? `${toolCount - listedCount} older names fold into the tool that replaced them and aren’t listed separately. ` : ""}Grouping is by job for readability; some tools fit more than one. Generated from the product’s tool registry. Machine-readable list: <a href="/llms-full.txt">llms-full.txt</a>.</p>
+  </section>
+
+  <CtaBlock title="See which tools an answer uses" question="Can I delete the Amount field on Invoice?" />
+</InfoPage>

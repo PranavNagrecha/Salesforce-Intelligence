@@ -106,3 +106,41 @@ describe('core roster is derived from the questions the product advertises', () 
     expect(isDirectlyInvokable('sfi.tech_debt_score', 'full')).toBe(true);
   });
 });
+
+/**
+ * PERF-2 — FAIL-BEFORE/PASS-AFTER: an unrecognized SFI_TOOL_PROFILE value
+ * (`minimal`, `lean`, a typo) used to select the FULL roster silently, so a
+ * user trying to shrink tools/list got the largest one. Now only the exact
+ * value `full` selects it; anything else warns on stderr and uses `core`.
+ */
+describe('SFI_TOOL_PROFILE unknown values', () => {
+  const prev = process.env['SFI_TOOL_PROFILE'];
+  afterEach(() => {
+    if (prev === undefined) delete process.env['SFI_TOOL_PROFILE'];
+    else process.env['SFI_TOOL_PROFILE'] = prev;
+    vi.restoreAllMocks();
+  });
+
+  it.each(['minimal', 'lean', 'ful', 'everything'])(
+    "'%s' selects core and warns",
+    async (value) => {
+      const { toolProfile } = await import('../../src/tools/tool-profile.js');
+      const writes: string[] = [];
+      vi.spyOn(process.stderr, 'write').mockImplementation((chunk) => {
+        writes.push(String(chunk));
+        return true;
+      });
+      process.env['SFI_TOOL_PROFILE'] = value;
+      expect(toolProfile()).toBe('core');
+      expect(writes.join('')).toContain(`SFI_TOOL_PROFILE='${value}'`);
+    },
+  );
+
+  it("'full' and 'FULL' still select full; unset selects core", async () => {
+    const { toolProfile } = await import('../../src/tools/tool-profile.js');
+    process.env['SFI_TOOL_PROFILE'] = 'FULL';
+    expect(toolProfile()).toBe('full');
+    delete process.env['SFI_TOOL_PROFILE'];
+    expect(toolProfile()).toBe('core');
+  });
+});

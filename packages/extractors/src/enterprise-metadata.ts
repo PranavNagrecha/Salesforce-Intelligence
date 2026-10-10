@@ -130,6 +130,14 @@ interface EnterpriseExtractorConfig {
    */
   readonly userCriteriaProfileRefs?: boolean;
   /**
+   * Emit a `references` edge from the rule to each bare field its
+   * `<recordFilter>` tests on the parent object (RestrictionRule /
+   * ScopingRule). Salesforce refuses to delete a field a rule's filter names;
+   * without the edge a field-deletion check read the `sharing` category as
+   * "checked, none".
+   */
+  readonly recordFilterFieldRefs?: boolean;
+  /**
    * XML element name whose first text value should be used as the node's
    * `label`. When set, `extractEnterpriseMetadata` reads the element from the
    * raw XML and passes it to `makeNode` instead of the hardcoded `null`.
@@ -372,6 +380,77 @@ const extractUserCriteriaProfileIds = (xml: string): readonly string[] => {
   return [...ids].sort();
 };
 
+const XML_ENTITIES: Readonly<Record<string, string>> = {
+  '&lt;': '<',
+  '&gt;': '>',
+  '&amp;': '&',
+  '&apos;': "'",
+  '&quot;': '"',
+};
+const RECORD_FILTER_KEYWORDS = new Set(['and', 'or', 'not', 'true', 'false', 'null']);
+/** A bare field name directly before a comparison operator (not a `.path` tail or `$User.X`). */
+const RECORD_FILTER_FIELD_RE =
+  /(?<![.$\w])([A-Za-z][A-Za-z0-9_]*)\s*(?:!=|<>|<=|>=|=|<|>|\bNOT\s+IN\b|\bIN\b|\bLIKE\b|\bINCLUDES\b|\bEXCLUDES\b)/gi;
+
+/** The first segment of a custom relationship path (`Advisor__r.Id` → `Advisor`). */
+const RECORD_FILTER_CUSTOM_PATH_RE = /(?<![.$\w])([A-Za-z][A-Za-z0-9_]*)__r\./g;
+
+/** A whole relationship path (`Advisor__r.Region__c`, `Account.Owner.Name`), not `$User.X`. */
+const RECORD_FILTER_PATH_RE = /(?<![.$\w])([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)+)/g;
+
+/** A filter's text with XML entities decoded and string literals blanked. */
+const normalizeRecordFilter = (raw: string): string =>
+  raw
+    .replace(/&(?:lt|gt|amp|apos|quot);/g, (e) => XML_ENTITIES[e] ?? e)
+    .replace(/'(?:[^'\\]|\\.)*'|"(?:[^"\\]|\\.)*"/g, "''");
+
+/**
+ * The relationship paths one `<recordFilter>` value tests, verbatim
+ * (`Advisor__r.Region__c = $User.Id` → `['Advisor__r.Region__c']`).
+ * `$User` merge fields and string literals are skipped. Shared by the refresh
+ * pass that resolves each path's hops to field edges and by
+ * `safe_to_delete_field`, which hedges a field a path ends on but no edge
+ * resolved — one parser, so the two never disagree about what a path is.
+ */
+export const recordFilterRelationshipPaths = (filter: string): readonly string[] => {
+  const paths = new Set<string>();
+  for (const match of normalizeRecordFilter(filter).matchAll(RECORD_FILTER_PATH_RE)) {
+    if (match[1] !== undefined) paths.add(match[1]);
+  }
+  return [...paths].sort();
+};
+
+/**
+ * The fields on the rule's object a `<recordFilter>` tests: a bare field before
+ * an operator (`Region__c = 'West'` → `Region__c`), and the custom lookup a
+ * relationship path starts from (`Advisor__r.Id = $User.Id` → `Advisor__c`).
+ * String literals are stripped first and `$User` merge fields are skipped.
+ * A path's later hops and the field it ends on live on RELATED objects, which a
+ * single file cannot resolve: the rule node carries the paths
+ * (`recordFilterPaths`) and the refresh pass `resolveRecordFilterPathEdges`
+ * mints those edges through each lookup's target. A standard relationship's
+ * first hop (`RecordType.DeveloperName` → `RecordTypeId`, `Owner.X` → `OwnerId`)
+ * is also left to that pass; a standard field cannot be deleted anyway.
+ */
+export const extractRecordFilterFieldNames = (xml: string): readonly string[] => {
+  const names = new Set<string>();
+  for (const raw of extractXmlValues(xml, 'recordFilter')) {
+    const filter = normalizeRecordFilter(raw);
+    for (const match of filter.matchAll(RECORD_FILTER_FIELD_RE)) {
+      const name = match[1];
+      if (name !== undefined && !RECORD_FILTER_KEYWORDS.has(name.toLowerCase())) names.add(name);
+    }
+    for (const match of filter.matchAll(RECORD_FILTER_CUSTOM_PATH_RE)) {
+      if (match[1] !== undefined) names.add(`${match[1]}__c`);
+    }
+  }
+  return [...names].sort();
+};
+
+/** Every relationship path across a file's `<recordFilter>` values. */
+const extractRecordFilterPaths = (xml: string): readonly string[] =>
+  [...new Set(extractXmlValues(xml, 'recordFilter').flatMap((f) => recordFilterRelationshipPaths(f)))].sort();
+
 /**
  * Infer the primary SObject for report/dashboard metadata when the file
  * path does not carry a nested parent (reports live flat under `reports/`).
@@ -422,10 +501,45 @@ const rescopeRecordContextField = (
   return `${scopeObject}.${remainder}`;
 };
 
+/**
+ * REPORT-FILTER-COLUMNS-UNGRAPHED: a Report names the fields it FILTERS on in
+ * `<filter><criteriaItems><column>` (and sorts on in `<sortColumn>`) — neither
+ * is a `<columns><field>`, so a field used only as a report filter minted no
+ * edge and `safe_to_delete_field` called the report family "unchecked" for a
+ * report the vault holds. Swept here for Reports only.
+ *
+ * `<crossFilters>` blocks are removed first: their criteria columns are BARE
+ * names on the cross-filter's related object, which this per-file sweep
+ * cannot resolve — scoping them to the report's object would invent fields.
+ * A bare token is kept only when it is custom-suffixed (`Amount__c`), so the
+ * platform pseudo-columns (`FIRST_NAME`, `CREATED_DATE`) never become fields.
+ */
+const reportCriteriaColumnRefs = (
+  xml: string,
+  scopeObject: string | null,
+): readonly string[] => {
+  const withoutCrossFilters = xml.replace(/<crossFilters>[\s\S]*?<\/crossFilters>/g, '');
+  const out: string[] = [];
+  for (const value of ['column', 'sortColumn'].flatMap((el) =>
+    extractXmlValues(withoutCrossFilters, el),
+  )) {
+    if (isLegacyDottedAddress(value) || !isWellFormedColumnField(value)) continue;
+    if (value.includes('.')) out.push(`CustomField:${value}`);
+    else if (scopeObject !== null && /__c$/i.test(value)) {
+      out.push(`CustomField:${scopeObject}.${value}`);
+    }
+  }
+  return out;
+};
+
 const extractFieldRefs = (
   xml: string,
   parentObjectApiName: string | null,
-  options?: { readonly listViewFilterScoped?: boolean },
+  options?: {
+    readonly listViewFilterScoped?: boolean;
+    /** Sweep Report filter / sort columns ({@link reportCriteriaColumnRefs}). */
+    readonly reportCriteriaColumns?: boolean;
+  },
 ): FieldRefSweepResult => {
   const scopeObject =
     parentObjectApiName ?? inferReportObjectApiName(xml);
@@ -466,6 +580,10 @@ const extractFieldRefs = (
     } else if (scopeObject !== null) {
       refs.add(`CustomField:${scopeObject}.${value}`);
     }
+  }
+
+  if (options?.reportCriteriaColumns === true) {
+    for (const ref of reportCriteriaColumnRefs(xml, scopeObject)) refs.add(ref);
   }
 
   // CR-CAP-13: the whole-XML dotted scan mints `CustomField:` from any
@@ -1255,6 +1373,7 @@ const extractEnterpriseMetadata = async (
 
   const fieldRefResult = extractFieldRefs(text.value, parentObjectApiName, {
     listViewFilterScoped: config.parseListViewFilters === true,
+    reportCriteriaColumns: config.type === 'Report',
   });
   const fieldRefs = fieldRefResult.refs;
   // CR-CAP-13: list-view filter-predicate field identity. `filterFieldRefs` is
@@ -1355,6 +1474,19 @@ const extractEnterpriseMetadata = async (
     config.userCriteriaProfileRefs === true
       ? extractUserCriteriaProfileIds(text.value)
       : [];
+  const recordFilterPaths: readonly string[] =
+    config.recordFilterFieldRefs === true ? extractRecordFilterPaths(text.value) : [];
+  const recordFilterFieldEdges: Edge[] =
+    config.recordFilterFieldRefs === true && parentObjectApiName !== null
+      ? extractRecordFilterFieldNames(text.value).map((field) => ({
+          fromId: nodeId,
+          toId: `CustomField:${parentObjectApiName}.${field}`,
+          edgeType: 'references',
+          confidence: 'parsed',
+          source: EXTRACTOR_SOURCE,
+          properties: { referenceKind: 'recordFilter' },
+        }))
+      : [];
   const userCriteriaProfileEdges: Edge[] = userCriteriaProfileIds.map((profileId) => ({
     fromId: nodeId,
     toId: `${UNRESOLVED_PROFILE_PREFIX}${profileId}`,
@@ -1431,6 +1563,9 @@ const extractEnterpriseMetadata = async (
       ...(userCriteriaProfileIds.length > 0
         ? { userCriteriaProfileIds, unresolvedProfileIds: userCriteriaProfileIds }
         : {}),
+      // The relationship paths the filter tests, resolved to field edges by the
+      // refresh pass `resolveRecordFilterPathEdges` (omitted when none).
+      ...(recordFilterPaths.length > 0 ? { recordFilterPaths } : {}),
       ...arrayPropertyBlock,
       ...(config.captureSharedTo
         ? {
@@ -1507,6 +1642,7 @@ const extractEnterpriseMetadata = async (
       ...fieldRefEdges,
       ...childRefEdges,
       ...userCriteriaProfileEdges,
+      ...recordFilterFieldEdges,
       ...visibleToEdges,
       ...(reportDetail !== null ? reportDetail.edges : []),
       ...(reportTypeDetail !== null ? reportTypeDetail.edges : []),
@@ -1759,9 +1895,11 @@ const extractFlexiPageEmbeddedFlows = (xml: string): readonly string[] => {
  * so an active embedded Flow no longer reads as 0-usage / safe-to-delete.
  *
  * HONESTY: the profile/recordType/app/form-factor ACTIVATION (which user sees
- * which page) is NOT in the retrieved FlexiPage metadata — it is a separate
- * Lightning App Builder assignment. `activationsModeled: false` flags that so
- * the consuming tool discloses the gap rather than implying an assignment.
+ * which page) is NOT in the retrieved FlexiPage metadata. It is modeled on the
+ * assigning side instead — `recordPageOverrides` on the CustomObject (org
+ * default) and CustomApplication (app / record type / profile), read by
+ * `layout_for_user`. `activationsModeled: false` means only that THIS node
+ * carries no activation; never read it as "activations are not modeled".
  */
 /**
  * FLEXIPAGE-RELATEDLIST-ALIASES: a dynamic related list on a Lightning page
@@ -1968,6 +2106,7 @@ export const extractRestrictionRule = (path: string): Promise<Result<ExtractionR
     // (id-based stub) so profile-retirement / sharing reviews see the rule and
     // the constrained profile is not read as unused.
     userCriteriaProfileRefs: true,
+    recordFilterFieldRefs: true,
     // Surface enforcement semantics directly so get_component can explain
     // Restrict vs Scoping, show the SOQL filter, user-criteria profile, and
     // active state without requiring a live query.
@@ -1982,6 +2121,7 @@ export const extractScopingRule = (path: string): Promise<Result<ExtractionResul
     // Same object→rule parentOf edge as RestrictionRule (both are top-level
     // rules whose parent object comes from `<targetEntity>`).
     parentEdge: true,
+    recordFilterFieldRefs: true,
     // Same set as RestrictionRule — both rule types share the same XML schema
     // and the same consumer questions (what filter / who does it apply to).
     extraProperties: ['enforcementType', 'recordFilter', 'userCriteria', 'active'],

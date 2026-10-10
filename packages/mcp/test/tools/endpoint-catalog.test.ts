@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -237,14 +237,18 @@ describe('endpointCatalogHandler', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const d = result.value.data;
-    expect(d.inboundApis).toHaveLength(2);
+    // ARCH-08: only the REST resource is an integration entry point; the
+    // Lightning controller is listed under uiEntryPoints.
+    expect(d.inboundApis).toHaveLength(1);
     const restEntry = d.inboundApis.find((e) => e.endpointKind === 'rest');
     expect(restEntry).toBeDefined();
     expect(restEntry?.direction).toBe('inbound');
     expect(restEntry?.sourceComponentId).toBe(REST_CLASS);
-    const auraEntry = d.inboundApis.find((e) => e.endpointKind === 'aura');
+    expect(d.inboundApis.some((e) => e.endpointKind === 'aura')).toBe(false);
+    const auraEntry = d.uiEntryPoints.find((e) => e.endpointKind === 'aura');
     expect(auraEntry).toBeDefined();
     expect(auraEntry?.url).toBe('LeadAuraApi.getLeads');
+    expect(d.summary.uiEntryPointCount).toBe(1);
   });
 
   it('returns outbound message endpoints', async () => {
@@ -333,10 +337,11 @@ describe('endpointCatalogHandler', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const d = result.value.data;
-    // 2 inbound + (1 outbound msg + 1 EDS + 2 NCs + 2 omni-rest) = 6 outbound.
-    expect(d.summary.inboundCount).toBe(2);
+    // 1 inbound REST + (1 outbound msg + 1 EDS + 2 NCs + 2 omni-rest) = 6
+    // outbound. The Aura controller is a UI entry point, not counted (ARCH-08).
+    expect(d.summary.inboundCount).toBe(1);
     expect(d.summary.outboundCount).toBe(6);
-    expect(d.summary.totalEndpoints).toBe(8);
+    expect(d.summary.totalEndpoints).toBe(7);
   });
 
   it('sorts each category by sourceComponentId ASC', async () => {
@@ -502,6 +507,114 @@ describe('endpointCatalogHandler (orphaned named credential)', () => {
 });
 
 // =============================================================================
+// NC-DYNAMIC-CALLOUT-ORPHANED: a shared helper builds `'callout:' + name` at
+// runtime, and a trigger hands it the credential NAME as a literal. No literal
+// `callout:Name` exists, so the graph has no reference edge — the catalog used
+// to call the credential orphaned. The name-literal scan now counts it; a
+// credential named nowhere stays orphaned but carries the dynamic caveat.
+// =============================================================================
+
+describe('endpointCatalogHandler (dynamic callout name literals — NC-DYNAMIC-CALLOUT-ORPHANED)', () => {
+  let dynDir: string;
+  let dynStore: GraphStore;
+  let dynCtx: Context;
+
+  beforeAll(async () => {
+    dynDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-endpoint-dyn-'));
+    const { mkdirSync, writeFileSync } = await import('node:fs');
+    mkdirSync(join(dynDir, 'classes'), { recursive: true });
+    writeFileSync(
+      join(dynDir, 'classes', 'CalloutUtil.cls'),
+      "public class CalloutUtil {\n  public static void send(String method, String nc, String body) {\n    HttpRequest req = new HttpRequest();\n    req.setEndpoint('callout:' + nc + '/v1');\n  }\n}\n",
+    );
+    writeFileSync(
+      join(dynDir, 'classes', 'InvoiceSync.cls'),
+      "public class InvoiceSync {\n  public static void run() { CalloutUtil.send('POST', 'Billing_Api', '{}'); }\n  // CalloutUtil.send('POST', 'Ghost_Api', '{}');\n}\n",
+    );
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: 'ApexClass:CalloutUtil', apiName: 'CalloutUtil', sourcePath: join(dynDir, 'classes', 'CalloutUtil.cls') }),
+        makeNode({ id: 'ApexClass:InvoiceSync', apiName: 'InvoiceSync', sourcePath: join(dynDir, 'classes', 'InvoiceSync.cls') }),
+        makeNode({ id: 'NamedCredential:Billing_Api', type: 'NamedCredential', apiName: 'Billing_Api' }),
+        makeNode({ id: 'NamedCredential:Ghost_Api', type: 'NamedCredential', apiName: 'Ghost_Api' }),
+        makeNode({
+          id: 'CustomMetadataRecord:Endpoint_Registry.Ledger',
+          type: 'CustomMetadataRecord',
+          apiName: 'Endpoint_Registry.Ledger',
+          properties: { values: { Named_Credential__c: 'Ledger_Api' } },
+        }),
+        makeNode({ id: 'NamedCredential:Ledger_Api', type: 'NamedCredential', apiName: 'Ledger_Api' }),
+        makeNode({ id: 'NamedCredential:Docs_Api', type: 'NamedCredential', apiName: 'Docs_Api' }),
+        makeNode({
+          id: 'OmniIntegrationProcedure:Docs_Fetch',
+          type: 'OmniIntegrationProcedure',
+          apiName: 'Docs_Fetch',
+          properties: { restEndpoints: [{ stepName: 'Get', path: '/docs', method: 'GET', namedCredential: 'Docs_Api' }] },
+        }),
+      ],
+      edges: [],
+    };
+    const opened = await openGraph(join(dynDir, 'dyn.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    dynStore = opened.value;
+    const imported = await importExtractionResults(dynStore, [seed]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    dynCtx = { vaultRoot: dynDir, manifest: FIXTURE_MANIFEST, graph: dynStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(dynStore);
+    rmSync(dynDir, { recursive: true, force: true });
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a credential named as a literal to a dynamic-callout helper is NOT orphaned', async () => {
+    const result = await endpointCatalogHandler(dynCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const billing = result.value.data.namedCredentials.find((e) => e.sourceComponentId === 'NamedCredential:Billing_Api');
+    expect(billing?.orphaned).toBe(false);
+    expect(billing?.referenceCount).toBe(1);
+    expect(billing?.referencedBy).toEqual([{ componentId: 'ApexClass:InvoiceSync', via: 'name-literal' }]);
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a credential named on a custom-metadata endpoint registry is NOT orphaned', async () => {
+    const result = await endpointCatalogHandler(dynCtx, {});
+    if (!result.ok) throw new Error('handler failed');
+    const ledger = result.value.data.namedCredentials.find((e) => e.sourceComponentId === 'NamedCredential:Ledger_Api');
+    expect(ledger?.orphaned).toBe(false);
+    expect(ledger?.referencedBy?.[0]?.componentId).toBe('CustomMetadataRecord:Endpoint_Registry.Ledger');
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a credential an OmniStudio IP Rest Action declares is NOT orphaned', async () => {
+    const result = await endpointCatalogHandler(dynCtx, {});
+    if (!result.ok) throw new Error('handler failed');
+    const docs = result.value.data.namedCredentials.find((e) => e.sourceComponentId === 'NamedCredential:Docs_Api');
+    expect(docs?.orphaned).toBe(false);
+    expect(docs?.referencedBy).toEqual([{ componentId: 'OmniIntegrationProcedure:Docs_Fetch', via: 'omni-rest' }]);
+  });
+
+  it('sfi.integration_map grades the credentials identically (one shared counter)', async () => {
+    const { integrationMapHandler } = await import('../../src/tools/integration-map.js');
+    const result = await integrationMapHandler(dynCtx, {});
+    if (!result.ok) throw new Error('integration_map failed');
+    const byId = new Map(result.value.data.namedCredentials.map((n) => [n.id, n]));
+    expect(byId.get('NamedCredential:Billing_Api')?.orphaned).toBe(false);
+    expect(byId.get('NamedCredential:Ledger_Api')?.orphaned).toBe(false);
+    expect(byId.get('NamedCredential:Ghost_Api')?.orphaned).toBe(true);
+    expect(byId.get('NamedCredential:Ghost_Api')?.orphanedCaveat).toMatch(/at runtime/);
+  });
+
+  it('a credential named only in a COMMENT stays orphaned, with the dynamic-callout caveat', async () => {
+    const result = await endpointCatalogHandler(dynCtx, {});
+    if (!result.ok) throw new Error('handler failed');
+    const ghost = result.value.data.namedCredentials.find((e) => e.sourceComponentId === 'NamedCredential:Ghost_Api');
+    expect(ghost?.orphaned).toBe(true);
+    expect(ghost?.orphanedCaveat).toMatch(/at runtime/);
+    expect(ghost?.orphanedCaveat).toContain('ApexClass:CalloutUtil');
+  });
+});
+
+// =============================================================================
 // Object-scope refusal (ENDPOINT-CATALOG-IGNORES-OBJECT-SCOPE). The catalog is
 // ORG-WIDE — endpoints carry no endpoint→object association in the graph — so an
 // object / component scope is REFUSED with a named `invalid-query` rather than
@@ -540,12 +653,12 @@ describe('endpointCatalogHandler (object scope — ENDPOINT-CATALOG-IGNORES-OBJE
     expect(account.ok).toBe(false);
   });
 
-  it('the bare no-scope call is unchanged (byte-identical golden — 8 endpoints, no appliedScope)', async () => {
+  it('the bare no-scope call is unchanged (7 integration endpoints after ARCH-08, no appliedScope)', async () => {
     const r = await endpointCatalogHandler(ctx, {});
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const d = r.value.data;
-    expect(d.summary.totalEndpoints).toBe(8);
+    expect(d.summary.totalEndpoints).toBe(7);
     // No new field leaks onto the bare-call payload.
     expect('appliedScope' in d).toBe(false);
     expect(JSON.stringify(d)).not.toContain('appliedScope');
@@ -860,6 +973,53 @@ describe('endpointCatalogHandler — outbound allowlist families (RemoteSiteSett
     expect(d.summary.inboundCount).toBe(0);
   });
 
+  it('FAIL-BEFORE/PASS-AFTER (ARCH-08): lists Apex callouts and flags a literal host no active remote site authorizes', async () => {
+    const classes = join(dir, 'source', 'classes');
+    mkdirSync(classes, { recursive: true });
+    writeFileSync(
+      join(classes, 'InvoiceSync.cls'),
+      [
+        'public with sharing class InvoiceSync {',
+        '  public static void send(String body) {',
+        '    HttpRequest a = new HttpRequest();',
+        "    a.setEndpoint('https://vendor-a.example.com/v1/invoices');",
+        "    a.setEndpoint('https://vendor-b.example.com/v1/invoices');",
+        "    a.setEndpoint('https://unlisted.example.org/hook');",
+        "    a.setEndpoint('callout:Billing_NC/v2/send');",
+        '    a.setEndpoint(Settings__c.getOrgDefaults().Base_Url__c);',
+        "    // a.setEndpoint('https://old.example.net');",
+        '  }',
+        '}',
+      ].join('\n'),
+    );
+    // A test class's mock endpoint never leaves the org: not a callout.
+    writeFileSync(
+      join(classes, 'InvoiceSyncTest.cls'),
+      "@isTest\nprivate class InvoiceSyncTest {\n  static void t() { HttpRequest r = new HttpRequest(); r.setEndpoint('https://mock.example.net/x'); }\n}",
+    );
+    try {
+      const r = await endpointCatalogHandler(ctx, {});
+      if (!r.ok) throw new Error('catalog failed');
+      const d = r.value.data;
+      expect(d.apexCallouts.map((c) => [c.target, c.host, c.namedCredential])).toEqual([
+        ['literal-host', 'vendor-a.example.com', null],
+        ['literal-host', 'vendor-b.example.com', null],
+        ['literal-host', 'unlisted.example.org', null],
+        ['named-credential', null, 'Billing_NC'],
+        ['dynamic', null, null],
+      ]);
+      expect(d.apexCallouts[0]?.authorizedBy).toBe('https://vendor-a.example.com');
+      expect(d.apexCallouts[0]?.sourceComponentId).toBe('ApexClass:InvoiceSync');
+      // vendor-b's remote site is INACTIVE: it authorizes nothing.
+      expect(d.summary.unauthorizedCalloutHosts).toEqual(['unlisted.example.org', 'vendor-b.example.com']);
+      expect(d.summary.apexCalloutCount).toBe(5);
+      // Call sites are not URL declarations: the total is unchanged.
+      expect(d.summary.totalEndpoints).toBe(3);
+    } finally {
+      rmSync(join(dir, 'source'), { recursive: true, force: true });
+    }
+  });
+
   it('breaks the total down by endpointKind so an allowlist entry cannot read as a callsite', async () => {
     const r = await endpointCatalogHandler(ctx, {});
     expect(r.ok).toBe(true);
@@ -895,5 +1055,138 @@ describe('endpointCatalogHandler — the total is never certified as every URL i
     if (!r.ok) return;
     expect(r.value.data.disclosure).toContain('ALLOWLIST authorizations');
     expect(r.value.data.disclosure).toContain('not evidence that any code reaches it');
+  });
+});
+
+// FAIL-BEFORE/PASS-AFTER (eval A09): a helper building `'callout:' + name` read
+// `target: 'dynamic'` with nothing tying it to the credential the SAME response
+// linked to the helper's callers, and nothing said the callout ran in @future.
+describe('endpointCatalogHandler — dynamic callout credential join + async context', () => {
+  let jDir: string;
+  let jStore: GraphStore;
+  let jCtx: Context;
+
+  beforeAll(async () => {
+    jDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-endpoint-join-'));
+    const classes = join(jDir, 'source', 'classes');
+    const triggers = join(jDir, 'source', 'triggers');
+    mkdirSync(classes, { recursive: true });
+    mkdirSync(triggers, { recursive: true });
+    writeFileSync(
+      join(classes, 'Relay_Util.cls'),
+      [
+        'public class Relay_Util {',
+        '  @future(callout=true)',
+        '  public static void push(String credName, String body) {',
+        '    HttpRequest req = new HttpRequest();',
+        "    req.setEndpoint('callout:' + credName + '/batch');",
+        '    new Http().send(req);',
+        '  }',
+        '}',
+      ].join('\n'),
+    );
+    writeFileSync(
+      join(triggers, 'Relay_Visit_Trigger.trigger'),
+      "trigger Relay_Visit_Trigger on Visit_Event__e (after insert) {\n  Relay_Util.push('Relay_Fn', 'x');\n}\n",
+    );
+    // An unrelated class naming a different credential: not a caller, no join.
+    writeFileSync(
+      join(classes, 'Other_Thing.cls'),
+      "public class Other_Thing {\n  static String n = 'Unrelated_Fn';\n}\n",
+    );
+    writeFileSync(
+      join(classes, 'Sync_Job.cls'),
+      [
+        'public class Sync_Job implements Queueable, Database.AllowsCallouts {',
+        '  public void execute(QueueableContext ctx) {',
+        '    HttpRequest req = new HttpRequest();',
+        "    req.setEndpoint('callout:Ledger_Fn/sync');",
+        '  }',
+        '}',
+      ].join('\n'),
+    );
+    const seed: ExtractionResult = {
+      nodes: [
+        makeNode({ id: 'ApexClass:Relay_Util', apiName: 'Relay_Util', sourcePath: 'source/classes/Relay_Util.cls' }),
+        makeNode({ id: 'ApexClass:Other_Thing', apiName: 'Other_Thing', sourcePath: 'source/classes/Other_Thing.cls' }),
+        makeNode({ id: 'ApexClass:Sync_Job', apiName: 'Sync_Job', sourcePath: 'source/classes/Sync_Job.cls' }),
+        makeNode({
+          id: 'ApexTrigger:Relay_Visit_Trigger',
+          type: 'ApexTrigger',
+          apiName: 'Relay_Visit_Trigger',
+          sourcePath: 'source/triggers/Relay_Visit_Trigger.trigger',
+        }),
+        makeNode({ id: 'NamedCredential:Relay_Fn', type: 'NamedCredential', apiName: 'Relay_Fn' }),
+        makeNode({ id: 'NamedCredential:Unrelated_Fn', type: 'NamedCredential', apiName: 'Unrelated_Fn' }),
+        makeNode({ id: 'NamedCredential:Ledger_Fn', type: 'NamedCredential', apiName: 'Ledger_Fn' }),
+      ],
+      edges: [
+        makeEdge({
+          fromId: 'ApexTrigger:Relay_Visit_Trigger',
+          toId: 'ApexClass:Relay_Util',
+          edgeType: 'references',
+          confidence: 'heuristic',
+        }),
+      ],
+    };
+    const opened = await openGraph(join(jDir, 'j.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    jStore = opened.value;
+    const imported = await importExtractionResults(jStore, [seed]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    jCtx = { vaultRoot: jDir, manifest: FIXTURE_MANIFEST, graph: jStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(jStore);
+    rmSync(jDir, { recursive: true, force: true });
+  });
+
+  it('joins a dynamic helper callout to the credential its direct caller names (heuristic tier)', async () => {
+    const r = await endpointCatalogHandler(jCtx, {});
+    if (!r.ok) throw new Error(r.error.message);
+    const relay = r.value.data.apexCallouts.find((c) => c.sourceComponentId === 'ApexClass:Relay_Util');
+    expect(relay?.target).toBe('dynamic');
+    expect(relay?.credentialCandidates).toEqual([
+      {
+        namedCredential: 'NamedCredential:Relay_Fn',
+        tier: 'direct-caller',
+        namedIn: ['ApexTrigger:Relay_Visit_Trigger'],
+        confidence: 'heuristic',
+      },
+    ]);
+  });
+
+  it('marks a @future(callout=true) site async at method granularity', async () => {
+    const r = await endpointCatalogHandler(jCtx, {});
+    if (!r.ok) throw new Error(r.error.message);
+    const relay = r.value.data.apexCallouts.find((c) => c.sourceComponentId === 'ApexClass:Relay_Util');
+    expect(relay?.asyncContext).toEqual({ mechanism: 'future', allowsCallouts: true, granularity: 'method' });
+  });
+
+  it('marks a Queueable + AllowsCallouts class async at class granularity, and adds no candidates to a named site', async () => {
+    const r = await endpointCatalogHandler(jCtx, {});
+    if (!r.ok) throw new Error(r.error.message);
+    const job = r.value.data.apexCallouts.find((c) => c.sourceComponentId === 'ApexClass:Sync_Job');
+    expect(job?.target).toBe('named-credential');
+    expect(job?.asyncContext).toEqual({ mechanism: 'queueable', allowsCallouts: true, granularity: 'class' });
+    expect(job?.credentialCandidates).toBeUndefined();
+  });
+});
+
+describe('calloutAsyncContext', () => {
+  it('does not mark a call site after the @future method body ends', async () => {
+    const { calloutAsyncContext } = await import('../../src/tools/apex-callouts.js');
+    const src = [
+      'public class Mixed {',
+      '  @future',
+      "  static void later() { String s = '{'; }",
+      '  static void now() {',
+      "    req.setEndpoint('callout:X');",
+      '  }',
+      '}',
+    ].join('\n');
+    expect(calloutAsyncContext(src, 5)).toBeUndefined();
+    expect(calloutAsyncContext(src, 3)).toEqual({ mechanism: 'future', allowsCallouts: false, granularity: 'method' });
   });
 });

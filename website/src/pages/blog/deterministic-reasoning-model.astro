@@ -1,17 +1,18 @@
 ---
 import DocPage from "../../layouts/DocPage.astro";
+import siteData from "../../data/site-data.json";
 import site from "../../data/site.ts";
 
-const title = "How sf-intelligence reasons about your Salesforce org (0.2.0 → 0.2.1)";
+const title = "How sf-intelligence Reasons About Your Salesforce Org";
 const description =
-  "sf-intelligence's deterministic, offline reasoning: joins your org vault against an org-independent Concept Model to turn metadata into cited structural claims - no LLM.";
+  "sf-intelligence's deterministic, offline reasoning: joins your org vault against an org-independent Concept Model to turn metadata into cited structural claims, no LLM.";
 
 const jsonld = [
   {
     "@type": "TechArticle",
     headline: "How sf-intelligence reasons about your Salesforce org",
     description:
-      "The deterministic, offline reasoning model behind sfi.interpret: a two-graph join of the grounded org vault against an org-independent Concept Model (143 concepts / 195 rules) that returns cited, confidence-tiered structural claims - no LLM, no live org read.",
+      `The deterministic, offline reasoning model behind sfi.interpret: a two-graph join of the grounded org vault against an org-independent Concept Model (${siteData.conceptCount} concepts / ${siteData.conceptRuleCount} rules) that returns cited, confidence-tiered structural claims - no LLM, no live org read.`,
     author: { "@id": `${site.url}/#org` },
     publisher: { "@id": `${site.url}/#org` },
     datePublished: "2026-07-20",
@@ -34,7 +35,7 @@ const jsonld = [
   heading="Reasoning about your org, not just retrieving it"
   intro={`sf-intelligence 0.2.x adds a deterministic, offline reasoning layer on top of retrieval. Here is how <code>sfi.interpret</code> turns your org's real metadata into <strong>cited, confidence-tiered structural claims</strong> - and what shipped across 0.2.0 and 0.2.1.`}
   crumbs={[{ label: "blog", href: "/blog" }, { label: "deterministic-reasoning-model", href: "/blog/deterministic-reasoning-model" }]}
-  breadcrumbs={[{ name: "Blog", path: "/blog" }, { name: "The deterministic reasoning model", path: "/blog/deterministic-reasoning-model" }]}
+  breadcrumbs={[{ name: "Guides", path: "/blog" }, { name: "The deterministic reasoning model", path: "/blog/deterministic-reasoning-model" }]}
   jsonld={jsonld}
   ogType="article"
   datePublished="2026-07-20"
@@ -44,8 +45,8 @@ const jsonld = [
     <div class="container">
       <div class="hero-meta">
         <span class="chip">2026-07-20</span>
-        <span class="chip"><b>143</b> concepts</span>
-        <span class="chip"><b>195</b> rules</span>
+        <span class="chip"><b>{siteData.conceptCount}</b> concepts</span>
+        <span class="chip"><b>{siteData.conceptRuleCount}</b> rules</span>
         <span class="chip">deterministic · offline</span>
         <span class="chip">no LLM · no live read</span>
       </div>
@@ -68,7 +69,7 @@ const jsonld = [
         <p>The reasoning model is built on two separate graphs that never mix:</p>
         <ul>
           <li><strong>Graph A - your org's grounded vault slice.</strong> A minimal slice of your real metadata graph assembled around the component in question. It carries the org specificity, and everything it contributes is citable by canonical ID.</li>
-          <li><strong>Graph B - the Concept Model.</strong> A curated, <strong>org-independent</strong> library of general Salesforce truth: <strong>143 concepts / 195 rules</strong> about how the platform behaves - save order, sharing posture, cascade semantics, async boundaries, and more. <strong>No org data ever lives in it.</strong></li>
+          <li><strong>Graph B - the Concept Model.</strong> A curated, <strong>org-independent</strong> library of general Salesforce truth: <strong>{siteData.conceptCount} concepts / {siteData.conceptRuleCount} rules</strong> about how the platform behaves - save order, sharing posture, cascade semantics, async boundaries, and more. <strong>No org data ever lives in it.</strong></li>
         </ul>
         <p><code>sfi.interpret</code> is the deterministic <strong>join</strong> of the two: it fires the Concept Model's rules against your grounded slice and returns the structural implications that hold. No inference engine, no language model, no live org call - the same inputs always produce the same claims.</p>
 
@@ -77,7 +78,7 @@ const jsonld = [
           <pre class="diagram">     <span class="dim">Graph A (your org)                 Graph B (ships with the package)</span>
   ┌────────────────────┐          ┌──────────────────────────┐
   │ grounded vault     │          │ Concept Model            │
-  │ slice — real IDs   │          │ 143 concepts / 195 rules │
+  │ slice — real IDs   │          │ {siteData.conceptCount} concepts / {siteData.conceptRuleCount} rules │
   │ CustomField:...    │          │ <span class="dim">org-independent, no</span>      │
   │ Flow:...  Apex:... │          │ <span class="dim">org data — ever</span>          │
   └─────────┬──────────┘          └────────────┬─────────────┘
@@ -111,7 +112,7 @@ const jsonld = [
 
         <h2 id="0-2-1">What 0.2.1 added</h2>
         <ul>
-          <li><strong>Concept Model grew</strong> (48 / 84 → 94 / 143 in 0.2.1; <strong>143 concepts / 195 rules</strong> today) - all org-independent, curated general-Salesforce truth. The shape of <code>sfi.interpret</code> output is unchanged; there is simply more it can reason about.</li>
+          <li><strong>Concept Model grew</strong> (48 / 84 → 94 / 143 in 0.2.1; <strong>{siteData.conceptCount} concepts / {siteData.conceptRuleCount} rules</strong> today) - all org-independent, curated general-Salesforce truth. The shape of <code>sfi.interpret</code> output is unchanged; there is simply more it can reason about.</li>
           <li><strong>18 adversarially-verified correctness fixes.</strong> Every already-correct rule is byte-identical; only the over-claiming cases were fixed - e.g. a <code>without sharing</code> class no longer implies it enforces CRUD/FLS, and a unique-field violation reports the right status code.</li>
           <li><strong>New endpoint-type predicate.</strong> Edge rules now fire only when the endpoint node is of the intended type (fail-closed), so a permission-set grant is never mislabelled a Profile grant, nor an Apex callout a named-credential binding.</li>
           <li><strong>Two lossless Flow tools</strong> - <code>sfi.flow_graph</code> (a lossless structural projection of a Flow) and <code>sfi.flow_trace</code> (declared-logic tracing over a caller-supplied record map). Advertised roster 196 → <strong>198</strong>.</li>

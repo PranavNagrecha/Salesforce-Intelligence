@@ -1,0 +1,48 @@
+---
+/**
+ * FaqBlock — an accordion of questions plus matching FAQPage JSON-LD.
+ * Answers may contain simple HTML (links, <code>); the JSON-LD gets the
+ * plain text. Pass schema={false} when the page already emits a FAQPage.
+ */
+export interface Faq {
+  q: string;
+  /** Answer as HTML. */
+  a: string;
+}
+interface Props {
+  faqs: Faq[];
+  schema?: boolean;
+}
+const { faqs, schema = true } = Astro.props;
+
+const toText = (html: string): string =>
+  html
+    .replace(/<[^>]+>/g, "")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&rsquo;/g, "’")
+    .replace(/\s+/g, " ")
+    .trim();
+
+const jsonld = {
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  mainEntity: faqs.map((f) => ({
+    "@type": "Question",
+    name: f.q,
+    acceptedAnswer: { "@type": "Answer", text: toText(f.a) },
+  })),
+};
+---
+
+<div class="faq">
+  {faqs.map((f) => (
+    <details>
+      <summary>{f.q}</summary>
+      <div class="faq-a"><p set:html={f.a} /></div>
+    </details>
+  ))}
+</div>
+{schema && <script type="application/ld+json" set:html={JSON.stringify(jsonld)} />}

@@ -1,116 +1,70 @@
 ---
-import DocPage from "../../layouts/DocPage.astro";
-
-const title = "Salesforce Agent Readiness Audit for Agentforce and AI Assistants";
-const description =
-  "Assess Salesforce metadata quality, permissions, automation, dependencies and evidence gaps before connecting Agentforce or another AI assistant.";
-
-const jsonld = [
-  {
-    "@type": "FAQPage",
-    mainEntity: [
-      {
-        "@type": "Question",
-        name: "What is a Salesforce agent-readiness audit?",
-        acceptedAnswer: {
-          "@type": "Answer",
-          text: "A structured pass over technical debt, unused or risky metadata, permissions/exposure, and (where modeled) what GenAI / Agentforce assets can touch — before you widen what agents see. sf-intelligence runs that pass offline from a local vault using existing tools, not a new SaaS product.",
-        },
-      },
-      {
-        "@type": "Question",
-        name: "Does this replace Hubbl or Elements AI-readiness audits?",
-        acceptedAnswer: {
-          "@type": "Answer",
-          text: "No. Those vendors sell packaged commercial assessments and dashboards. This page is a free, local playbook for the same buying trigger using open tools. Use both when you need a vendor report for leadership and day-to-day editor questions for builders.",
-        },
-      },
-    ],
-  },
-];
+import UseCaseLayout from "../../layouts/UseCaseLayout.astro";
+import { TECH_DEBT, aiExposure, sensitiveData } from "../../data/page-answers.ts";
 ---
 
-<DocPage
-  title={title}
-  description={description}
+<UseCaseLayout
+  title="Is Your Salesforce Org Ready for AI Agents? Audit It"
+  description="Before you switch on Agentforce or another AI agent, check what it could reach: sensitive fields, broad permissions, guest access, old automation and debt."
   path="/use-cases/agent-readiness-audit"
-  heading="Audit whether your Salesforce org is ready for AI agents"
-  intro="2026 buyers ask whether the org is <strong>ready for Agentforce / agentic AI</strong>. sf-intelligence already ships the kit — this page is the playbook, not a new product."
-  crumbs={[
-    { label: "use-cases", href: "/use-cases" },
-    { label: "agent-readiness audit", href: "/use-cases/agent-readiness-audit" },
+  heading="Is the org ready for AI agents?"
+  lede="An AI agent inherits the org it runs in: every broad permission, every sensitive field it can reach, every forgotten flow. Check those first, from the metadata, without giving anything new access."
+  crumb="Agent readiness"
+  audience="architects, security reviewers and admins planning Agentforce"
+  short="Ask your AI assistant a short series of questions: which fields look sensitive, what your agents can reach, who has broad access, what’s exposed to guest users, and how much technical debt there is. sf-intelligence answers each from your org’s metadata, offline, and says plainly what each check couldn’t see."
+  answers={[sensitiveData, aiExposure]}
+  answerIntro="Two of the checks, run on Verdant, the demo org."
+  asks={[
+    "Which fields look like they hold sensitive data?",
+    "What can our AI agents reach?",
+    "Who has View All Data or Modify All Data?",
+    "What can guest users see?",
+    "Score the technical debt in this org.",
+    "Which custom fields does nothing use?",
   ]}
-  breadcrumbs={[
-    { name: "Use cases", path: "/use-cases" },
-    { name: "Agent-readiness audit", path: "/use-cases/agent-readiness-audit" },
+  checks={[
+    "<strong>Sensitive fields</strong>, flagged by name, type and description",
+    "<strong>Agent setup</strong>: topics, actions and prompt templates, and the fields they touch",
+    "<strong>Broad permissions</strong> and permission sets nobody seems to need",
+    "<strong>Guest and Experience Cloud exposure</strong>, when your refresh pulled it",
+    "<strong>Technical debt</strong>: old automation, Apex risks, unused fields and classes",
   ]}
-  jsonld={jsonld}
+  limits={[
+    "What an agent actually did at run time. This reads configuration",
+    "Personal data stored in fields with unremarkable names",
+    "Record-level data, unless you turn on the optional live mode",
+    "Areas your refresh didn’t pull. They are left out of scores, not counted as clean",
+  ]}
+  tools={["pii_inventory", "ai_exposure_report", "guest_exposure_report", "permission_risk_report", "tech_debt_score", "unused_fields_deep", "org_risk_report"]}
+  related={[
+    { href: "/ai-safety", label: "Is AI safe on my Salesforce org?" },
+    { href: "/use-cases/sharing-troubleshooting", label: "Sharing and access", note: "use case" },
+    { href: "/compare/hubbl", label: "sf-intelligence vs Hubbl", note: "if you need a scored audit report" },
+    { href: "/trust", label: "Trust and security" },
+  ]}
+  faqs={[
+    {
+      q: "Does the audit give the agent any access?",
+      a: "No. The checks read your metadata snapshot on your computer. Nothing is installed in the org and nothing is granted.",
+    },
+    {
+      q: "Is the sensitive-data check a compliance scan?",
+      a: "No. It flags fields by their names, types and descriptions, never their values. Treat it as a starting list for a review, and expect it to miss fields with unremarkable names.",
+    },
+    {
+      q: "How is the debt score worked out?",
+      a: "It weighs several areas, such as unused metadata, legacy automation, Apex quality and old API versions. Areas it couldn’t check are left out of the score and named, so a low score on a partial snapshot isn’t passed off as a clean bill.",
+    },
+  ]}
+  cta={{ question: sensitiveData.question, related: { href: "/ai-safety", label: "Is AI safe on my org?" } }}
+  dateModified="2026-10-10"
 >
-  <section>
-    <div class="container">
-      <div class="prose">
-        <div class="callout">
-          <p><strong>Short answer:</strong> Refresh a vault, then run debt → unused → risk → exposure tools in order. Every answer stays on your machine, read-only, with confidence labels. For safety framing see <a href="/ai-safety">is AI safe on my org?</a>.</p>
-        </div>
-
-        <div class="hero-demo" style="margin:0 0 30px;">
-          <p class="hero-demo-kicker">run the audit pass on a demo org - no org, no auth</p>
-          <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
-          <p class="hero-demo-note">Then walk the playbook against a synthetic org that has debt planted in it on purpose: <em>"which Apex has governor-limit risk?"</em> (a batch class queries inside a loop), <em>"find hardcoded IDs in the Apex"</em>, and <em>"which test classes don't really assert anything?"</em>. It shows you the report shape and the honest exclusions before you point it at an org anyone will read the numbers from. Fully offline: no Salesforce login, no <code>sf</code> CLI. <a href="/getting-started#demo">more on the demo →</a></p>
-        </div>
-
-        <h2 id="why">Why this framing</h2>
-        <p>Industry commentary in 2026 treats technical debt as a top admin pain and "get AI-ready" as a budget line (Hubbl and Elements sell into it). The capabilities below already exist in the roster — packaging them as one narrative is the GTM move, not inventing new analysis.</p>
-
-        <h2 id="playbook">Playbook (compose existing tools)</h2>
-        <table class="doc-table">
-          <thead><tr><th>Step</th><th>Ask / tool</th><th>What you learn</th></tr></thead>
-          <tbody>
-            <tr><td>1. Debt score</td><td><code>sfi.tech_debt_score</code></td><td>Weighted debt with honest exclusions when an extractor didn't run</td></tr>
-            <tr><td>2. Org risk</td><td><code>sfi.org_risk_report</code></td><td>Synthesis of risk themes; optional <code>gate: true</code> for deploy readiness</td></tr>
-            <tr><td>3. Unused surface</td><td><code>sfi.unused_fields_deep</code>, <code>sfi.find_dead_code</code></td><td>Cleanup candidates before agents inherit ghost metadata</td></tr>
-            <tr><td>4. Hardcoded / quality</td><td><code>sfi.find_hardcoded_values</code>, <code>sfi.governor_limit_risks</code></td><td>IDs, injection-ish patterns, governor risk (heuristic)</td></tr>
-            <tr><td>5. PII map</td><td><code>sfi.pii_inventory</code></td><td>Which fields look sensitive by name/type/description</td></tr>
-            <tr><td>6. Guest exposure</td><td><code>sfi.guest_exposure_report</code></td><td>Experience Cloud / unauthenticated surface (when modeled)</td></tr>
-            <tr><td>7. AI exposure</td><td><code>sfi.ai_exposure_report</code></td><td>What modeled GenAI / Agentforce-related assets touch</td></tr>
-            <tr><td>8. Docs handoff</td><td><code>sfi.generate_onboarding_doc</code>, <code>sfi.generate_data_dictionary</code></td><td>Human-readable baseline for the cleanup backlog</td></tr>
-          </tbody>
-        </table>
-
-        <h2 id="prompts">Example prompts</h2>
-        <ul>
-          <li>"Score technical debt for this org and list the top cleanup themes."</li>
-          <li>"Which unused custom fields are safest to retire, and what still references them?"</li>
-          <li>"What PII could an agent see if we expose Account and Contact broadly?"</li>
-          <li>"Run an AI exposure report — what GenAI assets are modeled and what do they touch?"</li>
-        </ul>
-
-        <h2 id="limits">Honest limits</h2>
-        <ul>
-          <li>Static / vault-bound — not a runtime agent monitor.</li>
-          <li>Heuristic findings stay labeled; spot-check before executive claims.</li>
-          <li>Coverage depends on retrieve + extractors; gaps are disclosed, not invented as "none in org."</li>
-          <li>Commercial audits still win when you need a vendor logo on a board deck — see <a href="/compare/hubbl">vs Hubbl</a> and <a href="/compare/elements-cloud">vs Elements.cloud</a>.</li>
-        </ul>
-
-        <h2 id="skills">MCP tools vs Agent Skills</h2>
-        <p>Readiness is not just a metadata score - it is whether an agent can act on that metadata safely. sf-intelligence is agent infrastructure with two layers. The read-only MCP tools are the execution layer: grounded, offline reads that return cited, confidence-tiered evidence. <a href="/agent-skills">Salesforce Agent Skills</a> are the intent layer: portable instructions that decide when to run an audit tool, how to scope the question, and how to hedge the finding. Skills interpret the ask; the MCP tools do the grounded org read.</p>
-        <p>The two are complementary, not a migration - MCP stays the grounded execution surface while skills make the same read-only tools portable across Claude Code, Claude Desktop, Cursor, and other MCP clients. See <a href="/agent-skills">how Agent Skills and MCP tools work together</a>.</p>
-
-        <h2 id="next">Next</h2>
-        <p><a href="/getting-started">Install</a> · <a href="/capabilities">capability map</a> · <a href="/compare">compare hub</a> · repo <a href="https://github.com/PranavNagrecha/Salesforce-Intelligence/blob/main/docs/POSITIONING.md">POSITIONING.md</a>.</p>
-
-        <div style="padding-top:36px;">
-          <div class="cta-box">
-            <h2 class="screen-type">Audit locally. Then widen agents.</h2>
-            <p>Free on npm. One retrieve. Read-only by construction.</p>
-            <div class="cta-actions">
-              <a class="btn btn-solid" href="/getting-started">get started</a>
-              <a class="btn btn-ghost" href="/ai-safety">AI safety</a>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
-</DocPage>
+  <h2>A score that says what it skipped</h2>
+  <p>On the demo org the technical debt score comes out at {TECH_DEBT.score} out of 100 ({TECH_DEBT.band}; higher is worse). The answer also says only {TECH_DEBT.scoredAreas} of {TECH_DEBT.totalAreas} areas could be scored, because the refresh didn’t pull everything the others need. A score with its gaps named is more useful than a confident number built on missing data.</p>
+  <h2>Order the checks by risk</h2>
+  <ol>
+    <li><strong>What could the agent see?</strong> Sensitive fields, and the agent’s own actions and context.</li>
+    <li><strong>Who else can see it?</strong> Broad permissions, guest access and sharing.</li>
+    <li><strong>What would it act on?</strong> Old automation, unused fields and code with known risks.</li>
+  </ol>
+</UseCaseLayout>

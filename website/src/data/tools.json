@@ -1,973 +1,1694 @@
 {
-  "generatedAt": "2026-10-03T18:18:42.266Z",
+  "generatedAt": "2026-10-10T19:00:52.719Z",
+  "version": "0.4.0",
   "toolCount": 231,
+  "listedToolCount": 226,
+  "coreToolCount": 25,
+  "core": [
+    "sfi.resolve",
+    "sfi.search_components",
+    "sfi.get_component",
+    "sfi.list_components",
+    "sfi.get_edges",
+    "sfi.get_impact",
+    "sfi.effective_permissions",
+    "sfi.order_of_execution",
+    "sfi.org_history",
+    "sfi.health_check",
+    "sfi.org_card",
+    "sfi.route_question",
+    "sfi.synthesize_answer",
+    "sfi.capabilities",
+    "sfi.guidance",
+    "sfi.list_analyses",
+    "sfi.describe_analysis",
+    "sfi.run_analysis",
+    "sfi.live_consent",
+    "sfi.safe_to_delete_field",
+    "sfi.why_cant_user_see_record",
+    "sfi.who_can_access_object",
+    "sfi.field_access_audit",
+    "sfi.what_happens_on_save",
+    "sfi.org_overview"
+  ],
   "sections": [
     {
-      "label": "Orientation & routing",
+      "id": "orientation",
+      "label": "Getting oriented",
       "tools": [
         {
-          "name": "sfi.resolve",
-          "description": "Typo-tolerant resolver: messy/misspelled text -> ranked candidate components with a disposition (exact|ambiguous|none) + per-candidate evidence."
-        },
-        {
           "name": "sfi.capabilities",
-          "description": "Product self-description: what this knowledge base can answer."
+          "description": "What this server can answer: a capability map with example questions, persona question-paths (admin, developer, architect, release manager, support) naming the tools for each, the trust-tag glossary (confidence, provenance, completeness), and the recommended conversation pattern. No args.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.synthesize_answer",
-          "description": "Answer-layer grounding pass: turns the JSON returned by prior sfi.* tool call(s) into a structured, citation-grounded answer skeleton - `summary`, `bullets` (head..."
+          "name": "sfi.list_analyses",
+          "description": "Catalog of every analysis on this server, including the ones not in tools/list: name, one-line summary and category (core, search, what-if, documentation, live, cross-org, industries). Use it to find a tool that is not listed, then sfi.describe_analysis for its args and sfi.run_analysis to run it.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.describe_analysis",
+          "description": "Summary, arg signature and JSON input schema for one analysis, by `name` (with or without the `sfi.` prefix). Call it before sfi.run_analysis when a tool's args are unclear.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.run_analysis",
+          "description": "Runs any analysis by `name` with `args` (an object; a JSON string of one is also accepted). Output is identical to calling the tool directly.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.route_question",
-          "description": "Front-door router: for a plain-language question, surface a meaning-ranked shortlist of the sfi.* tools that can answer it - your host LLM picks which to run - pl..."
+          "description": "Advisory router for a vague, broad or compound question. It does not answer the question.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.org_card",
+          "description": "Orientation snapshot of the org, precomputed at refresh (16KB max, one file read): name, edition, sandbox or production, org id, admin contact, last refresh time, coverage and blind spots, scale by type, top objects, automation density, permission posture, integration surface and naming conventions.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.guidance",
-          "description": "General Salesforce best-practice guidance - the `knowledge` plane for greenfield / New-Org questions that have NO org-specific answer (Flow vs Apex, order of exec..."
+          "description": "General Salesforce best-practice guidance that is NOT about this org: Flow vs Apex, order of execution, governor limits, async Apex, trigger frameworks, bulkification, testing, OWD and sharing, profiles vs permission sets, packaging, sandboxes. Returns a curated summary with links to official docs.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.disambiguate_concepts",
-          "description": "Vocabulary + semantic-disambiguation tier - the 'is `Status` the same as `Stage` here?' surface."
+          "description": "Vocabulary + semantic-disambiguation tier - the 'is `Status` the same as `Stage` here?' surface.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         }
       ]
     },
     {
-      "label": "Search & find",
+      "id": "find",
+      "label": "Find & identify components",
       "tools": [
         {
           "name": "sfi.search_components",
-          "description": "Free-text search across vault components."
+          "description": "Lexical (substring) search over component api names, labels and stored properties, including formula text such as ValidationRule errorConditionFormula. Use it when you know a word or snippet to look for.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.resolve",
+          "description": "Turns an informal or misspelled name into canonical-id candidates with a disposition: exact | ambiguous | none.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.get_component",
-          "description": "Fetch a single component by canonical id."
+          "description": "Fetches one component's definition by canonical id. Pass `id` (or `componentId`) in Type:ApiName form: CustomObject:Account, CustomField:Account.Industry__c, ApexClass:OrderService, Flow:Lead_Intake.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.list_components",
-          "description": "List components of a given type, sorted by id."
+          "description": "Inventory: lists components of one `type` (see enum), paged in id order. Narrow to one object with `objectApiName` (for example \"Contact\"; aliases object/objectId) or to any parent with `parentId` (for example \"CustomObject:Contact\"); the narrow applied is echoed in `appliedScope`.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.query_graph",
+          "description": "ADVANCED / power-user: a read-only, guard-railed STRUCTURED query over the vault's dependency graph, for ad-hoc questions the purpose-built tools don't cover (e.g. \"every ApexClass whose api name starts with Billing\", \"all grantedBy edges of heuristic confidence\", \"nodes with no lastModifiedBy\").",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.search_apex_source",
-          "description": "Search the vaulted Apex source for matches."
+          "description": "Search the vaulted Apex source for matches. Optional regex; returns path, line, and snippet.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.search_flow_metadata",
-          "description": "Search the vaulted Flow metadata XML for matches."
-        },
-        {
-          "name": "sfi.find_formula_references",
-          "description": "List the incoming `references` edges to a field with the source nodes and edge-level metadata (e.g., formula tokenizer properties)."
-        },
-        {
-          "name": "sfi.find_code_usages",
-          "description": "List the code source files (ApexClass, ApexTrigger, LightningComponentBundle, AuraDefinitionBundle, VisualforcePage, VisualforceComponent) that read, write, call,..."
+          "description": "Search the vaulted Flow metadata XML for matches. Optional regex; returns path, line, and snippet.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.lookup_record",
-          "description": "Given a CustomMetadataRecord or CustomSettingRecord canonical id (e.g., `CustomMetadataRecord:Marketo_Api_Setting__mdt.Default`), return the record's label, prote..."
-        },
-        {
-          "name": "sfi.find_dependency_cycles",
-          "description": "Architect tool: find cyclic dependency clusters in the org's Apex."
-        },
-        {
-          "name": "sfi.find_hardcoded_values",
-          "description": "'find me hardcoded IDs / emails / usernames / endpoint URLs / sandbox-test-data' surface."
+          "description": "Given a CustomMetadataRecord or CustomSettingRecord canonical id (e.g., `CustomMetadataRecord:Marketo_Api_Setting__mdt.Default`), return the record's label, protected flag, parent type ApiName, and the full per-field value list.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.find_field_anywhere",
-          "description": "Universal-search surface - answers 'where is this field used anywhere in the org?' for one CustomField id, passed as `targetId` or its alias `fieldId` (field-tool..."
+          "description": "Universal-search surface - answers 'where is this field used anywhere in the org?' for one CustomField id, passed as `targetId` or its alias `fieldId` (field-tool-family parity).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.find_semantic_field",
-          "description": "Semantic-discovery surface - answers 'do we already have a field for X?'."
-        },
-        {
-          "name": "sfi.find_hardcoded_values_anywhere",
-          "description": "Cross-corpus hardcoded-value surface - extends `sfi.find_hardcoded_values` (Apex-only) with formula expressions (CustomField.formula), ValidationRule.errorConditi..."
-        },
-        {
-          "name": "sfi.find_clone_patterns",
-          "description": "Structural clone-detection surface."
-        },
-        {
-          "name": "sfi.find_dead_code",
-          "description": "Cross-cutting dead-code surface - composes `method_reachability` verdict, entry-point taxonomy (REST / Aura / Invocable / Queueable / Batchable / Schedulable / tr..."
-        },
-        {
-          "name": "sfi.find_component_usages",
-          "description": "The universal \"where is this component used?\" answer for ANY canonical component type (`componentId`) - one entry point instead of fanning out across find_field_a..."
+          "description": "Semantic-discovery surface - answers 'do we already have a field for X?'.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         }
       ]
     },
     {
-      "label": "Explain & understand",
+      "id": "understand",
+      "label": "Understand what something does",
       "tools": [
         {
+          "name": "sfi.lifecycle_process",
+          "description": "\"What happens when {Object}.{field} becomes {value}?\" - the existing process for a specific value or stage transition (which automations already run when a record moves into a given state, e.g. an Opportunity going to Closed Won or a Case status flip).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
           "name": "sfi.explain_field",
-          "description": "Given a CustomField canonical id (e.g., `CustomField:Account.Industry` or `CustomField:Marketo_Api_Setting__mdt.Number_Of_Retries__c`), return the field's label,..."
+          "description": "Given a CustomField canonical id, return the field's label, description, type, required flag, and, `picklistValues`: the DECLARED value set from the field's inline value-set definition.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.compare_components",
+          "description": "Compare two live-graph components by canonical id, returning the structural diff.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.object_360",
+          "description": "\"Tell me EVERYTHING about this OBJECT\" - the object-tier counterpart to `field_360`, and the tool for \"what is {Object} and what is attached to it\", \"what would I be touching if I changed/retired this object\", \"which profiles can create or edit it\", \"what reports and record pages use it\".",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.what_happens_on_save",
-          "description": "What ALREADY runs when a record on this object is created or updated - every existing automation (flows, triggers, validation rules, duplicate rules, workflow, ap..."
-        },
-        {
-          "name": "sfi.order_of_execution",
-          "description": "Emit the generic Salesforce order-of-execution (SOE) tree instantiated for THIS org's target object across every supported DML event (insert / update / delete / u..."
+          "description": "What already runs when a record of one object is saved, in Salesforce order of execution for one DML event.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.explain_flow",
-          "description": "Explain what a Flow does in plain business terms - what it is FOR, when it runs, and what it changes."
+          "description": "Explain what a Flow does in plain business terms - what it is FOR, when it runs, and what it changes. The go-to answer for \"what does this flow do\", \"what is this automation for\", \"walk me through this process\", or \"explain the {Name} flow\".",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.flow_graph",
+          "description": "The FAITHFUL structural graph of a Flow, and - with `walkthrough: true` - the ORDERED, element-by-element walk of what runs when it runs.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.flow_trace",
+          "description": "Honest PROJECTION of a Flow over a caller-supplied record state - the \"what happens to THIS record\" debugger.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.explain_apex_method",
-          "description": "Given an ApexClass or ApexTrigger canonical id (`ApexClass:{ClassName}` or `ApexTrigger:{TriggerName}`), return a structured narrative payload for the explainer."
+          "description": "Given an ApexClass or ApexTrigger canonical id (`ApexClass:{ClassName}` or `ApexTrigger:{TriggerName}`), return a structured narrative payload for the explainer.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.explain_formula",
-          "description": "Tokenize a Salesforce formula expression and return a structured narrative payload for the explainer."
+          "description": "Tokenize a Salesforce formula expression and return a structured narrative payload for the explainer.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.field_meaning",
-          "description": "Vocabulary + semantic-disambiguation tier - the 'what does this field actually mean in our org?' surface."
+          "description": "Vocabulary + semantic-disambiguation tier - the 'what does this field actually mean in our org?' surface.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.field_provenance",
-          "description": "Vocabulary + semantic-disambiguation tier - the 'is this field manually entered or automated?' surface."
-        },
-        {
-          "name": "sfi.interpret",
-          "description": "WHEN to reach for this: the user asks what a component structurally IMPLIES, or the CONSEQUENCES of a design - 'what happens to child records if I delete this par..."
-        },
-        {
-          "name": "sfi.explain_error",
-          "description": "Decode a PASTED Salesforce error string back to the org component that produced it - the support desk's first-line tool."
-        },
-        {
-          "name": "sfi.explain_debug_log",
-          "description": "Decode a PASTED Apex DEBUG LOG, flow fault text, or governor-limit exception back to the org component that ran - the developer/support runtime-triage wedge, ZERO..."
-        }
-      ]
-    },
-    {
-      "label": "Impact, dependencies & what-if",
-      "tools": [
-        {
-          "name": "sfi.get_edges",
-          "description": "List edges incident to a node, optionally filtered by direction, edge type, and confidence."
-        },
-        {
-          "name": "sfi.get_subgraph",
-          "description": "BFS from a root component, up to `hops` (max 3)."
-        },
-        {
-          "name": "sfi.get_impact",
-          "description": "BFS over incoming edges from a component, up to `hops` (max 3)."
-        },
-        {
-          "name": "sfi.blast_radius_live",
-          "description": "Fuse the static impact graph with LIVE record magnitude - \"what breaks if I change/remove X, and how much is at stake?\"."
-        },
-        {
-          "name": "sfi.safe_to_delete_field",
-          "description": "Is this field safe to delete, and what's the evidence? The BA's due-diligence check before retiring a field \"no one uses\" - it gathers every dependency (validatio..."
-        },
-        {
-          "name": "sfi.field_change_advisor",
-          "description": "Decision-support tool: before changing a field, see the whole blast radius in one briefing."
-        },
-        {
-          "name": "sfi.what_if_change_field_value",
-          "description": "Value-change impact (Data Steward / Identity & Integration lens): given a CustomField `fieldId`, what breaks if its stored VALUE changes - NOT its schema (use wha..."
-        },
-        {
-          "name": "sfi.value_change_audit",
-          "description": "Batch value-change audit (Data Steward lens): given an `object` and optionally a list of `fields`, risk-ranks the impact of changing each field's stored VALUE - t..."
-        },
-        {
-          "name": "sfi.why_field_changed",
-          "description": "Trace every writer to a CustomField."
-        },
-        {
-          "name": "sfi.what_if_change_field_type",
-          "description": "Given a CustomField canonical id (`CustomField:{Object}.{Field}`) and a proposed new field type, returns the structured impact across every incoming dependency edge."
-        },
-        {
-          "name": "sfi.what_if_remove_picklist_value",
-          "description": "Given a Picklist or MultiselectPicklist CustomField id (`CustomField:{Object}.{Field}`) and a value to remove, returns the structured impact across formula source..."
-        },
-        {
-          "name": "sfi.what_if_make_field_required",
-          "description": "Given a CustomField id (`CustomField:{Object}.{Field}`), walks the parent object's write paths and flags incomplete writes that would fail at runtime once the fie..."
-        },
-        {
-          "name": "sfi.what_if_deactivate_flow",
-          "description": "Given a Flow canonical id (`Flow:{ApiName}`), bare API name, or flow label / partial name (e.g."
-        },
-        {
-          "name": "sfi.what_if_disable_trigger",
-          "description": "Given an ApexTrigger canonical id (`ApexTrigger:{Name}`), enumerates the downstream impact of disabling the trigger by walking every outgoing edge."
-        },
-        {
-          "name": "sfi.what_if_change_method_signature",
-          "description": "Given an ApexClass (`classApiName` / `componentId` / `apiName` - a bare name or an `ApexClass:` id, interchangeable, resolved + echoed as `appliedScope`), a metho..."
-        },
-        {
-          "name": "sfi.what_if_merge_profiles",
-          "description": "Given two Profile canonical ids (`Profile:{Name}`), walks both profiles' grants and visibility settings, groups them by `(settingType, settingId)`, and surfaces e..."
-        },
-        {
-          "name": "sfi.what_if_split_profile",
-          "description": "Given a Profile id (`Profile:{Name}`) and an ordered array of target PermissionSet ids (`PermissionSet:{Name}`), proposes a per-grant assignment via a greedy keyw..."
-        },
-        {
-          "name": "sfi.what_if_assign_permset",
-          "description": "Permission-set what-if tool: given a target permission set (`permissionSetId` - a `PermissionSet:` or `PermissionSetGroup:` id, or a bare name) and a `baseline` c..."
-        },
-        {
-          "name": "sfi.what_if_revoke_permset",
-          "description": "Permission-set what-if tool (the mirror of `sfi.what_if_assign_permset`): given a target permission set (`permissionSetId` - a `PermissionSet:` or `PermissionSetG..."
-        },
-        {
-          "name": "sfi.call_graph",
-          "description": "Deep code tool: given a root `ApexClass:` or `ApexTrigger:` id and an optional `direction` (`'downstream' | 'upstream' | 'both'`; defaults to `'both'`), BFS over..."
-        },
-        {
-          "name": "sfi.downstream_effects",
-          "description": "Given an `ApexClass:`, `ApexTrigger:`, OR `CustomObject:` id, surfaces what downstream automation and side effects are reachable."
-        },
-        {
-          "name": "sfi.method_reachability",
-          "description": "Given an ApexClass / ApexTrigger (`classApiName` / `componentId` / `apiName` - a bare name or an `ApexClass:` / `ApexTrigger:` id, interchangeable, resolved + ech..."
-        },
-        {
-          "name": "sfi.tests_for_change",
-          "description": "Smart test selection (test-impact analysis): given `changedComponents` (1..500 ApexClass / ApexTrigger ids or bare class names - each entry may also be a `review_..."
-        },
-        {
-          "name": "sfi.package_impact",
-          "description": "Managed-package boundary surface - 'what does the {namespace} package touch, and what of MINE breaks if I uninstall/upgrade it?'."
+          "description": "Vocabulary + semantic-disambiguation tier - the 'is this field manually entered or automated?' surface.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.field_360",
-          "description": "A complete 360 profile of a single FIELD - everything that touches that field across validation, formulas, automation, code, UI, integrations, and emails, in one..."
+          "description": "A complete 360 profile of a single FIELD - everything that touches that field across validation, formulas, automation, code, UI, integrations, and emails, in one place.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.field_lineage",
-          "description": "Trace where a field's value comes from and what it feeds - its data provenance upstream (which automations, formulas, code, or integrations set it) and its downst..."
+          "name": "sfi.explain_error",
+          "description": "Decode a PASTED Salesforce error string back to the org component that produced it - the support desk's first-line tool.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.explain_debug_log",
+          "description": "Decode a PASTED Apex DEBUG LOG, flow fault text, or governor-limit exception back to the org component that ran - the developer/support runtime-triage wedge, ZERO org access.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.trace_debug_log",
+          "description": "READ a pasted Apex DEBUG LOG as the EVENT STREAM it is, and answer the four questions a log is actually opened for: the execution TIMELINE, WHERE THE TIME WENT, WHICH AUTOMATION FIRED IN WHAT ORDER, and CONSUMPTION BY PHASE + the platform's own limit table. 100% OFFLINE.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         }
       ]
     },
     {
+      "id": "impact",
+      "label": "Impact & dependencies",
+      "tools": [
+        {
+          "name": "sfi.get_edges",
+          "description": "Raw graph edges touching one node.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.get_subgraph",
+          "description": "BFS from a root component, up to `hops` (max 3). Returns the connected node and edge slice, capped at 200 nodes / 400 edges and bounded again by a response-byte budget.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.get_impact",
+          "description": "Answers 'what breaks if I change or delete this?' by walking incoming dependency edges from one component.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.find_formula_references",
+          "description": "List the incoming `references` edges to a field with the source nodes and edge-level metadata (e.g., formula tokenizer properties).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.find_code_usages",
+          "description": "List the code source files (ApexClass, ApexTrigger, LightningComponentBundle, AuraDefinitionBundle, VisualforcePage, VisualforceComponent) that read, write, call, or reference a component.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.safe_to_delete_field",
+          "description": "Deletion verdict for one field, with the evidence.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "opt-in"
+        },
+        {
+          "name": "sfi.find_dependency_cycles",
+          "description": "Architect tool: find cyclic dependency clusters in the org's Apex.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.field_change_advisor",
+          "description": "Decision-support tool: before changing a field, see the whole blast radius in one briefing.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "opt-in"
+        },
+        {
+          "name": "sfi.what_if_change_field_value",
+          "description": "Value-change impact (Data Steward / Identity & Integration lens): given a CustomField `fieldId`, what breaks if its stored VALUE changes - NOT its schema (use what_if_change_field_type for type/required/delete).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.value_change_audit",
+          "description": "Batch value-change audit (Data Steward lens): given an `object` and optionally a list of `fields`, risk-ranks the impact of changing each field's stored VALUE - the portfolio version of what_if_change_field_value.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.why_field_changed",
+          "description": "Each writer carries the literal it sets or its source and `operation`; pass `value` to ask what sets the field to X: picklist values are checked against the value set, checkboxes take true/false, and `valueFilter` groups every writer into `definitelySets`, `maySet`, and `cannotSet`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.record_delete_impact",
+          "description": "\"If a record of this object is deleted, what happens to its children, and what stops it?\" For an object: `children[]`, citing the field file and the `<deleteConstraint>` line.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.what_if_change_field_type",
+          "description": "Given a CustomField canonical id (`CustomField:{Object}.{Field}`) and a proposed new field type, returns the structured impact across every incoming dependency edge.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.what_if_remove_picklist_value",
+          "description": "Given a Picklist or MultiselectPicklist CustomField id and a value to remove, lists the components it can see using the value.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.what_if_make_field_required",
+          "description": "Given a CustomField id (`CustomField:{Object}.{Field}`), walks the parent object's write paths and flags incomplete writes that would fail at runtime once the field is required.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "opt-in"
+        },
+        {
+          "name": "sfi.what_if_deactivate_flow",
+          "description": "Given a Flow canonical id, bare API name, or flow label / partial name, enumerates the downstream impact of deactivating the Flow by walking every outgoing edge.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.what_if_disable_trigger",
+          "description": "Given an ApexTrigger canonical id (`ApexTrigger:{Name}`), enumerates the downstream impact of disabling the trigger by walking every outgoing edge.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.what_if_change_method_signature",
+          "description": "Given an ApexClass, a method name, and an optional new signature string, enumerates every direct caller of the named method plus every test class exercising the target class.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.what_if_merge_profiles",
+          "description": "Given two Profile canonical ids, walks both profiles' grants and visibility settings, groups them by `(settingType, settingId)`, and surfaces every pairwise disagreement as a `MergeConflict` carrying `profileAValue`, `profileBValue`, and a `recommendedPolicy`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.what_if_split_profile",
+          "description": "Given a Profile id (`Profile:{Name}`) and an ordered array of target PermissionSet ids (`PermissionSet:{Name}`), proposes a per-grant assignment via a greedy keyword-match heuristic.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.downstream_effects",
+          "description": "Given an `ApexClass:`, `ApexTrigger:`, OR `CustomObject:` id, surfaces what downstream automation and side effects are reachable.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.review_change",
+          "description": "Is this deployment risky? Pre-deploy review of a change set - answers 'what could go wrong if I deploy this', 'what should I test before deploying', 'review my package.xml / PR / changeset'.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.package_impact",
+          "description": "Managed-package boundary surface - 'what does the {namespace} package touch, and what of MINE breaks if I uninstall/upgrade it?'.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.field_lineage",
+          "description": "Trace where a field's value comes from and what it feeds - its data provenance upstream (which automations, formulas, code, or integrations set it) and its downstream effects (what reads it, what fires because of it).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.find_component_usages",
+          "description": "The universal \"where is this component used?\" answer for ANY canonical component type (`componentId`) - one entry point instead of fanning out across find_field_anywhere / find_code_usages / get_impact / grep.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        }
+      ]
+    },
+    {
+      "id": "reasoning",
+      "label": "Structural reasoning & consequences",
+      "tools": [
+        {
+          "name": "sfi.synthesize_answer",
+          "description": "Grounding check before you answer. Pass the JSON output of earlier sfi.* calls as `input` (any JSON; combine several results in one array or object), optionally the user's `question`, and optionally your `draft` answer.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.interpret",
+          "description": "WHEN to reach for this: the user asks what a component structurally IMPLIES, or the CONSEQUENCES of a design.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        }
+      ]
+    },
+    {
+      "id": "access",
       "label": "Permissions, sharing & access",
       "tools": [
         {
           "name": "sfi.permission_risk_report",
-          "description": "Ranked permission-risk report, leading with OVER-PRIVILEGE read straight from the extracted profile / permission-set metadata: every Profile or PermissionSet that..."
+          "description": "Ranked permission-risk report, leading with OVER-PRIVILEGE read straight from the extracted profile / permission-set metadata.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.permission_set_consolidation",
-          "description": "Offline, vault-only CONSOLIDATION candidates for permission sets, from DECLARED grants - 'which permission sets are redundant / duplicate / consolidatable'."
+          "description": "Offline, vault-only CONSOLIDATION candidates for permission sets, from DECLARED grants - 'which permission sets are redundant / duplicate / consolidatable'.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.effective_permissions",
-          "description": "Compute a user's EFFECTIVE access - the UNION of a profile + assigned permission sets, max-wins, with each permission attributed to the container(s) that grant it."
+          "description": "What a profile plus permission-set bundle actually GRANTS, unioned, with each permission attributed to the container that grants it: object CRUD and View/Modify All, field-security count, system permissions, custom permissions, Apex class access, record-type visibility, Visualforce pages and tabs.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.who_can_run",
+          "description": "The REVERSE of `sfi.user_ability`: given a `Flow:X` (`componentId`), which Profiles / PermissionSets grant RUN access to it (from the `flowAccess` `grantedBy` edges).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.who_can_access_object",
+          "description": "Reverse access lookup: which profiles, permission sets, roles and groups can reach records of one object, and how (org-wide default, object CRUD and View/Modify All, ViewAllData/ModifyAllData, sharing rules with groups expanded to members).",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.guest_exposure_report",
+          "description": "\"What can UNAUTHENTICATED GUEST users see in my Experience Cloud / Site communities?\" - the audit for one of the most notorious real-world Salesforce leaks (over-permissioned site guest profiles exposing PII to the open internet).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.community_catalog",
+          "description": "\"What Experience Cloud communities does this org have, and WHO CAN LOG INTO them?\" - the OFFLINE metadata answer, one row per community, joining the `Network` (community definition) to the `CustomSite` (site container) it names through `<site>`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.why_cant_user_see_record",
-          "description": "Walk the Salesforce sharing cascade (OWD → PermissionGrant → SystemPermission → RoleHierarchy → OwnerSharingRule → CriteriaSharingRule → RestrictionRule → Scoping..."
+          "description": "Explains whether a user can see, edit, delete or create records of an object, and why not.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.layout_for_user",
-          "description": "Walk the Salesforce layout-routing cascade (ProfileLookup → LayoutAssignment → RecordTypeResolution) for a given object, optional record type, and profile (`profi..."
+          "description": "Walk the Salesforce layout-routing cascade for a given object, optional record type, and profile.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.user_ability",
+          "description": "\"What can this Profile / PermissionSet RUN or DO?\" - beyond record CRUD (which `object_access_audit` / `why_cant_user_see_record` cover).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.profile_security",
+          "description": "\"What are this profile's login & session security policies?\" - a focused security-audit surface separate from `user_ability` (which is \"what can it RUN or DO\").",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.security_settings",
+          "description": "\"What are my ORG-WIDE security settings - and what can this product NOT see?\" One call over `settings/Security.settings-meta.xml` (root `<SecuritySettings>`), which produces two org-level singletons.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.lightning_pages",
+          "description": "Lightning record pages (FlexiPage), both directions.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.list_view_sharing",
+          "description": "\"Who is this list view shared with?\" - a list view's `<sharedTo>` visibility scope (the groups/roles it shows up for in the list-view picker), now captured at extraction as `visibleTo` edges.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.app_access",
+          "description": "Given a `CustomApplication`, return what's IN the app and WHO can use it: `navType`, `tabs`, `canOpen`, and `defaultedBy`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.tab_availability",
+          "description": "Given a `Profile:X` or `PermissionSet:X`, list the tabs it can see: each row carries the `tab`, the verbatim `visibility` enum, and an `available` flag normalising 'the user can reach this tab'.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.layout_assignments",
+          "description": "The REVERSE of `sfi.layout_for_user`: enumerate every (Profile × RecordType) assignment that targets a page layout - the question an admin asks before editing or deleting a layout.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.field_access_audit",
-          "description": "Given a CustomField canonical id (`CustomField:{Object}.{Field}`), cross-walk every Profile and PermissionSet that grants access to the field via incoming `grante..."
+          "description": "Who can read or edit one FIELD: every Profile and PermissionSet that grants field-level security on it, plus Apex classes that read or write it (an indirect path).",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.object_access_audit",
+          "description": "Given a CustomObject canonical id (`CustomObject:{ApiName}`), enumerate every Profile and PermissionSet that grants OBJECT-level access via incoming `grantedBy` edges.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.recordtype_availability",
+          "description": "Given a Profile or PermissionSet canonical id, report which record types the user can CREATE / see, grouped by object, from the granter's `recordTypeVisibilities`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.persona_unused_grants",
+          "description": "Which object and field permissions does this kind of user have that nothing they can run uses?",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.how_to_see",
+          "description": "The exact click path a reviewer follows to open a component - the \"How to see it\" steps of a finding, worded with the vault's labels.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.unassigned_permission_sets",
-          "description": "List PermissionSets unassigned to users."
+          "description": "List PermissionSets unassigned to users.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.crud_fls_audit",
-          "description": "CRUD/FLS enforcement audit."
+          "description": "CRUD/FLS enforcement audit.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.what_if_assign_permset",
+          "description": "Permission-set what-if tool: given a target permission set and a `baseline` container set, returns the NET access the user would GAIN by assigning the target.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.what_if_revoke_permset",
+          "description": "Permission-set what-if tool: given a target permission set and a `baseline` container set, returns the NET access the user would LOSE by revoking the target.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.generate_sharing_summary",
-          "description": "Composes a structured markdown sharing summary covering every CustomObject's OWD (`properties.sharingModel`), the SharingRules that apply (matched on `properties...."
+          "description": "Composes a structured markdown sharing summary covering every CustomObject's OWD, the SharingRules that apply, the Profile / PermissionSet grants tallied from incoming `grantedBy` edges on the object, and the Role Hierarchy.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         }
       ]
     },
     {
-      "label": "Code & quality",
-      "tools": [
-        {
-          "name": "sfi.apex_test_coverage",
-          "description": "Developer tool: map test-class references to the Apex they exercise."
-        },
-        {
-          "name": "sfi.apex_build_advisor",
-          "description": "Decision-support tool: before a developer writes Apex, brief them on what the org's existing Apex teaches."
-        },
-        {
-          "name": "sfi.process_builder_migration_candidates",
-          "description": "List active Process Builder (Flow with `processType: 'Workflow'`), WorkflowRule, and ApprovalProcess nodes as migration candidates with per-rule complexity ('simp..."
-        },
-        {
-          "name": "sfi.code_quality_audit",
-          "description": "General-purpose code-quality entry point."
-        },
-        {
-          "name": "sfi.governor_limit_risks",
-          "description": "Apex-specific narrowing for governor-limit-relevant patterns - the performance/scale subset of the quality catalog."
-        },
-        {
-          "name": "sfi.test_coverage_gaps",
-          "description": "(1) `properties.isTest === true` identifies test classes (excluded from the scan), (2) BFS over incoming USAGE edges (capped at depth 3; every edge type but `pare..."
-        },
-        {
-          "name": "sfi.test_coverage_for_method",
-          "description": "Deep code tool: given an `ApexClass:` or `ApexTrigger:` id (accepted interchangeably as `classApiName`, `componentId`, or `apiName` - a bare name or the canonical..."
-        },
-        {
-          "name": "sfi.meaningful_test_audit",
-          "description": "Lists every ApexClass with `properties.isTest === true` with a heuristic assertion-meaningfulness score."
-        }
-      ]
-    },
-    {
-      "label": "Automation, integrations & events",
+      "id": "automation",
+      "label": "Automation & code behavior",
       "tools": [
         {
           "name": "sfi.automation_risk_report",
-          "description": "Ranked automation risks: Process Builder migration candidates and governor-limit findings."
+          "description": "Ranked automation risks: Process Builder migration candidates and governor-limit findings.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.integration_map",
-          "description": "Return a structured topology of the org's integration surfaces: AuthProviders, NamedCredentials, RemoteSiteSettings, CspTrustedSites, ExternalDataSources, Externa..."
+          "name": "sfi.action_chain",
+          "description": "\"What actually happens when I convert this Lead / submit this record for approval?\" - a record ACTION composed as a CHAIN, the way `order_of_execution` composes a record SAVE.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.event_subscribers",
-          "description": "DETAIL VIEW for ONE Platform Event."
+          "name": "sfi.apex_test_coverage",
+          "description": "Developer tool: map test-class references to the Apex they exercise. With `classApiName`, returns the test classes that reach it (`target.coveringTests`; `coveringTestDetail` gives depth and `via`: direct / transitive / via-trigger) and a `status` of has-test-references / no-test-references-found.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.automation_build_advisor",
-          "description": "Decision-support tool: before an admin/architect builds automation on an object, brief them on what already runs there and the org-specific risks of adding more."
+          "description": "Decision-support tool: before an admin/architect builds automation on an object, brief them on what already runs there and the org-specific risks of adding more.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.automation_collisions",
+          "description": "Field-level write-collision + save-recursion cycle detector for ONE object - 'is my org fighting itself on this object?'. Where automation_build_advisor flags OBJECT-level hazards (multiple flows, mixed paradigms), this tool looks at what those automations actually WRITE.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.apex_build_advisor",
+          "description": "Decision-support tool: before a developer writes Apex, brief them on what the org's existing Apex teaches.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.order_of_execution",
+          "description": "Full order-of-execution map for one object across every DML event (insert, update, delete, undelete): the same per-phase steps as sfi.what_happens_on_save, keyed by event in `byEvent`.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.record_creation_paths",
+          "description": "\"How do records of this object get created?\" - the record-provenance trace an admin needs to answer \"how did this record get here?\".",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.nonselective_soql",
+          "description": "Flag NON-SELECTIVE SOQL - a WHERE clause with a full-table-scan / timeout shape at large data volume.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.flow_bulkification_audit",
+          "description": "Flag Flows that perform a record Create / Update / Delete or a Get Records lookup INSIDE a Loop body, plus filterless Get Records anywhere - the Flow-side complement of `sfi.governor_limit_risks`, which scans only ApexClass / ApexTrigger source and never sees Flows.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.flow_fault_audit",
+          "description": "Which Flows have a DML/action element with NO fault path - the flow error-handling hygiene sweep.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.apex_structure",
+          "description": "The PARSED anatomy of ONE Apex class or trigger, plus the review a senior reviewer would give it - the Apex counterpart of `sfi.flow_graph(walkthrough)`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.process_builder_migration_candidates",
+          "description": "List active Process Builder (Flow with `processType: 'Workflow'`), WorkflowRule, and ApprovalProcess nodes as migration candidates with per-rule complexity ('simple' / 'moderate' / 'complex') and a migration-notes paragraph.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.code_quality_audit",
+          "description": "General-purpose code-quality entry point.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.governor_limit_risks",
+          "description": "Apex-specific narrowing for governor-limit-relevant patterns - the performance/scale subset of the quality catalog.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.find_hardcoded_values",
+          "description": "'find me hardcoded IDs / emails / usernames / endpoint URLs / sandbox-test-data' surface.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.test_coverage_gaps",
+          "description": "`properties.isTest === true` identifies test classes, BFS over incoming callsApex / dispatchesAsync / inheritsFrom / references edges from Apex, plus a trigger hop for a test whose DML fires a trigger that reaches the class.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.call_graph",
+          "description": "Deep code tool: given a root `ApexClass:` or `ApexTrigger:` id and an optional `direction` (`'downstream' | 'upstream' | 'both'`; defaults to `'both'`), BFS over `callsApex` edges up to `maxDepth` hops (default 3, max 5).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.test_coverage_for_method",
+          "description": "Deep code tool: given an `ApexClass:` or `ApexTrigger:` id and an optional `methodName`, walks upstream `callsApex` + `dispatchesAsync` BFS and surfaces every test class that reaches the target.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.meaningful_test_audit",
+          "description": "Lists every ApexClass with `properties.isTest === true` with a heuristic assertion-meaningfulness score.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.method_reachability",
+          "description": "Given an ApexClass / ApexTrigger, walks upstream USAGE-edge BFS and classifies the reachable upstream set against the entry-point taxonomy.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.tests_for_change",
+          "description": "Smart test selection: given `changedComponents`, returns the MINIMAL set of test classes to run plus the inverse risk signal - changed components no test reaches.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.async_chain_depth",
-          "description": "Given an ApexClass canonical id (`ApexClass:{Name}`), walks the transitive async chain via outgoing `dispatchesAsync` edges, capped at 10 hops."
+          "description": "Given an ApexClass canonical id (`ApexClass:{Name}`), walks the transitive async chain via outgoing `dispatchesAsync` edges, capped at 10 hops.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.scheduled_job_catalog",
-          "description": "Returns one entry per ApexClass with `properties.isSchedulable === true`, with the per-class `scheduledByCalls` array surfaced from inbound `dispatchesAsync` edge..."
+          "description": "Returns one entry per ApexClass with `properties.isSchedulable === true`, with the per-class `scheduledByCalls` array surfaced from inbound `dispatchesAsync` edges whose `properties.dispatchMechanism === 'schedule'`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.find_hardcoded_values_anywhere",
+          "description": "Cross-corpus hardcoded-value surface - extends `sfi.find_hardcoded_values` (Apex-only) with formula expressions (CustomField.formula), ValidationRule.errorConditionFormula, and WorkflowRule.formula.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.find_clone_patterns",
+          "description": "Structural clone-detection surface. TWO modes.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.find_dead_code",
+          "description": "Cross-cutting dead-code surface - composes `method_reachability` verdict, entry-point taxonomy, and zero-usage detection into a single cascade verdict per candidate: `definitely_dead`, `likely_dead`, `uncertain`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        }
+      ]
+    },
+    {
+      "id": "integration",
+      "label": "Integrations & external systems",
+      "tools": [
+        {
+          "name": "sfi.integration_map",
+          "description": "Return a structured topology of the org's integration surfaces: AuthProviders, NamedCredentials, RemoteSiteSettings, CspTrustedSites, ExternalDataSources, ExternalServices, ConnectedApps, NetworkAccess entries, plus the cross-type `references` edges connecting them.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.event_subscribers",
+          "description": "DETAIL VIEW for ONE Platform Event.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.event_topology",
+          "description": "The org's EVENT PLANE in one call - Platform Events, Change Data Capture, and the channels that carry both, with inventory AND where-used.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.outbound_message_catalog",
-          "description": "Returns one entry per OutboundMessage node (the promotion of the dangling-by-design `<outboundMessages>` references) with the endpoint URL, payload shape (fields..."
+          "description": "Returns one entry per OutboundMessage node with the endpoint URL, payload shape, integration user, the includeSessionId / useDeadLetterQueue flags, and the WorkflowRules that invoke it via incoming `references` edges.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.endpoint_catalog",
-          "description": "Returns every URL / endpoint participating in an integration in one structured response, split four ways - `inboundApis` (from `exposes` edges to synthetic Extern..."
+          "description": "Returns every URL / endpoint participating in an integration in one structured response, split four ways - `inboundApis`, `apexCallouts`, `outboundMessages`, `externalDataSources`, and `namedCredentials`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.installed_package_catalog",
+          "description": "Answer \"what packages are installed in this org?\" from the `InstalledPackage` metadata the refresh extracts (`installedPackages/<namespace>.installedPackage-meta.xml`).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         }
       ]
     },
     {
-      "label": "Industries - OmniStudio & CPQ",
-      "tools": [
-        {
-          "name": "sfi.cpq_rule_chain",
-          "description": "Given a CpqProductRule or CpqPriceRule canonical id, returns the chain of rules of the same type sharing the same parent CustomObject (the SBQQ__ rule object defi..."
-        },
-        {
-          "name": "sfi.cpq_quote_template_breakdown",
-          "description": "Given a CpqQuoteTemplate canonical id, returns the template's top-level configuration (`templateContentReference` from the `SBQQ__Template__c` field, `documentFor..."
-        },
-        {
-          "name": "sfi.cpq_dependency_map",
-          "description": "Walks the values mirror of every requested CPQ-typed node and surfaces every string-encoded `SBQQ__`-prefixed field reference as a heuristic dependency entry."
-        },
-        {
-          "name": "sfi.datatransform_field_map",
-          "description": "Given an OmniDataTransform canonical id (`OmniDataTransform:{Name}_{VersionNumber}`), returns the DataRaptor's source-to-target field mapping plus the operation-t..."
-        },
-        {
-          "name": "sfi.decision_table_browse",
-          "description": "Given a DecisionTable canonical id (`DecisionTable:{SetupName}`), returns the table's parameter shape - `dataSourceType` (`CsvUpload` | `SObject` | `Manual`), `ex..."
-        },
-        {
-          "name": "sfi.integration_procedure_chain",
-          "description": "Given an OmniIntegrationProcedure canonical id, returns the IP's identity metadata (`omniProcessKey`, `versionNumber`, `subType`, `type`, `uniqueName`, `isActive`..."
-        },
-        {
-          "name": "sfi.omniscript_flow",
-          "description": "Given an OmniScript canonical id (`OmniScript:{ApiName}`), returns the parsed step sequence (the `<omniProcessElements>` children walked recursively, sorted by `l..."
-        },
-        {
-          "name": "sfi.omniuicard_widget_breakdown",
-          "description": "Given an OmniUiCard canonical id (`OmniUiCard:{ApiName}`), returns the FlexCard's identity metadata (`omniUiCardType`, `authorName`, `versionNumber`, `isActive`,..."
-        },
-        {
-          "name": "sfi.omni_model",
-          "description": "The inside of ONE OmniStudio component as nodes and edges (the OmniStudio element model): an OmniScript's elements (`OmniElement:<uniqueName>#<Step>/<Block>/<name..."
-        },
-        {
-          "name": "sfi.omni_dead_references",
-          "description": "Does every show rule, merge field and payload key in an OmniScript / Integration Procedure point at something that exists in the version that RUNS? Findings with..."
-        },
-        {
-          "name": "sfi.omni_version_diff",
-          "description": "What changed between two versions of one OmniScript or Integration Procedure: elements added, removed and RENAMED (same type, parent and label key, different name..."
-        },
-        {
-          "name": "sfi.omni_edit_block_audit",
-          "description": "Audit every Edit Block (a list of cards with Add / Edit / Delete) of an OmniScript's active version - or of every active OmniScript: which server delete is wired..."
-        },
-        {
-          "name": "sfi.omni_completion_audit",
-          "description": "Does \"Complete\" mean \"saved\"? For one Integration Procedure (`ip` / `componentId`, active version) or every active one: `COMPLETE_WITHOUT_SUCCESS` (the step that..."
-        },
-        {
-          "name": "sfi.omni_form_spec",
-          "description": "The form a browser test runner fills, from metadata: for an OmniScript's active version, every step and its inputs - data key, `inputKind` (text / masked / radio..."
-        },
-        {
-          "name": "sfi.omni_path_simulator",
-          "description": "Given answers (a data JSON or flat name → value pairs), which steps and inputs of an OmniScript's active version are shown? Show rules are evaluated three-valued..."
-        },
-        {
-          "name": "sfi.omni_changed_since",
-          "description": "What changed in OmniStudio since a previous refresh - semantically, so a finding whose evidence changed can be re-checked before it goes out."
-        },
-        {
-          "name": "sfi.omni_prefill_trace",
-          "description": "For every answer an OmniScript screen saves: does the saved value come BACK when the screen reopens? Runs the save trace on the ACTIVE version, then follows every..."
-        },
-        {
-          "name": "sfi.omni_save_trace",
-          "description": "For every answer on an OmniScript screen: is it SAVED to the database, and if not, where exactly is it dropped? Judges the ACTIVE version (an inactive version or..."
-        }
-      ]
-    },
-    {
-      "label": "Documentation generators",
+      "id": "docs",
+      "label": "Generate documentation",
       "tools": [
         {
           "name": "sfi.generate_fleet_report",
-          "description": "The \"state of my orgs\" digest: ONE GeneratedDocument composed across EVERY vault in the multi-vault registry, so you get a single artifact instead of running sfi...."
+          "description": "The \"state of my orgs\" digest: ONE GeneratedDocument composed across EVERY vault in the multi-vault registry, so you get a single artifact instead of running sfi.org_pulse / sfi.fleet_find / sfi.fleet_drift_ranking once per org by hand.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.get_naming_convention_report",
-          "description": "Return the naming-convention pattern observations, optionally scoped to one object (`scope: 'CustomField:{Object}'` or `'CustomField:{Object}.*'`; omit or pass `'..."
+          "description": "Return the naming-convention pattern observations, optionally scoped to one object (`scope: 'CustomField:{Object}'` or `'CustomField:{Object}.*'`; omit or pass `'all'` for org-wide).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.export_manifest",
+          "description": "Group a set of canonical component ids into a well-formed `package.xml` snippet a human can hand to Gearset / Copado / `sf project deploy`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.org_overview",
-          "description": "Return a structured org-tour snapshot - the buyer-priority #9 headline answer for the new-to-this-org persona."
+          "description": "Org tour computed from the graph: counts per component type, top 10 objects by inbound dependencies, top Apex classes by callers, broadest profiles, integration surface, automation summary with active ratio, front-end mix, legacy-debt indicators, largest classes and naming conventions.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.domain_clusters",
-          "description": "Cluster the org's CustomObject + ApexClass + Flow nodes into SUGGESTED domain groupings using a greedy shared-edge-density algorithm."
+          "description": "Cluster the org's CustomObject + ApexClass + Flow nodes into SUGGESTED domain groupings using a greedy shared-edge-density algorithm.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.generate_data_dictionary",
-          "description": "Given a CustomObject (the `objectId` accepts either the canonical id `CustomObject:{ApiName}` or a bare object api name like `Account`, coerced to the id - consis..."
+          "description": "Given a CustomObject, composes a structured markdown document covering the object's Overview, Fields, Relationships, Validation Rules, Page Layouts, and Related Triggers/Flows.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.generate_admin_handbook",
-          "description": "Composes a structured markdown admin handbook covering the org's purpose, main objects, automation summary, permission structure, integration topology, and recent..."
+          "description": "Composes a structured markdown admin handbook covering the org's purpose, main objects, automation summary, permission structure, integration topology, and recent changes.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.generate_architecture_overview",
-          "description": "Composes a 3-4 page architecture document chaining `sfi.org_overview` + `sfi.domain_clusters` + `sfi.integration_map`."
+          "description": "Composes a 3-4 page architecture document chaining `sfi.org_overview` + `sfi.domain_clusters` + `sfi.integration_map`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.generate_compliance_report",
-          "description": "Composes a structured markdown compliance report chaining `sfi.pii_inventory` + `sfi.field_access_audit` (per regulated field on the current PAGE - default 25, ad..."
+          "description": "Composes a structured markdown compliance report chaining `sfi.pii_inventory` + `sfi.field_access_audit` (per regulated field on the current PAGE - default 25, adjustable via limit/offset/cursor) + per-object `sharingModel` lookup.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.generate_onboarding_doc",
-          "description": "Composes a structured markdown new-admin / new-developer tour chaining `sfi.generate_admin_handbook` + `sfi.generate_architecture_overview` + `sfi.org_overview` f..."
+          "description": "ORG-WIDE only - to document ONE object for a new hire use `sfi.object_360` with `format: \"handbook\"`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.field_mapping_between_objects",
-          "description": "Map the fields of one object onto another for a conversion or migration - which field on object A corresponds to which field on object B, and which fields have no..."
+          "description": "Map the fields of one object onto another for a conversion or migration - which field on object A corresponds to which field on object B, and which fields have no match and would lose data.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         }
       ]
     },
     {
+      "id": "govern",
       "label": "Health, freshness & audit",
       "tools": [
         {
           "name": "sfi.org_pulse",
-          "description": "Org pulse for the current vault: freshness coverage (how many components carry a known lastModifiedDate, the coverage %, and the oldest/newest components) plus th..."
+          "description": "Org pulse for the current vault: freshness coverage (how many components carry a known lastModifiedDate, the coverage %, and the oldest/newest components) plus the top contributors by lastModifiedBy. Answers \"how fresh is what I know about this org?\" and \"who shaped this org?\".",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.doc_coverage_report",
+          "description": "Offline, vault-only documentation-GAP meter - the documentation axis `sfi.tech_debt_score` lacks. MEASURES where the org's metadata is undocumented (it does NOT PRODUCE docs like `sfi.generate_data_dictionary` / `sfi.generate_admin_handbook`).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.limit_headroom_report",
+          "description": "Offline, vault-only limit-headroom report - the replacement for the retiring Salesforce Optimizer's limit report. Counts the org's METADATA against per-object and per-org CONFIGURATION ceilings and ranks the rows WORST-FIRST by remaining headroom% so an admin acts before a deploy hits a wall.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.get_manifest",
-          "description": "Return the current vault manifest (org-kb/meta/manifest.json) verbatim."
+          "description": "Return the current vault manifest (org-kb/meta/manifest.json) verbatim.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.coverage_report",
-          "description": "Report the vault's self-assessed metadata coverage: covered, partial, not-modeled, and - during a staged refresh - pending families (queued by the in-progress tie..."
+          "description": "Report the vault's self-assessed metadata coverage: covered, partial, not-modeled, and - during a staged refresh - pending families (queued by the in-progress tiered build, with `stagedBuild` tier progress; pending types count as missing coverage, so absence answers about them must stay qualified).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "opt-in"
         },
         {
           "name": "sfi.retrieve_blindspot_report",
-          "description": "Retrieve blind spots: components REFERENCED by retrieved automation / code / config but ABSENT from the vault (their edge targets resolve to no node)."
+          "description": "Retrieve blind spots: components REFERENCED by retrieved automation / code / config but ABSENT from the vault (their edge targets resolve to no node). The honest backing for absence answers: an 'X is unused / nothing references X / X is safe to delete' answer about a listed target is unreliable.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.health_check",
-          "description": "Report self-assessed server health, render consistency, and coverage completeness, plus a freshness block (vault age, a stale flag, the most recent refresh's chan..."
+          "description": "Vault health: status, coverage completeness by type, freshness (vault age, stale flag, changes in the last refresh), staged-refresh progress and vault-history status. No args.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.baseline_acknowledge",
-          "description": "Acknowledge a heuristic finding so SAST tools suppress it across refreshes (stored in org-kb/meta/baseline.json)."
+          "description": "Acknowledge a heuristic finding so SAST tools suppress it across refreshes (stored in org-kb/meta/baseline.json).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.baseline_status",
-          "description": "List suppressed finding fingerprints and per-tool counts from the vault baseline file."
+          "description": "List suppressed finding fingerprints and per-tool counts from the vault baseline file.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.org_risk_report",
-          "description": "Deterministic org risk synthesis: health, tech debt, and coverage gaps ranked with trust metadata."
+          "description": "Deterministic org risk synthesis: health, tech debt, over-privilege (standard profiles ranked below custom grantors), guest-user exposure, PII and coverage gaps ranked with trust metadata.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.unused_components",
-          "description": "Find UNUSED / DEAD components - Apex classes that are never called, flows that are deployed but never run, permission sets nobody uses, email templates nobody sen..."
+          "description": "Find UNUSED / DEAD components - Apex classes that are never called, flows that are deployed but never run, permission sets nobody uses, email templates nobody sends, fields nothing reads.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.ai_exposure_report",
+          "description": "AI-exposure audit (the flagship): 'what data can my org's own AI see?'.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.what_changed_since_refresh",
-          "description": "'since my last refresh, which component TYPES changed?'."
+          "description": "'since my last refresh, which component TYPES changed?'. Reads the continuous-learning store's MOST RECENT refresh entry and returns the non-zero per-type `changedTypes` (signed: + added / − removed), `changedTypeCount`, `changedEdges`, `lastRefreshedAt`, and a plain-language `interpretation`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.org_history",
-          "description": "Continuous-learning store: the org's refresh timeline."
+          "description": "Refresh timeline of this vault: per-refresh component and edge changes by type, most recent first, plus refreshCount, first and last refresh time and net component change. Use it for 'how has the org changed over time'.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.diff_snapshots",
-          "description": "Compare two captured vault snapshots and report the structural diff."
+          "description": "Compare two captured vault snapshots and report the structural diff. `fromLabel` and `toLabel` name persisted snapshots under `{vaultRoot}/snapshots/`; the special value `'current'` for `toLabel` triggers a transient capture of the live graph (no persisted artefact).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.trend",
-          "description": "Timeline of persisted snapshot captures."
+          "description": "Timeline of persisted snapshot captures. Default (no `metric`): component/edge counts per label.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.pii_inventory",
-          "description": "Enumerate every CustomField in the vault, classify each with the `pii-detection` recognizer (which inspects API name, declared data type, and description text), t..."
+          "description": "Enumerate every CustomField in the vault, classify each with the `pii-detection` recognizer (which inspects API name, declared data type, and description text), then emit a structured inventory.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.changed_since",
-          "description": "Enumerate every vault node whose `lastModifiedDate` is at or after `since` (for a snapshot-based answer - what was added / removed / modified between two refreshe..."
+          "description": "Enumerate every vault node whose `lastModifiedDate` is at or after `since`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.last_modified",
-          "description": "Given a canonical componentId (e.g., `ApexClass:AccountController`, `CustomField:Account.Industry`, `Flow:Lead_Nurture`), return the component's freshness fields:..."
+          "description": "Given a canonical componentId (e.g., `ApexClass:AccountController`, `CustomField:Account.Industry`, `Flow:Lead_Nurture`), return the component's freshness fields: `lastModifiedDate` (ISO 8601 or null), `lastModifiedBy: { id, name }` (or null), and `apiVersion` (number or null).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.unused_fields_deep",
-          "description": "Optional `objectId` narrows the scan to one CustomObject - accepts the canonical id (`CustomObject:Account`) or a bare api name (`Account`), matched case-insensit..."
+          "description": "Optional `objectId` narrows the scan to one CustomObject - accepts the canonical id (`CustomObject:Account`) or a bare api name (`Account`), matched case-insensitively against the vault and echoed back as `appliedScope`; without it the scan is org-wide.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "opt-in"
         },
         {
           "name": "sfi.empty_queues_and_groups",
-          "description": "List Queue and Group nodes with zero members, and say which of those zeros were actually MEASURED."
+          "description": "List Queue and Group nodes with zero members, and say which of those zeros were actually MEASURED.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
           "name": "sfi.tech_debt_score",
-          "description": "Aggregate the unused_components, unused_fields_deep / process_builder_migration_candidates / unassigned_permission_sets / empty_queues_and_groups, qualityIssues d..."
+          "description": "Aggregate the unused_components, unused_fields_deep / process_builder_migration_candidates / unassigned_permission_sets / empty_queues_and_groups, qualityIssues data, freshness data, and the Apex API-version distribution into one weighted 0-100 score plus a category breakdown.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.promotion_readiness",
-          "description": "Promotion readiness: a focused lens on compare_vaults(sandbox → prod)."
+          "name": "sfi.picklist_integrity_scan",
+          "description": "Org-wide picklist value-set integrity scan - the INVERSE of what_if_remove_picklist_value (which starts from one value).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.annotations",
+          "description": "Read the curated annotations overlay (`meta/annotations.jsonl`): ownership, lifecycle status (e.g. deprecated), glossary synonyms, domain grouping, and notes that humans stated - or AI proposed and a human confirmed - about org components.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.propose_annotation",
+          "description": "Record an AI-PROPOSED annotation (owner / status / glossary / domain / note) for a component. Written ALWAYS as `source: 'ai', confirmed: false` - confirmation is a human act via `sfi.confirm_annotation` (or CLI `sfi annotate confirm <id> <key>`); discard with `sfi.reject_annotation`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.review_annotations",
+          "description": "List UNCONFIRMED annotation proposals from `meta/annotations.jsonl` (AI proposals awaiting human sign-off). Optional `componentId` / `key` / `author` filters.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.confirm_annotation",
+          "description": "Confirm an AI-proposed annotation: re-writes the existing (componentId, key) value as `source: 'human', confirmed: true` - the same write as CLI `sfi annotate confirm <componentId> <key>`. Idempotent when already confirmed.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.reject_annotation",
+          "description": "Reject (discard) an UNCONFIRMED annotation proposal by writing `op: 'unset'` for the (componentId, key) pair - dedicated reject verb wrapping CLI `sfi annotate <id> --key <k> --unset`. Refuses already-confirmed entries (those are curated facts; remove them via the CLI unset path).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.component_history",
+          "description": "The component's change timeline from the vault's OWN git history: `git log --follow` over its source file, merged with the org-declared metadata lastModified stamps; optional capped unified diff of the most recent change.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.component_change_attribution",
+          "description": "Who changed this component in Setup, and when - OFFLINE, from persisted SetupAuditTrail rows (`meta/setup-audit-trail.jsonl` written by `sfi refresh --with-audit-trail`).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.component_as_of",
+          "description": "The component AS IT WAS at a git ref in the vault's own history: `git show <ref>:<sourcePath>` re-run through the SAME extractor the refresh uses for that type → declared properties-as-of (apiName/label/type + extractor properties).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        },
+        {
+          "name": "sfi.history_tracking_gaps",
+          "description": "Compliance audit: 'which sensitive fields have no field-history tracking enabled?'.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         }
       ]
     },
     {
-      "label": "Cross-org & fleet",
-      "tools": [
-        {
-          "name": "sfi.fleet_find",
-          "description": "Cross-vault resolve: which of your REGISTERED orgs contains the thing you mean."
-        },
-        {
-          "name": "sfi.fleet_drift_ranking",
-          "description": "Fleet ops: of every REGISTERED vault, which is most behind its live org - i.e."
-        },
-        {
-          "name": "sfi.compare_components",
-          "description": "Compare two live-graph components by canonical id, returning the structural diff."
-        },
-        {
-          "name": "sfi.compare_vaults",
-          "description": "Given two registered vault aliases, returns a structured diff identifying `added` (in B only), `removed` (in A only), and `shapeModified` (in both with at least o..."
-        },
-        {
-          "name": "sfi.compare_object_across_vaults",
-          "description": "Given a CustomObject api-name and two registered vault aliases, returns the field-by-field diff - `addedFields` (in B only), `removedFields` (in A only), `shapeMo..."
-        },
-        {
-          "name": "sfi.compare_profile_across_vaults",
-          "description": "Given a Profile name and two registered vault aliases, returns per-grant-category drift - `grantDiffs.objectPermissions`, `.fieldPermissions`, `.tabVisibilities`,..."
-        }
-      ]
-    },
-    {
+      "id": "live",
       "label": "Live org data (opt-in)",
       "tools": [
         {
           "name": "sfi.live_describe",
-          "description": "Opt-in live org: describe an sObject via Salesforce CLI."
+          "description": "Opt-in live org: describe an sObject via Salesforce CLI. Disabled unless SFI_LIVE_PLANE_ENABLED=1 or liveEnabled=true.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_stale_check",
-          "description": "Opt-in live org: \"is the org AHEAD of the vault?\"."
+          "description": "Opt-in live org: \"is the org AHEAD of the vault?\".",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_count",
-          "description": "Opt-in live org: count records."
+          "description": "Opt-in live org: count records. Pass `objectApiName` to count every row of an object, or `soql` for a custom count query.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_sample",
-          "description": "Opt-in live org: run SOQL with a hard row cap (default + max 200)."
+          "description": "Opt-in live org: run SOQL with a hard row cap (default + max 200). Read-only sample rows for runtime questions.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_field_population",
-          "description": "Opt-in live org: population rate for one field (total vs null counts)."
+          "description": "Opt-in live org: population rate for one field (total vs null counts).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_group_count",
-          "description": "Opt-in live org: value distribution - COUNT grouped by one field on any object (e.g."
+          "description": "Opt-in live org: value distribution - COUNT grouped by one field on any object (e.g. Cases by Status, Accounts by Industry). Optional equality filter.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_stale_records",
-          "description": "Opt-in live org: records on any object not touched in N days (default LastModifiedDate)."
+          "description": "Opt-in live org: records on any object not touched in N days (default LastModifiedDate). Answers \"which X are stale/unused?\" without arbitrary SOQL.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_recent_activity",
-          "description": "Opt-in live org: records created or modified in the last N days on any object."
+          "description": "Opt-in live org: records created or modified in the last N days on any object. Read-only; capped detail with true total.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_aggregate",
-          "description": "Opt-in live org: MIN/MAX/AVG/SUM on one numeric field for any object."
+          "description": "Opt-in live org: MIN/MAX/AVG/SUM on one numeric field for any object. Optional equality filter.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_duplicate_check",
-          "description": "Opt-in live org: find duplicate values on one field (GROUP BY + HAVING COUNT > 1)."
+          "description": "Opt-in live org: find duplicate values on one field (GROUP BY + HAVING COUNT > 1). Read-only; capped duplicate groups.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_owner_breakdown",
-          "description": "Opt-in live org: record counts by OwnerId with User/Queue names resolved."
+          "description": "Opt-in live org: record counts by OwnerId with User/Queue names resolved. Read-only; top owners by volume.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_record_access",
-          "description": "Opt-in live org: a specific user's EFFECTIVE access to ONE record right now - Read / Edit / Delete / Transfer / Full (All) - from the org's live sharing calculati..."
+          "description": "Opt-in live org: a specific user's EFFECTIVE access to ONE record right now - Read / Edit / Delete / Transfer / Full (All) - from the org's live sharing calculation (UserRecordAccess).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_access_oracle",
-          "description": "Opt-in live org: PARITY ORACLE for the offline permission engine."
+          "description": "Opt-in live org: PARITY ORACLE for the offline permission engine.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_record_shares",
-          "description": "Opt-in live org: the explicit sharing rows on ONE record - WHO it is shared with and WHY - from the runtime `{Object}Share` table (each row is a UserOrGroupId + A..."
+          "description": "Opt-in live org: the explicit sharing rows on ONE record - WHO it is shared with and WHY - from the runtime `{Object}Share` table (each row is a UserOrGroupId + AccessLevel + RowCause: Owner / Manual / a sharing Rule / a Team / Apex managed sharing).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_scheduled_jobs",
-          "description": "Opt-in live org: the RUNTIME schedule registry - what is ACTUALLY scheduled right now - from CronTrigger (+ CronJobDetail.Name / JobType, State, CronExpression, N..."
+          "description": "Opt-in live org: the RUNTIME schedule registry - what is ACTUALLY scheduled right now - from CronTrigger (+ CronJobDetail.Name / JobType, State, CronExpression, NextFireTime, TimesTriggered), plus an optional recent AsyncApexJob status summary.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_field_history",
-          "description": "Opt-in live org: WHO changed a field on a record and to what - from the `{Object}History` table (Field, OldValue, NewValue, CreatedBy.Name, CreatedDate)."
+          "description": "Opt-in live org: WHO changed a field on a record and to what - from the `{Object}History` table (Field, OldValue, NewValue, CreatedBy.Name, CreatedDate). Filter by `fieldApiName`, `recordId`, and/or `days`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_storage_by_object",
-          "description": "Opt-in live org: record counts across objects via the Salesforce recordCount REST API - top N by volume, optional objectApiNames filter."
+          "description": "Opt-in live org: record counts across objects via the Salesforce recordCount REST API - top N by volume, optional objectApiNames filter. Read-only.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_org_limits",
-          "description": "Opt-in live org: current org governor limits via REST."
+          "description": "Opt-in live org: current org governor limits via REST. Read-only.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_data_skew",
-          "description": "Opt-in live org: ownership / data-skew concentration - which `ownerField` value (default `OwnerId`) holds MORE than `threshold` records (default 10,000) of `objec..."
+          "description": "Opt-in live org: ownership / data-skew concentration - which `ownerField` value (default `OwnerId`) holds MORE than `threshold` records (default 10,000) of `objectApiName`, via a single `GROUP BY ... HAVING COUNT(Id) > threshold` SOQL aggregate, worst-concentration first.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_security_exposure",
-          "description": "Opt-in live org: the RUNTIME security-exposure snapshot - how many permission sets currently grant Modify All Data / View All Data / Author Apex, and how many use..."
+          "description": "Opt-in live org: the RUNTIME security-exposure snapshot, via resilient SOQL COUNT over PermissionSet / PermissionSetAssignment.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_inactive_users",
-          "description": "Opt-in live org: active users who haven't logged in within N days (default 30) or never have - the license-reclamation / dormant-account question."
+          "description": "Opt-in live org: active users who haven't logged in within N days (default 30) or never have - the license-reclamation / dormant-account question. Standard (human) users by default; reports the true total (`totalInactive`) plus a capped detail page, oldest-dormant first.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_permset_holders",
-          "description": "Opt-in live org: WHO HOLDS a permission set, permission set group, or profile - the name-by-name assignment roster (PermissionSetAssignment / User rows are runtim..."
+          "description": "Opt-in live org: WHO HOLDS a permission set, permission set group, or profile - the name-by-name assignment roster (PermissionSetAssignment / User rows are runtime state, never in the vault; vault sfi.effective_permissions describes what a grantor GRANTS, not who holds it).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_zombie_accounts",
-          "description": "Opt-in live org: ZOMBIE accounts - active users with login access but ZERO permission-set/PSG assignments, via a single SOQL anti-join (Id NOT IN PermissionSetAss..."
+          "description": "Opt-in live org: ZOMBIE accounts - active users with login access but ZERO permission-set/PSG assignments, via a single SOQL anti-join.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_group_members",
-          "description": "Opt-in live org: WHO IS IN a queue or public group - the runtime GroupMember roster (metadata XML only carries DECLARED members, so the vault's member counts rout..."
+          "description": "Opt-in live org: WHO IS IN a queue or public group - the runtime GroupMember roster (metadata XML only carries DECLARED members, so the vault's member counts routinely say 0 while Setup-managed membership is live-only; vault sfi.empty_queues_and_groups reads the declared counts).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_user_permsets",
-          "description": "Opt-in live org: WHAT does USER X hold - the reverse of sfi.live_permset_holders (input = a user, output = the grantors they hold: profile + direct permission set..."
+          "description": "Opt-in live org: WHAT does USER X hold - the reverse of sfi.live_permset_holders (input = a user, output = the grantors they hold: profile + direct permission sets + permission set groups, with expirations).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_setup_audit_trail",
-          "description": "Opt-in live org: WHO CHANGED WHAT in Setup - the SetupAuditTrail roster (profile/permission-set edits, field changes, org-wide-default flips, and every other trac..."
+          "description": "Opt-in live org: WHO CHANGED WHAT in Setup - the SetupAuditTrail roster (profile/permission-set edits, field changes, org-wide-default flips, and every other tracked configuration change), the runtime \"who touched this\" question the vault's declared metadata cannot answer.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_license_usage",
-          "description": "Opt-in live org: license / cost optimization."
+          "description": "Opt-in live org: license / cost optimization.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_consent",
-          "description": "Manage per-org live-plane grants (in the core profile)."
+          "description": "Reports, grants or revokes the per-org live-plane grant. The live plane runs read-only queries against the real org for record counts, samples and field population.",
+          "core": true,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_report_usage",
-          "description": "Opt-in live org: stale/unused reports via Report.LastRunDate - total vs not-run-in-N-days."
+          "description": "Opt-in live org: stale/unused reports via Report.LastRunDate - total vs not-run-in-N-days. Read-only; resilient when Report is unavailable.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_folder_access",
-          "description": "Opt-in live org: folder inventory and access types (Report/Dashboard/Email/Document)."
+          "description": "Opt-in live org: folder inventory and access types (Report/Dashboard/Email/Document). Read-only; flags publicly accessible folders.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_email_template_usage",
-          "description": "Opt-in live org: email template usage, Classic vs Lightning classification, and migration candidates."
+          "description": "Opt-in live org: email template usage, Classic vs Lightning classification, and migration candidates. Read-only.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_org_health",
-          "description": "Opt-in live org: operational health snapshot - failed/pending async jobs, paused flow interviews, governor limits at risk."
+          "description": "Opt-in live org: operational health snapshot - failed/pending async jobs, paused flow interviews, governor limits at risk. Read-only.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_automation_fired",
-          "description": "Does this record-triggered automation actually run in production? Given an ApexTrigger / record-triggered Flow / WorkflowRule `componentId`, resolves its trigger..."
+          "description": "Does this record-triggered automation actually run in production?",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_picklist_usage",
-          "description": "Which picklist VALUES are actually used in production."
+          "description": "Which picklist VALUES are actually used in production.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_budget",
-          "description": "Disclose this session's live-query budget and result-cache state."
+          "description": "Disclose this session's live-query budget and result-cache state.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
+        },
+        {
+          "name": "sfi.blast_radius_live",
+          "description": "Fuse the static impact graph with LIVE record magnitude - \"what breaks if I change/remove X, and how much is at stake?\".",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_drift_check",
-          "description": "Offline↔live contradiction detection (requires the opt-in live plane)."
+          "description": "Offline↔live contradiction detection (requires the opt-in live plane).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
           "name": "sfi.live_verify",
-          "description": "Confirm ONE claim against the live org now, with the smallest read-only query that can, so a finding never rests on a stale snapshot."
+          "description": "Confirm ONE claim against the live org now, with the smallest read-only query that can, so a finding never rests on a stale snapshot.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         }
       ]
     },
     {
-      "label": "Other tools",
+      "id": "industries",
+      "label": "Industries: OmniStudio & CPQ",
       "tools": [
         {
-          "name": "sfi.list_analyses",
-          "description": "Catalog gateway: the paginated index of EVERY analysis this server can run - name, one-line summary, and a coarse category (core / search / what-if / documentatio..."
+          "name": "sfi.cpq_rule_chain",
+          "description": "Given a CpqProductRule or CpqPriceRule canonical id, returns the chain of rules of the same type sharing the same parent CustomObject (the SBQQ__ rule object definition), sorted by `(active DESC, evaluationOrder ASC, id ASC)`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.describe_analysis",
-          "description": "Catalog gateway: ONE analysis's full description + JSON input schema, fetched on demand (`name`, with or without the `sfi.` prefix)."
+          "name": "sfi.cpq_quote_template_breakdown",
+          "description": "Given a CpqQuoteTemplate canonical id, returns the template's top-level configuration plus a best-effort `sections` list derived from values whose `field` token begins with `SBQQ__Section__c`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.run_analysis",
-          "description": "Catalog gateway: execute any analysis by `name` with `args` (an object, or a JSON-encoded string of one - a known client quirk handled defensively)."
+          "name": "sfi.cpq_dependency_map",
+          "description": "Walks the values mirror of every requested CPQ-typed node and surfaces every string-encoded `SBQQ__`-prefixed field reference as a heuristic dependency entry.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.org_card",
-          "description": "Serve the refresh-time ORG CARD - the ≤16KB orientation snapshot to load BEFORE your first question."
+          "name": "sfi.datatransform_field_map",
+          "description": "Given an OmniDataTransform canonical id (`OmniDataTransform:{Name}_{VersionNumber}`), returns the DataRaptor's source-to-target field mapping plus the operation-type metadata (Extract / Load / Transform).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.doc_coverage_report",
-          "description": "Offline, vault-only documentation-GAP meter - the documentation axis `sfi.tech_debt_score` lacks."
+          "name": "sfi.decision_table_browse",
+          "description": "Given a DecisionTable canonical id, returns the table's parameter shape, and ALWAYS sets `rows: null`. will NOT enumerate row content; row data lives in the CSV uploaded to Salesforce Files, in the `sourceObject` SObject records, or in the OmniStudio designer's row-editor UI.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.limit_headroom_report",
-          "description": "Offline, vault-only limit-headroom report - the replacement for the retiring Salesforce Optimizer's limit report."
+          "name": "sfi.integration_procedure_chain",
+          "description": "Given an OmniIntegrationProcedure canonical id, returns the IP's identity metadata and its steps, in runtime order, each with `name`, `type`, `description`, `sequenceNumber`, `isActive`, `executionConditionalFormula`, `path` / `depth`, and the element catalog's `canonicalType` and `role`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.query_graph",
-          "description": "ADVANCED / power-user: a read-only, guard-railed STRUCTURED query over the vault's dependency graph, for ad-hoc questions the purpose-built tools don't cover (e.g."
+          "name": "sfi.omniscript_flow",
+          "description": "Given an OmniScript canonical id, returns the parsed step sequence, the downstream IP / DataRaptor / sibling-OmniScript dispatches resolved through `dispatchesOmniAction` outgoing edges, and the OmniScript's identity metadata sourced from the R2 extractor's node properties.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.who_can_run",
-          "description": "The REVERSE of `sfi.user_ability`: given a `Flow:X` (`componentId`), which Profiles / PermissionSets grant RUN access to it (from the `flowAccess` `grantedBy` edges)."
+          "name": "sfi.omniuicard_widget_breakdown",
+          "description": "Given an OmniUiCard canonical id, returns the FlexCard's identity metadata, the parsed `states[]` array each carrying `name`, `stateIndex`, recursive `widgetCount`, and the full recursive `widgets[]` tree, the declared `dataSource`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.who_can_access_object",
-          "description": "The REVERSE of `sfi.why_cant_user_see_record`: given a `CustomObject:X` (`componentId`), ENUMERATE which profiles / permission sets / roles / groups statically ga..."
+          "name": "sfi.omni_model",
+          "description": "The inside of ONE OmniStudio component as nodes and edges: an OmniScript's elements, the data keys they produce and read, the server calls they make and the Integration Procedure input keys those fill, Edit Block delete paths; an Integration Procedure's steps in execution order.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.guest_exposure_report",
-          "description": "\"What can UNAUTHENTICATED GUEST users see in my Experience Cloud / Site communities?\" - the audit for one of the most notorious real-world Salesforce leaks (over-..."
+          "name": "sfi.omni_dead_references",
+          "description": "Does every show rule, merge field and payload key in an OmniScript / Integration Procedure point at something that exists in the version that RUNS?",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.community_catalog",
-          "description": "\"What Experience Cloud communities does this org have, and WHO CAN LOG INTO them?\" - the OFFLINE metadata answer, one row per community, joining the `Network` (co..."
+          "name": "sfi.omni_version_diff",
+          "description": "What changed between two versions of one OmniScript or Integration Procedure: elements added, removed and RENAMED, plus changes to behaviour-relevant settings.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.user_ability",
-          "description": "\"What can this Profile / PermissionSet RUN or DO?\" - beyond record CRUD (which `object_access_audit` / `why_cant_user_see_record` cover)."
+          "name": "sfi.omni_edit_block_audit",
+          "description": "Audit every Edit Block of an OmniScript's active version - or of every active OmniScript: which server delete is wired, whether each delete IP is in the vault, where the deleted record's id comes from, and whether an edited card keeps its record.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.profile_security",
-          "description": "\"What are this profile's login & session security policies?\" - a focused security-audit surface separate from `user_ability` (which is \"what can it RUN or DO\")."
+          "name": "sfi.omni_completion_audit",
+          "description": "Does \"Complete\" mean \"saved\"?",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.security_settings",
-          "description": "\"What are my ORG-WIDE security settings - and what can this product NOT see?\" One call over `settings/Security.settings-meta.xml` (root `<SecuritySettings>`), whi..."
+          "name": "sfi.omni_form_spec",
+          "description": "The form a browser test runner fills, from metadata: for an OmniScript's active version, every step and its inputs, and a `sampleValue` that satisfies them.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.lightning_pages",
-          "description": "Lightning record pages (FlexiPage), both directions."
+          "name": "sfi.omni_path_simulator",
+          "description": "Given answers (a data JSON or flat name → value pairs), which steps and inputs of an OmniScript's active version are shown? Show rules are evaluated three-valued - a rule over an answer you did not supply is `unknown` and named in `unknownBecause`, never guessed.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.list_view_sharing",
-          "description": "\"Who is this list view shared with?\" - a list view's `<sharedTo>` visibility scope (the groups/roles it shows up for in the list-view picker), now captured at ext..."
+          "name": "sfi.omni_changed_since",
+          "description": "What changed in OmniStudio since a previous refresh - semantically, so a finding whose evidence changed can be re-checked before it goes out. Compares a refresh snapshot (`snapshot` label from `sfi snapshot list`; default: the previous refresh) with the current vault.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.app_access",
-          "description": "Given a `CustomApplication` (`componentId`, e.g."
+          "name": "sfi.omni_prefill_trace",
+          "description": "For every answer an OmniScript screen saves: does the saved value come BACK when the screen reopens?",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.tab_availability",
-          "description": "Given a `Profile:X` or `PermissionSet:X` - via `componentId` or the natural `profileApiName` / `profileId` / `permissionSetApiName` / `permissionSetId` selector (..."
+          "name": "sfi.omni_save_trace",
+          "description": "For every answer on an OmniScript screen: is it SAVED to the database, and if not, where exactly is it dropped? Judges the ACTIVE version (an inactive version or a `Type/SubType/Language` / unique-name selector is redirected to the active one and echoed in `appliedScope`).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
+        }
+      ]
+    },
+    {
+      "id": "cross-org",
+      "label": "Cross-org & fleet",
+      "tools": [
+        {
+          "name": "sfi.fleet_find",
+          "description": "Cross-vault resolve: which of your REGISTERED orgs contains the thing you mean. Runs the typo-tolerant resolver across every vault in the multi-vault registry, read-only, and reports per-vault dispositions (exact|ambiguous|none|unavailable) + which vaults it was found in.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.lifecycle_process",
-          "description": "\"What happens when {Object}.{field} becomes {value}?\" - the existing process for a specific value or stage transition (which automations already run when a record..."
+          "name": "sfi.fleet_drift_ranking",
+          "description": "Fleet ops: of every REGISTERED vault, which is most behind its live org - i.e. which to /sfi-refresh first.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "primary"
         },
         {
-          "name": "sfi.action_chain",
-          "description": "\"What actually happens when I convert this Lead / submit this record for approval?\" - a record ACTION composed as a CHAIN, the way `order_of_execution` composes a..."
+          "name": "sfi.compare_vaults",
+          "description": "Given two registered vault aliases, returns a structured diff identifying `added` (in B only), `removed` (in A only), and `shapeModified` (in both with at least one non-volatile property differing) components.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.layout_assignments",
-          "description": "The REVERSE of `sfi.layout_for_user`: enumerate every (Profile × RecordType) assignment that targets a page layout - the question an admin asks before editing or..."
+          "name": "sfi.promotion_readiness",
+          "description": "Promotion readiness: a focused lens on compare_vaults(sandbox → prod).",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.automation_collisions",
-          "description": "Field-level write-collision + save-recursion cycle detector for ONE object - 'is my org fighting itself on this object?'."
+          "name": "sfi.compare_object_across_vaults",
+          "description": "Given a CustomObject api-name and two registered vault aliases, returns the field-by-field diff, plus `objectLevelDrift` for CustomObject-level property differences.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         },
         {
-          "name": "sfi.ai_exposure_report",
-          "description": "AI-exposure audit (the flagship): 'what data can my org's own AI see?'."
-        },
-        {
-          "name": "sfi.export_manifest",
-          "description": "Group a set of canonical component ids into a well-formed `package.xml` snippet a human can hand to Gearset / Copado / `sf project deploy`."
-        },
-        {
-          "name": "sfi.object_access_audit",
-          "description": "Given a CustomObject canonical id (`CustomObject:{ApiName}`), enumerate every Profile and PermissionSet that grants OBJECT-level access via incoming `grantedBy` e..."
-        },
-        {
-          "name": "sfi.object_360",
-          "description": "\"Tell me EVERYTHING about this OBJECT\" - the object-tier counterpart to `field_360`, and the tool for \"what is {Object} and what is attached to it\", \"what would I..."
-        },
-        {
-          "name": "sfi.recordtype_availability",
-          "description": "Given a Profile or PermissionSet canonical id (`Profile:{Name}` / `PermissionSet:{Name}`) - or the natural `profileApiName` / `profileId` / `permissionSetApiName`..."
-        },
-        {
-          "name": "sfi.record_creation_paths",
-          "description": "\"How do records of this object get created?\" - the record-provenance trace an admin needs to answer \"how did this record get here?\"."
-        },
-        {
-          "name": "sfi.record_delete_impact",
-          "description": "\"If a record of this object is deleted, what happens to its children, and what stops it?\" For an object (`objectApiName` / `object` / `CustomObject:` `componentId..."
-        },
-        {
-          "name": "sfi.persona_unused_grants",
-          "description": "Which object and field permissions does this kind of user have that nothing they can run uses? A persona is a profile + permission sets + permission set groups -..."
-        },
-        {
-          "name": "sfi.how_to_see",
-          "description": "The exact click path a reviewer follows to open a component - the \"How to see it\" steps of a finding, worded with the vault's labels."
-        },
-        {
-          "name": "sfi.flow_graph",
-          "description": "The FAITHFUL structural graph of a Flow, and - with `walkthrough: true` - the ORDERED, element-by-element walk of what runs when it runs."
-        },
-        {
-          "name": "sfi.nonselective_soql",
-          "description": "Flag NON-SELECTIVE SOQL - a WHERE clause with a full-table-scan / timeout shape at large data volume."
-        },
-        {
-          "name": "sfi.flow_bulkification_audit",
-          "description": "Flag Flows that perform a record Create / Update / Delete or a Get Records lookup INSIDE a Loop body, plus filterless Get Records anywhere - the Flow-side complem..."
-        },
-        {
-          "name": "sfi.flow_trace",
-          "description": "Honest PROJECTION of a Flow over a caller-supplied record state - the \"what happens to THIS record\" debugger."
-        },
-        {
-          "name": "sfi.flow_fault_audit",
-          "description": "Which Flows have a DML/action element with NO fault path - the flow error-handling hygiene sweep."
-        },
-        {
-          "name": "sfi.apex_structure",
-          "description": "The PARSED anatomy of ONE Apex class or trigger, plus the review a senior reviewer would give it - the Apex counterpart of `sfi.flow_graph(walkthrough)`."
-        },
-        {
-          "name": "sfi.picklist_integrity_scan",
-          "description": "Org-wide picklist value-set integrity scan - the INVERSE of what_if_remove_picklist_value (which starts from one value)."
-        },
-        {
-          "name": "sfi.review_change",
-          "description": "Pre-deploy change review (the CI/deploy gate): given `components` (1..500 change entries a host assembles from a PR / package.xml / `git diff`; each carries `chan..."
-        },
-        {
-          "name": "sfi.event_topology",
-          "description": "The org's EVENT PLANE in one call - Platform Events, Change Data Capture, and the channels that carry both, with inventory AND where-used."
-        },
-        {
-          "name": "sfi.installed_package_catalog",
-          "description": "Answer \"what packages are installed in this org?\" from the `InstalledPackage` metadata the refresh extracts (`installedPackages/<namespace>.installedPackage-meta...."
-        },
-        {
-          "name": "sfi.annotations",
-          "description": "Read the curated annotations overlay (`meta/annotations.jsonl`): ownership, lifecycle status (e.g."
-        },
-        {
-          "name": "sfi.propose_annotation",
-          "description": "Record an AI-PROPOSED annotation (owner / status / glossary / domain / note) for a component."
-        },
-        {
-          "name": "sfi.review_annotations",
-          "description": "List UNCONFIRMED annotation proposals from `meta/annotations.jsonl` (AI proposals awaiting human sign-off)."
-        },
-        {
-          "name": "sfi.confirm_annotation",
-          "description": "Confirm an AI-proposed annotation: re-writes the existing (componentId, key) value as `source: 'human', confirmed: true` - the same write as CLI `sfi annotate con..."
-        },
-        {
-          "name": "sfi.reject_annotation",
-          "description": "Reject (discard) an UNCONFIRMED annotation proposal by writing `op: 'unset'` for the (componentId, key) pair - dedicated reject verb wrapping CLI `sfi annotate <i..."
-        },
-        {
-          "name": "sfi.component_history",
-          "description": "The component's change timeline from the vault's OWN git history (`sfi vault git enable`): `git log --follow` over its source file - one entry per source-changing..."
-        },
-        {
-          "name": "sfi.component_change_attribution",
-          "description": "Who changed this component in Setup, and when - OFFLINE, from persisted SetupAuditTrail rows (`meta/setup-audit-trail.jsonl` written by `sfi refresh --with-audit-..."
-        },
-        {
-          "name": "sfi.component_as_of",
-          "description": "The component AS IT WAS at a git ref in the vault's own history: `git show <ref>:<sourcePath>` re-run through the SAME extractor the refresh uses for that type →..."
-        },
-        {
-          "name": "sfi.trace_debug_log",
-          "description": "READ a pasted Apex DEBUG LOG as the EVENT STREAM it is, and answer the four questions a log is actually opened for: the execution TIMELINE, WHERE THE TIME WENT, W..."
-        },
-        {
-          "name": "sfi.history_tracking_gaps",
-          "description": "Compliance audit: 'which sensitive fields have no field-history tracking enabled?'."
+          "name": "sfi.compare_profile_across_vaults",
+          "description": "Given a Profile name and two registered vault aliases, returns per-grant-category drift - `grantDiffs.objectPermissions`, `.fieldPermissions`, `.tabVisibilities`, `.apexClassAccesses`, `.userPermissions`. Each `GrantDiff` carries `targetId`, `side` (`'A' | 'B' | 'both'`), `valueA`, `valueB`.",
+          "core": false,
+          "readOnly": true,
+          "livePlane": "never"
         }
       ]
     }

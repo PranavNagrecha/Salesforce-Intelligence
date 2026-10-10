@@ -709,3 +709,46 @@ describe('extractOmniUiCard', () => {
     });
   });
 });
+
+describe('FlexCard custom-label references (B08)', () => {
+  it('FAIL-BEFORE/PASS-AFTER: a {Label.X} merge token in an action URL mints a references edge to CustomLabel:X', async () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<OmniUiCard xmlns="http://soap.sforce.com/2006/04/metadata">
+    <authorName>Developer</authorName>
+    <isActive>true</isActive>
+    <name>InvoiceTile</name>
+    <omniUiCardType>Parent</omniUiCardType>
+    <dataSourceConfig>${esc({ dataSource: {} })}</dataSourceConfig>
+    <propertySetConfig>${esc({
+      states: [
+        {
+          name: 'Active',
+          components: {
+            layer0: {
+              children: [
+                {
+                  element: 'action',
+                  property: { stateAction: { type: 'Web Page', url: '{Label.Invoice_Portal_URL}/{recordId}' } },
+                },
+              ],
+            },
+          },
+        },
+      ],
+    })}</propertySetConfig>
+    <versionNumber>1</versionNumber>
+</OmniUiCard>`;
+    const { dir, path } = await writeTempCardXml('InvoiceTile_Developer_1.ouc-meta.xml', xml);
+    try {
+      const result = await extractOmniUiCard(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const labels = result.value.edges.filter((e) => e.toId.startsWith('CustomLabel:'));
+      expect(labels.map((e) => [e.toId, e.edgeType])).toEqual([
+        ['CustomLabel:Invoice_Portal_URL', 'references'],
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

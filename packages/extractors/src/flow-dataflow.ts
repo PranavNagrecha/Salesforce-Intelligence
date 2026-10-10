@@ -557,3 +557,80 @@ export const traceValueReference = (
     depthCapped: acc.depthCapped,
   };
 };
+
+// ---------------------------------------------------------------------------
+// Formula resources that compare a field to a literal
+// ---------------------------------------------------------------------------
+
+/**
+ * One `<formulas>` resource that names a record field AND a quoted literal.
+ * Flat (scalars and scalar arrays only) so it renders into vault frontmatter.
+ */
+export interface FlowFormulaValueRef {
+  /** The formula resource's `<name>`. */
+  readonly name: string;
+  /** Every `{Object}.{Field}` the expression resolves to (heuristic trace). */
+  readonly fields: readonly string[];
+  /** Every quoted string literal in the expression, deduped. */
+  readonly literals: readonly string[];
+}
+
+/**
+ * A `field` ↔ `value` pair a formula resource compares directly:
+ * `ISPICKVAL(ref, 'v')`, `INCLUDES(ref, 'v')`, `[TEXT(]ref[)] = 'v'` (and
+ * `<>`, `!=`, `==`, either side). A literal in no pair is still in the
+ * formula's `literals` — a CASE() arm, for example — so a consumer can say
+ * "mentions" without claiming a proven comparison.
+ */
+export interface FlowFormulaComparison {
+  readonly formula: string;
+  readonly field: string;
+  readonly value: string;
+}
+
+const QUOTED = String.raw`(?:'((?:[^'\\]|\\.)*)'|"((?:[^"\\]|\\.)*)")`;
+const REF = String.raw`(?:TEXT\(\s*)?\{!([^}]+)\}\s*\)?`;
+const PAIR_PATTERNS: readonly RegExp[] = [
+  new RegExp(String.raw`(?:ISPICKVAL|INCLUDES)\(\s*${REF}\s*,\s*${QUOTED}\s*\)`, 'gi'),
+  new RegExp(String.raw`${REF}\s*(?:==|=|<>|!=)\s*${QUOTED}`, 'gi'),
+];
+const REVERSED_PAIR = new RegExp(String.raw`${QUOTED}\s*(?:==|=|<>|!=)\s*${REF}`, 'gi');
+
+/**
+ * Flow formula resources that test a record field against a literal
+ * (`ISPICKVAL({!$Record.Status__c}, 'Closed')`). No edge carries these: a
+ * formula resource's field reads reach the graph only when a DML element
+ * consumes the formula, so a picklist value tested only inside a formula was
+ * invisible to every value-removal check. Formulas with no quoted literal or no
+ * resolvable field are omitted (they cannot name a field's value).
+ */
+export const collectFormulaValueRefs = (
+  index: FlowDataflowIndex,
+): { refs: FlowFormulaValueRef[]; comparisons: FlowFormulaComparison[] } => {
+  const out: FlowFormulaValueRef[] = [];
+  const comparisons: FlowFormulaComparison[] = [];
+  for (const [name, expression] of index.formulas) {
+    const literals = [
+      ...new Set(
+        [...expression.matchAll(new RegExp(QUOTED, 'g'))].map((m) => m[1] ?? m[2] ?? ''),
+      ),
+    ].filter((l) => l.length > 0);
+    if (literals.length === 0) continue;
+    const fields = traceValueReference(index, name).sources.map((s) => s.field);
+    if (fields.length === 0) continue;
+    const addPair = (ref: string | undefined, value: string | undefined): void => {
+      if (ref === undefined || value === undefined || value.length === 0) return;
+      for (const s of traceValueReference(index, ref).sources) {
+        if (!comparisons.some((c) => c.formula === name && c.field === s.field && c.value === value)) {
+          comparisons.push({ formula: name, field: s.field, value });
+        }
+      }
+    };
+    for (const re of PAIR_PATTERNS) {
+      for (const m of expression.matchAll(re)) addPair(m[1], m[2] ?? m[3]);
+    }
+    for (const m of expression.matchAll(REVERSED_PAIR)) addPair(m[3], m[1] ?? m[2]);
+    out.push({ name, fields, literals });
+  }
+  return { refs: out, comparisons };
+};

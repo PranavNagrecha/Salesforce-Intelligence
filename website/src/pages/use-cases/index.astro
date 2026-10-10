@@ -1,88 +1,105 @@
 ---
-import DocPage from "../../layouts/DocPage.astro";
+import Base from "../../layouts/Base.astro";
+import CtaBlock from "../../components/CtaBlock.astro";
 import site from "../../data/site.ts";
+import "../../styles/pages.css";
 
-const title = "Salesforce Org Intelligence Use Cases for Admins, Developers & Architects";
+const title = "Salesforce Use Cases for Admins, Developers & Architects";
 const description =
-  "See how Salesforce teams use sf-intelligence for metadata analysis, dependency mapping, impact analysis, permissions, sharing and agent readiness.";
+  "What people use sf-intelligence for: deleting fields safely, tracing dependencies, explaining flows, fixing access, reviewing deployments and learning new orgs.";
 
-const cases = [
-  { slug: "salesforce-metadata-analysis", tag: "metadata", title: "Salesforce metadata analysis", blurb: "Search and explain schema, fields, Flows, Apex, permissions, integrations, and OmniStudio from a local org vault." },
-  { slug: "salesforce-dependency-analysis", tag: "dependencies", title: "Salesforce dependency analysis", blurb: "Trace what depends on a field, object, Flow, Apex class, permission set, or package before you change it." },
-  { slug: "impact-analysis", tag: "impact", title: "Impact analysis", blurb: "What breaks if you delete a field, object, Flow, or Apex class? Dependency tracing with confidence tiers." },
-  { slug: "where-is-a-field-used", tag: "where-used", title: "Where is a field used?", blurb: "Find every place a Salesforce field is referenced - Flows, Apex, layouts, reports, validation rules - from the dependency graph plus a source grep." },
-  { slug: "what-breaks-if-you-delete-a-field", tag: "safe-delete", title: "What breaks if you delete a field?", blurb: "Simulate a delete before you make it. See every dependent component, with honest coverage caveats on what static analysis can miss." },
-  { slug: "explain-a-salesforce-flow", tag: "explain", title: "Explain a Salesforce flow", blurb: "Ask what a specific Flow actually does in plain English - its trigger, decisions, and the components it touches." },
-  { slug: "sharing-troubleshooting", tag: "access", title: "Sharing & visibility", blurb: "Why can't a user see a record? Who can edit a field? Trace Profiles, Permission Sets, and the sharing cascade." },
-  { slug: "claude-salesforce-mcp", tag: "agents", title: "Claude Salesforce MCP", blurb: "Register a read-only Salesforce MCP server in Claude Code, Claude Desktop, Cursor, Codex, or any MCP client." },
-  { slug: "agent-readiness-audit", tag: "AI-ready", title: "Agent-readiness audit", blurb: "Compose tech debt, unused metadata, org risk, PII, guest exposure, and AI exposure into one offline Agentforce prep pass." },
+const groups = [
+  {
+    label: "Before you change something",
+    cases: [
+      { slug: "what-breaks-if-you-delete-a-field", title: "What breaks if I delete this field?", text: "Every flow, formula, roll-up and class that depends on it, plus what wasn’t checked." },
+      { slug: "impact-analysis", title: "What breaks if I change this?", text: "Turning off a flow, changing a class or deploying a release: blocking, review first or go." },
+      { slug: "where-is-a-field-used", title: "Where is this field used?", text: "Every component that reads, writes or shows a field, in one question." },
+      { slug: "salesforce-dependency-analysis", title: "Map what depends on what", text: "Trace a field, flow or Apex class in both directions." },
+    ],
+  },
+  {
+    label: "When something is wrong",
+    cases: [
+      { slug: "sharing-troubleshooting", title: "Why can’t this user see it?", text: "The profile, permission or sharing rule that decides access, checked in Salesforce’s order." },
+      { slug: "explain-a-salesforce-flow", title: "Explain this flow to me", text: "When a flow starts, what it changes and what happens if it fails." },
+    ],
+  },
+  {
+    label: "When the org is new to you",
+    cases: [
+      { slug: "salesforce-metadata-analysis", title: "Understand an org you didn’t build", text: "A tour of the org, a brief on any object, and a data dictionary." },
+      { slug: "consultants", title: "Learn a client’s org in an afternoon", text: "Discovery, documentation and pre-deploy reviews for consultants." },
+    ],
+  },
+  {
+    label: "Planning for AI",
+    cases: [
+      { slug: "claude-salesforce-mcp", title: "Ask Claude about your org", text: "Set it up in Claude, Cursor, VS Code or Codex and ask in plain words." },
+      { slug: "agent-readiness-audit", title: "Is the org ready for AI agents?", text: "Sensitive fields, agent setup, broad access and debt, before you switch an agent on." },
+    ],
+  },
 ];
 
+const all = groups.flatMap((g) => g.cases);
 const jsonld = [
   {
     "@type": "CollectionPage",
-    name: "Salesforce use cases",
+    "@id": `${site.url}/use-cases#collection`,
+    name: "sf-intelligence use cases",
     description,
     isPartOf: { "@id": `${site.url}/#website` },
-  },
-  {
-    "@type": "ItemList",
-    itemListElement: cases.map((c, i) => ({
-      "@type": "ListItem",
-      position: i + 1,
-      name: c.title,
-      url: `${site.url}/use-cases/${c.slug}`,
-    })),
+    mainEntity: {
+      "@type": "ItemList",
+      itemListElement: all.map((c, i) => ({
+        "@type": "ListItem",
+        position: i + 1,
+        name: c.title,
+        url: `${site.url}/use-cases/${c.slug}`,
+      })),
+    },
   },
 ];
 ---
 
-<DocPage
-  title={title}
-  description={description}
-  path="/use-cases"
-  heading="Use cases"
-  intro={`The operational problems Salesforce teams actually search for - each one an intent-matched page that answers the question and shows the sf-intelligence tools that solve it. Offline, read-only, grounded in your real metadata.`}
-  crumbs={[{ label: "use-cases", href: "/use-cases" }]}
-  breadcrumbs={[{ name: "Use cases", path: "/use-cases" }]}
-  jsonld={jsonld}
->
-  <section>
-    <div class="container">
-      <div class="hero-demo" style="margin:0 0 34px;">
-        <p class="hero-demo-kicker">try any of these on a demo org first - no org, no auth</p>
-        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
-        <p class="hero-demo-note">One command serves a synthetic "Verdant Energy" org over MCP - 12 custom objects with Flows, Apex, profiles, sharing rules, and OmniStudio wired up - so every use case below has something real to answer against. Fully offline: no Salesforce login, no <code>sf</code> CLI, nothing to configure. <a href="/getting-started#demo">more on the demo →</a></p>
-      </div>
-      <div class="grid cols-3">
-        {cases.map((c) => (
-          <article class="card">
-            <div class="tagn">{c.tag}</div>
-            <h3><a href={`/use-cases/${c.slug}`}>{c.title}</a></h3>
-            <p>{c.blurb}</p>
-          </article>
-        ))}
-        <article class="card">
-          <div class="tagn">safety</div>
-          <h3><a href="/ai-safety">Is AI safe on my org?</a></h3>
-          <p>Offline, read-only, fail-closed - why a local metadata vault is the low-risk way to point an AI agent at Salesforce. No writes, no data egress.</p>
-        </article>
-      </div>
-      <h2 class="head screen-type" style="font-size:clamp(1.5rem,3.5vw,2rem); margin-top:48px;">Compare</h2>
-      <p class="sec-intro">How sf-intelligence stacks up against first-party Salesforce MCP and the commercial org-intelligence tools.</p>
-      <p style="margin-top:16px; display:flex; gap:12px; flex-wrap:wrap;">
-        <a class="btn btn-ghost" href="/compare">› compare hub</a>
-        <a class="btn btn-ghost" href="/compare/salesforce-dx-mcp">› vs Salesforce MCP</a>
-        <a class="btn btn-ghost" href="/compare/elements-cloud">› vs Elements.cloud</a>
-        <a class="btn btn-ghost" href="/compare/dx0">› vs dx0</a>
-        <a class="btn btn-ghost" href="/compare/hubbl">› vs Hubbl</a>
-        <a class="btn btn-ghost" href="/compare/metazoa">› vs Metazoa</a>
-        <a class="btn btn-ghost" href="/compare/sweep">› vs Sweep</a>
-      </p>
-      <p class="center" style="margin-top:28px; display:flex; gap:12px; justify-content:center; flex-wrap:wrap;">
-        <a class="btn btn-ghost" href="/capabilities">› full capability map</a>
-        <a class="btn btn-solid" href="/getting-started">get started</a>
-      </p>
+<Base title={title} description={description} path="/use-cases" breadcrumbs={[{ name: "Use cases", path: "/use-cases" }]} jsonld={jsonld}>
+  <section class="page-hero">
+    <div class="wrap">
+      <nav class="crumbs" aria-label="Breadcrumb">
+        <a href="/">Home</a><span class="sep" aria-hidden="true">/</span><a href="/use-cases">Use cases</a>
+      </nav>
+      <h1>What people use it for</h1>
+      <p class="lede">Each page shows the question in plain words, a real answer from the demo org, and what the tool can and can’t see. Pick the job you’re doing.</p>
     </div>
   </section>
-</DocPage>
+
+  <div class="page-body">
+    <div class="wrap">
+      {groups.map((g) => (
+        <section class="block" aria-label={g.label}>
+          <h2>{g.label}</h2>
+          <div class="card-grid">
+            {g.cases.map((c) => (
+              <article class="new-card">
+                <h3><a href={`/use-cases/${c.slug}`}>{c.title}</a></h3>
+                <p>{c.text}</p>
+              </article>
+            ))}
+          </div>
+        </section>
+      ))}
+
+      <section class="block" aria-labelledby="more">
+        <h2 id="more">Still deciding?</h2>
+        <ul class="link-list">
+          <li><a href="/demo">See real answers on the demo org</a><span> · no install needed</span></li>
+          <li><a href="/compare">Compare with other Salesforce tools</a></li>
+          <li><a href="/ai-safety">Is AI safe on my Salesforce org?</a></li>
+          <li><a href="/capabilities">Everything it can answer</a></li>
+        </ul>
+      </section>
+
+      <CtaBlock />
+    </div>
+  </div>
+</Base>

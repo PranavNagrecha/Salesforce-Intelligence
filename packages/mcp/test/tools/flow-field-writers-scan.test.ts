@@ -75,7 +75,7 @@ describe('scanFlowXml — read/write scoping', () => {
       ].join('\n'),
     );
     expect(scanFlowXml(xml, 'Ns__Obj__c', 'My_Field__c')).toEqual([
-      { fieldApiName: 'My_Field__c', mechanism: 'inputAssignments' },
+      { fieldApiName: 'My_Field__c', mechanism: 'inputAssignments', objectScope: 'scoped' },
     ]);
   });
 
@@ -98,7 +98,7 @@ describe('scanFlowXml — read/write scoping', () => {
       ].join('\n'),
     );
     expect(scanFlowXml(xml, 'Ns__Obj__c', 'My_Field__c')).toEqual([
-      { fieldApiName: 'My_Field__c', mechanism: 'assignToReference' },
+      { fieldApiName: 'My_Field__c', mechanism: 'assignToReference', objectScope: 'scoped' },
     ]);
   });
 });
@@ -408,6 +408,7 @@ const resultFixture = (
   truncationCause: 'none',
   scannedCount: 0,
   totalCount: 0,
+  otherObjectMatchesDropped: 0,
   ...over,
 });
 
@@ -435,5 +436,38 @@ describe('describeSupplementalFlowWriterScanBoundary', () => {
     expect(note).not.toContain('SFI_FLOW_WRITER_SCAN_MAX');
     expect(note).not.toContain('CAPPED at');
     expect(note).not.toContain('un-scanned tail');
+  });
+});
+
+// ===========================================================================
+// FAIL-BEFORE/PASS-AFTER — the shared scan ignored the DML's own object, so a
+// Flow that writes `Status__c` on a Task was reported as a writer of
+// `Case.Status__c` by why_field_changed / field_360 / safe_to_delete_field.
+// ===========================================================================
+
+describe('FAIL-BEFORE/PASS-AFTER: scanFlowXml scopes inputAssignments to the DML object', () => {
+  const dml = (inner: string): string =>
+    `<Flow>${inner}<start><object>Case</object><triggerType>RecordAfterSave</triggerType></start></Flow>`;
+  const assign = '<inputAssignments><field>Status__c</field><value><stringValue>Done</stringValue></value></inputAssignments>';
+
+  it('drops a same-named field written on a different object', () => {
+    const xml = dml(`<recordCreates><name>Make_Task</name>${assign}<object>Task</object></recordCreates>`);
+    expect(scanFlowXml(xml, 'Case', 'Status__c')).toEqual([]);
+  });
+
+  it('keeps a write whose DML object, $Record or typed variable resolves to the object', () => {
+    expect(
+      scanFlowXml(dml(`<recordUpdates><name>U</name>${assign}<object>Case</object></recordUpdates>`), 'Case', 'Status__c'),
+    ).toEqual([{ fieldApiName: 'Status__c', mechanism: 'inputAssignments', objectScope: 'scoped' }]);
+    expect(
+      scanFlowXml(dml(`<recordUpdates><name>U</name>${assign}<inputReference>$Record</inputReference></recordUpdates>`), 'Case', 'Status__c'),
+    ).toEqual([{ fieldApiName: 'Status__c', mechanism: 'inputAssignments', objectScope: 'scoped' }]);
+  });
+
+  it('marks a write whose object cannot be resolved as a lead, not a confirmed writer', () => {
+    const xml = dml(`<recordUpdates><name>U</name>${assign}<inputReference>untypedThing</inputReference></recordUpdates>`);
+    expect(scanFlowXml(xml, 'Case', 'Status__c')).toEqual([
+      { fieldApiName: 'Status__c', mechanism: 'inputAssignments', objectScope: 'unresolved' },
+    ]);
   });
 });

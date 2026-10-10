@@ -5,7 +5,7 @@ import type {
   ExtractionResult,
   Node,
 } from '@sf-intelligence/contracts';
-import { err, ok, type Result } from '@sf-intelligence/core';
+import { err, mergeWriteValueEdges, ok, type Result } from '@sf-intelligence/core';
 
 import {
   type DuplicateSourceSummary,
@@ -972,6 +972,11 @@ export const importExtractionResults = async (
   // relationship map is built from canonical ids, and it only emits targets that
   // match a real vaulted CustomField — resolve or drop, never a dangling guess.
   mintRelationshipTraversalEdges(allNodes, allEdges);
+  // One component writing a field in several places (an approval process's
+  // submit + approve + reject updates; a Flow's create + update) shares ONE
+  // graph key — fold every written value into the edge that survives the
+  // first-writer-wins insert, after canonicalization so the keys are final.
+  mergeWriteValueEdges(allEdges);
 
   const nodeOutcome = await commitBatched(connection, allNodes, insertNode);
   if (!nodeOutcome.ok) {

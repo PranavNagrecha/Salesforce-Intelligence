@@ -21,6 +21,7 @@ interface Props {
   /** ISO date of the last meaningful content change. */
   dateModified?: string;
 }
+/* Extra <head> content (page-specific JSON-LD, preloads) goes in the "head" slot. */
 
 const {
   title, description, path, breadcrumbs, jsonld, ogImage, index = true,
@@ -43,14 +44,15 @@ const {
       datePublished={datePublished}
       dateModified={dateModified}
     />
+    <slot name="head" />
   </head>
   <body>
     <a class="skip" href="#main">Skip to content</a>
-    <Header />
+    <Header path={path} />
     <main id="main">
       <slot />
     </main>
     <Footer />
-    <script src="/assets/main.js" defer is:inline></script>
+    <script src="../scripts/site.ts"></script>
   </body>
 </html>

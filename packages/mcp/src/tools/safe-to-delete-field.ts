@@ -48,8 +48,9 @@
  *   - `review` if the graph would otherwise be `safe` but the evidence is not
  *     provably complete — either coverage is incomplete, or the vault was BUILT
  *     by an older sf-intelligence than the one running (`builderVersionCaveat`:
- *     the roll-up / condition / traversal edge families added in 0.3.0 are
- *     absent from an older vault, so their absence proves nothing). Both mean
+ *     the edge families added since that build — named from the shared
+ *     `EDGE_FAMILIES_BY_VERSION` table — are absent, so their absence proves
+ *     nothing). Both mean
  *     "not proven safe"; treat as **not permission to delete**.
  *   - `blocking` if ANY reason carries `blocking`.
  *   - `risky` if no `blocking` but at least one non-unknown `risky`.
@@ -152,15 +153,15 @@ import type {
   Node,
   TrustSummary,
 } from '@sf-intelligence/contracts';
-import { compareVersions, err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listChildren, listEdges } from '@sf-intelligence/graph';
+import { err, ok, type Result } from '@sf-intelligence/core';
+import { countNodesByType, getNodeById, listChildren, listEdges } from '@sf-intelligence/graph';
 import {
   detectPiiClassification,
   isRegulatedPiiClassification,
   type PiiCategory,
 } from '@sf-intelligence/patterns';
 import type { ExecCommand } from '@sf-intelligence/tooling-api';
-import { buildMixedFreshness } from '@sf-intelligence/vault';
+import { buildCoverageEntries, buildMixedFreshness } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import { mdTable } from '../answer-render.js';
@@ -171,10 +172,25 @@ import {
   buildUsageSourceCoverageCaveat,
   type CoverageCaveat,
 } from './coverage-trust.js';
+import {
+  buildCheckedCategories,
+  type CheckedCategory,
+  DELETE_CATEGORY_FAMILIES,
+  omniCallerContext,
+  type OmniCallerContext,
+  type OmniCallerCounts,
+  referrerRunState,
+  refineDeleteTier,
+} from './delete-safety-tiers.js';
 import { classifyEdgeSemantics } from './edge-semantics-classify.js';
 import { buildSafeToDeleteEvidenceEnvelope } from './evidence-envelope.js';
 import { readFactBlock, type FactsBlock } from './facts-block.js';
 import { normalizeFieldId } from './field-360.js';
+import {
+  NAME_SCAN_FAMILIES,
+  type NameOnlyFieldMatch,
+  scanNameOnlyFieldReferences,
+} from './field-name-source-scan.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
 import { scanFlowConditionFieldReaders } from './flow-condition-field-readers-scan.js';
 import { scanSupplementalFlowFieldWriters } from './flow-field-writers-scan.js';
@@ -199,8 +215,21 @@ import {
   reportDashboardUsageDetail,
   type ReportDashboardEvidence,
 } from './report-dashboard-usage.js';
+import {
+  reportTypeColumnNote,
+  reportTypesWithColumn,
+  reportTypesWithUnattributedColumnNamed,
+  reportTypeScanGap,
+  scanReportTypeColumns,
+} from './report-type-columns.js';
 import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
 import { indexRestatedConditionEdges } from './restated-condition-edges.js';
+import { findRuleFilterPathGaps } from './rule-filter-path-gaps.js';
+import {
+  findUnreferencedFieldUpdates,
+  type UnreferencedFieldUpdate,
+} from './unreferenced-field-updates.js';
+import { assessVaultFreshness, builderStaleCaveat, edgeFamilySince } from './vault-freshness.js';
 
 /** Canonical id prefix for the CustomField node type. */
 const CUSTOM_FIELD_PREFIX = 'CustomField:';
@@ -234,6 +263,7 @@ const CATEGORY_ORDER = [
   'analytics',
   'ui',
   'frontend',
+  'omnistudio',
   // OBJECT-TIER categories. Reached only through the four object-tier edge
   // types added to `EDGE_SEMANTICS` for `object_360` (`lookupTo`, `triggersOn`,
   // `parentOf`, `sharedWith`). None of those edge types lands on a CustomField
@@ -387,6 +417,19 @@ export interface SafeToDeleteFieldExample {
    * stamps.
    */
   readonly via?: 'flow-condition-reads-scan' | 'flow-field-writers-scan';
+  /**
+   * The referrer's declared run state when the vault records one (Flow
+   * `status`, `Active`/`Inactive` for a rule, OmniStudio component or DLRS
+   * definition). Present so an inactive blocker reads as "delete this version
+   * first", not "this will break at runtime".
+   */
+  readonly status?: string;
+  /** OmniStudio only: the components that call this referrer (max 5, active first). */
+  readonly calledBy?: readonly ComponentId[];
+  /** OmniStudio only: how many callers there are and how many of them run. */
+  readonly callers?: OmniCallerCounts;
+  /** Apex only: the field is named only in a SOQL string literal (not compiler-checked). */
+  readonly mechanism?: 'soql-string-literal';
 }
 
 /**
@@ -416,16 +459,41 @@ export interface SafeToDeleteFieldOutput {
   readonly fieldId: ComponentId;
   readonly verdict: Verdict;
   readonly reasoning: readonly SafeToDeleteFieldReason[];
+  /**
+   * ADM-5. Present only when `verdict` is `review` with an EMPTY `reasoning`:
+   * names what produced the verdict (a coverage gap, an older builder, live
+   * population) so "review" never arrives with no stated cause.
+   */
+  readonly reviewBecause?: string;
+  /** ADM-5: custom ReportTypes listing this field as a column (no graph edge exists for it). */
+  readonly reportTypeColumns?: readonly string[];
+  /**
+   * Every delete category checked, INCLUDING the empty ones, with its referrer
+   * count and `found` / `none-found` / `partially-checked` (a capped retrieve:
+   * the retrieved members were checked, `retrievedOf` says how many) /
+   * `not-checked` (a coverage gap behind an empty category). The `name-match`
+   * row is the source name scan behind `nameOnlyMatches`. `reasoning` lists
+   * only categories with referrers.
+   */
+  readonly checkedCategories?: readonly CheckedCategory[];
+  /** A03: workflow field updates that set this field but that nothing fires. */
+  readonly unreferencedFieldUpdates?: readonly UnreferencedFieldUpdate[];
+  /**
+   * B10: Apex / OmniStudio source that names this field's API name with no
+   * modeled edge (dynamic-SOQL field lists, OmniStudio JSON paths). Object
+   * NOT verified; Salesforce does not block the delete; `review`.
+   */
+  readonly nameOnlyMatches?: readonly NameOnlyFieldMatch[];
   readonly coverageCaveat?: CoverageCaveat;
   /**
    * UPGRADE PATH: present when the vault was BUILT by an older sf-intelligence
    * than the one now running — i.e. the vault predates extractors this build
    * has. Unlike `coverageCaveat` (which reports what the refresh did not
    * RETRIEVE), this reports what the refresh could not EXTRACT from what it
-   * did retrieve: the roll-up coupling, condition-firer and resolved
-   * formula-traversal edges added in 0.3.0 are simply absent from an older
-   * vault, so a field whose only dependency is one of those reads as `safe`
-   * with nothing to warn the reader. Verdict-affecting in one direction only:
+   * did retrieve: edge families added after the vault's builder (named from
+   * the shared `EDGE_FAMILIES_BY_VERSION` table) are simply absent, so a field
+   * whose only dependency is one of those reads as `safe` with nothing to
+   * warn the reader. Verdict-affecting in one direction only:
    * an otherwise-`safe` verdict is routed to `review` (not proven safe), the
    * same treatment incomplete coverage gets. Also mirrored into
    * `trust.limitations` so the proposal artifact discloses it.
@@ -549,8 +617,8 @@ export const classifyEdge = (
  */
 const CATEGORY_NOTES: Readonly<Record<ReasonCategory, string>> = Object.freeze(
   {
-    apex: 'Apex classes and triggers reference this field. Parsed-confidence matches (the default-on Apex AST pass — dot-access plus inline static SOQL SELECT/WHERE/ORDER BY/GROUP BY fields and constant-string Database.query literals) are real references; heuristic-confidence matches (apex-scanner regex fallback) may include false positives — spot-check those before deleting. String-BUILT dynamic SOQL remains invisible either way.',
-    flow: 'Flow definitions read or write this field. The Flow XML names the field literally; deleting the field will break the Flow at runtime.',
+    apex: 'Apex classes and triggers reference this field. A parsed reference (AST: dot-access, inline static SOQL) is a compile-time dependency — Salesforce refuses the delete, so it is `blocking`. A field named only in a SOQL string literal (e.g. a constant handed to Database.query; `mechanism: soql-string-literal`) is not compiler-checked: the delete succeeds and the query fails at runtime, so it is `risky`, as is a heuristic-only (regex) match. String-BUILT dynamic SOQL remains invisible either way.',
+    flow: 'Flow versions read or write this field. Salesforce refuses the delete while ANY version references it — an Obsolete/Draft version too (its example carries `status`; it does not run, but must be deleted first). An Active one also breaks at runtime.',
     condition:
       'A condition EVALUATES this field. Seven firer families mint these: Flow entry criteria, Flow decisions, validation-rule conditions, workflow-rule criteria, and approval-process, assignment-rule, auto-response-rule and escalation-rule criteria. Each example carries the `firerId` of the component whose criteria it is, so the citation names the actual rule to go change rather than the family list (the example `id` itself is a synthetic ConditionalContext node). Salesforce refuses to delete a field a live condition tests, so this is a hard blocker even when the field appears on no layout and in no formula. The condition is listed but NOT evaluated: sfi does not know whether any record satisfies it.',
     workflow:
@@ -562,7 +630,7 @@ const CATEGORY_NOTES: Readonly<Record<ReasonCategory, string>> = Object.freeze(
     formula:
       'Another formula field references this field — either directly (tokenized from the formula body) or through a cross-object relationship traversal (`Parent__r.Field__c`) resolved against the org\u2019s lookup fields. Each EXAMPLE carries the referring field id, and a traversal-derived one also carries the `traversalPath` it was resolved from. The referencing formula will fail to compile if this field is removed.',
     rollup:
-      'A roll-up summary field on the PARENT object depends on this field in one of three declared roles: `summarizedField` (the roll-up aggregates this field), `summaryForeignKey` (the roll-up is anchored on this master-detail field), or `summaryFilterItem` (the roll-up’s filter tests this field). Each example carries its own `rollupRole`, so the citation names the coupling that actually exists rather than listing the possibilities. Salesforce REFUSES the delete outright while the roll-up exists — delete or repoint the roll-up first. The coupling is declared in the parent object’s metadata, not this field’s, so a search restricted to this object cannot find it.',
+      'A roll-up depends on this field. A DLRS rollup definition (a dlrs__LookupRollupSummary2 record, `type: CustomMetadataRecord`) writes or aggregates it and stops working when it is gone — `review` when the definition is inactive (`status`). Otherwise a native roll-up summary field on the PARENT object depends on this field in one of three declared roles: `summarizedField` (the roll-up aggregates this field), `summaryForeignKey` (the roll-up is anchored on this master-detail field), or `summaryFilterItem` (the roll-up’s filter tests this field). Each example carries its own `rollupRole`, so the citation names the coupling that actually exists rather than listing the possibilities. Salesforce REFUSES the delete outright while the roll-up exists — delete or repoint the roll-up first. The coupling is declared in the parent object’s metadata, not this field’s, so a search restricted to this object cannot find it.',
     integration:
       'An integration surface (external data source, external service) references this field. Removing it may break the outbound or inbound contract.',
     permission:
@@ -574,7 +642,9 @@ const CATEGORY_NOTES: Readonly<Record<ReasonCategory, string>> = Object.freeze(
     ui:
       'A Lightning page (FlexiPage) references this field. Removing the field will leave the page with a broken element.',
     frontend:
-      'A Lightning Web Component, Aura bundle, Visualforce page, or Visualforce component references this field. Heuristic-confidence matches (LWC/Aura scanners) may include false positives; spot-check the bundle source before deleting.',
+      'A Lightning Web Component, Aura bundle, Visualforce page, or Visualforce component references this field. An LWC `@salesforce/schema` import is a compiler-checked reference Salesforce refuses to delete past (`blocking`); heuristic-confidence matches (LWC/Aura scanners) may include false positives (`risky`) — spot-check the bundle source.',
+    omnistudio:
+      'An OmniStudio component (DataMapper, Integration Procedure, OmniScript, FlexCard) names this field as a string. Salesforce does NOT refuse the delete — a running component breaks at runtime (`blocking`); one that does not run (`status: Inactive`) is `review`. A DataMapper runs when an active caller dispatches it (`calledBy`, `callers`), whatever its own active flag says.',
     relationship:
       'A relationship field on another object points AT this object (`lookupTo`). A master-detail parent cannot be deleted while children exist — the platform refuses outright and cascade-deletes the children if you force the relationship away first; a lookup requires the referencing field to go first. Object-tier only: no CustomField carries an incoming `lookupTo` edge.',
     automation:
@@ -608,6 +678,13 @@ const formatExampleCitation = (e: SafeToDeleteFieldExample): string => {
   // dropped dependency as far as they can tell.
   if (e.alsoVia !== undefined && e.alsoVia.length > 0) {
     qualifiers.push(`also via ${[...e.alsoVia].join(', ')}`);
+  }
+  if (e.mechanism === 'soql-string-literal') qualifiers.push('in a SOQL string only');
+  if (e.calledBy !== undefined) {
+    const n = e.callers;
+    qualifiers.push(
+      `called by ${e.calledBy.join(', ')}${n !== undefined ? ` (${n.active} of ${n.total} callers active)` : ''}`,
+    );
   }
   if (e.apiConfirmed === true) qualifiers.push('API-confirmed');
   return qualifiers.length === 0 ? e.id : `${e.id} (${qualifiers.join(', ')})`;
@@ -729,16 +806,6 @@ const applyCoverageToVerdict = (
 ): Verdict => applyCoverageToVerdictShared(verdict, caveat, 'safe', 'review');
 
 /**
- * The release that introduced the dependency edges this tool now cites but a
- * vault built before it does not hold: roll-up coupling edges
- * (`source: rollup-summary`), condition field edges (`ConditionalContext ->
- * CustomField readsFrom`), and import-time resolved formula `__r` traversals
- * plus FlexiPage related-list aliases (`source: relationship-resolver`).
- * Named in the caveat so the reader knows WHAT re-refreshing buys them.
- */
-const EDGE_FAMILIES_ADDED_IN = '0.3.0';
-
-/**
  * UPGRADE PATH: build the stale-builder caveat for a vault that a previous,
  * older sf-intelligence built.
  *
@@ -749,9 +816,9 @@ const EDGE_FAMILIES_ADDED_IN = '0.3.0';
  * were. The missing evidence is the extraction, not the retrieve, so nothing
  * downstream could tell.
  *
- * Reads the running version from `SFI_PLUGIN_VERSION` (set by `sfi mcp` at
- * startup) exactly as `health_check`'s vault-version nudge does — purely
- * local, no network. An absent env var or an unparseable version on either
+ * Reads the running version via the shared `runningVersion()`
+ * (`SFI_PLUGIN_VERSION`, else the bundled build version) — purely local, no
+ * network. An absent env var or an unparseable version on either
  * side yields no caveat: `compareVersions` returns false on malformed input,
  * and a verdict must never be downgraded on a guess.
  *
@@ -762,22 +829,18 @@ const EDGE_FAMILIES_ADDED_IN = '0.3.0';
  * that does not set the var — but it means absence of this caveat is NOT
  * proof the vault is current. `sfi.health_check` is the direct check.
  */
+/** The edge family behind the `sharing` delete category (EDGE_FAMILIES_BY_VERSION). */
+const SHARING_FIELD_EDGE_FAMILY = 'sharing-rule criteria and restriction / scoping rule filter field edges';
+// Fail at module load on a typo, never as a silent "always modeled".
+edgeFamilySince(SHARING_FIELD_EDGE_FAMILY);
+
 const buildBuilderVersionCaveat = (ctx: Context): string | undefined => {
-  const runningVersion = process.env['SFI_PLUGIN_VERSION'];
-  const builtByVersion = ctx.manifest.version;
-  if (runningVersion === undefined || runningVersion === '') return undefined;
-  if (typeof builtByVersion !== 'string' || builtByVersion === '') {
-    return undefined;
-  }
-  if (!compareVersions(builtByVersion, runningVersion)) return undefined;
-  return (
-    `This vault was built by sf-intelligence ${builtByVersion}; you are running ${runningVersion}. ` +
-    `Roll-up coupling, condition (Flow / validation-rule / workflow-rule / approval-process / ` +
-    `assignment-rule / auto-response-rule / escalation-rule criteria) and resolved formula-traversal ` +
-    `dependency edges were added in ${EDGE_FAMILIES_ADDED_IN} and are ABSENT until you re-run ` +
-    `\`sfi refresh\` — a field whose only dependency is one of those cannot be seen here. A verdict ` +
-    `of "safe" is therefore reported as "review" (NOT proven safe) on this vault.`
-  );
+  // The drift decision AND the list of edge families missing from this vault
+  // both come from the shared vault-freshness assessment (one table,
+  // EDGE_FAMILIES_BY_VERSION); only the deletion-specific consequence is added.
+  const line = builderStaleCaveat(assessVaultFreshness(ctx));
+  if (line === undefined) return undefined;
+  return `${line} A verdict of "safe" is therefore reported as "review" (NOT proven safe) on this vault.`;
 };
 
 /**
@@ -1368,10 +1431,35 @@ const coreSafeToDeleteFieldHandler = async (
     resolvedEdges.map((r) => r.edge),
   );
 
+  // Referrers whose blocking reference comes from a version / component that
+  // does not run (Obsolete Flow, inactive rule) — disclosed, never hidden.
+  const inactiveBlockers = new Set<string>();
+  const omniContexts = new Map<string, Promise<OmniCallerContext | null>>();
   // PASS 2 — classify and bucket.
   for (const { edge, fromNode } of resolvedEdges) {
     if (restated.isRestatingCondition(edge)) continue;
-    const { category, verdict } = classifyEdge(edge, fromNode);
+    // A condition's run state is its FIRER's (the synthetic ConditionalContext
+    // carries none): an Obsolete Flow's decision is as dormant as the Flow.
+    const condFirerId = edge.properties['firerId'];
+    let runNode = fromNode;
+    if (fromNode.type === 'ConditionalContext' && typeof condFirerId === 'string') {
+      const firer = await getNodeById(ctx.graph, condFirerId as ComponentId);
+      if (firer.ok && firer.value !== null) runNode = firer.value;
+    }
+    // An invoked OmniStudio referrer: its callers, and (for a DataMapper) a
+    // run state derived from them rather than its own unreliable flag.
+    let omniPending = omniContexts.get(fromNode.id);
+    if (omniPending === undefined) {
+      omniPending = omniCallerContext(ctx.graph, fromNode);
+      omniContexts.set(fromNode.id, omniPending);
+    }
+    const omni = await omniPending;
+    const run = omni?.run ?? referrerRunState(edge, runNode);
+    const { category, verdict } = refineDeleteTier(classifyEdge(edge, fromNode), edge, run) as {
+      category: ReasonCategory;
+      verdict: Verdict;
+    };
+    if (run.active === false && verdict === 'blocking') inactiveBlockers.add(fromNode.id);
     const apiConfirmed = edge.properties['confirmedByApi'] === true;
     // Per-example provenance qualifiers. Each is stamped by exactly one
     // extractor and OMITTED when that extractor did not mint the edge, so the
@@ -1402,6 +1490,13 @@ const coreSafeToDeleteFieldHandler = async (
       ...(rollupRole !== undefined ? { rollupRole } : {}),
       ...(firerId !== undefined ? { firerId } : {}),
       ...(alsoVia !== undefined ? { alsoVia } : {}),
+      ...(run.status !== undefined ? { status: run.status } : {}),
+      ...(edge.properties['mechanism'] === 'soql-string-literal'
+        ? { mechanism: 'soql-string-literal' as const }
+        : {}),
+      ...(omni !== null && category === 'omnistudio' && omni.callers.total > 0
+        ? { calledBy: omni.calledBy, callers: omni.callers }
+        : {}),
     };
     const existing = buckets.get(category);
     if (existing === undefined) {
@@ -1412,6 +1507,10 @@ const coreSafeToDeleteFieldHandler = async (
       });
     } else {
       existing.verdict = promoteVerdict(existing.verdict, verdict);
+      // ONE referrer, one row: a class that both reads and writes the field
+      // reaches it by two edges. Counting both reported 7 Apex referrers where
+      // there were 5 classes and spent example slots on a repeat.
+      if (existing.examples.some((e) => e.id === example.id)) continue;
       existing.count += 1;
       existing.examples.push(example);
     }
@@ -1609,10 +1708,78 @@ const coreSafeToDeleteFieldHandler = async (
     aggregateVerdict(reasoning),
     coverageCaveat,
   );
-  const staticVerdict: Verdict =
-    builderVersionCaveat !== undefined && coverageVerdict === 'safe'
+  // ADM-5: a custom ReportType column mints no edge; read it from source with
+  // the scan unused_fields_deep and field_360 share, so the three agree.
+  const reportTypeScan = objectApi !== null ? await scanReportTypeColumns(ctx) : null;
+  const reportTypeColumnIds =
+    reportTypeScan !== null && objectApi !== null
+      ? reportTypesWithColumn(reportTypeScan, objectApi, node.apiName)
+      : [];
+  // A failed / partial scan is "not checked": never let it read as `safe`.
+  const reportTypeGap =
+    reportTypeScan !== null ? reportTypeScanGap(reportTypeScan, node.apiName) : null;
+  // Failed, partial, or a same-named column on a relationship path that may be
+  // this field: the report-type plane was NOT fully checked for it.
+  const reportTypeUnchecked =
+    reportTypeScan !== null &&
+    (reportTypeScan.status === 'failed' ||
+      (reportTypeScan.status === 'ok' &&
+        (reportTypeScan.incomplete ||
+          reportTypesWithUnattributedColumnNamed(reportTypeScan, node.apiName).length > 0)));
+  // A restriction / scoping rule filter path ending on a field of this name
+  // that no edge resolved (an unresolvable hop, or a vault built before the
+  // path pass): the rule may test THIS field, so the sharing row is not checked.
+  const ruleFilterPathGaps = await findRuleFilterPathGaps(ctx, node.apiName);
+  const versionVerdict: Verdict =
+    (builderVersionCaveat !== undefined ||
+      reportTypeColumnIds.length > 0 ||
+      reportTypeUnchecked ||
+      ruleFilterPathGaps.length > 0) &&
+    coverageVerdict === 'safe'
       ? 'review'
       : coverageVerdict;
+  // A03: a workflow field update that sets this field mints no edge when no
+  // rule uses it, but Salesforce still refuses the delete until it is removed.
+  // An exact (same-object) match blocks; a cross-object name-only match is review.
+  const unfiredUpdates =
+    objectApi !== null ? await findUnreferencedFieldUpdates(ctx, objectApi, node.apiName) : [];
+  const unfiredVerdict: Verdict = unfiredUpdates.reduce<Verdict>(
+    (v, u) => promoteVerdict(v, u.match === 'exact' ? 'blocking' : 'review'),
+    versionVerdict,
+  );
+  // B10: name-only mentions in Apex / OmniStudio source with no edge (dynamic
+  // SOQL field lists, OmniStudio JSON paths). Never blocking: the object is not
+  // verified and Salesforce does not refuse the delete, but it is not `safe`.
+  const allReferrerIds = new Set<string>([
+    ...knownReferrerIds,
+    ...edgesResult.value.map((e) => e.fromId as string),
+  ]);
+  const nameScan = await scanNameOnlyFieldReferences(ctx, node.apiName, allReferrerIds, objectApi);
+  const nameOnlyMatches = nameScan.status === 'scanned' ? nameScan.matches : [];
+  // A family the graph holds but whose source the scan read none of (e.g. a
+  // managed-package DataPack export) was NOT checked by name: say so instead
+  // of reporting the name-match row as `none-found`.
+  const nameScanUnread: string[] = [];
+  if (nameScan.status === 'scanned') {
+    for (const family of NAME_SCAN_FAMILIES) {
+      if ((nameScan.filesByFamily[family] ?? 0) > 0) continue;
+      const held = await countNodesByType(ctx.graph, family as ComponentType);
+      if (held.ok && held.value > 0) nameScanUnread.push(family);
+    }
+  }
+  const staticVerdict: Verdict =
+    nameOnlyMatches.length > 0 ? promoteVerdict(unfiredVerdict, 'review') : unfiredVerdict;
+  const cappedCoverage = buildCoverageEntries(ctx.manifest).filter(
+    (e) => e.capped === true || e.pending === true,
+  );
+  const reportsCap = (ctx.manifest as { readonly reportsCap?: ReportsCapCounts }).reportsCap;
+  const heldAnalytics = new Map<string, number>();
+  if (reportsCap !== undefined) {
+    for (const family of ['Report', 'Dashboard'] as const) {
+      const n = await countNodesByType(ctx.graph, family);
+      if (n.ok) heldAnalytics.set(family, n.value);
+    }
+  }
 
   const dataShape = await readFactBlock(ctx, fieldId, 'fillRate');
 
@@ -1639,6 +1806,12 @@ const coreSafeToDeleteFieldHandler = async (
     // still a verdict computed from incomplete edge families, so the reader is
     // told even though the verdict did not move.
     ...(builderVersionCaveat !== undefined ? [builderVersionCaveat] : []),
+    ...(reportTypeGap !== null ? [reportTypeGap] : []),
+    ...(ruleFilterPathGaps.length > 0
+      ? [
+          `${ruleFilterPathGaps.length} restriction / scoping rule filter path(s) end on a field named \`${node.apiName.slice(node.apiName.lastIndexOf('.') + 1)}\` but could not be resolved to an object (${ruleFilterPathGaps.slice(0, 5).map((g) => `${g.ruleId}: ${g.path}`).join('; ')}). Salesforce refuses to delete a field a rule's filter tests, so the \`sharing\` row is not checked for this field: confirm the path's target object before deleting.`,
+        ]
+      : []),
     // SUPPLEMENTAL-FLOW-EVIDENCE — say which rows are reconstructions and which
     // reconstruction found them; a `blocking` row a caller cannot trace back to
     // an edge is otherwise indistinguishable from a declared dependency.
@@ -1672,6 +1845,36 @@ const coreSafeToDeleteFieldHandler = async (
         ]
       : []),
     REPORT_DASHBOARD_USAGE_CAVEAT,
+    ...(inactiveBlockers.size > 0
+      ? [
+          `${inactiveBlockers.size} blocking referrer(s) do not run today (see each example's \`status\`: an Obsolete/Draft Flow version or an inactive rule). Salesforce still refuses the delete until they are deleted, so the verdict stands — but nothing breaks at runtime from them.`,
+        ]
+      : []),
+    ...(unfiredUpdates.length > 0
+      ? [
+          `${unfiredUpdates.length} workflow field update(s) set this field but no rule or approval process fires them (\`unreferencedFieldUpdates\`): they never run, but delete them before the field.`,
+        ]
+      : []),
+    ...(nameOnlyMatches.length > 0
+      ? [
+          `${nameOnlyMatches.length} Apex / OmniStudio component(s) name \`${node.apiName.slice(node.apiName.lastIndexOf('.') + 1)}\` in source with no modeled reference (\`nameOnlyMatches\`: e.g. a dynamic-SOQL field list or an OmniStudio JSON path). The object is not verified (a same-named field on another object also matches; \`alsoModeledOn\` names one the component already references) and Salesforce will not block the delete, but each may break at runtime — review them.`,
+        ]
+      : []),
+    ...(nameScanUnread.length > 0
+      ? [
+          `The source name scan read no files for ${nameScanUnread.join(', ')} although the vault holds components of that type (e.g. a DataPack export); name-only mentions there were not checked.`,
+        ]
+      : []),
+    ...(nameScan.status === 'scanned' && nameScan.unreadable > 0
+      ? [
+          `The source name scan could not read ${nameScan.unreadable} file(s); name-only mentions in them were not checked.`,
+        ]
+      : []),
+    ...(nameScan.status === 'scanned' && nameScan.truncated
+      ? [
+          'The source name scan stopped at its component limit; more name-only mentions may exist (`sfi.search_apex_source`).',
+        ]
+      : []),
     ...(flsGrantCount > 0
       ? [
           `${flsGrantCount} Profile/PermissionSet FLS grant(s) exist on this field (access, not usage) — excluded from the verdict; see \`sfi.field_access_audit\` or \`sfi.unused_fields_deep\`. Deleting the field drops grants automatically.`,
@@ -1679,6 +1882,7 @@ const coreSafeToDeleteFieldHandler = async (
       : []),
     ...(coverageCaveat !== undefined ? [coverageCaveat.message] : []),
     ...(piiCompliance !== undefined ? [piiCompliance.message] : []),
+    ...(reportTypeColumnIds.length > 0 ? [reportTypeColumnNote(reportTypeColumnIds)] : []),
   ];
 
   // CR-CAP-L5: cross-check a `safe` static verdict against live production
@@ -1736,16 +1940,85 @@ const coreSafeToDeleteFieldHandler = async (
           limitations: baseLimitations,
         };
 
+  const reviewBecause =
+    verdict === 'review' && reasoning.length === 0
+      ? [
+          ...(reportTypeColumnIds.length > 0
+            ? [`explicit column of ${reportTypeColumnIds.length} custom report type(s) (see reportTypeColumns)`]
+            : []),
+          ...(coverageCaveat !== undefined
+            ? [`coverage gap: ${coverageCaveat.missingCoverage.length > 0 ? `not retrieved/modeled: ${coverageCaveat.missingCoverage.slice(0, 8).join(', ')}` : coverageCaveat.status} (see coverageCaveat)`]
+            : []),
+          ...(builderVersionCaveat !== undefined ? ['vault built by an older builder (see builderVersionCaveat)'] : []),
+          ...(reportTypeUnchecked ? ['custom report-type columns not fully checked (see trust.limitations)'] : []),
+          ...(ruleFilterPathGaps.length > 0
+            ? [`${ruleFilterPathGaps.length} rule filter path(s) may end on this field (see trust.limitations)`]
+            : []),
+          ...(unfiredUpdates.length > 0
+            ? [`${unfiredUpdates.length} workflow field update(s) set it with no rule firing them (see unreferencedFieldUpdates)`]
+            : []),
+          ...(nameOnlyMatches.length > 0
+            ? [`${nameOnlyMatches.length} source file(s) name it with no modeled edge (see nameOnlyMatches)`]
+            : []),
+          ...(livePopulation !== undefined && livePopulation.populatedCount > 0
+            ? [`${livePopulation.populatedCount} live record(s) populate it (see livePopulation)`]
+            : []),
+        ].join('; ') || 'no static reference was found, but the evidence is not complete enough to call it safe (see trust.limitations)'
+      : undefined;
+
   return ok({
     data: {
       fieldId,
       verdict,
       ...(dataShape !== undefined ? { dataShape } : {}),
       reasoning,
+      ...(reviewBecause !== undefined ? { reviewBecause } : {}),
+      ...(reportTypeColumnIds.length > 0 ? { reportTypeColumns: reportTypeColumnIds } : {}),
+      checkedCategories: buildCheckedCategories(
+        new Map([
+          ...reasoning.map((r) => [r.category as string, r.count] as const),
+          // Unfired field updates are workflow referrers with no edge (A03).
+          ['workflow', (reasoning.find((r) => r.category === 'workflow')?.count ?? 0) + unfiredUpdates.length],
+          // ADM-5: custom ReportType columns are analytics referrers with no edge.
+          ['analytics', (reasoning.find((r) => r.category === 'analytics')?.count ?? 0) + reportTypeColumnIds.length],
+        ]),
+        // A report-type plane not fully checked for this field keeps the
+        // analytics row off `none-found` (see reportTypeUnchecked).
+        [
+          ...(coverageCaveat?.missingCoverage ?? []),
+          ...(reportTypeUnchecked ? ['ReportType'] : []),
+          // An unresolved rule filter path that may end on this field.
+          ...new Set(ruleFilterPathGaps.map((g) => g.ruleId.slice(0, g.ruleId.indexOf(':')))),
+          // A vault built before the sharing criteria / rule-filter field edges
+          // holds none of them: its `sharing` row is not-checked, never none-found.
+          ...(assessVaultFreshness(ctx).missingEdgeFamilies.includes(
+            `${SHARING_FIELD_EDGE_FAMILY} (${edgeFamilySince(SHARING_FIELD_EDGE_FAMILY)})`,
+          )
+            ? (DELETE_CATEGORY_FAMILIES['sharing'] ?? [])
+            : []),
+        ],
+        {
+          cappedFamilies: cappedCoverage.map((e) => e.type),
+          cappedCounts: cappedFamilyCounts(reportsCap, heldAnalytics),
+          extra: [
+            {
+              category: 'name-match',
+              families: NAME_SCAN_FAMILIES,
+              referrers: nameOnlyMatches.length,
+              skipped: nameScan.status === 'skipped',
+              unreadFamilies: nameScanUnread,
+            },
+          ],
+        },
+      ),
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       ...(builderVersionCaveat !== undefined ? { builderVersionCaveat } : {}),
       ...(piiCompliance !== undefined ? { piiCompliance } : {}),
       ...(flsGrantCount > 0 ? { flsGrantCount } : {}),
+      ...(unfiredUpdates.length > 0 ? { unreferencedFieldUpdates: unfiredUpdates } : {}),
+      ...(nameOnlyMatches.length > 0
+        ? { nameOnlyMatches: nameOnlyMatches.slice(0, NAME_ONLY_MATCH_LIMIT) }
+        : {}),
       ...(livePopulation !== undefined ? { livePopulation } : {}),
       ...(rdUsage.usedInReport || rdUsage.usedInDashboard
         ? {
@@ -1759,6 +2032,31 @@ const coreSafeToDeleteFieldHandler = async (
       refreshedAt: ctx.manifest.refreshedAt,
     },
   });
+};
+
+/** Name-only matches listed in the payload (the limitation states the total). */
+const NAME_ONLY_MATCH_LIMIT = 10;
+
+/** `manifest.reportsCap` (the default capped report/dashboard pull). */
+interface ReportsCapCounts {
+  readonly reports?: { readonly total: number; readonly retrieved: number };
+  readonly dashboards?: { readonly total: number; readonly retrieved: number };
+}
+
+const cappedFamilyCounts = (
+  cap: ReportsCapCounts | undefined,
+  held: ReadonlyMap<string, number>,
+): readonly { readonly family: string; readonly retrieved: number; readonly total: number }[] => {
+  // What was CHECKED is what the graph holds; the manifest's retrieved count is
+  // the last pull only (earlier pulls can leave more in the vault).
+  const row = (family: string, c: { readonly retrieved: number; readonly total: number }) => {
+    const retrieved = Math.max(c.retrieved, held.get(family) ?? 0);
+    return { family, retrieved, total: Math.max(c.total, retrieved) };
+  };
+  return [
+    ...(cap?.reports !== undefined ? [row('Report', cap.reports)] : []),
+    ...(cap?.dashboards !== undefined ? [row('Dashboard', cap.dashboards)] : []),
+  ];
 };
 
 /**

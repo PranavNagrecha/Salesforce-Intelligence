@@ -1,38 +1,36 @@
 ---
-import DocPage from "../layouts/DocPage.astro";
+import InfoPage from "../layouts/InfoPage.astro";
+import AnswerCard from "../components/AnswerCard.astro";
+import InstallTabs from "../components/InstallTabs.astro";
+import TryDemo from "../components/TryDemo.astro";
+import CtaBlock from "../components/CtaBlock.astro";
+import FaqBlock from "../components/FaqBlock.astro";
+import { deleteField } from "../data/demo-answers.ts";
 import siteData from "../data/site-data.json";
 import site from "../data/site.ts";
 
-const heading = "A read-only Salesforce MCP server for grounded org intelligence";
-const title = "Salesforce MCP Server for Read-Only Org Intelligence | sf-intelligence";
-const description = `Connect AI assistants to a local Salesforce metadata vault with ${siteData.toolCount} read-only tools for dependencies, permissions, Apex, Flows and impact analysis.`;
-
+const title = "Read-Only, Offline Salesforce MCP Server (Free)";
+const description =
+  "A free Salesforce MCP server that reads your org once and answers offline. It never writes. Works in Claude, Cursor, VS Code + Copilot and Codex.";
+const heading = "A Salesforce MCP server that only reads";
+const dateModified = "2026-10-10";
 const canonical = `${site.url}/mcp`;
 const ORG_ID = `${site.url}/#org`;
 const SOFTWARE_ID = `${site.url}/#software`;
 
-// 40-60 word answer block rendered directly under the H1 (what it is / why
-// this one / what next).
-const intro =
-  `<strong>sf-intelligence</strong> is a free, source-available, read-only Salesforce MCP server. It answers metadata, dependency, permission, Apex, Flow and impact questions from a local, offline vault - never writing to your org. Choose it over DevOps-focused MCP servers when you need grounded, evidence-labelled understanding, not deploys. Then <a href="/getting-started">install sf-intelligence</a> and ask your first org question.`;
-
-// `@id` scope is PER-DOCUMENT — a consumer parsing /mcp cannot resolve an @id
-// that is only defined on the home page, and schema.org has no cross-URL merge.
-// This page previously emitted `{"@type": "SoftwareApplication", "@id": ...}` as
-// a bare "reference", but because it carries a @type it parses as a DEFINITION
-// with every required property missing, which made it the only invalid item on
-// the site — on the site's best-ranking page. So define the entity properly here
-// too. The @id stays identical to the home page's so the two describe one entity.
+// @id scope is per document, so the SoftwareApplication is defined in full
+// here too, with the same @id as the home page.
 const jsonld = [
   {
     "@type": "TechArticle",
     "@id": `${canonical}#article`,
     headline: heading,
     description,
-    author: { "@id": ORG_ID },
+    author: { "@id": `${site.url}/#author` },
     publisher: { "@id": ORG_ID },
-    dateModified: "2026-07-29",
-    mainEntityOfPage: canonical,
+    dateModified,
+    inLanguage: "en",
+    mainEntityOfPage: { "@id": `${canonical}#webpage` },
     about: { "@id": SOFTWARE_ID },
   },
   {
@@ -40,11 +38,11 @@ const jsonld = [
     "@id": SOFTWARE_ID,
     name: "sf-intelligence",
     applicationCategory: "DeveloperApplication",
-    applicationSubCategory: "Salesforce org intelligence MCP server",
+    applicationSubCategory: "Salesforce MCP server",
     operatingSystem: "macOS, Linux, Windows (Node.js 20+)",
     softwareVersion: siteData.version,
     description:
-      "An offline, read-only Salesforce org intelligence MCP server. Ask questions in plain language and get answers grounded in real org metadata: schema, dependencies, permissions, Apex, Flows, integrations, and OmniStudio.",
+      "A free, read-only Salesforce MCP server. It reads an org's metadata once and answers questions about dependencies, automation, access and deployment risk offline, naming every component it relies on.",
     license: `${site.url}/licensing`,
     url: `${site.url}/`,
     downloadUrl: site.npm,
@@ -55,111 +53,104 @@ const jsonld = [
     offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
   },
 ];
+
+const faqs = [
+  {
+    q: "What is a Salesforce MCP server?",
+    a: "MCP (Model Context Protocol) is the standard way AI assistants call outside tools. A Salesforce MCP server gives an assistant like Claude, Cursor or Copilot tools that know about your org, so it can look things up instead of guessing.",
+  },
+  {
+    q: "Why read-only?",
+    a: "So you can point it at production without a second thought. Its job is to explain the org: what depends on what, what runs on save, who can see what. Making changes stays with you and your release tools.",
+  },
+  {
+    q: "Why offline?",
+    a: "Answers come from a snapshot on your computer, so they’re fast, they work without a connection, and your org’s metadata isn’t sent to another service. You refresh the snapshot when the org changes.",
+  },
+  {
+    q: "Can I run it alongside Salesforce’s own MCP servers?",
+    a: "Yes. Theirs act on the org (records, deploys, tests); this one explains it. Many people register both. <a href=\"/compare/salesforce-dx-mcp\">How they differ</a>.",
+  },
+];
 ---
 
-<DocPage
+<InfoPage
   title={title}
   description={description}
   path="/mcp"
   heading={heading}
-  intro={intro}
-  crumbs={[{ label: "mcp", href: "/mcp" }]}
-  breadcrumbs={[{ name: "MCP server", path: "/mcp" }]}
+  lede="sf-intelligence reads your org’s metadata once and answers questions about it from your computer: what breaks if you change something, what runs on save, who can see what. It never writes to Salesforce."
+  crumbs={[{ name: "MCP server", path: "/mcp" }]}
   jsonld={jsonld}
+  dateModified={dateModified}
 >
-  <section>
-    <div class="container">
-      <div class="prose">
+  <div class="answer-first narrow">
+    <span class="label">Short answer</span>
+    <p>sf-intelligence is a free, source-available MCP server for Salesforce. Most Salesforce MCP servers act on the org: they query records, deploy or run tests. This one only reads. It answers impact, automation and access questions from a local snapshot, and names every component an answer relies on.</p>
+  </div>
 
-        <p class="muted" style="font-size:.85rem;">Last updated 2026-07-29</p>
-
-        <h2 id="what">What is a Salesforce MCP server?</h2>
-        <p>The <a href="https://modelcontextprotocol.io" rel="noopener">Model Context Protocol (MCP)</a> lets AI assistants call tools against external systems. A Salesforce MCP server exposes org-aware tools - schema lookup, dependency analysis, permission tracing - that Claude, Cursor, Codex, or any MCP client can invoke during a conversation.</p>
-        <p>Most Salesforce MCP servers are built for <strong>DevOps tasks</strong>: deploy, retrieve, run Apex, execute SOQL. sf-intelligence fills the gap they leave open: <strong>read-only org intelligence</strong> with explicit provenance on every answer.</p>
-
-        <h2 id="different">How sf-intelligence differs</h2>
-        <table class="doc-table">
-          <thead><tr><th>Property</th><th>sf-intelligence</th><th>Typical Salesforce MCP servers</th></tr></thead>
-          <tbody>
-            <tr><td>Write path</td><td><strong>None</strong> - read-only retrieve only</td><td>Often deploy, edit, run Apex/SOQL</td></tr>
-            <tr><td>Default mode</td><td><strong>Offline</strong> - answers from local vault</td><td>Live API calls per question</td></tr>
-            <tr><td>Primary use</td><td>Impact analysis, permissions, documentation</td><td>DevOps, coding, data queries</td></tr>
-            <tr><td>Data leaves your machine</td><td><strong>Never</strong> (vault is local)</td><td>Varies - often cloud-hosted</td></tr>
-            <tr><td>Cost</td><td>Free (MIT + Commons Clause)</td><td>Free official tools or paid SaaS</td></tr>
-          </tbody>
-        </table>
-        <p>See detailed comparisons on the <a href="/compare">compare hub</a> — start with <a href="/compare/salesforce-dx-mcp">vs Salesforce MCP</a> (hosted + DX + Agentforce-as-client).</p>
-
-        <h2 id="demo">Try it without a Salesforce org</h2>
-        <p>You do not need an org, an authenticated CLI, or any configuration to evaluate this. One command serves a built-in <strong>synthetic org</strong> - "Verdant Energy", a fictional solar installer - over MCP. Fully offline, no Salesforce auth, no <code>sf</code> CLI, nothing to connect.</p>
-        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
-        <p>For Claude Desktop, Cursor, Codex, or any other MCP client, the same demo server registers through ordinary stdio config:</p>
-        <div class="code-block"><div class="cb-head"><span class="fname">mcp config</span></div><pre>{'{'}
-  <span class="tok-s">"mcpServers"</span>: {'{'}
-    <span class="tok-s">"sf-intelligence-demo"</span>: {'{'}
-      <span class="tok-s">"type"</span>: <span class="tok-s">"stdio"</span>,
-      <span class="tok-s">"command"</span>: <span class="tok-s">"npx"</span>,
-      <span class="tok-s">"args"</span>: [<span class="tok-s">"-y"</span>, <span class="tok-s">"sf-intelligence"</span>, <span class="tok-s">"demo"</span>]
-    {'}'}
-  {'}'}
-{'}'}</pre></div>
-        <p>Then ask it something a real org question would look like - <em>"what breaks if I delete <code>Widget__c.Status__c</code>?"</em> - and read the citations it returns. When you want it pointed at your own org, the requirements below apply.</p>
-
-        <h2 id="clients">Works with Claude, Cursor, Codex, and more</h2>
-        <p>Register once via stdio transport. The server resolves the vault from your Salesforce DX repo's working directory. For a step-by-step walkthrough, see <a href="/use-cases/claude-salesforce-mcp">Claude Salesforce MCP setup</a>.</p>
-
-        <h3>Claude Code (project-scoped)</h3>
-        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-intelligence mcp</pre></div>
-
-        <h3>Claude Desktop / Cursor / any MCP client</h3>
-        <div class="code-block"><div class="cb-head"><span class="fname">mcp config</span></div><pre>{'{'}
-  <span class="tok-s">"mcpServers"</span>: {'{'}
-    <span class="tok-s">"sf-intelligence"</span>: {'{'}
-      <span class="tok-s">"type"</span>: <span class="tok-s">"stdio"</span>,
-      <span class="tok-s">"command"</span>: <span class="tok-s">"npx"</span>,
-      <span class="tok-s">"args"</span>: [<span class="tok-s">"-y"</span>, <span class="tok-s">"sf-intelligence"</span>, <span class="tok-s">"mcp"</span>]
-    {'}'}
-  {'}'}
-{'}'}</pre></div>
-
-        <h3>Remote read-only HTTP (optional)</h3>
-        <p>For CI or shared read-only access on localhost, <code>sfi serve --http</code> exposes streamable HTTP with bearer-token auth. The live plane is <strong>hard-disabled</strong> over HTTP - remote callers cannot reach your org. Details in the <a href="/configuration#http">configuration reference</a>.</p>
-
-        <h2 id="tools">{siteData.toolCount} read-only tools, plain-language routing</h2>
-        <p>You never memorize tool names. Ask questions like:</p>
-        <ul>
-          <li>"What breaks if I delete the Contact email field?" → <a href="/use-cases/impact-analysis">impact analysis</a></li>
-          <li>"Why can't this user see this record?" → <a href="/use-cases/sharing-troubleshooting">sharing troubleshooting</a></li>
-          <li>"Where is this Apex class used?" → dependency graph + source grep</li>
-          <li>"Generate a data dictionary for this org" → documentation tools</li>
-        </ul>
-        <p>An offline semantic router surfaces a ranked shortlist of the right tools for each question across offline, live, and hybrid planes, and your AI host picks which to run. It fails closed: write requests and prompt injection are refused with a read-only alternative, and a question nothing covers gets an honest gap instead of a lookalike tool. Browse the full <a href="/capabilities">capability map</a> or <a href="/tools">tool reference</a>.</p>
-
-        <h2 id="agent-skills">How MCP tools and Salesforce Agent Skills complement one another</h2>
-        <p>MCP tools and <a href="/agent-skills">Salesforce Agent Skills</a> solve different halves of the same problem, and neither replaces the other. Skills capture <em>intent and workflow</em> - what an admin, developer, or architect is trying to accomplish, and the order to do it in. The read-only MCP tools do the <em>grounded execution</em> - resolving a component, tracing dependencies, and returning evidence-labelled answers from your local vault. Skills call the MCP layer; the MCP layer keeps every step grounded in real metadata. MCP stays the read layer that answers the questions; skills make those answers repeatable.</p>
-
-        <h2 id="safe">Safe for production orgs</h2>
-        <p>Enterprise testers' first question: what does this do to my org? The answer is nothing destructive:</p>
-        <ul>
-          <li>Only <code>sf project retrieve</code> touches Salesforce - metadata read, never write</li>
-          <li>Vault answers make no network calls</li>
-          <li>Live plane is off until you grant per-org consent</li>
-          <li>No telemetry, no phone-home</li>
-        </ul>
-        <p>Full guarantees on the <a href="/trust">trust page</a> and in <a href="/faq#privacy">FAQ</a>.</p>
-
-        <div style="padding-top:36px;">
-          <div class="cta-box">
-            <h2 class="screen-type">Register in 30 seconds.</h2>
-            <p>Free on npm. One read-only retrieve, then ask anything about your org.</p>
-            <div class="cta-actions">
-              <a class="btn btn-solid" href="/getting-started">full install guide</a>
-              <a class="btn btn-ghost" href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">view on npm</a>
-            </div>
-          </div>
-        </div>
-
-      </div>
-    </div>
+  <section class="block" aria-labelledby="differs">
+    <h2 id="differs">How it differs from other Salesforce MCP servers</h2>
+    <table class="doc-table">
+      <thead><tr><th scope="col"><span class="sr-only">Topic</span></th><th scope="col">sf-intelligence</th><th scope="col">Typical Salesforce MCP servers</th></tr></thead>
+      <tbody>
+        <tr><th scope="row">Job</th><td>Explain the org: dependencies, automation, access, deployment risk</td><td>Act on the org: records, queries, deploys, tests</td></tr>
+        <tr><th scope="row">Writes to the org</th><td>Never. There is no write code</td><td>Often, where enabled</td></tr>
+        <tr><th scope="row">Where answers come from</th><td>A snapshot on your computer. Works offline</td><td>Live calls to the org for each question</td></tr>
+        <tr><th scope="row">Evidence</th><td>Names each component, how sure it is, and what it couldn’t check</td><td>Varies</td></tr>
+        <tr><th scope="row">Price</th><td>Free</td><td>Free official tools, or paid services</td></tr>
+      </tbody>
+    </table>
+    <p class="meta-line">Tool by tool: <a href="/compare">all comparisons</a>, starting with <a href="/compare/salesforce-dx-mcp">Salesforce’s own MCP servers</a>.</p>
   </section>
-</DocPage>
+
+  <section class="block" aria-labelledby="try">
+    <h2 id="try">Try it without a Salesforce org</h2>
+    <p>One command adds a made-up demo org, Verdant Energy, to your assistant. No Salesforce login, no Salesforce CLI, nothing to connect.</p>
+    <TryDemo id="mcp-try" />
+    <p>Then ask: <strong>“Can I delete the Amount field on Invoice?”</strong> This is the real answer it gives:</p>
+    <AnswerCard answer={deleteField} level={3} />
+  </section>
+
+  <section class="block" aria-labelledby="connect">
+    <h2 id="connect">Connect your own org</h2>
+    <p>First read the org once, read-only, from your Salesforce project folder: <code>npx -y sf-intelligence init --target-org my-org</code>, then <code>npx -y sf-intelligence refresh</code>. Then register the server with your assistant. Always give it the full path to the snapshot folder (<code>--vault</code>), because assistants start servers from a folder you don’t control.</p>
+    <InstallTabs mode="org" idPrefix="mcp-host" />
+    <p class="meta-line">Step-by-step: <a href="/getting-started">Getting started</a> · <a href="/use-cases/claude-salesforce-mcp">Ask Claude about your org</a></p>
+  </section>
+
+  <section class="block" aria-labelledby="ask">
+    <h2 id="ask">Ask in plain words</h2>
+    <p>You never need a tool name. Your assistant picks from the default set and can reach every other analysis when it needs to.</p>
+    <ul class="ask-list">
+      <li>What breaks if I delete the Status field on Project?</li>
+      <li>Why can’t Installers see Invoices?</li>
+      <li>What runs when a Project is saved?</li>
+      <li>Is this deployment risky?</li>
+    </ul>
+    <p class="meta-line"><a href="/capabilities">Everything it can answer</a> · <a href="/tools">Tools reference</a></p>
+  </section>
+
+  <section class="block" aria-labelledby="safe">
+    <h2 id="safe">Safe on production</h2>
+    <ul class="ticks narrow">
+      <li>Only commands you run, like <code>refresh</code>, contact Salesforce, and they only read</li>
+      <li>Answers from the snapshot make no network calls</li>
+      <li>The optional live mode is off until you turn it on for that org</li>
+      <li>No telemetry by default</li>
+    </ul>
+    <p class="meta-line">The details: <a href="/trust">Trust</a> · <a href="/faq">FAQ</a></p>
+  </section>
+
+  <details class="dev-details">
+    <summary>For developers: serving over HTTP</summary>
+    <p>For CI or shared read-only access on your own machine, <code>sfi serve --http</code> serves the same tools over streamable HTTP with a bearer token. The live mode is always off over HTTP, so remote callers can’t reach your org. See <a href="/configuration">Configuration</a>.</p>
+  </details>
+
+  <section class="block" aria-labelledby="faq">
+    <h2 id="faq">Questions</h2>
+    <FaqBlock faqs={faqs} />
+  </section>
+
+  <CtaBlock />
+</InfoPage>

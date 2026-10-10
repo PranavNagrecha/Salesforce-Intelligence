@@ -319,7 +319,7 @@ const objectRescueRank = (apiName: string): number =>
  * Schema nouns a user attaches to a name as a TYPE hint, not name content —
  * "SSN field", "the payment object", "Contact trigger". Left in the token
  * stream they fuzzy-match unrelated corpus tokens ("object"≈"project") and
- * drag genuine matches below noise, so `stripTypeHintNouns` removes them from
+ * drag genuine matches below noise, so `typeHintStripLadder` removes them from
  * the LEADING/TRAILING edge of the query before tokenization. The RAW query is
  * still used for the whole-name exact pass (a component literally named
  * `SSN_Field__c` stays findable) and for `queryNamesComponentType`, which
@@ -328,11 +328,18 @@ const objectRescueRank = (apiName: string): number =>
 const TYPE_HINT_SINGLE_NOUNS: ReadonlySet<string> = new Set([
   'trigger', 'triggers', 'profile', 'profiles', 'field', 'fields',
   'object', 'objects', 'flow', 'flows', 'component', 'components',
+  // B08 / C10: "<Name> label", "<Name> class", "<Name> checkbox", "<X> records"
+  // are type hints too — left in, they fuzzy-match unrelated names and demote
+  // an exact hit to `ambiguous`. (A label that literally ends in one of these
+  // words still whole-name-matches through the RAW query — see labelExact.)
+  'label', 'labels', 'class', 'classes', 'checkbox', 'picklist',
+  'record', 'records',
 ]);
 /** Two-word type hints, matched as a trailing/leading pair. */
 const TYPE_HINT_NOUN_PAIRS: ReadonlyArray<readonly [string, string]> = [
   ['permission', 'set'], ['permission', 'sets'],
   ['record', 'type'], ['record', 'types'],
+  ['custom', 'label'], ['custom', 'labels'],
 ];
 
 /**
@@ -342,10 +349,22 @@ const TYPE_HINT_NOUN_PAIRS: ReadonlyArray<readonly [string, string]> = [
  * that is NOTHING BUT nouns/articles ("field", "permission set") is returned
  * unchanged so concept-word queries keep their existing behavior (including
  * the generic-type-word suppression below).
+ *
+ * Returns the whole LADDER of forms, least-stripped first: `[raw, after one
+ * strip, after two, …, fully stripped]`. `resolveComponents` uses the first
+ * rung that literally names a component (api name or multi-word label), so a
+ * trailing word that is PART of a real name is never stripped away — "SIS
+ * Contact Record field" keeps "Record" when a field is labelled "… Record",
+ * instead of collapsing onto a shorter sibling labelled "… Contact".
  */
-const stripTypeHintNouns = (raw: string): string => {
-  const words = raw.trim().split(/\s+/);
+const typeHintStripLadder = (raw: string): readonly string[] => {
+  const trimmed = raw.trim();
+  const words = trimmed.split(/\s+/);
   const norm = (w: string): string => w.toLowerCase().replace(/[^a-z0-9]/g, '');
+  const ladder: string[] = [trimmed];
+  const pushRung = (rung: string): void => {
+    if (rung.length > 0 && ladder[ladder.length - 1] !== rung) ladder.push(rung);
+  };
   let start = 0;
   let end = words.length;
   const isPairAt = (i: number): boolean =>
@@ -354,19 +373,86 @@ const stripTypeHintNouns = (raw: string): string => {
     TYPE_HINT_NOUN_PAIRS.some(([a, b]) => norm(words[i]!) === a && norm(words[i + 1]!) === b);
   // Leading: articles, then noun hints ("the trigger ContactSync").
   for (;;) {
-    if (start < end && /^(?:the|a|an)$/i.test(norm(words[start]!))) { start += 1; continue; }
-    if (isPairAt(start) && start + 2 < end) { start += 2; continue; }
-    if (start < end - 1 && TYPE_HINT_SINGLE_NOUNS.has(norm(words[start]!))) { start += 1; continue; }
-    break;
+    if (start < end && /^(?:the|a|an)$/i.test(norm(words[start]!))) { start += 1; }
+    else if (isPairAt(start) && start + 2 < end) { start += 2; }
+    else if (start < end - 1 && TYPE_HINT_SINGLE_NOUNS.has(norm(words[start]!))) { start += 1; }
+    else break;
+    pushRung(words.slice(start, end).join(' '));
   }
   // Trailing: noun hints ("SSN field", "Admin permission set").
   for (;;) {
-    if (isPairAt(end - 2) && end - 2 > start) { end -= 2; continue; }
-    if (end - 1 > start && TYPE_HINT_SINGLE_NOUNS.has(norm(words[end - 1]!))) { end -= 1; continue; }
-    break;
+    if (isPairAt(end - 2) && end - 2 > start) { end -= 2; }
+    else if (end - 1 > start && TYPE_HINT_SINGLE_NOUNS.has(norm(words[end - 1]!))) { end -= 1; }
+    else break;
+    pushRung(words.slice(start, end).join(' '));
   }
-  const kept = words.slice(start, end).join(' ');
-  return kept.length > 0 ? kept : raw;
+  // "<Name> <noun> on <Object>" ("Billing Stage picklist on invoice"): the noun
+  // is a type hint even though "on <Object>" follows it. Left in, it fuzzy-matched
+  // name tokens ("picklist"≈"billing") and held a clean hit below `exact`.
+  const kept = words
+    .slice(start, end)
+    .filter((w, i, arr) => {
+      const next = arr[i + 1];
+      return !(
+        i > 0 &&
+        i + 2 < arr.length &&
+        next !== undefined &&
+        /^(?:on|of|for)$/i.test(next) &&
+        TYPE_HINT_SINGLE_NOUNS.has(norm(w))
+      );
+    })
+    .join(' ');
+  pushRung(kept);
+  return ladder;
+};
+
+/**
+ * Normalized multi-word LABEL -> node indices, built lazily once per index
+ * (labels shorter than 6 normalized chars or without a space are excluded:
+ * a one-word label like "Status" is shared by dozens of fields and must never
+ * fake a whole-name hit). Not persisted — derived from `index.nodes`.
+ */
+const LABEL_MIN_NORM_LEN = 6;
+const spacedLabelNorm = (label: string | null): string | null => {
+  if (label === null || !/\s/.test(label.trim())) return null;
+  const n = normalizeName(label);
+  return n.length >= LABEL_MIN_NORM_LEN ? n : null;
+};
+const labelIndexCache = new WeakMap<ResolveIndex, ReadonlyMap<string, readonly number[]>>();
+const byNormLabel = (index: ResolveIndex): ReadonlyMap<string, readonly number[]> => {
+  const cached = labelIndexCache.get(index);
+  if (cached !== undefined) return cached;
+  const m = new Map<string, number[]>();
+  index.nodes.forEach((n, i) => {
+    const key = spacedLabelNorm(n.label);
+    if (key === null) return;
+    const bucket = m.get(key);
+    if (bucket === undefined) m.set(key, [i]);
+    else bucket.push(i);
+  });
+  labelIndexCache.set(index, m);
+  return m;
+};
+
+/**
+ * The type-hint-stripped form of `query` to score with: the LEAST-stripped
+ * rung of {@link typeHintStripLadder} whose normalized form is some
+ * component's whole api name or multi-word label; the fully stripped form
+ * when no rung names anything. A literal name match on the RAW query always
+ * wins over a match on a shorter, stripped query.
+ */
+const chooseStrippedQuery = (query: string, index: ResolveIndex): string => {
+  const ladder = typeHintStripLadder(query);
+  if (ladder.length === 1) return ladder[0]!;
+  const labels = byNormLabel(index);
+  for (const rung of ladder) {
+    const n = normalizeName(rung);
+    if (n.length < 2) continue;
+    if ((index.byNormName.get(n)?.length ?? 0) > 0 || (labels.get(n)?.length ?? 0) > 0) {
+      return rung;
+    }
+  }
+  return ladder[ladder.length - 1]!;
 };
 
 const TYPE_WEIGHT: Readonly<Partial<Record<ComponentType, number>>> = {
@@ -512,7 +598,22 @@ export const resolveComponents = async (
   // trigger") are TYPE hints, not name content: they are stripped from the
   // token stream (so "SSN field" scores exactly like bare "SSN") while the raw
   // query still drives the whole-name exact pass and the type-intent ranking.
-  const strippedQuery = stripTypeHintNouns(query);
+  // The resolve index is loaded first: choosing how much of a trailing type
+  // noun to strip needs to know whether the unstripped words literally name a
+  // component (see `chooseStrippedQuery`).
+  let index: ResolveIndex;
+  try {
+    index = await getResolveIndex(
+      store,
+      options?.graphDbPath !== undefined ? { graphDbPath: options.graphDbPath } : undefined,
+    );
+  } catch (e) {
+    return err({
+      kind: 'query-failed',
+      message: `resolveComponents: ${(e as Error).message}`,
+    });
+  }
+  const strippedQuery = chooseStrippedQuery(query, index);
   const queryTokens = tokenizeText(strippedQuery, { expandPhrases: true });
   // OmniStudio family vocabulary the query names ("omniscript", "flexcard",
   // "integration procedure", …). A type-constraining signal that must not let
@@ -626,22 +727,16 @@ export const resolveComponents = async (
   // token, char bigram, synonym, or the whole normalized name) and score those,
   // instead of every node in the graph. Recall-safe: the union is a superset of
   // everything the full scan could score above the floor (see resolve-index.ts).
-  let index: ResolveIndex;
-  try {
-    index = await getResolveIndex(
-      store,
-      options?.graphDbPath !== undefined ? { graphDbPath: options.graphDbPath } : undefined,
-    );
-  } catch (e) {
-    return err({
-      kind: 'query-failed',
-      message: `resolveComponents: ${(e as Error).message}`,
-    });
-  }
   // Bug 3 — gather candidates using all three norm keys so exact-api-name
   // nodes are never excluded from scoring even when the raw normQuery doesn't
   // match (e.g. "ApiName flow" or "Flow:ApiName" queries).
   const candidateIdxSet = new Set(gatherCandidates(index, queryTokens, normQuery));
+  // A node whose multi-word label IS the query (raw or chosen-stripped) is a
+  // whole-name candidate even if its api name shares no token with the query.
+  for (const key of new Set([normQuery, normStrippedQuery])) {
+    const byLabel = byNormLabel(index).get(key);
+    if (byLabel !== undefined) for (const i of byLabel) candidateIdxSet.add(i);
+  }
   // Additional byNormName lookups for the stripped-query and after-type-prefix
   // norms. The token-based buckets above already cover most of these nodes,
   // but stop-word-named components (e.g. "IT") rely solely on byNormName and
@@ -817,8 +912,29 @@ export const resolveComponents = async (
         normPhraseExpanded !== normQuery &&
         normPhraseExpanded.length >= 2 &&
         node.normName === normPhraseExpanded);
+    // C10: the query IS a component's multi-word LABEL ("Number of Invoice
+    // Records"). As literal as typing its api name — but only for a spaced
+    // label of some length, so a one-word label ("Status") shared by dozens of
+    // fields never fakes a whole-name hit. Several same-label components stay
+    // `ambiguous` through the contender rule below. `normStrippedQuery` is the
+    // least-stripped form that names anything (`chooseStrippedQuery`), so a
+    // label matching the RAW query always beats a shorter label that only
+    // matches once a trailing word was stripped.
+    const labelNorm = spacedLabelNorm(node.label);
+    // "Contact Email" leads with an OBJECT word: that is the object-then-field
+    // prose shape, so a same-label field on ANOTHER object stays a decoy.
+    const leadWord = normalizeName(query.trim().split(/\s+/)[0] ?? '');
+    const labelDecoy =
+      node.type === 'CustomField' &&
+      objectNormNames.has(leadWord) &&
+      (node.parentApiName === null || normalizeName(node.parentApiName) !== leadWord);
+    const labelExact =
+      labelNorm !== null &&
+      !labelDecoy &&
+      (labelNorm === normQuery || labelNorm === normStrippedQuery);
     const wholeExact =
       dottedExact ||
+      labelExact ||
       (wholeExactNormMatch &&
         query.includes('.') === node.apiName.includes('.') &&
         !crossObjectFieldDecoy);
@@ -962,7 +1078,6 @@ export const resolveComponents = async (
     }
     const score =
       base * typeWeight(type) * typeIntentFactor * (1 + POP_K * Math.log10(1 + refs));
-    const kind: MatchKind = c.wholeExact ? 'exact' : rollupKind(matched);
     // Distinct node tokens the matched query tokens actually landed on, over
     // the candidate's total token count — its name-coverage fraction. A
     // whole-name exact match covers the whole name (coverage 1). Parent-credit
@@ -975,6 +1090,7 @@ export const resolveComponents = async (
       ? 1
       : matchedNodeTokens.size / c.node.tokens.length;
     coverageById.set(c.node.id, nameCoverage);
+    const kind: MatchKind = c.wholeExact ? 'exact' : rollupKind(matched);
     if (c.wholeExact) wholeExactIds.add(c.node.id);
     if (c.parentMatched) parentMatchedIds.add(c.node.id);
     // RESOLVE-STUDENT-APPLICATION-DROPS-OBJECT: record the CustomObject the
@@ -1010,6 +1126,19 @@ export const resolveComponents = async (
         ? `exact name match on "${query.trim()}"`
         : buildEvidence(kind, matched),
     });
+  }
+
+  // When some candidate literally IS the query (whole api name / label), a
+  // runner-up whose tokens merely all matched exactly is a partial hit: label
+  // it `substring` so a host reading matchKind never sees two `exact` rows
+  // for one literal name.
+  if (wholeExactIds.size > 0) {
+    for (let i = 0; i < scored.length; i += 1) {
+      const c = scored[i]!;
+      if (c.matchKind === 'exact' && !wholeExactIds.has(c.id)) {
+        scored[i] = { ...c, matchKind: 'substring' };
+      }
+    }
   }
 
   // Two-tier rank: confident matches (base >= EXACT_THRESHOLD) always rank

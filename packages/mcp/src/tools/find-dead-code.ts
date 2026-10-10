@@ -135,6 +135,7 @@ import {
   toApexClassId,
   toCustomObjectId,
 } from './input-aliases.js';
+import { namespaceOf } from './package-impact.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import {
   buildUnscannedNodesNote,
@@ -1223,6 +1224,15 @@ export const findDeadCodeHandler = async (
         'managed-package code and mints no edge, so zero incoming edges is EXPECTED here and is ' +
         'not evidence of death. Not proven live either — confirm the registration in the org ' +
         'before deleting.';
+    } else if (namespaceOf(row.id) !== null) {
+      // DEV-07. A managed-package component (`ns__Field__c`, `ns__Object__c`)
+      // cannot be deleted from this org, and the package's own code — which is
+      // never retrieved — is exactly the caller this graph cannot see. Zero
+      // incoming edges is the EXPECTED reading, never evidence of death.
+      verdict = 'uncertain';
+      reasoning =
+        `managed-package component (namespace ${namespaceOf(row.id) ?? ''}): it cannot be deleted from this org, ` +
+        'and the package code that uses it is not in the vault, so no incoming edge is expected. Not dead code.';
     } else if (incomingCount === 0) {
       verdict = 'definitely_dead';
       reasoning =

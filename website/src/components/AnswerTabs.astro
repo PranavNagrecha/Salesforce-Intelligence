@@ -1,0 +1,51 @@
+---
+/**
+ * AnswerTabs — a tab per persona, each panel an AnswerCard. Without JS the
+ * tab bar is hidden and every answer is shown in sequence.
+ */
+import type { DemoAnswer } from "../data/demo-answers.ts";
+import AnswerCard from "./AnswerCard.astro";
+
+interface Props {
+  answers: DemoAnswer[];
+  /** Prefix for element ids; must be unique on the page. */
+  idPrefix?: string;
+  label?: string;
+  level?: 2 | 3;
+  showTool?: boolean;
+  /** Show raw canonical ids on the chips (off on home: clutter for admins). */
+  showIds?: boolean;
+}
+const { answers, idPrefix = "ans", label = "Example questions", level = 3, showTool = true, showIds = true } = Astro.props;
+---
+
+<div class="tabs">
+  <div class="tablist" role="tablist" aria-label={label}>
+    {answers.map((a, i) => (
+      <button
+        class="tab"
+        type="button"
+        role="tab"
+        id={`${idPrefix}-tab-${a.slug}`}
+        data-slug={a.slug}
+        aria-controls={`${idPrefix}-${a.slug}`}
+        aria-selected={i === 0 ? "true" : "false"}
+        tabindex={i === 0 ? 0 : -1}
+      >
+        <span class="who">{a.persona}</span>{a.tab}
+      </button>
+    ))}
+  </div>
+  {answers.map((a, i) => (
+    <div
+      class="tab-panel"
+      role="tabpanel"
+      id={`${idPrefix}-${a.slug}`}
+      aria-labelledby={`${idPrefix}-tab-${a.slug}`}
+      tabindex="0"
+      data-tab-hidden={i === 0 ? undefined : ""}
+    >
+      <AnswerCard answer={a} level={level} showTool={showTool} showIds={showIds} />
+    </div>
+  ))}
+</div>

@@ -643,6 +643,21 @@ describe('extractFlow', () => {
             },
           },
           {
+            // A Get Records filter field is a READ of that field.
+            fromId: flowId,
+            toId: 'CustomField:Contact.Email',
+            edgeType: 'readsFrom',
+            confidence: 'parsed',
+            source: 'flow-extractor',
+            properties: {
+              operation: 'recordFilter',
+              element: 'recordLookup',
+              filterOperator: 'EqualTo',
+              filterValue: '$Record.PersonEmail',
+              filterValueKind: 'reference',
+            },
+          },
+          {
             fromId: flowId,
             toId: 'CustomField:Task.Subject',
             edgeType: 'writesTo',

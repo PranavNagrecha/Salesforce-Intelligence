@@ -403,6 +403,54 @@ export const buildApexCalloutEdges = (
 };
 
 /**
+ * `System.Label.Name` / `Label.Name` (and the managed `Label.ns.Name` form).
+ * Apex resolves the `Label` class case-insensitively, but a lowercase bare
+ * `label.x` is far more often a local variable, so the bare form must be the
+ * conventional capitalised `Label`; the `System.`-qualified form is
+ * unambiguous in any case. The `(?<![\w.])` guard keeps `obj.Label.x` /
+ * `getLabel` out, and a trailing `(` (a method call on a variable) is
+ * rejected.
+ */
+const APEX_LABEL_REF =
+  /(?<![\w.])(?:[Ss][Yy][Ss][Tt][Ee][Mm]\s*\.\s*[Ll][Aa][Bb][Ee][Ll]|Label)\s*\.\s*([A-Za-z][A-Za-z0-9_]*)(?:\s*\.\s*([A-Za-z][A-Za-z0-9_]*))?\b(?!\s*\()/g;
+
+/**
+ * APEX-LABEL-UNGRAPHED: build heuristic `references` edges from Apex to every
+ * Custom Label it reads (`System.Label.X` / `Label.X`). The regex scanner
+ * read these as a field access on a receiver named `Label`, minting a
+ * `CustomField:Label.X` phantom (hidden as targetMissing) — so the label's
+ * usages / impact read empty-and-complete. `Label.ns.Name` (a managed label)
+ * targets `CustomLabel:ns__Name`. One edge per label (first site's span).
+ */
+export const buildApexLabelEdges = (ownerId: string, source: string): readonly Edge[] => {
+  const scanned = stripApexCommentsAndStrings(source);
+  const seen = new Set<string>();
+  const raw: Edge[] = [];
+  APEX_LABEL_REF.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = APEX_LABEL_REF.exec(scanned)) !== null) {
+    const first = m[1];
+    if (first === undefined) continue;
+    const name = m[2] === undefined ? first : `${first}__${m[2]}`;
+    if (seen.has(name)) continue;
+    seen.add(name);
+    raw.push({
+      fromId: ownerId,
+      toId: `CustomLabel:${name}`,
+      edgeType: 'references',
+      confidence: 'heuristic',
+      source: SCANNER_SOURCE,
+      properties: { referenceKind: 'apexLabel', offset: m.index, length: m[0].length },
+    });
+  }
+  return raw;
+};
+
+/** Receivers of the label access shape — never an sObject variable. */
+const isLabelReceiver = (object: string, field: string): boolean =>
+  object.toLowerCase() === 'label' || (object.toLowerCase() === 'system' && field.toLowerCase() === 'label');
+
+/**
  * Result of running the heuristic Apex scanner and projecting its output
  * onto graph edges. `edges` is the deduped, sorted edge list ready to
  * merge into an extractor's `ExtractionResult.edges`. `warnings` is a
@@ -448,6 +496,49 @@ export const buildResourceRefEdges = (
     properties: { resourceKind: ref.kind, offset: ref.offset, length: ref.length },
   }));
 
+/** Members an edge names: `methods[]` (or the legacy scalar `methodName`). */
+const methodsOf = (edge: Edge): string[] => {
+  const list = edge.properties['methods'];
+  if (Array.isArray(list)) return list.filter((m): m is string => typeof m === 'string');
+  const scalar = edge.properties['methodName'];
+  return typeof scalar === 'string' && scalar.length > 0 ? [scalar] : [];
+};
+
+/** Apex static-field members: `fields[]` (or the scalar `field`). */
+const fieldsOf = (edge: Edge): string[] => {
+  const list = edge.properties['fields'];
+  if (Array.isArray(list)) return list.filter((f): f is string => typeof f === 'string');
+  const scalar = edge.properties['field'];
+  return typeof scalar === 'string' && scalar.length > 0 ? [scalar] : [];
+};
+
+/**
+ * Fold the member identity of a duplicate `(from, to, edgeType)` edge into the
+ * kept one: the union of called methods lands on `methods[]` (`methodName`
+ * stays the alphabetically-first for legacy readers), the union of referenced
+ * Apex static fields on `fields[]`. Every other property (offset/length span,
+ * confidence) stays first-occurrence. Edges naming no member are untouched.
+ */
+const foldMemberIdentity = (kept: Edge, dup: Edge): Edge => {
+  const keptMethods = methodsOf(kept);
+  const dupMethods = methodsOf(dup);
+  const keptFields = fieldsOf(kept);
+  const dupFields = fieldsOf(dup);
+  if (dupMethods.length === 0 && dupFields.length === 0) return kept;
+  const properties: Record<string, unknown> = { ...kept.properties };
+  if (keptMethods.length + dupMethods.length > 0) {
+    const methods = [...new Set([...keptMethods, ...dupMethods])].sort();
+    properties['methods'] = methods;
+    properties['methodName'] = methods[0] ?? '';
+  }
+  if (keptFields.length + dupFields.length > 0) {
+    const fields = [...new Set([...keptFields, ...dupFields])].sort();
+    properties['fields'] = fields;
+    properties['field'] = fields[0] ?? '';
+  }
+  return { ...kept, properties };
+};
+
 /**
  * Deduplicate by `(fromId, toId, edgeType)` and sort by `toId` ascending,
  * then `edgeType` ascending. Matches the precedent set by `flow.ts`'s
@@ -467,13 +558,21 @@ export const buildResourceRefEdges = (
  *   // merged is sorted by toId asc, then edgeType asc; duplicates dropped.
  */
 export const mergeAndSortEdges = (edges: readonly Edge[]): readonly Edge[] => {
-  const seen = new Set<string>();
+  const indexByKey = new Map<string, number>();
   const out: Edge[] = [];
   for (const edge of edges) {
     const key = `${edge.fromId}|${edge.toId}|${edge.edgeType}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(edge);
+    const at = indexByKey.get(key);
+    if (at === undefined) {
+      indexByKey.set(key, out.length);
+      out.push(edge);
+      continue;
+    }
+    // MEMBER-IDENTITY-DEDUPE: the duplicate is dropped, but the member it
+    // names (a called method, an Apex static field) is folded into the kept
+    // edge — otherwise one bundle importing two methods of the same class kept
+    // only the first and every method-level caller answer lost the rest.
+    out[at] = foldMemberIdentity(out[at] as Edge, edge);
   }
   out.sort((a, b) => {
     if (a.toId !== b.toId) return a.toId < b.toId ? -1 : 1;
@@ -620,7 +719,10 @@ export const buildApexScannerEdges = (
       // NAMED-CREDENTIAL-APEX-CALLOUT-UNGRAPHED: callout edges do not depend on
       // the brace-balanced scan succeeding (they are a raw string scan), so a
       // class the scanner rejects still surfaces its Named Credential callouts.
-      edges: mergeAndSortEdges(buildApexCalloutEdges(ownerId, source)),
+      edges: mergeAndSortEdges([
+        ...buildApexCalloutEdges(ownerId, source),
+        ...buildApexLabelEdges(ownerId, source),
+      ]),
       // Format documented in v0.3 wiring spec; consumers parse this
       // by prefix to surface scanner failures in the vault UI.
       warnings: [`apex-scanner: ${kind} at offset ${offset}: ${message}`],
@@ -632,6 +734,8 @@ export const buildApexScannerEdges = (
   // references (string-literal endpoints the scanner blanks) → heuristic
   // `references` edges to the Named Credential node.
   raw.push(...buildApexCalloutEdges(ownerId, source));
+  // APEX-LABEL-UNGRAPHED: `System.Label.X` / `Label.X` → CustomLabel.
+  raw.push(...buildApexLabelEdges(ownerId, source));
   // Apex → OmniStudio runtime calls. The generic `Class.method(` / `Obj.field`
   // sweeps read `omnistudio.IntegrationProcedureService.runIntegrationService(`
   // as a call to an org class `IntegrationProcedureService` (namespace dropped)
@@ -650,6 +754,9 @@ export const buildApexScannerEdges = (
   for (const access of scanResult.value.fieldAccesses) {
     // Drop field accesses on unresolvable receivers (Trigger context / this / super).
     if (UNRESOLVABLE_FIELD_RECEIVERS.has(access.object)) continue;
+    // `Label.X` / `System.Label` is a Custom Label read (edge above), never
+    // a field on an sObject named `Label`.
+    if (isLabelReceiver(access.object, access.field)) continue;
     // `omnistudio.DRGlobal`, `vlocity_cmt.DRProcessResult r = …`: an OmniStudio
     // package NAMESPACE qualifies a class or type — it is never an sObject
     // variable, so nothing it qualifies is a field (see above).

@@ -1,177 +1,190 @@
 ---
-import DocPage from "../layouts/DocPage.astro";
+import InfoPage from "../layouts/InfoPage.astro";
+import CtaBlock from "../components/CtaBlock.astro";
+import FaqBlock from "../components/FaqBlock.astro";
 import site from "../data/site.ts";
 import siteData from "../data/site-data.json";
 
-const approx = siteData.tests.approx.toLocaleString("en-US");
+/* Every number on this page is read from site-data.json (written by
+ * recalibrate.mjs from the product). None is typed. */
+// A floor, not a rounding: the release gate runs more cases at runtime than this static count.
+const atLeast = (Math.floor(siteData.tests.totalCases / 1000) * 1000).toLocaleString("en-US");
 const pkgCount = siteData.tests.packageCount;
 const gateCount = siteData.gateCount;
 const integ = siteData.integrationSuiteCount;
-const pkgs = siteData.packageDescriptions;
 const budgets = siteData.scaleBudgets;
+const ownerProfile = new URL(site.github).origin + "/" + new URL(site.github).pathname.split("/")[1];
+const ownerHandle = new URL(ownerProfile).pathname.slice(1);
 
-const title = "sf-intelligence Security, Privacy & Evidence Model";
+const title = "Is sf-intelligence Safe for Production Orgs?";
 const description =
-  "Review the sf-intelligence threat model, offline data flow, read-only guarantees, provenance labels, test evidence and known analysis limits.";
-
-const dateModified = "2026-07-23";
+  "Why sf-intelligence is safe on a production Salesforce org: it can't write, works offline, labels every answer, refuses to guess and is tested on every change.";
+const dateModified = "2026-10-10";
 
 const jsonld = [
   {
     "@type": "TechArticle",
-    headline: "How to trust the answers - sf-intelligence quality & trust model",
+    "@id": `${site.url}/trust#article`,
+    headline: "How sf-intelligence keeps your Salesforce org safe",
     description,
-    author: { "@id": `${site.url}/#org` },
-    publisher: { "@id": `${site.url}/#org` },
     dateModified,
-    mainEntityOfPage: `${site.url}/trust`,
-    about: "Software quality, testing and provenance for a Salesforce MCP server",
+    inLanguage: "en",
+    author: { "@id": `${site.url}/#author` },
+    publisher: { "@id": `${site.url}/#org` },
+    mainEntityOfPage: { "@id": `${site.url}/trust#webpage` },
+    about: { "@id": `${site.url}/#software` },
+  },
+];
+
+const faqs = [
+  {
+    q: "Can sf-intelligence change anything in my org?",
+    a: "No. There is no code in it that deploys, updates or deletes anything in Salesforce. If you ask it to delete a field, it declines and offers the read-only check instead: what would break if you did.",
+  },
+  {
+    q: "Does it send my org’s metadata anywhere?",
+    a: "No. The snapshot lives in a folder on your computer and answers come from there. Your AI assistant sees the answers it asks for, so use an assistant your company allows. sf-intelligence sends no telemetry by default.",
+  },
+  {
+    q: "What Salesforce access does the refresh need?",
+    a: "A login you can use with the Salesforce CLI that can retrieve metadata. The refresh only retrieves. Nothing is installed in the org.",
+  },
+  {
+    q: "Can it read records, like customer data?",
+    a: "Not by default. The snapshot is setup, not data. An optional live mode can read capped counts and samples, read-only, but only after you turn it on for that org, and every live call is limited by a budget.",
   },
 ];
 ---
 
-<DocPage
+<InfoPage
   title={title}
   description={description}
   path="/trust"
-  heading="How sf-intelligence keeps Salesforce org analysis read-only and grounded"
-  intro={`An AI that talks confidently about your Salesforce org is easy to build. One you can <em>trust</em> is not. Here is exactly how sf-intelligence earns it - the test suite, the CI gate every change must pass, the per-answer trust labels, and the boundaries it refuses to cross.`}
-  crumbs={[{ label: "trust", href: "/trust" }]}
-  breadcrumbs={[{ name: "Quality & trust", path: "/trust" }]}
+  heading="Safe to point at production"
+  lede="sf-intelligence reads your org once, read-only, and answers from a copy on your computer. It can’t change anything, it shows the evidence for every answer, and it says so when it can’t tell."
+  crumbs={[{ name: "Trust", path: "/trust" }]}
   jsonld={jsonld}
+  dateModified={dateModified}
 >
-  {/* headline numbers */}
-  <section class="stats" aria-label="Quality at a glance" style="padding:0;">
-    <div class="container stats-grid">
-      <div class="stat"><div class="num">{approx}+</div><div class="label">automated tests</div></div>
-      <div class="stat"><div class="num">{pkgCount}</div><div class="label">tested packages</div></div>
-      <div class="stat"><div class="num">{gateCount}</div><div class="label">CI gates per change</div></div>
-      <div class="stat"><div class="num">0</div><div class="label">org-data in the repo</div></div>
-    </div>
-  </section>
+  <div class="answer-first narrow">
+    <span class="label">Short answer</span>
+    <p>Yes, it’s built for production orgs. It has no way to write to Salesforce, nothing is installed in the org, and after one read-only refresh it works offline. Each answer names the components it relies on, says how sure it is, and lists what it couldn’t check.</p>
+  </div>
 
-  {/* 1. test coverage */}
-  <section id="tests">
-    <div class="container">
-      <p class="sec-label">automated testing</p>
-      <h2 class="head screen-type">~{approx} tests across the stack</h2>
-      <p class="sec-intro">Every layer of the product has its own test suite - from the metadata extractors and the dependency-graph engine to the {siteData.toolCount} MCP tools and the CLI. These run on every change.</p>
-      <article class="card" style="margin-top:26px;">
-        <div class="toollist">
-          {pkgs.map((p) => (
-            <div class="row">
-              <div class="tn">{p.name}</div>
-              <div class="td" set:html={`${p.description}  -  <strong>≈${p.cases.toLocaleString("en-US")}</strong> cases${p.name === "mcp" ? ` across ${p.files} files` : ""}.`} />
-            </div>
-          ))}
-        </div>
+  <section class="block" aria-labelledby="guarantees">
+    <h2 id="guarantees">What it will never do</h2>
+    <div class="card-grid">
+      <article class="new-card">
+        <h3>Change your org</h3>
+        <p>There is no deploy, update or delete code anywhere in the product. Ask it to delete a field and it declines, then offers to check what would break instead.</p>
       </article>
-      <p class="muted" style="margin-top:14px; font-size:.86rem;">Plus <strong>{integ} integration suites</strong> that drive the real MCP server end-to-end - including post-refresh <em>golden</em> tests, a fixed reference-question set, and deep smoke tests.</p>
+      <article class="new-card">
+        <h3>Install anything in Salesforce</h3>
+        <p>No managed package, no connected app of its own. It uses your existing Salesforce CLI login to retrieve metadata, the same way a developer does.</p>
+      </article>
+      <article class="new-card">
+        <h3>Call out to the internet on its own</h3>
+        <p>Answers come from the snapshot on your computer. Network access is off by default and only switches on for the command that needs it, like a refresh.</p>
+      </article>
+      <article class="new-card">
+        <h3>Guess</h3>
+        <p>If it can’t find a component, it says so instead of describing one. If a question isn’t about your org, it says that too, rather than passing general knowledge off as fact about your org.</p>
+      </article>
     </div>
   </section>
 
-  {/* 2. CI gate */}
-  <section id="ci" style="border-top:1px solid var(--line); border-bottom:1px solid var(--line); background:var(--screen);">
-    <div class="container">
-      <p class="sec-label">the ship gate</p>
-      <h2 class="head screen-type">Nothing ships unless all of this is green</h2>
-      <p class="sec-intro">Every change runs the full gate in CI. A single red check blocks the release.</p>
-      <div class="grid cols-2" style="margin-top:24px; gap:10px 32px;">
-        <div class="bound"><span class="mk">✓</span><div><b>Type-check</b><p>Strict TypeScript across every package.</p></div></div>
-        <div class="bound"><span class="mk">✓</span><div><b>Lint</b><p>ESLint, including import-order rules.</p></div></div>
-        <div class="bound"><span class="mk">✓</span><div><b>~{approx} unit tests</b><p>Every package suite must pass.</p></div></div>
-        <div class="bound"><span class="mk">✓</span><div><b>Integration + golden tests</b><p>The real MCP server, end-to-end.</p></div></div>
-        <div class="bound"><span class="mk">✓</span><div><b>End-to-end smoke</b><p>The server boots and answers over stdio.</p></div></div>
-        <div class="bound"><span class="mk">✓</span><div><b>Natural-language regression</b><p>A large question set is routed and checked, not just plumbing.</p></div></div>
-        <div class="bound"><span class="mk">✓</span><div><b>Analytical correctness eval</b><p>Answers are checked for the right verdict, not just a response.</p></div></div>
-        <div class="bound"><span class="mk">✓</span><div><b>Scale benchmarks</b><p>Import / refresh / resolve budgets enforced (below).</p></div></div>
-        <div class="bound"><span class="mk">✓</span><div><b>SAST</b><p>Static application security scanning.</p></div></div>
-        <div class="bound"><span class="mk">✓</span><div><b>Release guard</b><p>Validates the exact shipping set before publish.</p></div></div>
-        <div class="bound"><span class="mk">✓</span><div><b>Org-data leak scan</b><p>Fails the build if any real org identifier is found in the shipping set.</p></div></div>
-      </div>
-    </div>
+  <section class="block" aria-labelledby="where">
+    <h2 id="where">Where the answer comes from</h2>
+    <p>Every answer says which of these it used, so you never mistake a snapshot for live data.</p>
+    <dl class="defs">
+      <div><dt>Your snapshot (default)</dt><dd>The copy of your org’s setup taken at the last refresh. Fields, objects, flows, Apex, permissions, sharing and more. No records.</dd></div>
+      <div><dt>The live org (optional)</dt><dd>Small, read-only reads, such as a record count or who holds a permission set. Off until you turn it on for that org, and limited per session. When the limit is reached, it stops and tells you.</dd></div>
+      <div><dt>Both</dt><dd>Some answers combine the two, and say which part came from where.</dd></div>
+    </dl>
   </section>
 
-  {/* 3. trust model */}
-  <section id="trust-model">
-    <div class="container">
-      <p class="sec-label">per-answer trust</p>
-      <h2 class="head screen-type">Every answer is labelled</h2>
-      <p class="sec-intro">Testing keeps the code correct. These labels keep each <em>answer</em> honest - you always know where it came from, how it was derived, and how complete the evidence was.</p>
-      <div class="trust-cols" style="margin-top:28px;">
-        <div class="trust-col">
-          <h3>confidence</h3>
-          <div class="tag-row"><span class="badge high">declared</span><span class="desc">Salesforce states it directly - highest trust.</span></div>
-          <div class="tag-row"><span class="badge mid">parsed</span><span class="desc">From AST/XML parsing of source - high trust.</span></div>
-          <div class="tag-row"><span class="badge low">heuristic</span><span class="desc">Regex / token analysis - spot-check it.</span></div>
-        </div>
-        <div class="trust-col">
-          <h3>provenance</h3>
-          <div class="tag-row"><span class="badge mid">offline_snapshot</span><span class="desc">The last refresh's local vault - the default.</span></div>
-          <div class="tag-row"><span class="badge mid">live_org</span><span class="desc">An opt-in, capped, read-only SOQL read.</span></div>
-          <div class="tag-row"><span class="badge mid">hybrid</span><span class="desc">Fuses vault + live, discloses both.</span></div>
-        </div>
-        <div class="trust-col">
-          <h3>completeness</h3>
-          <div class="tag-row"><span class="badge high">complete</span><span class="desc">Every needed family was modeled.</span></div>
-          <div class="tag-row"><span class="badge low">partial</span><span class="desc">A dependency wasn't retrieved - "not checked", not "none".</span></div>
-          <div class="tag-row"><span class="badge mid">unknown</span><span class="desc">Coverage couldn't be determined.</span></div>
-        </div>
-      </div>
-      <div class="grid cols-2" style="gap:8px 32px; margin-top:26px; align-items:start;">
-        <div class="bound"><span class="mk">▸</span><div><b>Two confidence axes, never conflated.</b><p>The three tiers above grade a single <em>edge</em> - how one relationship was derived. An interpreted claim from <span class="mono">interpret</span> carries a separate <em>claim confidence</em>: the weakest of the firing rule's ceiling and the grounding edges it cites, so a claim is never asserted above the evidence beneath it - and with no citation there is no claim.</p></div></div>
-        <div class="bound"><span class="mk">▸</span><div><b>It answers the scope you asked for, or refuses.</b><p>Scope-aware tools resolve a natural selector and echo the resolved <span class="mono">appliedScope</span> back. If selectors disagree or none resolves, the tool returns a named <span class="mono">invalid-query</span> instead of silently answering org-wide against the wrong target. Omitting scope returns the full, byte-identical default.</p></div></div>
-      </div>
-    </div>
+  <section class="block" aria-labelledby="sure">
+    <h2 id="sure">How sure it is</h2>
+    <p>Each connection in an answer carries one of three labels. Treat the third as a lead to check, not a fact.</p>
+    <dl class="defs">
+      <div><dt>Declared</dt><dd>Salesforce says so directly in the metadata. For example, a roll-up summary names the field it sums.</dd></div>
+      <div><dt>Parsed</dt><dd>Read from code or flow definitions by a real parser. For example, an Apex class that reads the field.</dd></div>
+      <div><dt>Pattern match</dt><dd>Found by searching text. Useful, but it can be wrong. Spot-check before you act on it.</dd></div>
+    </dl>
+    <p class="narrow">Answers also say how complete the check was. If a kind of metadata wasn’t retrieved, the answer lists it as <strong>not checked</strong>, never as “none found”. An empty answer about something it couldn’t see is not the same as “unused”.</p>
   </section>
 
-  {/* 4. scale + adversarial */}
-  <section id="scale">
-    <div class="container">
-      <div class="grid cols-2" style="gap:40px; align-items:start;">
-        <div>
-          <p class="sec-label">tested at scale</p>
-          <h2 class="head screen-type" style="font-size:clamp(1.7rem,4vw,2.4rem);">Budgets, gated in CI</h2>
-          <div class="bound"><span class="mk">▸</span><div><b>Graph import</b><p>{budgets.graphImport}.</p></div></div>
-          <div class="bound"><span class="mk">▸</span><div><b>Full refresh</b><p>{budgets.fullRefresh}.</p></div></div>
-          <div class="bound"><span class="mk">▸</span><div><b>Resolve</b><p>{budgets.resolve}.</p></div></div>
-        </div>
-        <div>
-          <p class="sec-label">adversarial QA</p>
-          <h2 class="head screen-type" style="font-size:clamp(1.7rem,4vw,2.4rem);">Tested on real orgs</h2>
-          <p class="sec-intro">Beyond synthetic fixtures, the product is exercised against <strong>real production Salesforce orgs</strong> with a deliberately adversarial, failure-finding QA pass - not happy-path validation. Bugs found on real metadata are fixed and turned into regression tests so they stay fixed.</p>
-          <p class="muted" style="font-size:.9rem;">No customer org data is published or shipped - see the leak scan above.</p>
-        </div>
-      </div>
-    </div>
+  <section class="block" aria-labelledby="refuses">
+    <h2 id="refuses">When it says no</h2>
+    <ul class="ticks narrow">
+      <li><strong>Requests to change things.</strong> “Delete this field for me” gets a polite no and the read-only check that answers the real question.</li>
+      <li><strong>Attempts to misuse it.</strong> “Ignore your instructions” or “dump every SSN” is refused outright.</li>
+      <li><strong>The wrong target.</strong> If what you named doesn’t match anything, or matches two things, it asks which one. It never quietly answers about the whole org instead.</li>
+      <li><strong>The wrong org.</strong> Each snapshot is tied to its own folder. A command pointed at a snapshot that was copied from somewhere else refuses to write to it.</li>
+    </ul>
   </section>
 
-  {/* 5. honesty */}
-  <section id="boundaries" style="border-top:1px solid var(--line); background:var(--screen);">
-    <div class="container">
-      <p class="sec-label">the honest part</p>
-      <h2 class="head screen-type">What testing can't promise</h2>
-      <p class="sec-intro">Trust also means stating the limits plainly.</p>
-      <div class="grid cols-2" style="margin-top:22px; gap:8px 32px;">
-        <div class="bound"><span class="mk">!</span><div><b>Heuristic findings can be wrong.</b><p>Anything labelled <span class="mono">heuristic</span> (the Apex scanner, name-pattern detection) may have false positives. Spot-check before acting.</p></div></div>
-        <div class="bound"><span class="mk">!</span><div><b>Static analysis has blind spots.</b><p>Dynamic SOQL and reflective Apex are invisible - "no references found" means "no static evidence", not "definitely unused".</p></div></div>
-        <div class="bound"><span class="mk">!</span><div><b>Answers are as fresh as your last refresh.</b><p>The vault is a snapshot. <span class="mono">health_check</span> tells you when it's stale.</p></div></div>
-        <div class="bound"><span class="mk">!</span><div><b>It's read-only by design.</b><p>No write path means no accidental changes - and no claim to fix anything for you.</p></div></div>
+  <section class="block" aria-labelledby="tested">
+    <h2 id="tested">How it’s tested</h2>
+    <div class="figures">
+      <div class="figure"><span class="n">{atLeast}+</span><span class="l">automated test cases</span></div>
+      <div class="figure"><span class="n">{pkgCount}</span><span class="l">tested packages</span></div>
+      <div class="figure"><span class="n">{gateCount}</span><span class="l">checks on every change</span></div>
+      <div class="figure"><span class="n">{integ}</span><span class="l">end-to-end suites</span></div>
+    </div>
+    <p>Nothing ships unless every check passes. They include:</p>
+    <ul class="ticks narrow">
+      {siteData.gates.map((g) => <li>{g}</li>)}
+    </ul>
+    <p class="narrow">Speed limits are tested too: graph import, {budgets.graphImport}; a full refresh, {budgets.fullRefresh}; name lookup, {budgets.resolve}. Beyond the test suite, it’s exercised against real production orgs with deliberately hostile questions, and every bug found that way becomes a test. No customer org data is ever published: a leak scan fails the build if a real org name turns up.</p>
+  </section>
+
+  <section class="block" aria-labelledby="limits">
+    <h2 id="limits">What it can’t promise</h2>
+    <div class="split">
+      <div class="panel tint">
+        <h3>Blind spots</h3>
+        <ul class="ticks minus">
+          <li>Apex that builds queries or field names at run time can’t be read statically. “No references found” means no static evidence, not “definitely unused”.</li>
+          <li>Pattern-match findings can be wrong.</li>
+          <li>Reports and dashboards are only checked when they’re retrieved.</li>
+        </ul>
+      </div>
+      <div class="panel tint">
+        <h3>Freshness</h3>
+        <ul class="ticks minus">
+          <li>Answers are as current as your last refresh. It tells you when the snapshot is stale.</li>
+          <li>Changes made in the org since then aren’t in the snapshot.</li>
+          <li>It reads and explains. Making the change is still your job.</li>
+        </ul>
       </div>
     </div>
   </section>
 
-  <section>
-    <div class="container">
-      <div class="cta-box">
-        <h2 class="screen-type">Trust, but verify.</h2>
-        <p>Every claim above is in the source-available repo and runs in CI. Point it at your own org and check the answers against reality.</p>
-        <div class="cta-actions">
-          <a class="btn btn-solid" href="/getting-started">get started</a>
-          <a class="btn btn-ghost" href={site.github} rel="noopener">view on GitHub</a>
-        </div>
+  <section class="block" aria-labelledby="faq">
+    <h2 id="faq">Questions</h2>
+    <FaqBlock faqs={faqs} />
+  </section>
+
+  <section class="block narrow" aria-labelledby="built-by">
+    <h2 id="built-by">Built by</h2>
+    <div class="byline">
+      <span class="byline-mark" aria-hidden="true">{site.author.split(" ").map((w) => w[0]).join("")}</span>
+      <div>
+        <p><strong>{site.author}</strong> builds and maintains sf-intelligence as an independent project. It isn’t affiliated with Salesforce.</p>
+        <p class="meta-line">GitHub: <a href={ownerProfile} rel="noopener">@{ownerHandle}</a> · Source: <a href={site.github} rel="noopener">the sf-intelligence repository</a> · Licence: <a href="/licensing">MIT + Commons Clause</a></p>
       </div>
-      <p class="muted" style="margin-top:20px; font-size:.85rem; text-align:center;">Last updated {dateModified}.</p>
     </div>
   </section>
-</DocPage>
+
+  <nav class="block narrow" aria-labelledby="more">
+    <h2 id="more">Related</h2>
+    <ul class="link-list">
+      <li><a href="/ai-safety">Is AI safe on my Salesforce org?</a></li>
+      <li><a href="/configuration">Configuration</a><span> · network, live mode and limits, for developers</span></li>
+      <li><a href="/glossary">Glossary</a></li>
+    </ul>
+  </nav>
+
+  <CtaBlock title="Check the evidence yourself" />
+</InfoPage>

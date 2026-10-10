@@ -1,126 +1,64 @@
 ---
-import DocPage from "../../layouts/DocPage.astro";
-
-const title = "sf-intelligence vs Salesforce DX MCP & hosted MCP - sf-intelligence";
-const description =
-  "Compare sf-intelligence with Salesforce DX MCP, Hosted MCP Servers, and Agentforce-as-client: offline graph/impact vs first-party describe, CRUD, and DevOps.";
-
-const jsonld = [
-  {
-    "@type": "FAQPage",
-    mainEntity: [
-      {
-        "@type": "Question",
-        name: "Can sf-intelligence replace Salesforce's official MCP servers?",
-        acceptedAnswer: {
-          "@type": "Answer",
-          text: "No — they solve different layers. Hosted MCP and DX MCP cover live CRUD/SOQL, describe-style metadata, and DevOps (deploy, retrieve, run Apex). sf-intelligence is a local dependency graph for impact, permissions, docs, and honesty-labeled analysis. Many teams register both.",
-        },
-      },
-      {
-        "@type": "Question",
-        name: "Does Salesforce hosted MCP include impact analysis?",
-        acceptedAnswer: {
-          "@type": "Answer",
-          text: "Public docs for Hosted MCP and DX MCP emphasize records, SOQL, describe/layouts, deployment, and developer workflows — not a cross-metadata dependency graph or blast-radius engine. That org-intelligence gap is where sf-intelligence focuses.",
-        },
-      },
-      {
-        "@type": "Question",
-        name: "How does Agentforce fit?",
-        acceptedAnswer: {
-          "@type": "Answer",
-          text: "Agentforce can act as an MCP client (allowlisted tools via an enterprise registry). That makes shallow MCP access table stakes inside Salesforce. sf-intelligence remains useful as a read-only intelligence server those agents — or your IDE agents — can call for graph-depth questions, or as an offline prep audit before you widen agent scope.",
-        },
-      },
-    ],
-  },
-];
+import CompareLayout from "../../layouts/CompareLayout.astro";
+import { deployRisk } from "../../data/demo-answers.ts";
+import { SFI, VERIFIED } from "../../data/compare.ts";
 ---
 
-<DocPage
-  title={title}
-  description={description}
+<CompareLayout
+  name="Salesforce’s MCP servers"
+  title="sf-intelligence vs Salesforce DX MCP and Hosted MCP"
+  description="Salesforce's MCP servers act on your org: records, deploys, tests. sf-intelligence explains it offline. What each does, DX MCP's end of life, when to use both."
   path="/compare/salesforce-dx-mcp"
-  heading="sf-intelligence vs Salesforce MCP"
-  intro="Salesforce's 2026 MCP stack (Hosted MCP GA, DX MCP, Agentforce as client) made <strong>talking to your org from an AI client</strong> free and first-party. That is complementary to sf-intelligence — not a substitute for an offline dependency graph."
-  crumbs={[
-    { label: "compare", href: "/compare" },
-    { label: "vs Salesforce MCP", href: "/compare/salesforce-dx-mcp" },
+  heading="sf-intelligence vs Salesforce’s MCP servers"
+  lede="Salesforce’s own MCP servers let an AI assistant work with your org: query records, deploy, run tests. sf-intelligence answers questions about how the org is built, offline and read-only. They do different jobs, and many people run both."
+  short="Use Salesforce’s servers to act: query and update records under your login (Hosted MCP), or deploy, retrieve and run tests from a project (the DX MCP server, which Salesforce says reaches end of life on November 2, 2026). Use sf-intelligence to understand: what depends on a field, what runs on save, who can edit what, whether a release is risky. It never writes to the org."
+  rows={[
+    { label: "Job", sfi: "Explain the org: dependencies, automation, access, deployment risk", them: "Act on the org: records and SOQL (Hosted MCP); metadata, deploys, tests and scratch orgs (DX MCP)" },
+    { label: "Writes to the org", sfi: SFI.writes, them: "Yes, where enabled. Hosted MCP offers a read-only records server alongside create, update and delete servers; DX MCP can deploy metadata" },
+    { label: "Where it runs", sfi: "On your computer, from a metadata snapshot. Works offline", them: "Hosted MCP runs in Salesforce. DX MCP runs locally and calls the org live" },
+    { label: "Dependency and impact answers", sfi: "The main job: what depends on what, and what breaks", them: "Not their documented focus" },
+    { label: "Price", sfi: SFI.price, them: "DX MCP is free and open source. For Hosted MCP edition and licence terms, check Salesforce’s documentation" },
+    { label: "Status", sfi: "Actively developed", them: "Salesforce says the DX local MCP server reaches end of life on November 2, 2026, and points to skills instead" },
   ]}
-  breadcrumbs={[
-    { name: "Compare", path: "/compare" },
-    { name: "vs Salesforce MCP", path: "/compare/salesforce-dx-mcp" },
+  chooseSfi={[
+    "To know <strong>what breaks</strong> before you delete a field, turn off a flow or deploy",
+    "To find out <strong>why a user can’t see</strong> a record, or who can edit a field",
+    "To learn an org you didn’t build, or document it",
+    "<strong>No write access</strong> at all, and answers that work offline",
   ]}
-  jsonld={jsonld}
+  chooseThem={[
+    "To <strong>query or change records</strong> from your assistant, under your Salesforce login",
+    "To <strong>deploy, retrieve and run tests</strong> from an AI workflow",
+    "A first-party tool inside Salesforce’s own trust boundary",
+  ]}
+  notSfi={[
+    "You want the assistant to change records, metadata or settings. sf-intelligence can’t",
+    "You need live record data as the main answer. The optional live mode reads capped counts and samples, but it isn’t a query tool",
+  ]}
+  example={deployRisk}
+  exampleIntro="The kind of question sf-intelligence is for: a release reviewed before it is deployed, on Verdant, the demo org. Deploy it with whatever tool you already use."
+  sources={[
+    { label: "salesforcecli/mcp README (end-of-life notice, toolsets)", href: "https://github.com/salesforcecli/mcp" },
+    { label: "forcedotcom/mcp issue 46: End of Life, November 2nd, 2026", href: "https://github.com/forcedotcom/mcp/issues/46" },
+    { label: "Salesforce Hosted MCP Servers documentation", href: "https://developer.salesforce.com/docs/platform/hosted-mcp-servers/guide" },
+  ]}
+  verified={VERIFIED}
+  faqs={[
+    {
+      q: "Can sf-intelligence replace Salesforce’s MCP servers?",
+      a: "No. They do different jobs. Salesforce’s servers act on the org; sf-intelligence explains it and never changes anything. If you need both, register both in the same assistant. They don’t conflict.",
+    },
+    {
+      q: "Is the Salesforce DX MCP server being retired?",
+      a: "Salesforce’s notice says the DX local MCP server (@salesforce/mcp) reaches end of life on November 2, 2026: no further releases, the repositories archived, and the npm package marked deprecated but still installable. It points users to skills in the forcedotcom/sf-skills repository. sf-intelligence is a separate, independent project and isn’t affected.",
+    },
+    {
+      q: "Do Salesforce’s servers answer “what breaks if I delete this field?”",
+      a: "Their documentation focuses on records, queries, metadata deploys and tests, not on tracing dependencies across flows, Apex, formulas and permissions. That tracing is what sf-intelligence is built for.",
+    },
+  ]}
+  related={[{ href: "/mcp", label: "What is a Salesforce MCP server?" }, { href: "/agent-skills", label: "Agent skills and MCP tools" }]}
 >
-  <section>
-    <div class="container">
-      <div class="prose">
-        <div class="callout">
-          <p><strong>Short answer:</strong> Pitch resting only on "ask Salesforce from Claude/Cursor" is obsolete. Official servers cover live data and DevOps. Pitch sf-intelligence on <strong>graph depth, impact, permissions math, offline vault, and confidence labels</strong> — and use official MCP beside it when you need to act.</p>
-        </div>
-
-        <h2 id="summary">At a glance</h2>
-        <table class="doc-table">
-          <thead><tr><th></th><th>sf-intelligence</th><th>Salesforce MCP (hosted / DX)</th></tr></thead>
-          <tbody>
-            <tr><td><strong>Maintainer</strong></td><td>Community (MIT + Commons Clause)</td><td>Salesforce (official)</td></tr>
-            <tr><td><strong>Primary purpose</strong></td><td>Understand an org — impact, permissions, docs, exposure</td><td>Live data + DevOps — CRUD, SOQL, describe, deploy, retrieve</td></tr>
-            <tr><td><strong>Write to org</strong></td><td><strong>No</strong> — read-only retrieve only</td><td>Yes on DX / hosted paths that expose mutate tools</td></tr>
-            <tr><td><strong>Default mode</strong></td><td>Offline local vault</td><td>Live API / Salesforce-hosted</td></tr>
-            <tr><td><strong>Dependency graph</strong></td><td>Yes — confidence-tagged edges</td><td>No dedicated cross-metadata graph</td></tr>
-            <tr><td><strong>Impact / blast radius</strong></td><td>Core feature</td><td>Not the documented focus</td></tr>
-            <tr><td><strong>Permission tracing</strong></td><td>Yes — FLS, sharing cascade</td><td>Platform permissions enforce API calls; not an offline cascade explainer</td></tr>
-            <tr><td><strong>Agentforce</strong></td><td>Companion audit + optional MCP server for agents</td><td>Native MCP client + registry / allowlists</td></tr>
-            <tr><td><strong>Cost</strong></td><td>Free</td><td>Included with eligible Salesforce editions / CLI</td></tr>
-            <tr><td><strong>Package</strong></td><td><code>sf-intelligence</code></td><td>Hosted setup + <code>@salesforce/mcp</code> / CLI</td></tr>
-          </tbody>
-        </table>
-
-        <h2 id="layers">Three official layers (and where we sit)</h2>
-        <ul>
-          <li><strong>Hosted MCP Servers</strong> — Salesforce-managed endpoints for Enterprise+ orgs: records, SOQL, describe-style metadata under platform auth.</li>
-          <li><strong>DX MCP Server</strong> — 60+ tools in opt-in toolsets for developers (metadata, deployment, data, LWC, code analysis, DevOps Center).</li>
-          <li><strong>Agentforce as MCP client</strong> — agents call allowlisted MCP tools; governance is the product story ("power without context bloat").</li>
-        </ul>
-        <p>sf-intelligence is an <strong>ISV / community intelligence layer</strong> those clients can also call — or that humans use in Cursor/Claude Code before changing production.</p>
-
-        <h2 id="when-sfi">Choose sf-intelligence when you need to…</h2>
-        <ul>
-          <li>Ask "what breaks if I delete this field?" before anyone deploys</li>
-          <li>Trace why a user cannot see a record or edit a field</li>
-          <li>Document an inherited org or run a local <a href="/use-cases/agent-readiness-audit">agent-readiness audit</a></li>
-          <li>Explore production metadata with zero write risk and no Salesforce round-trip per answer</li>
-          <li>Cite provenance / confidence on every claim</li>
-        </ul>
-
-        <h2 id="when-sf">Choose Salesforce MCP when you need to…</h2>
-        <ul>
-          <li>Query or update live records under Salesforce auth</li>
-          <li>Deploy, retrieve, run Apex/tests, scaffold LWC from an AI workflow</li>
-          <li>Stay inside first-party hosting, Trust boundary, and admin allowlists</li>
-        </ul>
-
-        <h2 id="both">Use both together</h2>
-        <p>Common pattern: sf-intelligence for <strong>understand</strong>, DX or Hosted MCP for <strong>implement</strong>. Register both in the same MCP client — they do not conflict. For Agentforce, treat sfi as a read-only intelligence server on the allowlist, not a replace-the-platform play.</p>
-
-        <h2 id="more">More comparisons</h2>
-        <p>See also: <a href="/compare">compare hub</a> · <a href="/compare/elements-cloud">Elements.cloud</a> · <a href="/compare/dx0">dx0</a> · <a href="/compare/hubbl">Hubbl</a> · <a href="/compare/metazoa">Metazoa</a> · <a href="/compare/sweep">Sweep</a>.</p>
-
-        <div class="callout"><p><strong>Disclaimer:</strong> Based on publicly documented Salesforce MCP capabilities as of mid-2026. Official offerings evolve — verify in Salesforce docs. sf-intelligence is not affiliated with Salesforce.</p></div>
-
-        <div style="padding-top:36px;">
-          <div class="cta-box">
-            <h2 class="screen-type">Add the graph layer.</h2>
-            <p>Free on npm. Install beside Hosted MCP or DX MCP.</p>
-            <div class="cta-actions">
-              <a class="btn btn-solid" href="/getting-started">install sf-intelligence</a>
-              <a class="btn btn-ghost" href="/mcp">MCP overview</a>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
-</DocPage>
+  <h2>Two layers, both useful</h2>
+  <p>A common setup: ask sf-intelligence what a change will break, fix what it names, then use a Salesforce server (or your usual deployment tool) to make the change. The first tool can’t write anything; the second is the one you trust with write access.</p>
+</CompareLayout>

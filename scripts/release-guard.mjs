@@ -7,7 +7,7 @@
  * non-zero with a file:line list if any are found. The forbidden list is two
  * parts: generic patterns baked in here (the maintainer username and absolute
  * home paths), plus real private-org names loaded from a gitignored local file
- * (see loadForbidden). Generic Salesforce words (Account, etc.) are NOT
+ * (see scripts/lib/forbidden-names.mjs). Generic Salesforce words (Account, etc.) are NOT
  * forbidden.
  *
  * Design intent: the committed tree carries NO private-org metadata, so the
@@ -16,9 +16,16 @@
  */
 
 import { execSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
-import { dirname, extname, join } from 'node:path';
+import { readFileSync } from 'node:fs';
+import { extname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+
+import {
+  allowNoBlocklistFromEnv,
+  assertBlocklistPresent,
+  describeBlocklist,
+  loadForbiddenNames,
+} from './lib/forbidden-names.mjs';
 
 // Files/dirs that are maintainer-only and will NOT be in the public release.
 // (They need the maintainer's private org vaults to run, so a stranger can't
@@ -53,26 +60,50 @@ export const ALLOWLIST = [
 
 // Real private-org identifiers (org aliases, namespace prefix, real component
 // names) live in a GITIGNORED maintainer-only file so this committed guard is
-// itself public-clean. When the file is present (maintainer's machine) the
-// guard scans for those names too; without it (a fresh public clone) only the
-// generic patterns run — which is correct, because a public-clean tree has no
-// private-org names left to find.
-function loadForbidden() {
-  const local = join(dirname(fileURLToPath(import.meta.url)), 'forbidden-names.local.json');
-  const patterns = [...GENERIC_FORBIDDEN];
-  if (existsSync(local)) {
-    try {
-      const { patterns: extra } = JSON.parse(readFileSync(local, 'utf8'));
-      for (const p of extra ?? []) patterns.push(new RegExp(p, 'i'));
-    } catch {
-      // Malformed local file: fall back to the generic patterns only.
-    }
+// itself public-clean. The ONE loader (scripts/lib/forbidden-names.mjs) fails
+// CLOSED: a malformed file is a failure, never a silent drop to the generic
+// patterns. A MISSING file is allowed locally (with a loud VACUOUS note) but
+// refused under CI unless SFI_ALLOW_NO_BLOCKLIST=1 — the publish workflow
+// materializes the secret, so an empty secret must not ship a release.
+//
+// Loading never throws at import (release-snapshot imports this module);
+// {@link blocklistProblem} reports the failure and the CLI turns it into a
+// clean `FAILED —` line and exit 2, matching scan-org-leaks.
+let blocklist;
+let blocklistError = null;
+try {
+  blocklist = loadForbiddenNames(process.env.SFI_FORBIDDEN_NAMES_PATH || undefined);
+} catch (e) {
+  blocklistError = e instanceof Error ? e.message : String(e);
+  blocklist = { status: 'broken', path: '', guardPatterns: [], scannerPatterns: [], historyTerms: [] };
+}
+export const BLOCKLIST = blocklist;
+
+/**
+ * Why this run must not report a pass, or null. A broken blocklist is always a
+ * problem; a missing/empty one only in strict mode (default: CI=true) without
+ * an explicit SFI_ALLOW_NO_BLOCKLIST=1.
+ *
+ * @param {{ strict?: boolean, allowNoBlocklist?: boolean }} [opts]
+ * @returns {string | null}
+ */
+export function blocklistProblem({
+  strict = process.env.CI === 'true',
+  allowNoBlocklist = allowNoBlocklistFromEnv(),
+} = {}) {
+  if (blocklistError) return blocklistError;
+  try {
+    assertBlocklistPresent(BLOCKLIST, { strict, allowNoBlocklist });
+    return null;
+  } catch (e) {
+    return e instanceof Error ? e.message : String(e);
   }
-  return patterns;
 }
 
-// Identifiers that must never appear in shipped files.
-export const FORBIDDEN = loadForbidden();
+// Identifiers that must never appear in shipped files. The guard checks the
+// same org patterns the scanner does (`scannerPatterns` ∪ `patterns`), so the
+// count printed by describeBlocklist is the count actually checked here.
+export const FORBIDDEN = [...GENERIC_FORBIDDEN, ...BLOCKLIST.scannerPatterns.map((p) => new RegExp(p, 'i'))];
 
 // Binary/asset extensions: copied verbatim into the public snapshot, but never
 // scanned line-by-line for leaks (they aren't text).
@@ -221,6 +252,11 @@ export function scanMessages(messages) {
 
 /** The guard CLI: scan the shipping set + commit messages, print, set exit code. */
 export function runGuard() {
+  const problem = blocklistProblem();
+  if (problem) {
+    console.error(`Release privacy guard: FAILED — ${problem}`);
+    return 2;
+  }
   const tracked = trackedFiles();
   const shipped = shippingFiles();
   const { hits: fileHits, scanned, maintainerOnly } = scan(shipped);
@@ -228,6 +264,7 @@ export function runGuard() {
   const msgHits = scanMessages(msgs);
   const hits = [...fileHits, ...msgHits];
 
+  console.log(`Release privacy guard: ${describeBlocklist(BLOCKLIST)}`);
   console.log(
     `Release privacy guard: scanned ${scanned} public files + ${msgs.length} commit messages ` +
       `(${maintainerOnly} harness-gated maintainer-only skipped; ${tracked.length} tracked total).`,

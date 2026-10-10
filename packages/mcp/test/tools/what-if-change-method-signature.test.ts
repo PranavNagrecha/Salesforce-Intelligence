@@ -1119,3 +1119,70 @@ describe('whatIfChangeMethodSignatureHandler: methodName verification', () => {
     expect(result.value.data.disclosure).toContain('method name is CHECKED');
   });
 });
+
+/**
+ * A04 / C02 (FAIL-BEFORE/PASS-AFTER): an @AuraEnabled method's callers in Aura
+ * controller JavaScript (and external callers) are not modeled at method
+ * level, so "no callers found" used to come back `safe` with
+ * `completeness: complete` and `limitations: []` — a wrong-safe answer for a
+ * method the UI calls. The shared referrer-coverage table now hedges it.
+ */
+describe('whatIfChangeMethodSignatureHandler: unmodeled caller kinds (A04/C02)', () => {
+  let dir6: string;
+  let store6: GraphStore;
+  let ctx6: Context;
+
+  beforeAll(async () => {
+    dir6 = mkdtempSync(join(tmpdir(), 'sfi-mcp-wcms-unmodeled-'));
+    mkdirSync(join(dir6, 'classes'), { recursive: true });
+    writeFileSync(
+      join(dir6, 'classes', 'InvoiceController.cls'),
+      [
+        'public with sharing class InvoiceController {',
+        '  @AuraEnabled public static String getInvoice(Id invoiceId) { return null; }',
+        '}',
+      ].join('\n'),
+      'utf-8',
+    );
+    const opened = await openGraph(join(dir6, 'un.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    store6 = opened.value;
+    const imported = await importExtractionResults(store6, [
+      {
+        nodes: [
+          makeNode({
+            id: 'ApexClass:InvoiceController',
+            type: 'ApexClass',
+            apiName: 'InvoiceController',
+            sourcePath: join('classes', 'InvoiceController.cls'),
+            properties: { hasAuraEnabledMethod: true },
+          }),
+        ],
+        edges: [],
+      },
+    ]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    ctx6 = { vaultRoot: dir6, manifest: FIXTURE_MANIFEST, graph: store6 };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store6);
+    rmSync(dir6, { recursive: true, force: true });
+  });
+
+  it('reports review + partial and names the unmodeled caller kinds instead of a clean safe', async () => {
+    const result = await whatIfChangeMethodSignatureHandler(ctx6, {
+      classApiName: 'InvoiceController',
+      methodName: 'getInvoice',
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const data = result.value.data;
+    expect(data.callingClasses).toHaveLength(0);
+    expect(data.verdict).toBe('review');
+    expect(data.trust.completeness.status).not.toBe('complete');
+    const lim = data.trust.limitations.join(' ');
+    expect(lim).toContain('Aura server actions in bundles with no declared controller');
+    expect(lim).toContain('external API callers');
+  });
+});

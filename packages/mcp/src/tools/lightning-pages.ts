@@ -44,7 +44,7 @@ const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 250;
 
 const ACTIVATION_DISCLOSURE =
-  'Which profile / record type / app / form factor ACTIVATES (is served) a Lightning page is NOT in the retrieved FlexiPage metadata — it is a separate Lightning App Builder assignment. This lists the pages that EXIST for the object (and `layout_for_user` covers CLASSIC layouts); it does not resolve which page a specific user sees.';
+  'Which profile / record type / app / form factor ACTIVATES (is served) a Lightning page is NOT in the retrieved FlexiPage metadata — it is a separate Lightning App Builder assignment stored on the object and app metadata. This lists the pages that EXIST for the object; `layout_for_user` resolves which page a profile sees (org default, app default, app + record type + profile) in `recordPageActivation`.';
 
 /**
  * R1 TYPED ABSENCE sentinel: the property EVERY extracted FlexiPage node

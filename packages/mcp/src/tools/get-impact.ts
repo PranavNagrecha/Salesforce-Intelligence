@@ -89,6 +89,7 @@ import {
   GRAPH_MAX_PAYLOAD_BYTES,
   slimGraphNodes,
 } from './graph-payload-bounds.js';
+import { rootTypeFromId } from './referrer-coverage.js';
 import {
   formatNamedUsageClause,
   reportDashboardUsageDetail,
@@ -979,13 +980,17 @@ export const getImpactHandler = async (
   // names the un-walked classes rather than implying a completeness it can't have.
   // Derive the root type from the id prefix (robust when the root node row is
   // absent, e.g. an unknown field), mirroring the `rootIsObject` disclosure below.
-  const rootTypeForSoundness =
-    rootId.startsWith('CustomField:')
-      ? 'CustomField'
-      : rootId.startsWith('CustomObject:')
-        ? 'CustomObject'
-        : null;
-  const soundness = soundnessForImpactWalk(sortedNodes, rootTypeForSoundness);
+  // The referrer kinds the walk cannot see come from the ONE shared table
+  // (`referrer-coverage.ts`), keyed by the id prefix and refined by the root
+  // node's own properties when it is in the slice.
+  const rootTypeForSoundness = rootTypeFromId(rootId);
+  const rootNodeForSoundness = sortedNodes.find((n) => n.id === rootId) ?? null;
+  const soundness = soundnessForImpactWalk(
+    sortedNodes,
+    rootTypeForSoundness,
+    rootNodeForSoundness,
+    ctx.manifest?.version,
+  );
   const { nodes: slimNodes, slimmedCount } = slimGraphNodes(sortedNodes);
   // Per-node slimming bounds fat properties but not the slice total; enforce a
   // hard byte budget so the response always fits the MCP client's token limit.

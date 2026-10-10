@@ -1,0 +1,37 @@
+---
+/**
+ * TryDemo — the one-command demo box. `sf-intelligence demo` is an MCP server
+ * (it serves the built-in demo org over stdio), so the command shown registers
+ * it with Claude Code; other assistants are one link away.
+ */
+import { DEMO_CLAUDE_CODE } from "../data/install.ts";
+import CmdText from "./CmdText.astro";
+
+interface Props {
+  id?: string;
+  title?: string;
+  note?: string;
+  /** Show the "other assistants" line under the command. */
+  foot?: boolean;
+}
+const {
+  id = "try",
+  title = "Try the demo org",
+  note = "One command. No Salesforce login needed.",
+  foot = true,
+} = Astro.props;
+---
+
+<div class="try" id={id}>
+  <div class="try-top">
+    <span class="try-title">{title}</span>
+    <span class="try-note">{note}</span>
+  </div>
+  <div class="try-row">
+    <code class="try-cmd" tabindex="0" aria-label="Demo command for Claude Code"><span class="prompt" aria-hidden="true">$</span><CmdText cmd={DEMO_CLAUDE_CODE} /></code>
+    <button class="btn btn-primary copy-btn" type="button" data-copy={DEMO_CLAUDE_CODE} aria-label="Copy the demo command">Copy</button>
+  </div>
+  {foot && (
+    <p class="try-foot">For Claude Code. Using Claude Desktop, Cursor, VS Code or Codex? <a href="/getting-started#demo">Demo setup for your assistant</a>.</p>
+  )}
+</div>

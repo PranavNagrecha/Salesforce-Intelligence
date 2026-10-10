@@ -281,7 +281,7 @@ back-compat aliases stay hidden) form the core roster: the spine — including
 advertises. That second half is DERIVED from `ADVERTISED_QUESTION_TOOLS`
 (`packages/mcp/src/tools/tool-profile.ts`), so advertising a new question on the
 page advertises its tools too, and a question with no tool behind it fails the
-build rather than the user. The full non-hidden roster is 212 schemas and costs
+build rather than the user. The full non-hidden roster is 226 schemas and costs
 tens of thousands of context tokens in MCP clients that do not defer tool
 definitions. **Default is `core`** (AUDIT-F6): only that 25-schema roster is
 advertised and directly invokable. Everything else stays reachable via
@@ -291,7 +291,7 @@ server boot — clients fetch `tools/list` once.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SFI_TOOL_PROFILE` | `core` | Default `core` advertises (and directly invokes) the 25-schema core roster — the spine (incl. `sfi.live_consent`) plus the tools that answer the advertised questions; non-core tools run via `sfi.run_analysis`. Set `full` to advertise/invoke the entire roster. Unknown values fall back to `full`. |
+| `SFI_TOOL_PROFILE` | `core` | Default `core` advertises (and directly invokes) the 25-schema core roster — the spine (incl. `sfi.live_consent`) plus the tools that answer the advertised questions; non-core tools run via `sfi.run_analysis`. Set `full` to advertise/invoke the entire roster. Unknown values warn on stderr and fall back to `core`. |
 
 ## Input scope & selectors
 

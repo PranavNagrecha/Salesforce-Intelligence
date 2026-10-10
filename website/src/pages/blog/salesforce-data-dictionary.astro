@@ -2,9 +2,9 @@
 import DocPage from "../../layouts/DocPage.astro";
 import site from "../../data/site.ts";
 
-const title = "How to Create a Salesforce Data Dictionary (Auto-Generated from Metadata)";
+const title = "How to Create a Salesforce Data Dictionary from Metadata";
 const description =
-  "Document every Salesforce object and field - API name, type, help text, picklists, usage - and auto-generate a living data dictionary from your org's metadata, offline.";
+  "Document every Salesforce object and field (API name, type, help text, picklists, usage) and auto-generate a living data dictionary from your org's metadata, offline.";
 
 const faqs = [
   {
@@ -61,7 +61,7 @@ const jsonld = [
   heading="How to create a Salesforce data dictionary"
   intro={`A data dictionary is the single reference that says what every object and field in your org is <em>for</em>. Here is what belongs in one, why the exported-spreadsheet approach rots, and how to auto-generate a <strong>living</strong> data dictionary straight from your org's real metadata - offline, read-only, and cited to canonical component IDs.`}
   crumbs={[{ label: "blog", href: "/blog" }, { label: "salesforce-data-dictionary", href: "/blog/salesforce-data-dictionary" }]}
-  breadcrumbs={[{ name: "Blog", path: "/blog" }, { name: "Salesforce data dictionary", path: "/blog/salesforce-data-dictionary" }]}
+  breadcrumbs={[{ name: "Guides", path: "/blog" }, { name: "Salesforce data dictionary", path: "/blog/salesforce-data-dictionary" }]}
   jsonld={jsonld}
   ogType="article"
   datePublished="2026-07-21"

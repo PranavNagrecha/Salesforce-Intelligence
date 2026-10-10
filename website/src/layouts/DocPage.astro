@@ -26,6 +26,10 @@ const {
   title, description, path, heading, intro, breadcrumbs, jsonld, crumbs,
   ogType, datePublished, dateModified,
 } = Astro.props;
+
+/* Older pages pass slug-style crumb labels ("getting-started"); show them as words. */
+const humanize = (label: string): string =>
+  /^[a-z0-9-]+$/.test(label) ? label.charAt(0).toUpperCase() + label.slice(1).replace(/-/g, " ") : label;
 ---
 
 <Base
@@ -38,18 +42,18 @@ const {
   datePublished={datePublished}
   dateModified={dateModified}
 >
-  <section class="subhero">
+  <section class="page-hero">
     <div class="container">
       {crumbs && (
         <nav class="crumbs" aria-label="Breadcrumb">
-          <a href="/">home</a>
-          {crumbs.map((c) => (
-            <><span>/</span><a href={c.href}>{c.label}</a></>
+          <a href="/">Home</a>
+          {crumbs.map((c, i) => (
+            <><span class="sep" aria-hidden="true">/</span><a href={c.href}>{breadcrumbs?.[i]?.name ?? humanize(c.label)}</a></>
           ))}
         </nav>
       )}
-      <h1 class="screen-type">{heading}</h1>
-      {intro && <p set:html={intro} />}
+      <h1>{heading}</h1>
+      {intro && <p class="lede" set:html={intro} />}
     </div>
   </section>
   <slot />

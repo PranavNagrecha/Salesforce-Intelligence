@@ -2,11 +2,12 @@ import { mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { isAbsolute, join, resolve } from 'node:path';
 
 import { confirm, input } from '@inquirer/prompts';
-import { err, execHelper, ok, type Result } from '@sf-intelligence/core';
+import { err, ok, type Result } from '@sf-intelligence/core';
 import { vaultPaths } from '@sf-intelligence/vault';
 import { Command } from 'commander';
 
 import { readCliPackageVersion } from '../package-version.js';
+import { isAuthenticated, listAuthenticatedOrgs, loginRemedy, orgLabels, type OrgListResult } from '../sf-org-list.js';
 
 import { validateOrgAlias } from './org-alias.js';
 import { formatTrustStatement } from './trust-statement.js';
@@ -21,15 +22,6 @@ const SF_API_VERSION = '62.0';
 /** Default DX package directory that `sf project retrieve` requires to exist on disk. */
 const DEFAULT_PACKAGE_DIR = 'force-app';
 
-/**
- * Per-call timeout for init's best-effort `sf org list --json` probe (2 min
- * default, sharing refresh's `SFI_SF_QUERY_TIMEOUT_MS` knob), so a hung `sf`
- * cannot wedge `sfi init` forever (CR-01 / H8). `SIGTERM` on timeout.
- */
-const SF_LIST_TIMEOUT_MS = (() => {
-  const n = Number(process.env['SFI_SF_QUERY_TIMEOUT_MS']);
-  return Number.isFinite(n) && n > 0 ? Math.floor(n) : 120_000;
-})();
 
 /**
  * The error variants `runInit` can return.
@@ -232,47 +224,26 @@ const isEnoent = (cause: unknown): boolean =>
   typeof cause === 'object' && cause !== null && 'code' in cause &&
   (cause as { code?: unknown }).code === 'ENOENT';
 
-/** Org list array categories returned by `sf org list --json`. */
-const ORG_CATEGORIES = ['nonScratchOrgs', 'scratchOrgs', 'otherOrgs', 'devHubs', 'sandboxes'] as const;
-
 /**
- * Best-effort lookup of the user's default Salesforce org alias via
- * `sf org list --json`. Returns `null` if the CLI is unavailable, fails, or
- * yields no default — never throws.
- *
- * @example
- *   const alias = await getDefaultOrgAlias();
- *   const orgPrompt = await input({ message: 'Org:', default: alias ?? 'prod' });
+ * Best-effort lookup of the user's default Salesforce org alias from the LOCAL
+ * sf login list (no org is contacted — FR-06). Returns `null` if the CLI is
+ * unavailable, fails, or yields no default — never throws.
  */
-export const getDefaultOrgAlias = async (): Promise<string | null> => {
-  try {
-    const { stdout } = await execHelper('sf', ['org', 'list', '--json'], {
-      timeout: SF_LIST_TIMEOUT_MS,
-    });
-    const parsed = JSON.parse(stdout) as { result?: Record<string, unknown> };
-    const result = parsed.result;
-    if (result === undefined || result === null) return null;
-    for (const key of ORG_CATEGORIES) {
-      const entries = result[key];
-      if (!Array.isArray(entries)) continue;
-      for (const item of entries) {
-        if (typeof item !== 'object' || item === null) continue;
-        const entry = item as Record<string, unknown>;
-        if (entry['isDefaultUsername'] !== true && entry['isDefaultDevHubUsername'] !== true) continue;
-        const alias = entry['alias'] ?? entry['username'];
-        if (typeof alias === 'string' && alias.length > 0) return alias;
-      }
-    }
-    return null;
-  } catch {
-    return null;
-  }
+export const getDefaultOrgAlias = async (
+  listOrgs: () => Promise<OrgListResult> = listAuthenticatedOrgs,
+): Promise<string | null> => {
+  const r = await listOrgs();
+  if (!r.ok) return null;
+  const d = r.orgs.find((o) => o.isDefault);
+  return d?.alias ?? d?.username ?? null;
 };
 
 /** Commander flag shape — all optional so the handler prompts for what is missing. */
 interface InitCliFlags {
   readonly targetOrg?: string;
   readonly vaultRoot?: string;
+  /** FR-11: `--vault`, the spelling every other command uses (alias of --vault-root). */
+  readonly vault?: string;
   readonly force?: boolean;
 }
 
@@ -290,7 +261,8 @@ export const registerInitCommand = (program: Command): void => {
     .command('init')
     .description('Initialise a new org-kb vault in the current directory')
     .option('--target-org <alias>', 'Salesforce org alias to bind to this vault')
-    .option('--vault-root <path>', 'Vault root directory (relative to CWD)')
+    .option('--vault <path>', 'Vault root directory (default ./org-kb; same flag as refresh/status/mcp)')
+    .option('--vault-root <path>', 'Alias of --vault')
     .option('--force', 'Overwrite an existing org-kb/ vault config', false)
     .action(async (flags: InitCliFlags): Promise<void> => {
       const cwd = process.cwd();
@@ -308,7 +280,12 @@ export const registerInitCommand = (program: Command): void => {
  */
 const handleInit = async (cwd: string, flags: InitCliFlags): Promise<number> => {
   const interactive = process.stdin.isTTY === true;
+  if (flags.vault !== undefined && flags.vaultRoot !== undefined && flags.vault !== flags.vaultRoot) {
+    process.stderr.write('sfi init: --vault and --vault-root name different paths; pass one.\n');
+    return 1;
+  }
   const vaultRoot =
+    flags.vault ??
     flags.vaultRoot ??
     (interactive
       ? await input({ message: 'Vault root directory:', default: DEFAULT_VAULT_ROOT })
@@ -332,15 +309,23 @@ const handleInit = async (cwd: string, flags: InitCliFlags): Promise<number> => 
     force = true;
   }
 
-  const targetOrg = await resolveTargetOrg(flags, interactive);
+  // One `sf org list` per init, however many questions it answers (a cold sf
+  // start costs seconds, and each call used to spawn it again).
+  let orgListOnce: Promise<OrgListResult> | undefined;
+  const listOrgs = (): Promise<OrgListResult> => (orgListOnce ??= listAuthenticatedOrgs());
+  const targetOrg = await resolveTargetOrg(flags, interactive, listOrgs);
   if (targetOrg === null) {
-    // Name the default we DID detect, so the remedy is one paste rather than a
-    // hunt through `sf org list`. We still refuse to adopt it unasked.
-    const detected = interactive ? null : await getDefaultOrgAlias();
+    // Name the orgs we DID find, so the remedy is one paste rather than a
+    // hunt through `sf org list`. We still refuse to adopt one unasked.
+    const listed = interactive ? null : await listOrgs();
+    const orgs = listed?.ok === true ? listed.orgs : [];
+    const def = orgs.find((o) => o.isDefault);
+    const labels = orgLabels(orgs);
     const hint =
-      detected !== null
-        ? ` Your default org is \`${detected}\` — if that is the one you want, run:\n` +
-          `  sfi init --target-org ${detected}\n`
+      labels.length > 0
+        ? ` Your authenticated orgs: ${labels.slice(0, 8).join(', ')}${labels.length > 8 ? ', …' : ''}.` +
+          (def !== undefined ? ` The default is \`${def.alias ?? def.username ?? ''}\`.` : '') +
+          ` Pick one and run:\n  sfi init --target-org <alias>\n`
         : ' Run `sf org list` to see your authenticated orgs.\n';
     process.stderr.write(
       'sfi init: --target-org is required when stdin is not a terminal.' +
@@ -349,6 +334,15 @@ const handleInit = async (cwd: string, flags: InitCliFlags): Promise<number> => 
         hint,
     );
     return 1;
+  }
+  // FR-03: an alias the local sf CLI does not know fails only at refresh time,
+  // after a long wait and with a truncated error. Say so now (warning — the
+  // user may log in before refreshing).
+  const known = await listOrgs();
+  if (known.ok && !isAuthenticated(known.orgs, targetOrg)) {
+    process.stderr.write(
+      `sfi init: warning — \`${targetOrg}\` is not one of your authenticated sf orgs, so \`sfi refresh\` will fail until it is. ${loginRemedy(targetOrg)}\n`,
+    );
   }
   return runAndReport({ cwd, targetOrg, vaultRoot, force });
 };
@@ -369,10 +363,14 @@ const handleInit = async (cwd: string, flags: InitCliFlags): Promise<number> => 
  * Returns `null` when there is nothing to bind to, so the caller emits an
  * actionable error naming the detected default.
  */
-const resolveTargetOrg = async (flags: InitCliFlags, interactive: boolean): Promise<string | null> => {
+const resolveTargetOrg = async (
+  flags: InitCliFlags,
+  interactive: boolean,
+  listOrgs: () => Promise<OrgListResult>,
+): Promise<string | null> => {
   if (flags.targetOrg !== undefined) return flags.targetOrg;
-  const detected = await getDefaultOrgAlias();
   if (!interactive) return null;
+  const detected = await getDefaultOrgAlias(listOrgs);
   // Spread the `default` key conditionally — `exactOptionalPropertyTypes`
   // forbids `default: undefined` on inquirer's InputConfig.
   return input({

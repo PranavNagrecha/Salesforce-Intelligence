@@ -19,7 +19,9 @@ export const TRUST_GUARANTEES: ReadonlyArray<{ readonly headline: string; readon
     headline: 'OFFLINE by default',
     detail:
       'Every answer comes from the local vault built at the last refresh — not a live call. ' +
-      'The org is contacted only when you run `sfi refresh`.',
+      'Only commands you run contact the org: `sfi refresh` retrieves metadata (`--no-pull` skips the retrieve), ' +
+      '`sfi stale-sweep` / `sfi watch` count changed components, `sfi doctor` checks your login. ' +
+      'Setup steps read only your local sf login list.',
   },
   {
     headline: 'LOCAL & private',

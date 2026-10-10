@@ -243,3 +243,37 @@ describe('a permission-dependency capture that did not land is never silent', ()
     }
   });
 });
+
+// WOW-12 follow-up — FAIL-BEFORE/PASS-AFTER: the summary printed "Offline
+// rebuild (--no-pull): the org was not contacted." whenever the describe step
+// ran offline, even when --with-tooling-api (or --with-audit-trail /
+// --with-data-shape) had just queried the org on the same run.
+describe('--no-pull summary names the opt-ins that still contacted the org', () => {
+  it('does not claim "not contacted" when --with-tooling-api ran', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'sfi-refresh-contact-claim-'));
+    try {
+      await seedVault(cwd);
+      const { client, queries } = buildStubClient();
+      const result = await runRefresh({ cwd, noPull: true, withToolingApi: true, toolingApiClient: client });
+      expect(queries.length).toBeGreaterThan(0); // the org WAS queried
+      const text = formatRefreshSummary(result);
+      expect(text).toContain('Offline rebuild (--no-pull): no retrieve and no describe ran');
+      expect(text).not.toContain('the org was not contacted');
+      expect(text).toContain('--with-tooling-api contacts the org even with --no-pull');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('a plain --no-pull still says the org was not contacted', async () => {
+    const cwd = await mkdtemp(join(tmpdir(), 'sfi-refresh-contact-claim-plain-'));
+    try {
+      await seedVault(cwd);
+      const result = await runRefresh({ cwd, noPull: true });
+      expect(result.orgContactOptIns).toBeUndefined();
+      expect(formatRefreshSummary(result)).toContain('no retrieve and no describe ran; the org was not contacted.');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+});

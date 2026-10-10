@@ -115,14 +115,27 @@ export const CORE_PROFILE_TOOLS: ReadonlySet<string> = new Set([
  * questions this product advertises (see CORE_PROFILE_TOOLS). Deliberately not
  * a hardcoded count: the roster is derived, and a number written here would be
  * a second source of truth that drifts the first time a question is added.
- * Opt into the full roster with `SFI_TOOL_PROFILE=full`. Unknown values fall
- * back to `full` so a typo never produces an empty roster.
+ * Opt into the full roster with `SFI_TOOL_PROFILE=full` (the ONLY value that
+ * selects it). Any other unrecognized value (`minimal`, `lean`, a typo) falls
+ * back to `core` with a one-time stderr warning: a user who tries to SHRINK the
+ * roster must never silently get the largest one (PERF-2).
  */
 export const toolProfile = (): 'core' | 'full' => {
   const raw = process.env['SFI_TOOL_PROFILE']?.trim().toLowerCase();
   if (raw === undefined || raw === '') return 'core';
   if (raw === 'core') return 'core';
-  return 'full';
+  if (raw === 'full') return 'full';
+  warnUnknownProfileOnce(raw);
+  return 'core';
+};
+
+const warnedProfiles = new Set<string>();
+const warnUnknownProfileOnce = (raw: string): void => {
+  if (warnedProfiles.has(raw)) return;
+  warnedProfiles.add(raw);
+  process.stderr.write(
+    `[sfi] SFI_TOOL_PROFILE='${raw}' is not a known profile (valid: core, full); using 'core'.\n`,
+  );
 };
 
 /**

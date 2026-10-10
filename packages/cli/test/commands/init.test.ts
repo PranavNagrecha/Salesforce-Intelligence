@@ -202,3 +202,29 @@ describe('runInit', () => {
     }
   });
 });
+
+// FR-11 — FAIL-BEFORE/PASS-AFTER: `sfi init --vault <path>` failed with
+// "unknown option --vault" although refresh/status/doctor/mcp all take
+// --vault; init only accepted --vault-root.
+describe('sfi init --vault (FR-11)', () => {
+  it('accepts --vault like every other command', async () => {
+    const commander = await import('commander');
+    const { registerInitCommand } = await import('../../src/commands/init.js');
+    const cwd = await makeTempCwd();
+    const cwdSpy = vi.spyOn(process, 'cwd').mockReturnValue(cwd);
+    const out = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const errOut = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+    try {
+      const program = new commander.Command();
+      program.exitOverride();
+      registerInitCommand(program);
+      await program.parseAsync(['node', 'sfi', 'init', '--vault', join(cwd, 'my-vault'), '--target-org', 'acme-dev']);
+      expect((await stat(join(cwd, 'my-vault', 'meta', 'config.json'))).isFile()).toBe(true);
+    } finally {
+      cwdSpy.mockRestore();
+      out.mockRestore();
+      errOut.mockRestore();
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+});

@@ -36,7 +36,7 @@ import { resolve } from 'node:path';
 
 import type { ComponentId, ComponentType, EdgeType } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { closeGraph, openGraph, type GraphStore } from '@sf-intelligence/graph';
+import { closeGraph, openGraph, parsePropertiesJson, type GraphStore } from '@sf-intelligence/graph';
 import { captureSecurityPostureMetrics } from '@sf-intelligence/mcp';
 import {
   backfillCoverageInMemory,
@@ -142,17 +142,6 @@ interface RawEdgeRow {
   readonly source: string;
   readonly properties_json: string;
 }
-
-const parsePropertiesJson = (raw: string | null | undefined): Readonly<Record<string, unknown>> => {
-  if (typeof raw !== 'string' || raw.length === 0) return {};
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    return parsed as Readonly<Record<string, unknown>>;
-  } catch {
-    return {};
-  }
-};
 
 const compareNodes = (a: SnapshotNode, b: SnapshotNode): number =>
   a.id < b.id ? -1 : a.id > b.id ? 1 : 0;

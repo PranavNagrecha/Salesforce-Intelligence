@@ -151,10 +151,14 @@ stop and surface its `issues` to the user:
 - `unhealthy` — the graph could not be read; the vault is unusable until
   rebuilt. Tell the user to run `/sfi-refresh` (or `/sfi-init` if there is
   no `org-kb/` directory at all).
-- `degraded` — the vault answers, but with caveats: missing or partial
-  coverage, or metadata types the refresh skipped. Relay the `issues` and
-  suggest `/sfi-refresh` (or `sfi refresh --no-pull` to recompute coverage
-  from the existing source without re-pulling the org).
+- `degraded` — the vault answers, but an integrity check failed (source
+  drift, a mid-build or bared-profile vault, duplicate source roots). Relay
+  the `issues` and suggest `/sfi-refresh` (or `sfi refresh --no-pull` to
+  rebuild from the existing source without re-pulling the org).
+
+Coverage gaps (families the org lacks or the refresh did not confirm) are
+listed in `coverageGaps` and do not change `status`; cite them when an
+answer depends on one of those families.
 
 Also watch `checks.sourceHashMatches`: when `false`, the local source
 changed since the vault was built, so a rebuild is due. The org itself may

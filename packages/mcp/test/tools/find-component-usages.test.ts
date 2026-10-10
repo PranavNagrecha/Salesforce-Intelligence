@@ -152,12 +152,75 @@ describe('findComponentUsagesHandler', () => {
       expect(d.boundaries.join(' ')).toMatch(/frontend bundle source/i);
     });
 
+    // A05 / C07 (FAIL-BEFORE/PASS-AFTER): formula fields that use $Label are
+    // not graph edges (only the grep reads them) and email-template text is not
+    // searched at all; the answer now says so instead of implying the found
+    // usages are the whole set.
+    it('names the CustomLabel referrer kinds that are not modeled', async () => {
+      const r = await findComponentUsagesHandler(ctx, { componentId: 'CustomLabel:Welcome_Message' });
+      expect(r.ok).toBe(true); if (!r.ok) return;
+      const d = r.value.data;
+      expect(d.referrerCoverage?.complete).toBe(false);
+      expect(d.referrerCoverage?.unmodeledKinds).toContain('formula fields / validation rules ($Label)');
+      expect(d.boundaries.join(' ')).toContain('not modeled as graph edges');
+      // The grep DOES read formulas, so only the unsearched kind is "not proof".
+      expect(d.referrerCoverage?.notSearched).toEqual(['email templates / custom metadata text']);
+    });
+
     it('finds an Aura $Resource reference for a StaticResource, excluding the resource payload itself', async () => {
       const r = await findComponentUsagesHandler(ctx, { componentId: 'StaticResource:BrandLogo' });
       expect(r.ok).toBe(true); if (!r.ok) return;
       const paths = r.value.data.grepSupplement.matches.map((m) => m.path);
       expect(paths.some((p) => p.includes('aura/brandHeader/brandHeader.cmp'))).toBe(true);
       expect(paths.some((p) => p.includes('staticresources/'))).toBe(false);
+    });
+  });
+
+  // DEV-10: the CustomLabel grep matched any identifier spelled like the label
+  // (a local `Id Billing_Contact_Id = …`) and reported hasStaticEvidence:true;
+  // real `$Label.X` readers in formulas / Flows were never searched at all.
+  describe('CustomLabel grep is accessor-anchored and reaches declarative metadata (DEV-10)', () => {
+    beforeAll(async () => {
+      const { mkdirSync, writeFileSync } = await import('node:fs');
+      const src = join(dir, 'source', 'main', 'default');
+      mkdirSync(join(src, 'triggers'), { recursive: true });
+      writeFileSync(
+        join(src, 'triggers', 'InvoiceTrigger.trigger'),
+        "trigger InvoiceTrigger on Invoice__c (before insert) {\n  Id Billing_Contact_Id = [SELECT Id FROM User LIMIT 1].Id;\n}\n",
+      );
+      mkdirSync(join(src, 'objects', 'Invoice__c', 'fields'), { recursive: true });
+      writeFileSync(
+        join(src, 'objects', 'Invoice__c', 'fields', 'Portal_Link__c.field-meta.xml'),
+        '<CustomField><formula>$Label.Portal_Base_Url &amp; Id</formula></CustomField>\n',
+      );
+      mkdirSync(join(src, 'classes'), { recursive: true });
+      writeFileSync(
+        join(src, 'classes', 'PortalLinks.cls'),
+        'public class PortalLinks { public static String base() { return System.Label.Portal_Base_Url; } }\n',
+      );
+      await importExtractionResults(store, [{
+        nodes: [
+          node({ id: 'CustomLabel:Billing_Contact_Id', type: 'CustomLabel', apiName: 'Billing_Contact_Id' }),
+          node({ id: 'CustomLabel:Portal_Base_Url', type: 'CustomLabel', apiName: 'Portal_Base_Url' }),
+        ],
+        edges: [],
+      }]);
+    });
+
+    it('FAIL-BEFORE/PASS-AFTER: a same-named local variable is NOT label usage', async () => {
+      const r = await findComponentUsagesHandler(ctx, { componentId: 'CustomLabel:Billing_Contact_Id' });
+      expect(r.ok).toBe(true); if (!r.ok) return;
+      expect(r.value.data.grepSupplement.matchCount).toBe(0);
+      expect(r.value.data.summary.hasStaticEvidence).toBe(false);
+    });
+
+    it('FAIL-BEFORE/PASS-AFTER: a formula $Label reader is found alongside the Apex System.Label reader', async () => {
+      const r = await findComponentUsagesHandler(ctx, { componentId: 'CustomLabel:Portal_Base_Url' });
+      expect(r.ok).toBe(true); if (!r.ok) return;
+      const paths = r.value.data.grepSupplement.matches.map((m) => m.path);
+      expect(paths.some((p) => p.endsWith('classes/PortalLinks.cls'))).toBe(true);
+      expect(paths.some((p) => p.endsWith('fields/Portal_Link__c.field-meta.xml'))).toBe(true);
+      expect(r.value.data.boundaries.join(' ')).toMatch(/label ACCESSORS/);
     });
   });
 

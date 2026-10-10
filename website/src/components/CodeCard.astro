@@ -1,0 +1,23 @@
+---
+import CmdText from "./CmdText.astro";
+/** CodeCard — a labelled, copyable code snippet. `code` is plain text. */
+interface Props {
+  id: string;
+  code: string;
+  file?: string;
+  /** Help line under the snippet (HTML allowed: <code>, links). */
+  help?: string;
+}
+const { id, code, file = "Terminal", help } = Astro.props;
+// A one-line command wraps (between arguments) instead of scrolling its end out of view.
+const oneLine = !code.includes("\n");
+---
+
+<div class="code-card">
+  <div class="code-bar">
+    <span class="file">{file}</span>
+    <button class="copy copy-btn" type="button" data-target={id} aria-label={`Copy: ${file}`}>Copy</button>
+  </div>
+  <pre class:list={["code", { wrap: oneLine }]} id={id} tabindex="0">{oneLine ? <CmdText cmd={code} /> : code}</pre>
+  {help && <p class="code-help" set:html={help} />}
+</div>

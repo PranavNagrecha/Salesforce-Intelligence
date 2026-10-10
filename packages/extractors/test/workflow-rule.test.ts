@@ -342,7 +342,8 @@ describe('extractWorkflowRule', () => {
           edgeType: 'writesTo',
           confidence: 'parsed',
           source: 'workflow-rule-extractor',
-          properties: { operation: 'Literal' },
+          // A Literal update with no <literalValue> blanks the field.
+          properties: { operation: 'Literal', assignedValueKind: 'null' },
         });
         // CO-EXISTENCE: the existing references edge to the scaffolding
         // node is STILL present (KEEP + ADD contract). Exactly two

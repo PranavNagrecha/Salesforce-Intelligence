@@ -1,90 +1,66 @@
 ---
-import DocPage from "../../layouts/DocPage.astro";
-import site from "../../data/site.ts";
-
-const title = "Salesforce Impact Analysis: Find Change Blast Radius Before Deployment";
-const description =
-  "Trace Salesforce change blast radius across metadata, Flows, Apex, permissions and tests with evidence-labelled, read-only org intelligence.";
-
-// Source page used a HowTo node; HowTo rich results are deprecated, so this
-// converts to TechArticle, keeping the same headline/description.
-const jsonld = [
-  {
-    "@type": "TechArticle",
-    headline: "Analyze Salesforce field deletion impact with sf-intelligence",
-    description: "Ask what breaks if you delete or change a Salesforce field, object, Flow, or Apex class using read-only dependency analysis.",
-    author: { "@id": `${site.url}/#org` },
-    publisher: { "@id": `${site.url}/#org` },
-    dateModified: "2026-07-29",
-    mainEntityOfPage: `${site.url}/use-cases/impact-analysis`,
-  },
-];
+import UseCaseLayout from "../../layouts/UseCaseLayout.astro";
+import { deployRisk } from "../../data/demo-answers.ts";
+import { deactivateFlow } from "../../data/page-answers.ts";
 ---
 
-<DocPage
-  title={title}
-  description={description}
+<UseCaseLayout
+  title="Salesforce Impact Analysis Before You Change or Deploy"
+  description="See what breaks before you delete a field, turn off a flow, change a class or deploy. Go, review first or no-go, with every affected component named."
   path="/use-cases/impact-analysis"
-  heading="Salesforce impact analysis"
-  intro={`Before you delete a field, deactivate a Flow, or refactor an Apex class, you need to know what depends on it. sf-intelligence answers <strong>"what breaks if I change this?"</strong> from your org's real dependency graph - not generic Salesforce training data.`}
-  crumbs={[{ label: "use-cases", href: "/use-cases" }, { label: "impact-analysis", href: "/use-cases/impact-analysis" }]}
-  breadcrumbs={[{ name: "Use cases", path: "/use-cases" }, { name: "Impact analysis", path: "/use-cases/impact-analysis" }]}
-  jsonld={jsonld}
+  heading="What breaks if I change this?"
+  lede="Before you turn off a flow, delete a field, change a class or deploy a release, find out what depends on it. Get a clear verdict and the list behind it, from your org’s real metadata."
+  crumb="Impact analysis"
+  audience="admins, architects and release managers"
+  short="Ask your AI assistant “what breaks if I deactivate this flow?” or “is this deployment risky?”. sf-intelligence traces what depends on each change and answers blocking, review first or go, with every affected component named. Anything it couldn’t fully check is marked “review”, never “safe”."
+  answers={[deactivateFlow, deployRisk]}
+  answerIntro="Two change questions asked of Verdant, the demo org: turning off one flow, then a small release that deletes a field and changes a flow."
+  asks={[
+    "What breaks if I deactivate the Project On Approve flow?",
+    "Is this deployment risky? Here’s my package.xml.",
+    "What happens if I make Permit Approved Date required?",
+    "What breaks if I remove the Approved value from Project Status?",
+    "What tests should I run for the classes I changed?",
+  ]}
+  checks={[
+    "<strong>Fields, objects, flows, classes and triggers</strong> and everything that depends on them",
+    "<strong>A whole release</strong> from a package.xml, a destructiveChanges.xml or a git diff file list",
+    "<strong>Overlapping automation</strong>: two things writing the same field, or a save that sets itself off again",
+    "<strong>Which Apex tests</strong> exercise the classes you changed",
+    "<strong>What-if changes</strong>: required fields, picklist values, field types, method signatures",
+  ]}
+  limits={[
+    "Code that calls things by a name built at run time",
+    "Managed packages, integrations and data loads",
+    "Kinds of metadata your refresh didn’t pull. A change touching them can’t be called safe",
+    "Whether a test that runs your change actually checks it",
+  ]}
+  tools={["review_change", "get_impact", "what_if_deactivate_flow", "what_if_make_field_required", "what_if_remove_picklist_value", "tests_for_change", "automation_collisions"]}
+  related={[
+    { href: "/use-cases/what-breaks-if-you-delete-a-field", label: "What breaks if I delete a field?", note: "use case" },
+    { href: "/use-cases/salesforce-dependency-analysis", label: "Dependency analysis", note: "trace both directions" },
+    { href: "/use-cases/consultants", label: "For consultants", note: "pre-deploy reviews on client orgs" },
+    { href: "/blog/salesforce-order-of-execution", label: "Salesforce order of execution, explained", note: "guide" },
+  ]}
+  faqs={[
+    {
+      q: "What can I hand it for a deployment review?",
+      a: "A package.xml, a destructiveChanges.xml, or the list of changed files from a git diff. You can also just name the components in your question.",
+    },
+    {
+      q: "When does it say “go”?",
+      a: "Only when nothing in the change set is blocked or left unchecked. A component it can’t find, or a kind of metadata it couldn’t check, keeps the answer at “review first” at best.",
+    },
+    {
+      q: "Can it count the records a change would affect?",
+      a: "Not from the snapshot, which holds your org’s setup, not its records. With the optional read-only live mode turned on, some answers add record counts, for example how many existing records have a field empty before you make it required.",
+    },
+  ]}
+  cta={{ question: deactivateFlow.question, related: { href: "/demo#demo-deployment-risk", label: "See a full deployment review" } }}
+  dateModified="2026-10-10"
 >
-  <section>
-    <div class="container">
-      <div class="prose">
-        <p class="muted" style="font-size:.84rem; margin-bottom:18px;">Last updated 2026-07-29</p>
-
-        <div class="hero-demo" style="margin:0 0 30px;">
-          <p class="hero-demo-kicker">run a blast-radius question in 2 minutes - no org, no auth</p>
-          <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
-          <p class="hero-demo-note">Then try all three shapes of the question: <em>"what breaks if I delete <code>Invoice__c.Amount__c</code>?"</em> (a field with a roll-up, a formula, and Apex on it), <em>"what if I make <code>Permit__c.Approved_Date__c</code> required?"</em>, and <em>"what breaks if I deactivate the <code>Installation_On_Complete</code> flow?"</em>. Synthetic "Verdant Energy" org, served fully offline: no Salesforce login, no <code>sf</code> CLI, nothing to configure. <a href="/getting-started#demo">more on the demo →</a></p>
-        </div>
-
-        <h2 id="problem">The problem with guessing</h2>
-        <p>A general AI model will list "typical" references - validation rules, page layouts, reports - but cannot know which ones exist in <em>your</em> org. sf-intelligence builds a DuckDB dependency graph from a read-only metadata retrieve and traces edges with confidence tags: <code>declared</code> (from Salesforce metadata), <code>parsed</code> (from AST/XML analysis), or <code>heuristic</code> (regex - spot-check these).</p>
-
-        <h2 id="questions">Questions you can ask</h2>
-        <ul>
-          <li>"What breaks if I delete the Contact email field?"</li>
-          <li>"What is the blast radius of removing the Payment custom object?"</li>
-          <li>"Is it safe to deactivate this Flow?"</li>
-          <li>"What depends on Account.Industry__c?"</li>
-          <li>"What would happen if I make this field required?" (optionally with live null-rate)</li>
-        </ul>
-        <p>The router picks tools like <code>find_component_usages</code>, <code>blast_radius</code>, <code>what_if_delete</code>, and <code>field_change_advisor</code> automatically - you type the question, not the tool name.</p>
-
-        <h2 id="evidence">Evidence tiers you can trust</h2>
-        <table class="doc-table">
-          <thead><tr><th>Signal</th><th>Meaning</th></tr></thead>
-          <tbody>
-            <tr><td><code>declared</code></td><td>Salesforce metadata states the dependency directly (highest trust)</td></tr>
-            <tr><td><code>parsed</code></td><td>Found by AST/XML parsing of Apex, Flow, or formula source</td></tr>
-            <tr><td><code>heuristic</code></td><td>Regex/token match - may have false positives; verify before acting</td></tr>
-            <tr><td><code>partial</code></td><td>A metadata family was not retrieved - "not checked", not "none"</td></tr>
-          </tbody>
-        </table>
-
-        <h2 id="live">Optional: live record counts</h2>
-        <p>With the opt-in read-only live plane, <code>blast_radius_live</code> adds affected-record counts on top of the static graph. Hybrid answers disclose both vault freshness and live provenance - if the org is ahead of the vault, you get a staleness warning first.</p>
-
-        <h2 id="limits">Honest boundaries</h2>
-        <p>sf-intelligence performs <strong>static analysis</strong>. Dynamic SOQL, reflective Apex, and runtime-only references are invisible. "No references found" means <strong>no static evidence</strong>, not "definitely unused." See the full boundary list on the <a href="/trust">trust page</a>.</p>
-        <p>Blast radius is evidence, not a decision. Turning a dependent list into an actual change plan means knowing which references block a change outright, which ones succeed and break something quietly afterwards, and how to rank a backlog when a tool returns zero - which is the subject of <a href="/blog/delete-unused-salesforce-fields">the dependency-first method for deciding whether a Salesforce field is safe to delete</a>. For the field-specific simulation with a verdict attached, see <a href="/use-cases/what-breaks-if-you-delete-a-field">what breaks if you delete a field</a>.</p>
-
-        <div style="padding-top:36px;">
-          <div class="cta-box">
-            <h2 class="screen-type">Try it on your org.</h2>
-            <p>Free, read-only, offline. One retrieve, then ask impact questions in plain language.</p>
-            <div class="cta-actions">
-              <a class="btn btn-solid" href="/getting-started">get started</a>
-              <a class="btn btn-ghost" href="/capabilities">all capabilities</a>
-            </div>
-          </div>
-        </div>
-
-      </div>
-    </div>
-  </section>
-</DocPage>
+  <h2>Why “blocking” and not just a list</h2>
+  <p>A list of dependents still leaves you to decide what matters. The answer sorts them: <strong>blocking</strong> means something will fail or stop working, <strong>review first</strong> means it couldn’t confirm the change is safe, and <strong>go</strong> means it checked everything the change touches and found nothing. In the first answer above, turning off Project On Approve would stop Permit records being created when a Project is approved, so it’s blocking.</p>
+  <h2>Releases, not just single changes</h2>
+  <p>New in sf-intelligence 0.4.0, a deployment review takes the change set the way you already have it and returns go, review first or no-go with the reasons. It also checks the objects the release touches for automation that writes the same field twice or sets itself off again.</p>
+</UseCaseLayout>

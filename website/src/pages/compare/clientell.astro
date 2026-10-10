@@ -1,0 +1,71 @@
+---
+import CompareLayout from "../../layouts/CompareLayout.astro";
+import { setsValue } from "../../data/demo-answers.ts";
+import { SFI, VERIFIED } from "../../data/compare.ts";
+---
+
+<CompareLayout
+  name="Clientell"
+  title="sf-intelligence vs Clientell MCP: Price and Data"
+  description="Clientell's hosted Salesforce MCP starts at $249 a month. sf-intelligence is free and keeps your metadata on your laptop. What each does and who it suits."
+  path="/compare/clientell"
+  heading="sf-intelligence vs Clientell"
+  lede="Both give your AI assistant a map of how your Salesforce org is built, so it can answer “what does this change touch?” Clientell runs that map as a hosted service with team features. sf-intelligence runs it on your computer, for free."
+  short="Clientell’s MCP is a hosted service: $249 a month for one production org and ten people, with a 14-day trial and no card needed. It adds team memory and links to Jira, Slack and email, and a $500 Platform plan adds deployments. sf-intelligence is free, keeps the metadata on your computer and never writes to the org."
+  rows={[
+    { label: "What it is", sfi: SFI.what, them: "A hosted “context graph” of your org’s structure, reachable from AI assistants over MCP, plus team memory and work-tool links" },
+    { label: "Where it runs", sfi: SFI.where, them: "Hosted. Clientell says “nothing runs on your machine”. A private cloud option is on Enterprise" },
+    { label: "Writes to the org", sfi: SFI.writes, them: "The MCP is listed as read-only on Salesforce. The Platform plan adds deployments with approval and rollback" },
+    { label: "Price", sfi: SFI.price, them: "MCP $249/month (1 production org, 10 people; +$25 per extra person). Platform $500/month. Enterprise by quote. 15% off yearly" },
+    { label: "Trial", sfi: "Free to use; demo org with one command", them: "14 days free, no credit card" },
+    { label: "AI assistants", sfi: SFI.hosts, them: "Claude Code, Cowork, Codex, Cursor and VS Code, per its pricing page" },
+    { label: "Beyond Salesforce", sfi: "Salesforce only", them: "Jira, Slack, Gmail, Outlook and GitHub integrations" },
+    { label: "Source code", sfi: SFI.source, them: "Closed" },
+  ]}
+  chooseSfi={[
+    "The same kind of answers <strong>for $0</strong>, at any team size",
+    "Org metadata that <strong>stays on your computer</strong>",
+    "To read the code that produces each answer",
+    "To try it on a demo org right now, with no account",
+  ]}
+  chooseThem={[
+    "A <strong>shared, hosted</strong> map the whole team uses, with nothing to refresh by hand",
+    "<strong>Team memory</strong> and context from Jira, Slack and email next to the metadata",
+    "Deployments with approval and rollback in the same product (Platform plan)",
+    "Security certifications, a vendor and same-day support",
+  ]}
+  notSfi={[
+    "You want answers to include context from tickets, chat or email. sf-intelligence only reads the org’s metadata",
+    "You want one hosted service the whole team shares with no setup on each laptop",
+    "You want the tool to deploy changes for you",
+  ]}
+  example={setsValue}
+  exampleIntro="The kind of question both answer, asked of Verdant, the demo org that ships inside sf-intelligence."
+  sources={[
+    { label: "getclientell.com pricing", href: "https://www.getclientell.com/pricing" },
+    { label: "Clientell vs Salesforce hosted MCP", href: "https://www.getclientell.com/compare/clientell-vs-salesforce-hosted-mcp" },
+  ]}
+  verified={VERIFIED}
+  faqs={[
+    {
+      q: "How much does Clientell’s MCP cost?",
+      a: "Its pricing page lists $249 a month for one production org and ten people, $25 a month for each extra person, and $200 a month for each extra production org, with 15% off yearly billing and a 14-day free trial. sf-intelligence is free.",
+    },
+    {
+      q: "Does Clientell write to my org?",
+      a: "Its MCP is described as read-only on Salesforce, and its comparison page says it “reads, plans, and drafts only”. Its Platform plan adds deployments you approve. Check the access each plan needs with Clientell. sf-intelligence has no write code at all.",
+    },
+    {
+      q: "Where does Clientell keep my org’s metadata?",
+      a: "In its hosted service; it says the graph stores the org’s structure, not your records. Its pricing page doesn’t say which region, so ask Clientell. sf-intelligence keeps the snapshot in a folder on your computer.",
+    },
+  ]}
+  related={[{ href: "/compare/salesforce-dx-mcp", label: "Salesforce’s own MCP servers" }]}
+>
+  <h2>What’s actually different</h2>
+  <ul>
+    <li><strong>Price.</strong> Clientell is a monthly subscription that grows with people and orgs. sf-intelligence costs nothing.</li>
+    <li><strong>Where the map lives.</strong> Clientell hosts it. sf-intelligence builds it on your computer from one read-only retrieve and never uploads it.</li>
+    <li><strong>Scope.</strong> Clientell adds team memory, work-tool context and, on a higher plan, deployments. sf-intelligence only answers questions about the org, and says plainly what it couldn’t check.</li>
+  </ul>
+</CompareLayout>

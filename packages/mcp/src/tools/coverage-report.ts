@@ -35,7 +35,7 @@ import type { Context } from '../server.js';
 import { probeLiveAccess } from './live-plane.js';
 import {
   type ReferencedButAbsentFamily,
-  referencedButAbsentFamilies,
+  withReferencedButAbsent,
 } from './referenced-but-absent.js';
 import { ASSIGNMENT_DATA_LIVE_TOOLS } from './vault-assignment-disclosure.js';
 
@@ -323,15 +323,11 @@ export const buildAssignmentDataCoverage = async (
 // confirmed-clean `retrieved: 0` is not evidence of an empty org — it must
 // leave `covered`, and it does not belong in `partial` either (a re-retrieve
 // does not change it: the container already came back without the member).
-// REFERENCED-BUT-ABSENT: unlike the two carve-outs above, this one CANNOT be
-// kept in lockstep with `summarizeCoverage` — the fact it reads
-// (`referencedButAbsentFamilies`, `./referenced-but-absent.js`) requires the
-// GRAPH, which `summarizeCoverage` (manifest.ts) has no access to by
-// construction. So `covered`/`partial` here and `summary` (still the raw,
-// unmodified `summarizeCoverage` output, read elsewhere e.g. by
-// `sfi.health_check`) may legitimately disagree on these types; `trust`
-// below is independently widened so THIS tool's own honesty verdict does not
-// read `complete` while its own `partial[]` lists the contradiction.
+// REFERENCED-BUT-ABSENT: the fact needs the GRAPH, so it is computed once by
+// `withReferencedButAbsent` (`./referenced-but-absent.js`) and handed to
+// `summarizeCoverage` as the manifest's derived `referencedButAbsentTypes` —
+// CH-2: `summary`, health_check and every coverage caveat now agree with the
+// `partial` bucket built here.
 const partitionCoverage = (
   entries: readonly CoverageEntry[],
   unparsed: ReadonlySet<string>,
@@ -426,30 +422,26 @@ export const coverageReportHandler = async (
   const entries = buildCoverageEntries(ctx.manifest).filter((entry) =>
     input.type === undefined ? true : entry.type === input.type,
   );
-  const summary = summarizeCoverage(
-    ctx.manifest,
-    input.type === undefined ? undefined : [input.type],
-  );
   // UNUSED-CERTIFIED-ZERO-CONTRADICTED-BY-OWN-GRAPH, coverage_report's half.
   // Candidates are ONLY the confirmed-clean-zero rows — the ones that would
   // otherwise land in `covered` purely on `retrieveConfirmed === true` — so a
   // vault with no such row never touches the graph at all (matches `entries`
   // filtered by `input.type` when one is given).
-  const confirmedEmptyTypes = entries
-    .filter((entry) => entry.retrieved === 0 && entry.retrieveConfirmed === true)
-    .map((entry) => entry.type);
-  const absentFamilies = await referencedButAbsentFamilies(ctx, confirmedEmptyTypes);
+  // CH-2: `summary` is computed from the SAME enriched manifest, so it can no
+  // longer call a referenced-but-absent type covered while `partial[]` lists it.
+  const absentFamilies = await withReferencedButAbsent(ctx, input.type);
   if (!absentFamilies.ok) return err(absentFamilies.error);
-  const referencedButAbsent = absentFamilies.value;
+  const referencedButAbsent = absentFamilies.value.families;
+  const summary = summarizeCoverage(
+    absentFamilies.value.manifest,
+    input.type === undefined ? undefined : [input.type],
+  );
   const { retrievedNotParsed, notRequested, referencedButAbsentEntries, ...partitions } =
     partitionCoverage(entries, retrievedNotParsedTypes(ctx.manifest), referencedButAbsent);
   const missingCoverage = summary.missingCoverage;
   // `trust.completeness` is THIS tool's own honesty verdict over its own
-  // `covered`/`partial` buckets — widened here so it cannot read `complete`
-  // while `partial[]` (above) already lists the contradiction. `summary`
-  // itself (below) stays the raw, unmodified `summarizeCoverage` output: that
-  // function has no graph access and other callers (e.g. `sfi.health_check`)
-  // depend on it being byte-identical to the manifest-only fact.
+  // `covered`/`partial` buckets. Since CH-2 `summary` already folds the
+  // referenced-but-absent types in; the union below is kept as a guard.
   const referencedButAbsentTypes = referencedButAbsentEntries.map((entry) => entry.type);
   const completenessMissingCoverage =
     referencedButAbsentTypes.length === 0

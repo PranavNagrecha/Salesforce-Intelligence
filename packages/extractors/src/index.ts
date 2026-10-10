@@ -61,6 +61,7 @@ export {
   extractScopingRule,
   extractServiceChannel,
   extractTransactionSecurityPolicy,
+  recordFilterRelationshipPaths,
   UNRESOLVED_PROFILE_PREFIX,
 } from './enterprise-metadata.js';
 export { extractDuplicateRule } from './duplicate-rule.js';
@@ -84,7 +85,7 @@ export type {
   FlowDataflowIndex,
   TracedSourceField,
 } from './flow-dataflow.js';
-export { parseFlowGraph, parseFlowGraphSource } from './flow-graph.js';
+export { parseFlowGraph, parseFlowGraphSource, START_SENTINEL as FLOW_START_SENTINEL } from './flow-graph.js';
 export type {
   ActionCall,
   ActionOutput,
@@ -176,10 +177,17 @@ export {
   WAVE_XMD_FILE_SUFFIX,
 } from './wave.js';
 export { extractWebLink } from './web-link.js';
-export { extractWorkflowRule } from './workflow-rule.js';
+export {
+  extractWorkflowRule,
+  listWorkflowFieldUpdates,
+  type WorkflowFieldUpdateDefinition,
+} from './workflow-rule.js';
 /**
  * The OmniStudio model's parsing core (element trees, DataMapper items, data
  * keys, merge expressions, show rules, formulas) — namespaced so its generic
  * helper names never collide with extractor exports.
  */
 export * as omnistudio from './omnistudio/index.js';
+export { BUNDLE_PARENT_DIRS, CONTAINER_FILE_TYPES, dispatchSourceFile } from './source-dispatch.js';
+export { DLRS_ROLLUP_SOURCE, buildDlrsRollupEdges, isDlrsRollupType } from './dlrs-rollup.js';
+export { standardLookupTargets } from './standard-relationships.js';

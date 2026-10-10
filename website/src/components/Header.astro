@@ -1,44 +1,34 @@
 ---
-import site from "../data/site.ts";
+import Wordmark from "./Wordmark.astro";
+
+interface Props {
+  /** Current page path, used to mark the active nav item. */
+  path?: string;
+}
+const { path = "" } = Astro.props;
 
 const nav = [
-  { href: "/mcp", label: "mcp" },
-  { href: "/capabilities", label: "capabilities" },
-  { href: "/tools", label: "tools" },
-  { href: "/use-cases", label: "use-cases" },
-  { href: "/compare", label: "compare" },
-  { href: "/blog", label: "blog" },
-  { href: "/trust", label: "trust" },
-  { href: "/getting-started", label: "get-started" },
-  { href: "/faq", label: "faq" },
+  { href: "/use-cases", label: "Use cases" },
+  { href: "/demo", label: "Demo" },
+  { href: "/compare", label: "Compare" },
+  { href: "/blog", label: "Guides" },
 ];
+const isCurrent = (href: string): boolean => path === href || path.startsWith(href + "/");
 ---
 
 <header class="site-header">
-  <div class="container nav">
-    <a class="brand" href="/" aria-label="sf-intelligence home">
-      <span class="mk">&gt;_</span>&nbsp;sf-intelligence
-    </a>
-    <nav aria-label="Primary">
-      <ul class="nav-links">
-        {nav.map((n) => <li><a href={n.href}>{n.label}</a></li>)}
-      </ul>
+  <div class="wrap header-row">
+    <Wordmark />
+    <nav class="nav" id="site-nav" aria-label="Main">
+      {nav.map((n) => (
+        <a href={n.href} aria-current={isCurrent(n.href) ? "page" : undefined}>{n.label}</a>
+      ))}
     </nav>
-    <div class="nav-cta">
-      <a class="btn btn-ghost" href={site.github} rel="noopener" aria-label="GitHub repository">GitHub</a>
-      <a class="btn btn-ghost" href={site.npm} rel="noopener">npm</a>
-      <a class="btn btn-solid" href="/getting-started">install</a>
-      <button class="nav-toggle" aria-label="Open menu" aria-controls="mobile-menu" aria-expanded="false">menu</button>
-    </div>
-  </div>
-  <div class="container">
-    <div id="mobile-menu" class="mobile-menu">
-      <ul>
-        {nav.map((n) => <li><a href={n.href}>{n.label}</a></li>)}
-        <li><a href="/licensing">licensing</a></li>
-        <li><a href={site.github} rel="noopener">GitHub</a></li>
-      </ul>
-      <a class="btn btn-solid" href="/getting-started" style="width:100%; justify-content:center;">install</a>
+    <div class="header-actions">
+      <a class="btn btn-primary btn-sm" href="/getting-started">Install</a>
+      <button class="menu-btn" type="button" aria-expanded="false" aria-controls="site-nav" aria-label="Open menu">
+        <svg viewBox="0 0 18 18" aria-hidden="true"><path d="M2 4.5h14M2 9h14M2 13.5h14" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path></svg>
+      </button>
     </div>
   </div>
 </header>

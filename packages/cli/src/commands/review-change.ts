@@ -46,18 +46,20 @@ import { readFile } from 'node:fs/promises';
 import { basename, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
-import { err, ok, type Result, splitPathSegments} from '@sf-intelligence/core';
+import { err, ok, type Result } from '@sf-intelligence/core';
 import {
   buildContext,
   dispatchTool,
+  parseManifestComponents,
+  parseSourcePathEntries,
   shutdown,
+  type ChangeComponent,
+  type ChangeSetKind as ChangeKind,
   type Context,
 } from '@sf-intelligence/mcp';
 import { Command } from 'commander';
-import { XMLParser } from 'fast-xml-parser';
 
 import { readCliPackageVersion } from '../package-version.js';
-import { BUNDLE_PARENT_DIRS, componentTypeFromSourcePath } from '../refresh-pipeline.js';
 import { VAULT_OPTION_HELP, vaultForAction } from '../vault-option.js';
 
 /** JSON indentation, 2 spaces, matches the rest of the CLI. */
@@ -65,15 +67,18 @@ const JSON_INDENT = 2;
 
 const nodeExecFile = promisify(execFile);
 
-/** The three change kinds the handler understands. */
-export type ChangeKind = 'added' | 'modified' | 'deleted';
-
-/** One assembled change-set entry the handler reviews. */
-export interface ChangeComponent {
-  readonly type: string;
-  readonly apiName: string;
-  readonly changeKind: ChangeKind;
-}
+/**
+ * Change-set parsing lives in ONE module shared with the MCP tool
+ * (`sfi.review_change`'s `packageXml` / `sourcePaths` inputs), re-exported
+ * here so existing importers keep working.
+ */
+export {
+  deriveComponentFromPath,
+  parseDiffComponents,
+  parseManifestComponents,
+  type ChangeComponent,
+  type ChangeSetKind as ChangeKind,
+} from '@sf-intelligence/mcp';
 
 /** Error variants surfaced from the `sfi review-change` handler. */
 export interface ReviewChangeCommandError {
@@ -86,162 +91,6 @@ export interface ReviewChangeCommandError {
     | 'dispatch-failed';
   readonly message: string;
 }
-
-// ---------------------------------------------------------------------------
-// package.xml parsing
-// ---------------------------------------------------------------------------
-
-/** Coerce a fast-xml-parser value that may be a scalar, array, or absent to an array. */
-const toArray = <T>(value: T | readonly T[] | undefined): readonly T[] =>
-  value === undefined ? [] : Array.isArray(value) ? value : [value as T];
-
-/**
- * Parse a `package.xml` string into a change set. Every `<members>` under a
- * `<types><name>` becomes one `{ type: <name>, apiName: <member>, changeKind:
- * 'modified' }` entry — a manifest names WHICH components a deploy touches but
- * NOT how, so `modified` is the only honest default (surfaced as a disclosure
- * by the caller). Wildcard (`*`) members cannot be enumerated offline and are
- * collected into `wildcardTypes` so the caller can disclose the gap rather than
- * silently drop them.
- *
- * @example
- *   parseManifestComponents('<Package><types><members>Acme</members>' +
- *     '<name>ApexClass</name></types></Package>')
- *   // => { components: [{ type: 'ApexClass', apiName: 'Acme', changeKind: 'modified' }], wildcardTypes: [] }
- */
-export const parseManifestComponents = (
-  xml: string,
-): { components: readonly ChangeComponent[]; wildcardTypes: readonly string[] } => {
-  const parser = new XMLParser({ ignoreAttributes: true, trimValues: true });
-  const parsed = parser.parse(xml) as {
-    Package?: { types?: unknown };
-  };
-  const typesBlocks = toArray(parsed.Package?.types) as ReadonlyArray<{
-    name?: unknown;
-    members?: unknown;
-  }>;
-  const components: ChangeComponent[] = [];
-  const wildcardTypes: string[] = [];
-  for (const block of typesBlocks) {
-    const name = typeof block.name === 'string' ? block.name.trim() : '';
-    if (name === '') continue;
-    const members = toArray(block.members as string | string[] | undefined);
-    for (const rawMember of members) {
-      const member = String(rawMember).trim();
-      if (member === '') continue;
-      if (member === '*') {
-        if (!wildcardTypes.includes(name)) wildcardTypes.push(name);
-        continue;
-      }
-      components.push({ type: name, apiName: member, changeKind: 'modified' });
-    }
-  }
-  return { components, wildcardTypes };
-};
-
-// ---------------------------------------------------------------------------
-// git diff path mapping
-// ---------------------------------------------------------------------------
-
-/** Map a `git diff --name-status` status letter to a change kind. */
-const statusToChangeKind = (status: string): ChangeKind => {
-  const head = status.charAt(0).toUpperCase();
-  if (head === 'A') return 'added';
-  if (head === 'D') return 'deleted';
-  if (head === 'C') return 'added'; // a copy creates a new component
-  // M (modified), R (rename → treat the new path as a modify), T (type change),
-  // and anything unexpected all fold to the safe `modified` default.
-  return 'modified';
-};
-
-/**
- * Derive the `{ type, apiName }` a source-tree path resolves to, REUSING the
- * refresh pipeline's `componentTypeFromSourcePath` dispatcher for the TYPE and
- * deriving the vault-canonical api name to match the id format the extractors
- * emit (`{Type}:{Object}.{Name}` for object-nested types, `{Type}:{Name}`
- * otherwise, bundle dir basename for LWC/Aura). Returns null when the path is
- * not a recognised metadata source file (docs, `sfdx-project.json`, a bundle's
- * unhandled child, …) so the caller can skip it.
- *
- * Bundles: `git diff` reports FILES inside an `lwc/`/`aura/` bundle, but the
- * dispatcher's bundle branch keys on the bundle DIRECTORY. So when a path lives
- * under `lwc/{bundle}/…` or `aura/{bundle}/…`, we truncate to the bundle dir and
- * dispatch THAT (with `isDirectory: true`) — collapsing every changed file in a
- * bundle to the one bundle component.
- */
-export const deriveComponentFromPath = (
-  relPath: string,
-): { type: string; apiName: string } | null => {
-  const segments = splitPathSegments(relPath);
-  if (segments.length === 0) return null;
-
-  // Bundle short-circuit. `git diff` reports FILES inside an lwc/aura bundle,
-  // but the graph models the bundle as ONE component keyed by the bundle-dir
-  // basename — so every changed file collapses to that component. Truncate
-  // the path to the bundle directory itself and hand THAT to the shared
-  // `componentTypeFromSourcePath` dispatcher with `isDirectory: true` (fixed
-  // under R6-29 to resolve bundle dirs correctly) rather than duplicating the
-  // dispatch matrix's type mapping here.
-  for (const bundleDir of BUNDLE_PARENT_DIRS) {
-    const idx = segments.indexOf(bundleDir);
-    if (idx !== -1 && idx + 1 < segments.length) {
-      const bundleName = segments[idx + 1];
-      if (bundleName === undefined || bundleName === '') continue;
-      const bundlePath = segments.slice(0, idx + 2).join('/');
-      const type = componentTypeFromSourcePath('', bundlePath, true);
-      if (type !== null) return { type, apiName: bundleName };
-    }
-  }
-
-  const type = componentTypeFromSourcePath('', relPath, false);
-  if (type === null) return null;
-
-  const fileName = segments[segments.length - 1] ?? '';
-  // The api-name portion is the basename up to its FIRST dot — correct for
-  // every single-name metadata file (`OrderService.cls`, `My_Flow.flow-meta.xml`,
-  // `Industry__c.field-meta.xml`, `Account.object-meta.xml`).
-  const localName = fileName.split('.')[0] ?? fileName;
-
-  const objIdx = segments.indexOf('objects');
-  if (objIdx !== -1 && objIdx + 1 < segments.length) {
-    const objectName = segments[objIdx + 1] ?? '';
-    if (type === 'CustomObject') return { type, apiName: objectName };
-    // Object-nested types (CustomField, ValidationRule, RecordType, …) scope
-    // their id to the parent object: `{Object}.{Name}`.
-    return { type, apiName: `${objectName}.${localName}` };
-  }
-
-  return { type, apiName: localName };
-};
-
-/**
- * Parse `git diff --name-status <base>` output into a de-duplicated change set.
- * Each line is `STATUS\tPATH` (or `R###\tOLD\tNEW` / `C###\tOLD\tNEW` — the LAST
- * tab-separated field is the current path). Paths the dispatcher does not
- * recognise are dropped. A path that maps to a component already seen keeps the
- * FIRST change kind (a bundle's many files collapse to one entry).
- */
-export const parseDiffComponents = (diffOutput: string): readonly ChangeComponent[] => {
-  const seen = new Map<string, ChangeComponent>();
-  for (const rawLine of diffOutput.split('\n')) {
-    const line = rawLine.trim();
-    if (line === '') continue;
-    const fields = line.split('\t').filter((f) => f !== '');
-    if (fields.length < 2) continue;
-    const status = fields[0] ?? '';
-    const path = fields[fields.length - 1] ?? '';
-    const derived = deriveComponentFromPath(path);
-    if (derived === null) continue;
-    const id = `${derived.type}:${derived.apiName}`;
-    if (seen.has(id)) continue;
-    seen.set(id, {
-      type: derived.type,
-      apiName: derived.apiName,
-      changeKind: statusToChangeKind(status),
-    });
-  }
-  return [...seen.values()];
-};
 
 // ---------------------------------------------------------------------------
 // handler
@@ -759,6 +608,30 @@ interface ReviewChangeCliFlags {
   readonly format?: string;
 }
 
+/**
+ * Name the changed files / members that were NOT reviewed: container files
+ * (one file holding many rules or labels) and metadata the vault does not
+ * model. A clean exit over them is not a clean review.
+ */
+const unreviewableDisclosures = (
+  entries: readonly { readonly input: string; readonly reason: 'container' | 'not-modeled' }[],
+): string[] => {
+  const containers = entries.filter((e) => e.reason === 'container').map((e) => e.input);
+  const unmodeled = entries.filter((e) => e.reason === 'not-modeled').map((e) => e.input);
+  const out: string[] = [];
+  if (containers.length > 0) {
+    out.push(
+      `NOT REVIEWED — ${containers.length} container file(s)/member(s) hold many components (name the changed ones in a manifest to review them): ${containers.slice(0, 10).join(', ')}.`,
+    );
+  }
+  if (unmodeled.length > 0) {
+    out.push(
+      `NOT REVIEWED — ${unmodeled.length} changed metadata file(s)/member(s) the vault does not model: ${unmodeled.slice(0, 10).join(', ')}.`,
+    );
+  }
+  return out;
+};
+
 /** Read a `package.xml` and assemble its change set. */
 const componentsFromManifest = async (
   manifestPath: string,
@@ -774,7 +647,7 @@ const componentsFromManifest = async (
       message: `could not read manifest '${manifestPath}': ${(cause as Error).message}`,
     });
   }
-  const { components, wildcardTypes } = parseManifestComponents(xml);
+  const { components, wildcardTypes, unreviewable } = parseManifestComponents(xml);
   const disclosures: string[] = [
     `Change kinds are UNKNOWN from a manifest alone — all ${components.length} member(s) from '${basename(manifestPath)}' are reviewed as 'modified'. Deletions in a destructiveChanges.xml are NOT distinguished here; use --diff for add/modify/delete fidelity.`,
   ];
@@ -783,6 +656,7 @@ const componentsFromManifest = async (
       `Wildcard (*) members cannot be enumerated offline — ${wildcardTypes.length} type(s) skipped: ${wildcardTypes.join(', ')}.`,
     );
   }
+  disclosures.push(...unreviewableDisclosures(unreviewable));
   return ok({ components, disclosures });
 };
 
@@ -808,9 +682,15 @@ const componentsFromDiff = async (
         'Pass a valid base ref and a --project dir that is an sfdx git working tree.',
     });
   }
-  const components = parseDiffComponents(stdout);
+  const parsed = parseSourcePathEntries(stdout.split('\n'));
+  const components = parsed.components.map((c) => ({
+    type: c.type,
+    apiName: c.apiName,
+    changeKind: c.changeKind,
+  }));
   const disclosures: string[] = [
-    `Change set derived from \`git diff --name-status ${base}\` in '${projectDir}'; paths mapped via the refresh dispatcher. Renames are reviewed as 'modified' of the new path.`,
+    `Change set derived from \`git diff --name-status ${base}\` in '${projectDir}'; paths mapped via the refresh dispatcher. A rename is reviewed as a delete of the old component plus an add of the new one.`,
+    ...unreviewableDisclosures(parsed.unreviewable),
   ];
   return ok({ components, disclosures });
 };

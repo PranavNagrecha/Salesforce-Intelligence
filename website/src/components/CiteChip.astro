@@ -1,0 +1,19 @@
+---
+import type { Cite } from "../data/demo-answers.ts";
+
+interface Props {
+  cite: Cite;
+  /** "id" shows the raw canonical id (answer cards); "api" the short API name (chat panel); "none" neither. */
+  show?: "id" | "api" | "none";
+  href?: string;
+}
+const { cite, show = "id", href } = Astro.props;
+const detail = show === "id" ? cite.id : show === "api" ? cite.api : undefined;
+const Tag = href ? "a" : "span";
+---
+
+<Tag class="cite" href={href}>
+  <span class="kind">{cite.kind}</span>
+  {cite.name && <span class="name">{cite.name}</span>}
+  {detail && <code class="api">{detail}</code>}
+</Tag>

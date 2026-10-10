@@ -260,6 +260,36 @@ describe('extractOmniDataTransform', () => {
       ]);
     });
 
+    it('FAIL-BEFORE/PASS-AFTER: an Extract formula row reads the alias-pathed fields it tests', async () => {
+      const { edges } = await fieldEdges(
+        'AcmeOrderFlags_1.rpt-meta.xml',
+        `<?xml version="1.0" encoding="UTF-8"?>
+<OmniDataTransform xmlns="http://soap.sforce.com/2006/04/metadata">
+    <name>AcmeOrderFlags</name>
+    <omniDataTransformItem>
+        <filterOperator>=</filterOperator>
+        <filterValue>orderId</filterValue>
+        <inputFieldName>Id</inputFieldName>
+        <inputObjectName>Acme_Order__c</inputObjectName>
+        <outputFieldName>ord</outputFieldName>
+        <outputObjectName>json</outputObjectName>
+    </omniDataTransformItem>
+    <omniDataTransformItem>
+        <formulaExpression>IF((ord:Acme_Locked__c == false &amp;&amp; unknownAlias:Other__c == 1), true, false)</formulaExpression>
+        <formulaResultPath>FLAG</formulaResultPath>
+        <outputFieldName>Order:Flag</outputFieldName>
+        <outputObjectName>json</outputObjectName>
+    </omniDataTransformItem>
+    <type>Extract</type>
+    <uniqueName>AcmeOrderFlags_1</uniqueName>
+</OmniDataTransform>`,
+      );
+      expect(edges.map((e) => [e.type, e.toId, e.props['roles']])).toEqual([
+        ['readsFrom', 'CustomField:Acme_Order__c.Acme_Locked__c', ['formula']],
+        ['readsFrom', 'CustomField:Acme_Order__c.Id', ['filter']],
+      ]);
+    });
+
     it('a Load that maps Id writes its object as an upsert', async () => {
       const { edges } = await fieldEdges(
         'AcmeSaveOrder_1.rpt-meta.xml',

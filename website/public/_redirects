@@ -1,7 +1,12 @@
 # Legacy hand-written sitemap → Astro-generated index (full URL set).
 /sitemap.xml  /sitemap-index.xml  301
 
-# Host consolidation — forward the stale Cloudflare Pages alias to the canonical
-# domain, path-preserving, single-hop (A01/T01). The primary-domain setting in
-# Cloudflare Pages is the needed complement (needs-user).
-https://salesforce-intelligence.pages.dev/*  https://sfi.auditforce.cloud/:splat  301!
+# Host consolidation (salesforce-intelligence.pages.dev → sfi.auditforce.cloud)
+# is done by functions/_middleware.js, NOT here. Cloudflare Pages `_redirects`
+# accepts only path sources: its docs list domain-level redirects as
+# unsupported, so an absolute `https://…pages.dev/*` rule in this file was
+# silently ignored. Keep the middleware until the redirect moves to a
+# Cloudflare Bulk Redirect (owner-only, dashboard), then delete it.
+
+# Setup guides live under Getting started; /setup has no page of its own.
+/setup  /getting-started  301

@@ -238,6 +238,10 @@ export const LIMIT_TOOL_EXCLUSIONS: ReadonlySet<string> = new Set([
   // pulse digest (a report-generation fan-out bound, mirroring org_pulse's
   // list-size cap above) — not a raw graph-derived row/edge enumeration.
   'sfi.generate_fleet_report',
+  // `limit`/`offset` page the concept-rule CLAIMS for ONE component — bounded
+  // by the curated rule count, not by org size — so it is not a graph-derived
+  // row enumeration and needs no high-fanout org probe.
+  'sfi.interpret',
 ]);
 
 export interface OversizeEnumerationViolation {

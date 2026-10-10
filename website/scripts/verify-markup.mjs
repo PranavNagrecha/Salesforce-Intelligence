@@ -41,9 +41,34 @@ const htmlFiles = (dir) =>
 
 const errors = [];
 
+/** Decode the entities Astro emits in <title>, so "&amp;" counts as one character. */
+const decode = (s) =>
+  s
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#0?39;|&apos;/g, "'")
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)));
+
+// Search results cut a title at roughly 600px, about 60 characters. 23 of 37
+// titles were over that, several of them spending the visible part on a
+// repeated "| sf-intelligence" suffix. Pages that are not indexed (404) and
+// files with no <title> (search-console verification stubs) are skipped.
+const TITLE_MAX = 60;
+const indexable = (html) => !/<meta[^>]+name="robots"[^>]+content="[^"]*noindex/i.test(html);
+
 for (const file of htmlFiles(DIST)) {
   const html = fs.readFileSync(file, "utf8");
   const rel = path.relative(DIST, file);
+  const rawTitle = /<title>([^<]*)<\/title>/i.exec(html)?.[1];
+  if (rawTitle !== undefined && indexable(html)) {
+    const title = decode(rawTitle).trim();
+    if (title.length > TITLE_MAX) {
+      errors.push(`${rel}: <title> is ${title.length} characters (max ${TITLE_MAX}): "${title}"`);
+    }
+  }
   // Match each opening <table ...> tag and read its class attribute, if any.
   for (const match of html.matchAll(/<table\b([^>]*)>/gi)) {
     const attrs = match[1] ?? "";
@@ -55,12 +80,37 @@ for (const file of htmlFiles(DIST)) {
       );
     }
   }
+  // An empty header cell (a Markdown `| |` corner) leaves that column's data
+  // cells with no header: screen readers lose the column name and Lighthouse
+  // fails td-has-header. Give the corner a label ("Measure", "Server", ...).
+  const emptyTh = (html.match(/<th\b[^>]*>\s*<\/th>/gi) || []).length;
+  if (emptyTh) errors.push(`${rel}: ${emptyTh} empty <th> header cell(s); label the column`);
+}
+
+// ---- llms.txt lists every indexable page (it is generated at build by
+// integrations/geo.mjs; this catches the generator being skipped or broken).
+const llmsPath = path.join(DIST, "llms.txt");
+if (!fs.existsSync(llmsPath)) {
+  errors.push("llms.txt missing from dist/ (integrations/geo.mjs did not run)");
+} else {
+  const llms = fs.readFileSync(llmsPath, "utf8");
+  for (const file of htmlFiles(DIST)) {
+    const html = fs.readFileSync(file, "utf8");
+    const canonical = /<link[^>]+rel="canonical"[^>]+href="([^"]*)"/i.exec(html)?.[1];
+    if (!canonical || !indexable(html)) continue;
+    if (!llms.includes(`](${canonical})`)) {
+      errors.push(`${path.relative(DIST, file)}: not listed in llms.txt (${canonical})`);
+    }
+  }
+  if (/\{\{\w+\}\}/.test(llms)) errors.push("llms.txt has an unfilled {{token}}");
 }
 
 if (errors.length > 0) {
   for (const e of errors) console.error(`verify-markup: FAIL — ${e}`);
-  console.error(`verify-markup: ${errors.length} unstyled table(s) found`);
+  console.error(`verify-markup: ${errors.length} problem(s) found`);
   process.exit(1);
 }
 
-console.log("verify-markup: OK — every <table> in dist/ carries `doc-table`");
+console.log(
+  `verify-markup: OK — every <table> carries \`doc-table\`, every title is ≤ ${TITLE_MAX} characters, no header cell is empty, and llms.txt lists every indexable page`,
+);

@@ -1,0 +1,158 @@
+{
+  "$comment": "Card index for every guide and post: the home Guides block, /blog, /how-to, /errors, footer and related-link labels all read this file. Every Markdown entry in src/content/guides must appear here (the build fails otherwise). kind: guide = evergreen, listed first; release = release notes and engineering posts. home: shown in the home page Guides block, in this order.",
+  "guides": [
+    {
+      "href": "/how-to/find-what-is-updating-a-field",
+      "section": "how-to",
+      "kind": "guide",
+      "date": "2026-10-10",
+      "home": true,
+      "title": "Which Flow or trigger is updating this field?",
+      "text": "Find what changes a field, and which automation sets it to a specific value."
+    },
+    {
+      "href": "/how-to/pre-deployment-impact-review",
+      "section": "how-to",
+      "kind": "guide",
+      "date": "2026-10-10",
+      "home": true,
+      "title": "Is this Salesforce deployment risky?",
+      "text": "Review a change set or pull request before you deploy: what it deletes, what depends on it, which tests to run."
+    },
+    {
+      "href": "/errors/maximum-trigger-depth-exceeded",
+      "section": "errors",
+      "kind": "guide",
+      "date": "2026-10-10",
+      "home": true,
+      "title": "Maximum trigger depth exceeded",
+      "text": "What the error means, which saves Salesforce runs again, and how to find the step that loops."
+    },
+    {
+      "href": "/how-to/delete-picklist-value",
+      "section": "how-to",
+      "kind": "guide",
+      "date": "2026-10-10",
+      "home": true,
+      "title": "What breaks when you delete a picklist value",
+      "text": "Delete, deactivate or replace a value safely, and find the automation that still checks for it."
+    },
+    {
+      "href": "/how-to/standard-field-where-used",
+      "section": "how-to",
+      "kind": "guide",
+      "date": "2026-10-10",
+      "home": false,
+      "title": "Where is this standard field used?",
+      "text": "“Where is this used?” only covers custom fields. How to find uses of a standard field like Opportunity Amount."
+    },
+    {
+      "href": "/how-to/where-is-apex-class-used",
+      "section": "how-to",
+      "kind": "guide",
+      "date": "2026-10-10",
+      "home": false,
+      "title": "Where is this Apex class used?",
+      "text": "Find every caller of a class, tell dead code from scheduled jobs, and delete unused classes safely."
+    },
+    {
+      "href": "/compare/salesforce-mcp-servers",
+      "section": "compare",
+      "kind": "guide",
+      "date": "2026-10-10",
+      "home": false,
+      "title": "Salesforce MCP servers compared (2026)",
+      "text": "Six servers side by side: what each one can change, where it runs and what it costs."
+    },
+    {
+      "href": "/setup/vs-code-copilot",
+      "section": "setup",
+      "kind": "guide",
+      "date": "2026-10-10",
+      "home": false,
+      "title": "Salesforce MCP in VS Code + Copilot",
+      "text": "Set it up, and fix the one config key that makes a server silently not load."
+    },
+    {
+      "href": "/setup/cursor",
+      "section": "setup",
+      "kind": "guide",
+      "date": "2026-10-10",
+      "home": false,
+      "title": "Salesforce MCP in Cursor",
+      "text": "Where the config file goes, why the path matters, and how to reload the server after an edit."
+    },
+    {
+      "href": "/blog/delete-unused-salesforce-fields",
+      "section": "blog",
+      "kind": "guide",
+      "date": "2026-07-28",
+      "home": true,
+      "title": "Can I delete this Salesforce field?",
+      "text": "A dependency-first way to clean up fields, and the blind spots to check by hand."
+    },
+    {
+      "href": "/blog/salesforce-order-of-execution",
+      "section": "blog",
+      "kind": "guide",
+      "date": "2026-07-21",
+      "home": true,
+      "title": "Salesforce order of execution, explained",
+      "text": "What runs when you save a record, in plain English, and the bugs the order causes."
+    },
+    {
+      "href": "/blog/what-does-this-salesforce-flow-do",
+      "section": "blog",
+      "kind": "guide",
+      "date": "2026-07-29",
+      "home": false,
+      "title": "What does this Flow do?",
+      "text": "How to read a Flow you didn’t build: trigger, entry conditions, and every field it writes."
+    },
+    {
+      "href": "/blog/salesforce-data-dictionary",
+      "section": "blog",
+      "kind": "guide",
+      "date": "2026-07-21",
+      "home": false,
+      "title": "How to create a Salesforce data dictionary",
+      "text": "Generate one from your org’s real metadata instead of a spreadsheet that goes stale."
+    },
+    {
+      "href": "/blog/sf-intelligence-0-4-0",
+      "section": "blog",
+      "kind": "release",
+      "date": "2026-10-10",
+      "home": false,
+      "title": "0.4.0: four new questions your AI can answer",
+      "text": "Is this deployment risky, what sets a field to a value, why a flow runs twice, and a one-page brief of any object. Plus a tool list about 70% smaller."
+    },
+    {
+      "href": "/blog/sf-intelligence-0-3-1",
+      "section": "blog",
+      "kind": "release",
+      "date": "2026-08-22",
+      "home": false,
+      "title": "0.3.1: the tools audit themselves",
+      "text": "A correctness release: 39 verified defects in tools that had already shipped, each reproduced against a real org, and the 18 regressions the fixes caused."
+    },
+    {
+      "href": "/blog/sf-intelligence-0-3-0",
+      "section": "blog",
+      "kind": "release",
+      "date": "2026-08-10",
+      "home": false,
+      "title": "0.3.0: safer defaults",
+      "text": "A smaller default tool list, live access as an expiring grant tied to one org, network access off by default, and the upgrade steps."
+    },
+    {
+      "href": "/blog/deterministic-reasoning-model",
+      "section": "blog",
+      "kind": "release",
+      "date": "2026-07-20",
+      "home": false,
+      "title": "How sf-intelligence reasons about your org",
+      "text": "How answers are worked out from your org’s metadata and a fixed set of general Salesforce rules, with no AI model involved. Covers 0.2.0 and 0.2.1."
+    }
+  ]
+}

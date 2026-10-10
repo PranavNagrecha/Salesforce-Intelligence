@@ -245,12 +245,49 @@ if (existsSync(configurationMd) && manifest) {
         `docs/configuration.md registered=${registered} but ProductManifest total=${manifest.tools.total}`,
       );
     }
+    // CH-9: the prose a few lines further down quoted a stale 212.
+    const fullRe = /full non-hidden roster is (\d+) schemas/;
+    const fm = configText.match(fullRe);
+    if (fm && Number(fm[1]) !== manifest.tools.total - manifest.tools.hidden) {
+      fail(
+        `docs/configuration.md "full non-hidden roster is ${fm[1]} schemas" but ProductManifest total-hidden=${manifest.tools.total - manifest.tools.hidden}`,
+      );
+    }
     if (backCompat !== manifest.tools.hidden) {
       fail(
         `docs/configuration.md back-compat=${backCompat} but ProductManifest hidden=${manifest.tools.hidden}`,
       );
     }
   }
+}
+
+// ── docs/routing.md tool counts (CH-9) ──────────────────────────────────────
+// routing.md hand-wrote "registers 217 tools, 212 of which are advertised" and
+// "advertises **19 of 212**" for three releases after both changed. Every
+// "N of M tools" / "registers N tools" phrase there must match the manifest
+// (M = tools advertised under `full` = total - hidden).
+const routingMd = join(root, 'docs/routing.md');
+if (existsSync(routingMd) && manifest) {
+  const text = read(routingMd);
+  const fullAdvertised = manifest.tools.total - manifest.tools.hidden;
+  const coreSize = manifest.tools.profiles?.core?.length;
+  const checks = [
+    [/registers (\d+) tools, (\d+) of which are advertised/g, (m) => [[m[1], manifest.tools.total], [m[2], fullAdvertised]]],
+    [/advertises \**(\d+)\s+of\s+(\d+)\**\s+tools/g, (m) => [[m[1], coreSize], [m[2], fullAdvertised]]],
+    [/ask-phrasings across (\d+) tools/g, (m) => [[m[1], fullAdvertised]]],
+  ];
+  let seen = 0;
+  for (const [re, pairs] of checks) {
+    for (const m of text.matchAll(re)) {
+      seen += 1;
+      for (const [got, want] of pairs(m)) {
+        if (Number(got) !== want) {
+          fail(`docs/routing.md "${m[0].replace(/\s+/g, ' ')}" — ${got} should be ${want} (ProductManifest)`);
+        }
+      }
+    }
+  }
+  if (seen === 0) fail('docs/routing.md: no tool-count phrase matched — update the CH-9 pin patterns.');
 }
 
 // ── core-roster size pin (AUDIT-F6 / live_consent in core → 19) ─────────────
@@ -282,8 +319,9 @@ if (manifest) {
         root,
         'website/src/pages/configuration.astro',
       ),
-      'website/public/llms.txt': join(root, 'website/public/llms.txt'),
-      'website/public/llms-full.txt': join(root, 'website/public/llms-full.txt'),
+      // website/public/llms.txt and llms-full.txt are no longer committed:
+      // the website build generates them, filling every count from
+      // site-data.json (pinned above), so they cannot carry a stale literal.
     };
     const texts = {};
     for (const [label, path] of Object.entries(corePinFiles)) {
@@ -311,8 +349,6 @@ if (manifest) {
 // hand users an install command for the previous release.
 if (manifest) {
   const versionPinFiles = [
-    'website/public/llms.txt',
-    'website/public/llms-full.txt',
     'README.md',
     'docs/guides/installation.md',
     '.claude-plugin/plugin.json',
@@ -671,8 +707,7 @@ const websiteProfilePaths = [
   join(root, 'website/src/pages/configuration.astro'),
   join(root, 'website/src/pages/getting-started.astro'),
   join(root, 'website/src/pages/index.astro'),
-  join(root, 'website/public/llms.txt'),
-  join(root, 'website/public/llms-full.txt'),
+  join(root, 'website/src/data/llms-header.md'),
 ];
 
 for (const path of [
@@ -1018,6 +1053,91 @@ if (existsSync(contractsSrc) && existsSync(adr004)) {
     }
   } else {
     warn('OmniStudio element catalog not built; element-catalog.md drift not checked (run pnpm -r build).');
+  }
+}
+
+// ── website pages: every stated count is the current one ────────────────────
+// The site prints counts in prose ("the 19-tool core roster", "143 concepts /
+// 195 rules") that went stale while site-data.json was correct, because only
+// three website files were pinned. Pages should render counts from
+// site-data.json; any literal that remains in a current-fact form must match
+// the ProductManifest. Release posts are history (a 0.3.0 post rightly says
+// 19 tools), so they are exempt from the pins but not from the phrase list.
+const websitePagesRoot = join(root, 'website/src/pages');
+const isReleasePost = (rel) => /^blog\/sf-intelligence-\d+-\d+-\d+\.astro$/.test(rel);
+const websitePageFiles = [];
+const walkWebsitePages = (dir) => {
+  if (!existsSync(dir)) return;
+  for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    const full = join(dir, entry.name);
+    if (entry.isDirectory()) walkWebsitePages(full);
+    else if (/\.(astro|md|mdx)$/.test(entry.name)) websitePageFiles.push(full);
+  }
+};
+walkWebsitePages(websitePagesRoot);
+const websiteRel = (full) => full.slice(websitePagesRoot.length + 1).replace(/\\/g, '/');
+
+if (manifest && websitePageFiles.length > 0) {
+  const { concepts, rules } = manifest.conceptModel;
+  const expectedCore = manifest.tools.profiles?.core?.length ?? null;
+  const currentPages = websitePageFiles.filter((f) => !isReleasePost(websiteRel(f)));
+  for (const full of currentPages) {
+    const text = read(full);
+    const label = `website/src/pages/${websiteRel(full)}`;
+    // The "Concept Model … N concepts / M rules" pin, plus the bare
+    // "N concepts / M rules" form with no lead-in; one report per pair.
+    const pairs = new Set([
+      ...matchConceptCountFacts(text).map((m) => `${m.concepts}/${m.rules}`),
+      ...[...text.matchAll(/\b(\d+)\s+concepts\s*\/\s*(\d+)\s+rules\b/g)].map((m) => `${m[1]}/${m[2]}`),
+    ]);
+    for (const pair of pairs) {
+      if (pair !== `${concepts}/${rules}`) {
+        fail(`${label} states ${pair.replace('/', ' concepts / ')} rules but ProductManifest has ${concepts}/${rules}. Render {siteData.conceptCount} / {siteData.conceptRuleCount} instead.`);
+      }
+    }
+    if (typeof expectedCore === 'number') {
+      const { failures: coreFails } = checkCoreRosterCountPins({ [label]: text }, expectedCore);
+      for (const message of coreFails) fail(`${message}. Render {siteData.coreToolCount} instead.`);
+    }
+  }
+}
+
+// Stale count phrases that shipped on the site. Release posts may quote the
+// count that was true at their release, so they are skipped here too.
+const websiteStalePhrases = [
+  { phrase: '19-tool core', reason: 'the core roster is derived (site-data.coreToolCount); 19 was 0.3.0.' },
+  { phrase: '143 concepts / 195 rules', reason: 'Concept Model size comes from site-data.json (conceptCount / conceptRuleCount).' },
+  { phrase: '143-concept, 195-rule', reason: 'Concept Model size comes from site-data.json (conceptCount / conceptRuleCount).' },
+];
+for (const full of websitePageFiles) {
+  if (isReleasePost(websiteRel(full))) continue;
+  const text = read(full);
+  for (const { phrase, reason } of websiteStalePhrases) {
+    if (text.includes(phrase)) fail(`website/src/pages/${websiteRel(full)} contains stale phrase "${phrase}" (${reason})`);
+  }
+}
+
+// /.well-known/mcp/server.json on the site mirrors the registry manifest.
+// Cloudflare builds only website/, so recalibrate.mjs copies it; this catches
+// a server.json edit (description, version) that was never re-mirrored.
+{
+  const serverJson = join(root, 'packages/cli/server.json');
+  const mirror = join(root, 'website/public/.well-known/mcp/server.json');
+  if (existsSync(serverJson) && existsSync(mirror)) {
+    if (read(serverJson) !== read(mirror)) {
+      fail('website/public/.well-known/mcp/server.json differs from packages/cli/server.json. Run website/recalibrate.mjs.');
+    }
+  } else if (existsSync(serverJson)) {
+    warn('website/public/.well-known/mcp/server.json missing; run website/recalibrate.mjs to mirror the registry manifest.');
+  }
+}
+
+// site-data.json coreToolCount must match the manifest's core profile.
+if (manifest && websiteDataPath) {
+  const siteData = JSON.parse(read(websiteDataPath));
+  const expectedCore = manifest.tools.profiles?.core?.length ?? null;
+  if (siteData.coreToolCount != null && siteData.coreToolCount !== expectedCore) {
+    fail(`${websiteDataPath} coreToolCount=${siteData.coreToolCount} but ProductManifest profiles.core.length=${expectedCore}. Run website/recalibrate.mjs.`);
   }
 }
 

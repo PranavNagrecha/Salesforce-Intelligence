@@ -1,71 +1,120 @@
 ---
-import DocPage from "../layouts/DocPage.astro";
+import InfoPage from "../layouts/InfoPage.astro";
+import FaqBlock from "../components/FaqBlock.astro";
+import site from "../data/site.ts";
 
-const title = "sf-intelligence License: MIT + Commons Clause Explained";
-const description = "Understand permitted use, redistribution and commercial-service restrictions under the sf-intelligence MIT + Commons Clause license.";
+/* Every term on this page is quoted from, or a plain reading of, the LICENSE
+ * file at the repository root. Do not add terms that file doesn't contain. */
+const title = "sf-intelligence License: What You Can Do";
+const description =
+  "sf-intelligence is free under MIT + Commons Clause. Use it at work or on client orgs; a commercial licence is only needed to sell it. The terms, quoted.";
+const licenseUrl = `${site.github}/blob/main/LICENSE`;
+
+const faqs = [
+  {
+    q: "Is it free to use at work?",
+    a: "Yes. Using it inside a company, on your company’s orgs, costs nothing and needs no licence beyond the one it ships with.",
+  },
+  {
+    q: "Is it open source?",
+    a: "It’s source available. The code is public and the MIT terms let you read, change and share it, but the Commons Clause takes away the right to sell it, so it doesn’t meet the Open Source Initiative’s definition.",
+  },
+  {
+    q: "Can I change it and share my changes?",
+    a: "Yes. The MIT grant covers modifying, merging, publishing and distributing copies, as long as the copyright notice, the licence and the Commons Clause notice go with them.",
+  },
+  {
+    q: "Do I have to credit sf-intelligence?",
+    a: "Beyond keeping the licence notice in copies of the software, no. The licence says: “Attribution is appreciated but not required.”",
+  },
+  {
+    q: "Is there a warranty?",
+    a: "No. Like any MIT-licensed software it’s provided “as is”, without warranty of any kind.",
+  },
+];
 ---
 
-<DocPage
+<InfoPage
   title={title}
   description={description}
   path="/licensing"
-  heading="What the sf-intelligence license allows"
-  intro={`Free to use, even at work. A commercial license is only needed to <em>Sell</em> it.`}
-  crumbs={[{ label: "licensing", href: "/licensing" }]}
-  breadcrumbs={[{ name: "Licensing", path: "/licensing" }]}
+  heading="What the licence lets you do"
+  lede="Free to use, including at work and on client orgs. You only need a commercial licence to sell sf-intelligence itself."
+  crumbs={[{ name: "Licensing", path: "/licensing" }]}
+  dateModified="2026-10-10"
 >
-  <section>
-    <div class="container">
+  <div class="answer-first narrow">
+    <span class="label">Short answer</span>
+    <p>sf-intelligence is licensed under <strong>MIT with the Commons Clause</strong>. You can use, copy, change and share it for free. What you can’t do without a commercial licence is <strong>sell</strong> it: offer it, or a service whose value comes substantially from it, to others for a fee.</p>
+  </div>
 
-      <h2>License Overview</h2>
-      <p>sf-intelligence is licensed under the <strong>MIT License with Commons Clause</strong>. This means:</p>
-
-      <div class="feature-grid" style="grid-template-columns: 1fr 1fr; gap: 2rem; margin: 2rem 0;">
-        <div class="feature-card">
-          <h3>✓ Free to Use</h3>
-          <p>Free, forever - including at work, inside a company. Use sf-intelligence for:</p>
-          <ul style="margin-top: 1rem; font-size: 0.95rem;">
-            <li>Personal projects, learning, and evaluation</li>
-            <li>Internal org analysis - at home or on the job</li>
-            <li>Self-hosting it for your own or your team's use</li>
-            <li>Forking, modifying, redistributing, and contributing</li>
-          </ul>
-        </div>
-
-        <div class="feature-card">
-          <h3>✗ Selling It</h3>
-          <p>You may not "Sell" it without a commercial license - i.e. provide it to others, for a fee, as a product or service whose value derives substantially from it:</p>
-          <ul style="margin-top: 1rem; font-size: 0.95rem;">
-            <li>Offering it (or a hosted / SaaS version) as a paid product or service</li>
-            <li>Reselling it, or paid access to it or its output</li>
-            <li>Charging for hosting/support whose value derives substantially from it</li>
-            <li>A competing product whose value derives substantially from it</li>
-          </ul>
-        </div>
+  <section class="block" aria-labelledby="allowed">
+    <h2 id="allowed">Allowed, and what needs a licence</h2>
+    <div class="split">
+      <div class="panel accent">
+        <h3>Free, no permission needed</h3>
+        <ul class="ticks">
+          <li>Using it on your own or your employer’s orgs</li>
+          <li>Using it as one of your tools on client work (see below)</li>
+          <li>Running it for yourself or your own team</li>
+          <li>Reading, changing and forking the code</li>
+          <li>Sharing copies, with the licence notice included</li>
+        </ul>
       </div>
-
-      <h2>Commercial Licensing</h2>
-      <p>If you want to use sf-intelligence commercially, or aren't sure if your use case requires a license, get in touch:</p>
-      <div style="margin: 2rem 0; padding: 1.5rem; background: rgba(255, 255, 255, 0.05); border-radius: 8px;">
-        <p><strong>Email:</strong> <a href="mailto:pranav.sfintelligence@gmail.com">pranav.sfintelligence@gmail.com</a></p>
-        <p style="margin-top: 0.5rem;"><strong>Subject:</strong> sf-intelligence Commercial License</p>
+      <div class="panel tint">
+        <h3>Needs a commercial licence</h3>
+        <ul class="ticks minus">
+          <li>Selling sf-intelligence, or paid access to it</li>
+          <li>Hosting it for others as a paid service</li>
+          <li>Selling support or consulting that’s substantially about it</li>
+          <li>A paid product whose value comes substantially from it</li>
+        </ul>
       </div>
-
-      <h2>Attribution</h2>
-      <p>Attribution is appreciated but not required. If you include attribution, please link to <a href="https://sfi.auditforce.cloud">sfi.auditforce.cloud</a>.</p>
-
-      <h2>Derivative Works</h2>
-      <p>You are free to modify sf-intelligence for your own use under the same license terms. If you modify the code, you may distribute those modifications under the MIT + Commons Clause license.</p>
-
-      <h2>Contributing</h2>
-      <p>Contributors agree that their contributions are also licensed under the MIT + Commons Clause. By submitting a pull request or contribution, you agree that your contribution can be used under these terms.</p>
-
-      <h2>Full License Text</h2>
-      <p>The complete license text ships in the <code>LICENSE</code> file inside the <a href="https://www.npmjs.com/package/sf-intelligence" rel="noopener">npm package</a>.</p>
-
-      <h2>Questions?</h2>
-      <p>If you have any questions about how the license applies to your use case, please reach out to <a href="mailto:pranav.sfintelligence@gmail.com">pranav.sfintelligence@gmail.com</a>.</p>
-
     </div>
   </section>
-</DocPage>
+
+  <section class="block narrow" aria-labelledby="consultants">
+    <h2 id="consultants">Can I use it on client orgs as a consultant?</h2>
+    <p><strong>Yes, as a tool in your own work.</strong> Running it on a client’s org while you do the engagement you were hired for, and using what it tells you in your advice, is using the software. The licence doesn’t restrict that.</p>
+    <p><strong>What needs a commercial licence</strong> is charging clients for something whose value comes “entirely or substantially” from sf-intelligence: selling access to it, hosting it for them, selling sf-intelligence support, or selling its output as your product (for example, a paid “run sf-intelligence on your org” package). The licence names consulting and support fees explicitly:</p>
+    <blockquote class="license-quote">
+      <p>“Sell” means practicing any or all of the rights granted to you under the License to provide to third parties, for a fee or other consideration (including without limitation fees for hosting or consulting/support services related to the Software), a product or service whose value derives, entirely or substantially, from the functionality of the Software.</p>
+      <cite>LICENSE, Commons Clause License Condition v1.0</cite>
+    </blockquote>
+    <p>If you’re unsure which side your work falls on, ask before you quote it: <a href={`mailto:${site.feedbackEmail}?subject=sf-intelligence%20commercial%20licence`}>{site.feedbackEmail}</a>. This page explains the licence in plain words; it isn’t legal advice, and the LICENSE file is what applies.</p>
+  </section>
+
+  <section class="block narrow" aria-labelledby="terms">
+    <h2 id="terms">The terms, quoted</h2>
+    <p>The MIT grant:</p>
+    <blockquote class="license-quote">
+      <p>Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the “Software”), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software…</p>
+      <cite>LICENSE, MIT License</cite>
+    </blockquote>
+    <p>The Commons Clause condition on that grant:</p>
+    <blockquote class="license-quote">
+      <p>…the grant of rights under the License will not include, and the License does not grant to you, the right to Sell the Software.</p>
+      <cite>LICENSE, Commons Clause License Condition v1.0</cite>
+    </blockquote>
+    <p>Read the whole file on <a href={licenseUrl} rel="noopener">GitHub</a>. It also ships inside the <a href={site.npm} rel="noopener">npm package</a>.</p>
+  </section>
+
+  <section class="block narrow" aria-labelledby="commercial">
+    <h2 id="commercial">Getting a commercial licence</h2>
+    <p>The licence names the contact for a licence to sell: <a href={`mailto:${site.feedbackEmail}?subject=sf-intelligence%20commercial%20licence`}>{site.feedbackEmail}</a>. Say briefly what you want to offer and to whom.</p>
+  </section>
+
+  <section class="block" aria-labelledby="faq">
+    <h2 id="faq">Questions</h2>
+    <FaqBlock faqs={faqs} />
+  </section>
+
+  <nav class="block narrow" aria-labelledby="more">
+    <h2 id="more">Related</h2>
+    <ul class="link-list">
+      <li><a href="/use-cases/consultants">Learn a client’s org in an afternoon</a><span> · for consultants</span></li>
+      <li><a href="/trust">How it keeps your org safe</a></li>
+      <li><a href="/faq">FAQ</a></li>
+    </ul>
+  </nav>
+</InfoPage>

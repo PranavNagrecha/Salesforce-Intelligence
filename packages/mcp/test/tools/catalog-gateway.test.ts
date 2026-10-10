@@ -182,6 +182,28 @@ describe('sfi.describe_analysis', () => {
     expect(r.value.data.description).toBeDefined();
   });
 
+  it("FAIL-BEFORE/PASS-AFTER: detail=full serves a core tool's long-form reference", async () => {
+    // The advertised description of a core tool is the short contract; what it
+    // drops must stay one call away.
+    const tool = V01_TOOLS.find((t) => t.name === 'sfi.safe_to_delete_field');
+    expect(tool?.reference).toBeDefined();
+    const r = await describeAnalysisHandler(ctx, { name: 'safe_to_delete_field', detail: 'full' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.description).toBe(tool?.description);
+    expect(r.value.data.reference).toBe(tool?.reference);
+    // Summary and schema stay lean: the reference is opt-in.
+    const s = await describeAnalysisHandler(ctx, { name: 'safe_to_delete_field', detail: 'schema' });
+    expect(s.ok && s.value.data.reference).toBeFalsy();
+  });
+
+  it('omits reference for a tool whose description is the whole text', async () => {
+    const tool = V01_TOOLS.find((t) => t.reference === undefined && !t.hidden);
+    expect(tool).toBeDefined();
+    const r = await describeAnalysisHandler(ctx, { name: tool?.name ?? '', detail: 'full' });
+    expect(r.ok && 'reference' in r.value.data).toBe(false);
+  });
+
   it('answers an unknown name with an honest catalog pointer', async () => {
     const r = await describeAnalysisHandler(ctx, { name: 'sfi.totally_made_up' });
     expect(r.ok).toBe(false);

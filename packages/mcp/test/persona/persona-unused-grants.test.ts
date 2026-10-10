@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { readdirSync, renameSync, writeFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 
 import { personaUnusedGrantsHandler } from '../../src/tools/persona-unused-grants.js';
@@ -75,5 +75,30 @@ describe('sfi.persona_unused_grants', () => {
     expect(r.data.appliedScope).toMatchObject({ name: 'Portal user', source: 'config', containers: ['PermissionSet:Acme_Portal'] });
     const missing = await personaUnusedGrantsHandler(fx.ctx, { persona: 'Nobody' });
     expect(missing.ok).toBe(false);
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER (CH-8): an unreadable reachable Apex file is disclosed, not silently skipped', async () => {
+    const find = (dir: string): string | null => {
+      for (const e of readdirSync(dir, { withFileTypes: true })) {
+        const p = join(dir, e.name);
+        if (e.isDirectory()) {
+          const hit = find(p);
+          if (hit !== null) return hit;
+        } else if (e.name === 'Acme_Notes.cls') return p;
+      }
+      return null;
+    };
+    const file = find(fx.vaultRoot);
+    expect(file).not.toBeNull();
+    if (file === null) return;
+    renameSync(file, `${file}.moved`);
+    try {
+      const r = must(await personaUnusedGrantsHandler(fx.ctx, { permissionSets: ['Acme_Portal'] }));
+      // Before: the read error was a bare `continue` — no limitation, `complete`.
+      expect(r.data.trust.limitations.some((l) => l.includes('could not be read'))).toBe(true);
+      expect(r.data.trust.completeness.status).toBe('partial');
+    } finally {
+      renameSync(`${file}.moved`, file);
+    }
   });
 });

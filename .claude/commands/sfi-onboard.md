@@ -25,20 +25,31 @@ SfIntelligence is read-only. Say this plainly before the refresh:
 > SfIntelligence will retrieve metadata and build a local vault. It will not
 > deploy, insert, update, delete, or mutate Salesforce data.
 
+## Running the CLI
+
+The plugin installs the MCP server, not the `sfi` command. Before the first
+command, run `command -v sfi` via the Bash tool. If it prints a path, run the
+commands below as written. If it prints nothing, run every `sfi …` command
+below as `npx -y sf-intelligence@0.4.0 …` instead, with the same arguments.
+The Bash tool has no terminal, so the CLI cannot prompt: always pass the
+flags it would otherwise ask for.
+
 ## Argument handling
 
 `$ARGUMENTS` may contain:
 
 - `--target-org <alias>` - use this alias without asking the user to pick.
-- `--vault-root <path>` - pass through to `sfi init`; default is `org-kb`.
+- `--vault <path>` - pass through to `sfi init`; default is `org-kb`.
 - `--with-tooling-api` - pass through to `sfi refresh`; this adds live
   read-only Tooling API enrichment for freshness fields after the offline
   retrieve finishes.
 - `--skip-refresh` - initialize and verify only; do not run the first refresh.
 
-If no target org is supplied, run `sf org list --json` and show the connected
-org aliases/usernames. Ask the user which one to use. If exactly one connected
-org exists, recommend it but still name it before proceeding.
+If no target org is supplied, run `sf org list --skip-connection-status --json`
+(local, contacts no org) and show the org aliases/usernames. Ask the user which one to use. If exactly one org
+alias is listed, recommend it but still name it before proceeding. This list
+does not report `connectedStatus` for non-scratch orgs, so never gate on it: an
+expired login surfaces when the first refresh runs.
 
 Do not ask the user to type npm, node, pnpm, or MCP config commands during this
 flow unless a diagnostic failure requires it.
@@ -56,15 +67,15 @@ sfi doctor
 Then run:
 
 ```sh
-sf org list --json
+sf org list --skip-connection-status --json
 ```
 
 Stop and give a concrete fix when:
 
-- `sfi` is not on PATH: tell the user the plugin CLI is not installed or the
-  MCP package is not available yet.
+- `sfi` is not on PATH and `npx -y sf-intelligence@0.4.0 doctor` also fails:
+  tell the user Node.js 20+ (which provides `npx`) is required.
 - `sf` is not on PATH: tell the user to install Salesforce CLI.
-- no connected org is available: tell the user to run
+- the list holds no org alias or username at all: tell the user to run
   `sf org login web --alias <alias>` and then rerun `/sfi-onboard`.
 - the current directory is not a Salesforce DX project and `sfi init` would
   need to scaffold one: explain that the recommended setup is to run this from
@@ -80,7 +91,7 @@ Run:
 sfi init --target-org <alias>
 ```
 
-Forward `--vault-root <path>` when the user supplied it.
+Forward `--vault <path>` when the user supplied it.
 
 If a vault already exists, do not overwrite it automatically. Ask whether they
 want to keep it and continue to refresh/status, or rerun init with `--force`.

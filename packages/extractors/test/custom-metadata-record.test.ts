@@ -417,3 +417,75 @@ describe('extractCustomMetadataRecord', () => {
     });
   });
 });
+
+describe('DLRS rollup definitions (WOW-3)', () => {
+  const cell = (field: string, type: string, value: string | null): string =>
+    value === null
+      ? `<values><field>${field}</field><value xsi:nil="true"/></values>`
+      : `<values><field>${field}</field><value xsi:type="xsd:${type}">${value}</value></values>`;
+  const record = (active: boolean): string => `<?xml version="1.0" encoding="UTF-8"?>
+<CustomMetadata xmlns="http://soap.sforce.com/2006/04/metadata" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xmlns:xsd="http://www.w3.org/2001/XMLSchema">
+  <label>InvoiceTotal</label>
+  <protected>false</protected>
+  ${cell('dlrs__Active__c', 'boolean', String(active))}
+  ${cell('dlrs__AggregateOperation__c', 'string', 'Sum')}
+  ${cell('dlrs__AggregateResultField__c', 'string', 'Invoice_Total__c')}
+  ${cell('dlrs__CalculationMode__c', 'string', 'Realtime')}
+  ${cell('dlrs__ChildObject__c', 'string', 'Invoice__c')}
+  ${cell('dlrs__FieldToAggregate__c', 'string', 'Amount__c')}
+  ${cell('dlrs__FieldToOrderBy__c', 'string', null)}
+  ${cell('dlrs__ParentObject__c', 'string', 'Project__c')}
+  ${cell('dlrs__RelationshipCriteriaFields__c', 'string', 'Status__c\nAmount__c')}
+  ${cell('dlrs__RelationshipField__c', 'string', 'Project__c')}
+</CustomMetadata>`;
+
+  it('FAIL-BEFORE/PASS-AFTER: an active DLRS record writes its target field and reads the child fields it aggregates', async () => {
+    const { dir, path } = await writeTempCmdXml(
+      'dlrs__LookupRollupSummary2.InvoiceTotal',
+      record(true),
+    );
+    try {
+      const result = await extractCustomMetadataRecord(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const dlrs = result.value.edges.filter((e) => e.source === 'dlrs-rollup');
+      const writer = dlrs.find((e) => e.edgeType === 'writesTo');
+      expect(writer?.toId).toBe('CustomField:Project__c.Invoice_Total__c');
+      expect(writer?.confidence).toBe('declared');
+      expect(writer?.properties).toMatchObject({
+        active: true,
+        calculationMode: 'Realtime',
+        aggregateOperation: 'Sum',
+        childObject: 'Invoice__c',
+      });
+      const reads = dlrs
+        .filter((e) => e.edgeType === 'readsFrom')
+        .map((e) => [e.toId, e.properties['roles']]);
+      expect(reads).toEqual([
+        ['CustomField:Invoice__c.Amount__c', ['aggregated', 'criteria']],
+        ['CustomField:Invoice__c.Project__c', ['relationship']],
+        ['CustomField:Invoice__c.Status__c', ['criteria']],
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an inactive DLRS record still mints its edges, stamped active:false', async () => {
+    const { dir, path } = await writeTempCmdXml(
+      'dlrs__LookupRollupSummary2.InvoiceTotal',
+      record(false),
+    );
+    try {
+      const result = await extractCustomMetadataRecord(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const writer = result.value.edges.find(
+        (e) => e.source === 'dlrs-rollup' && e.edgeType === 'writesTo',
+      );
+      expect(writer?.properties['active']).toBe(false);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

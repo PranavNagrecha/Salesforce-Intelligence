@@ -19,8 +19,13 @@
  *     invisible to both branches' green gates.
  *
  * The invariant is one-directional and must stay that way: every marker is
- * PRESENT in the advertised descriptions that carry it, and ABSENT from every
- * indexed document. A host must still read the caveat; the funnel must not.
+ * PRESENT in the long-form text that carries it, and ABSENT from every indexed
+ * document. A host must still be able to read the caveat; the funnel must not.
+ *
+ * The long-form text is `retrievalDocument(tool)`: a tool's `reference` when it
+ * has one (the core tools, whose advertised `description` is the short
+ * contract and whose long form `sfi.describe_analysis {detail:'full'}`
+ * serves), else its `description`.
  */
 import { describe, expect, it } from 'vitest';
 
@@ -29,13 +34,13 @@ import {
   CORPUS_BOILERPLATE_MARKERS,
   stripCorpusBoilerplate,
 } from '../../src/tools/corpus-boilerplate.js';
-import { V01_TOOLS } from '../../src/tools/index.js';
+import { V01_TOOLS, advertisedTools, retrievalDocument } from '../../src/tools/index.js';
 
 describe('repeated boilerplate reaches hosts but never the retrieval corpus', () => {
-  it('every marker is carried by at least one ADVERTISED description', () => {
+  it('every marker is carried by at least one long-form tool text', () => {
     for (const marker of CORPUS_BOILERPLATE_MARKERS) {
       const carriers = V01_TOOLS.filter((t) =>
-        (t.description ?? '').includes(marker),
+        retrievalDocument(t).includes(marker),
       );
       // A marker nobody carries is dead config — it would strip nothing and
       // silently rot, which is how the drift this repo keeps fixing begins.
@@ -61,12 +66,21 @@ describe('repeated boilerplate reaches hosts but never the retrieval corpus', ()
   it('a description carrying no boilerplate is returned BYTE-IDENTICAL', () => {
     // The strip must be incapable of perturbing a tool it does not target.
     const clean = V01_TOOLS.filter(
-      (t) =>
-        !CORPUS_BOILERPLATE_MARKERS.some((m) => (t.description ?? '').includes(m)),
+      (t) => !CORPUS_BOILERPLATE_MARKERS.some((m) => retrievalDocument(t).includes(m)),
     );
     expect(clean.length).toBeGreaterThan(0);
     for (const t of clean) {
-      expect(stripCorpusBoilerplate(t.description ?? '')).toBe(t.description ?? '');
+      expect(stripCorpusBoilerplate(retrievalDocument(t))).toBe(retrievalDocument(t));
+    }
+  });
+
+  it('no short advertised core description carries a boilerplate block', () => {
+    // The core descriptions are the per-session token budget: a repeated
+    // block belongs in `reference`, which the host reads only on request.
+    for (const t of advertisedTools('core')) {
+      for (const marker of CORPUS_BOILERPLATE_MARKERS) {
+        expect(t.description.includes(marker), `${t.name}: ${marker.slice(0, 40)}…`).toBe(false);
+      }
     }
   });
 
@@ -81,9 +95,9 @@ describe('repeated boilerplate reaches hosts but never the retrieval corpus', ()
 
   it('strips only the boilerplate, preserving the prose that precedes it', () => {
     const marker = 'Every response also carries `conceptReasoning`';
-    const carrier = V01_TOOLS.find((t) => (t.description ?? '').includes(marker));
+    const carrier = V01_TOOLS.find((t) => retrievalDocument(t).includes(marker));
     expect(carrier).toBeDefined();
-    const full = carrier?.description ?? '';
+    const full = carrier === undefined ? '' : retrievalDocument(carrier);
     const stripped = stripCorpusBoilerplate(full);
     expect(stripped.length).toBeLessThan(full.length);
     expect(stripped).toBe(full.slice(0, full.indexOf(marker)).trimEnd());

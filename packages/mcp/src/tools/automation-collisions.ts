@@ -107,6 +107,7 @@ import {
 } from './page-cursor.js';
 import { responseReductionCap } from './response-budget.js';
 import { isActiveSoeFirer } from './soe-active.js';
+import { isTimeTriggeredEdge } from './time-triggered-write.js';
 
 /** Default and max number of collisions / cycles returned per list. */
 const DEFAULT_LIMIT = 50;
@@ -696,6 +697,9 @@ const gatherFieldWritesForFirer = async (
   const fieldWrites: ResolvedFieldWrite[] = [];
   const unenumerable: UnenumerableWriteEdge[] = [];
   for (const writeEdge of edgesResult.value) {
+    // A time-triggered workflow update runs later, in its own transaction: it
+    // cannot collide with this save's writes.
+    if (isTimeTriggeredEdge(writeEdge)) continue;
     if (!writeEdge.toId.startsWith('CustomField:')) {
       const operation = writeEdge.properties['operation'];
       if (!isWholeRecordDmlEdge(writeEdge.properties) || operation === 'recordDelete') continue;

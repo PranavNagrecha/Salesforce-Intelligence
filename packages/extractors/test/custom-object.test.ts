@@ -1192,3 +1192,44 @@ describe('deriveEntityVariant', () => {
     expect(deriveEntityVariant('Account', false)).toBe('StandardObject');
   });
 });
+
+// FAIL-BEFORE/PASS-AFTER (ADM-3): the object's org-default Lightning record
+// page (`<actionOverrides>` View / Flexipage) was never read.
+describe('extractCustomObject — org-default record page activation', () => {
+  it('captures the View/Flexipage override as recordPageOverrides', async () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <actionOverrides>
+        <actionName>View</actionName>
+        <content>Project_Record_Page</content>
+        <formFactor>Large</formFactor>
+        <skipRecordTypeSelect>false</skipRecordTypeSelect>
+        <type>Flexipage</type>
+    </actionOverrides>
+    <actionOverrides>
+        <actionName>View</actionName>
+        <type>Default</type>
+    </actionOverrides>
+    <deploymentStatus>Deployed</deploymentStatus>
+    <label>Project</label>
+    <nameField>
+        <label>Project Name</label>
+        <type>Text</type>
+    </nameField>
+    <pluralLabel>Projects</pluralLabel>
+    <sharingModel>Private</sharingModel>
+    <visibility>Public</visibility>
+</CustomObject>`;
+    const { dir, path } = await writeTempXml('Project__c.object-meta.xml', xml);
+    try {
+      const result = await extractCustomObject(path);
+      if (!result.ok) throw new Error(result.error.message);
+      const obj = result.value.nodes.find((n) => n.type === 'CustomObject');
+      expect(obj?.properties['recordPageOverrides']).toEqual([
+        { page: 'Project_Record_Page', object: 'Project__c', formFactor: 'Large', recordType: null, profile: null },
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+});

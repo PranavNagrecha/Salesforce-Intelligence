@@ -397,13 +397,18 @@ jobs:
         env:
           ORG_LEAK_BLOCKLIST: ${{ secrets.ORG_LEAK_BLOCKLIST }}
         run: |
-          if [ -n "$ORG_LEAK_BLOCKLIST" ]; then
-            printf '%s' "$ORG_LEAK_BLOCKLIST" > scripts/forbidden-names.local.json
+          if [ -z "$ORG_LEAK_BLOCKLIST" ]; then
+            echo "::error::ORG_LEAK_BLOCKLIST secret is empty — refusing to publish on a vacuous org-leak scan"
+            exit 1
           fi
+          printf '%s' "$ORG_LEAK_BLOCKLIST" > scripts/forbidden-names.local.json
           node scripts/scan-org-leaks.mjs --strict
           node scripts/scan-org-leaks.mjs --git-history --strict
           pnpm guard
-          rm -f scripts/forbidden-names.local.json
+          # The blocklist stays on disk until AFTER `npm publish`: its
+          # prepublishOnly hook re-runs scan-org-leaks --strict and the release
+          # guard, both of which refuse a missing blocklist under CI. The
+          # "Remove org blocklist" step below deletes it (always()).
 
       # Idempotent: a re-run (or a workflow_dispatch against an already-released
       # tag) must not fail the whole job just because this version is on npm.
@@ -418,6 +423,12 @@ jobs:
           else
             npm publish --provenance --access public
           fi
+
+      # Delete the materialized blocklist whatever happened above, before any
+      # later step (SBOM, release assets) could pick it up.
+      - name: Remove org blocklist
+        if: always()
+        run: rm -f scripts/forbidden-names.local.json
 
       # Publish the server manifest to the official MCP Registry, keyless via the
       # same GitHub Actions OIDC identity. Previously this was a MANUAL step and

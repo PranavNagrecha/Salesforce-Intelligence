@@ -21,40 +21,17 @@ import type { ExecCommand } from '@sf-intelligence/tooling-api';
 
 import { mintLiveCapability } from '../../src/live-capability.js';
 import type { Context } from '../../src/server.js';
+import { usageSourceFamiliesFor } from '../../src/tools/coverage-trust.js';
 import { resetLiveSession } from '../../src/tools/live-session.js';
 import {
   safeToDeleteFieldHandler,
   safeToDeleteFieldInputSchema,
 } from '../../src/tools/safe-to-delete-field.js';
 
+// Derived from the ONE field-referrer contract so a new producer family is
+// covered here automatically (CH-2: a hand copy missed EmailTemplate).
 const completeFieldDeletionCoverage = (): readonly CoverageEntry[] =>
-  [
-    'CustomField',
-    'ValidationRule',
-    'Flow',
-    'ApexClass',
-    'ApexTrigger',
-    'Layout',
-    'LightningComponentBundle',
-    'AuraDefinitionBundle',
-    'VisualforcePage',
-    'VisualforceComponent',
-    'QuickAction',
-    'WorkflowRule',
-    // The remaining condition firers: their ConditionalContext nodes emit
-    // readsFrom edges to the fields their criteria test, so an unretrieved one
-    // can hide a `condition` blocker.
-    'ApprovalProcess',
-    'AssignmentRule',
-    'AutoResponseRule',
-    'EscalationRule',
-    'SharingRule',
-    'Report',
-    'Dashboard',
-    'ListView',
-    'ReportType',
-    'FlexiPage',
-  ].map((type) => ({
+  [...usageSourceFamiliesFor('CustomField')].map((type) => ({
     type,
     requested: true,
     retrieved: 1,
@@ -697,6 +674,26 @@ describe('safeToDeleteFieldHandler', () => {
     expect(result.value.data.trust.completeness.status).toBe('partial');
   });
 
+  it('FAIL-BEFORE/PASS-AFTER (ADM-5): a review verdict with empty reasoning names its cause', async () => {
+    const coverage = FIXTURE_MANIFEST.coverage ?? [];
+    const incompleteCtx: Context = {
+      ...ctx,
+      manifest: {
+        ...FIXTURE_MANIFEST,
+        coverage: coverage.filter((entry) => entry.type !== 'Report'),
+      },
+    };
+    const result = await safeToDeleteFieldHandler(incompleteCtx, { fieldId: SAFE_FIELD });
+    if (!result.ok) throw new Error(result.error.message);
+    expect(result.value.data.verdict).toBe('review');
+    expect(result.value.data.reasoning).toEqual([]);
+    expect(result.value.data.reviewBecause).toMatch(/coverage gap: .*Report/);
+    // A safe verdict carries no reviewBecause.
+    const safe = await safeToDeleteFieldHandler(ctx, { fieldId: SAFE_FIELD });
+    if (!safe.ok) throw new Error(safe.error.message);
+    expect(safe.value.data.reviewBecause).toBeUndefined();
+  });
+
   it('CR-P3-3: retrieveConfirmed-empty deletion-coverage types yield safe + NO caveat', async () => {
     // A zero-of-those org where SharingRule/Report/Dashboard/ListView/etc. were
     // CONFIRMED-CLEAN empty (describe confirmed support + clean retrieve returned
@@ -731,6 +728,30 @@ describe('safeToDeleteFieldHandler', () => {
     expect(result.value.data.verdict).toBe('safe');
     expect(result.value.data.coverageCaveat).toBeUndefined();
     expect(result.value.data.trust.completeness.status).toBe('complete');
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER (CH-2): an EmailTemplate family the graph contradicts blocks a clean safe', async () => {
+    // EmailTemplate came back confirmed-empty, but the vault's own edges name
+    // templates (referencedButAbsentTypes, derived at bind time). Merge fields
+    // reference fields, so an unread template plane cannot prove "unused".
+    const coverage = FIXTURE_MANIFEST.coverage ?? [];
+    const contradictedCtx: Context = {
+      ...ctx,
+      manifest: {
+        ...FIXTURE_MANIFEST,
+        coverage: coverage.map((entry) =>
+          entry.type === 'EmailTemplate'
+            ? { ...entry, retrieved: 0, retrieveConfirmed: true }
+            : { ...entry, retrieveConfirmed: true },
+        ),
+        referencedButAbsentTypes: ['EmailTemplate'],
+      } as Context['manifest'],
+    };
+    const result = await safeToDeleteFieldHandler(contradictedCtx, { fieldId: SAFE_FIELD });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.verdict).toBe('review');
+    expect(result.value.data.coverageCaveat?.missingCoverage).toContain('EmailTemplate');
   });
 
   it('returns blocking with an analytics category for a Report-referenced field', async () => {
@@ -1878,6 +1899,25 @@ describe('safeToDeleteFieldHandler — stale-builder upgrade path', () => {
     expect(builderVersionCaveat).toMatch(/sfi refresh/);
     // Mirrored into limitations so the proposal artifact discloses it too.
     expect(trust.limitations.some((l) => l === builderVersionCaveat)).toBe(true);
+  });
+
+  // FAIL-BEFORE/PASS-AFTER: the caveat used a hard-coded "added in 0.3.0"
+  // family list, so a 0.3.2-built vault read under 0.3.3 was told the 0.3.0
+  // families were ABSENT (false — it has them) and was never told what it IS
+  // missing. The wording now comes from the shared EDGE_FAMILIES_BY_VERSION.
+  it('names only the edge families added after the vault builder', async () => {
+    process.env[PLUGIN_ENV] = '0.3.3';
+    const result = await safeToDeleteFieldHandler(ctxBuiltBy('0.3.2'), {
+      fieldId: SAFE_FIELD,
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const caveat = result.value.data.builderVersionCaveat ?? '';
+    expect(caveat).toContain('remoteClass');
+    expect(caveat).toContain('(0.3.3)');
+    expect(caveat).not.toMatch(/roll-up coupling/i);
+    expect(caveat).not.toContain('0.3.0');
+    expect(result.value.data.verdict).toBe('review');
   });
 
   it('surfaces the caveat above the verdict in the checklist (which renders no trust block)', async () => {

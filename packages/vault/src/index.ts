@@ -47,6 +47,10 @@ export {
   retrievedNotParsedTypes,
   saveManifest,
   SHARED_CONTAINER_TYPES,
+  partialCoverageReasons,
+  type PartialCoverageReason,
+  standardFieldDescribeDisclosure,
+  standardFieldDescribeGapFor,
   summarizeCoverage,
 } from './manifest.js';
 export type {
@@ -54,6 +58,7 @@ export type {
   ExtendedVaultManifest,
   ManifestError,
   StagedBuildMarker,
+  StandardFieldDescribeSummary,
   UncoveredFamily,
 } from './manifest.js';
 export {

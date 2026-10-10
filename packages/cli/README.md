@@ -1,27 +1,12 @@
 # sf-intelligence
 
+Ask your AI what breaks before you change Salesforce. Offline, read-only, cited answers. Website and docs: **[sfi.auditforce.cloud](https://sfi.auditforce.cloud)**
+
 A **grounded, fail-closed backend for AI assistants** working in one Salesforce org — answers come from the org's **real metadata**, not a guess.
 
 `sf-intelligence` is an **offline-first, read-only, MCP-first knowledge base** for a single Salesforce org. One `sf project retrieve` builds a local vault (Markdown + a DuckDB dependency graph); a semantic router **advises** a ranked tool shortlist and your **host LLM decides** which to run. It **fails closed** — write imperatives and prompt injection are refused by shape, an unanswerable ask gets an honest gap instead of a lookalike tool, and genuine ambiguity gets a clarifying question instead of a guess. MIT + Commons Clause.
 
-Requires **Node.js 20+**. `npx -y sf-intelligence …` needs no install; `npm install -g sf-intelligence` puts `sfi` on your PATH for shorter commands.
-
-## Upgrading to 0.3.0 (breaking)
-
-Coming from 0.2.x? Read this first — full detail in
-[CHANGELOG.md](https://github.com/PranavNagrecha/Salesforce-Intelligence/blob/main/CHANGELOG.md).
-
-- **`SFI_TOOL_PROFILE` now defaults to `core`.** 25 tools are advertised and
-  directly invokable; the rest are reached via
-  `sfi.run_analysis { name: 'sfi.<tool>', args }`. `SFI_TOOL_PROFILE=full`
-  restores advertise-and-invoke-everything.
-- **`liveEnabled: true` no longer opens the live plane.** Grant standing
-  consent with `sfi.live_consent { grant: true }` or set
-  `SFI_LIVE_PLANE_ENABLED=1` — existing on-disk live grants stop working, so
-  re-grant once.
-- **The update check is now opt-in** (`SFI_UPDATE_CHECK=1`), and every
-  success envelope gains a `contentPolicy` block marking org metadata as
-  untrusted data for hosts.
+Requires **Node.js 20+**. `npx -y sf-intelligence …` needs no install; `npm install -g sf-intelligence` puts `sfi` on your PATH for shorter commands. Upgrading from an earlier version? Breaking changes and upgrade steps for every release are in the [CHANGELOG](https://github.com/PranavNagrecha/Salesforce-Intelligence/blob/main/CHANGELOG.md).
 
 ## Try it now — no Salesforce org needed
 
@@ -118,11 +103,11 @@ Share it, or just describe the gap, at <https://github.com/PranavNagrecha/Salesf
 
 Full guides, capabilities, the tool catalog, and configuration: **https://sfi.auditforce.cloud**
 
-- [Getting started](https://sfi.auditforce.cloud/getting-started.html) · [Quality & trust](https://sfi.auditforce.cloud/trust.html)
-- [Capabilities](https://sfi.auditforce.cloud/capabilities.html) · [All tools](https://sfi.auditforce.cloud/tools.html)
-- [Configuration](https://sfi.auditforce.cloud/configuration.html) · [FAQ](https://sfi.auditforce.cloud/faq.html)
+- [Try the demo](https://sfi.auditforce.cloud/demo) · [Getting started](https://sfi.auditforce.cloud/getting-started) · [Quality & trust](https://sfi.auditforce.cloud/trust)
+- [Capabilities](https://sfi.auditforce.cloud/capabilities) · [All tools](https://sfi.auditforce.cloud/tools)
+- [Configuration](https://sfi.auditforce.cloud/configuration) · [FAQ](https://sfi.auditforce.cloud/faq)
 
 ## License
 
 MIT + Commons Clause — see the `LICENSE` file shipped in this package, or
-<https://sfi.auditforce.cloud/licensing.html>.
+<https://sfi.auditforce.cloud/licensing>.

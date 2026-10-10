@@ -317,6 +317,14 @@ interface StatusCliFlags {
  *   registerStatusCommand(program);
  *   await program.parseAsync(['node', 'sfi', 'status', '--json']);
  */
+/**
+ * FR-11: `sfi status` exits 0 on "no vault" by design (a recoverable state),
+ * which left a cron/CI wrapper no way to detect a missing vault while
+ * doctor/selftest/refresh all exit 1. `--strict` opts into a non-zero exit.
+ */
+export const statusExitCode = (out: StatusOutput, strict: boolean): number =>
+  strict && out.kind === 'no-vault' ? 1 : 0;
+
 export const registerStatusCommand = (program: Command): void => {
   program
     .command('status')
@@ -327,11 +335,13 @@ export const registerStatusCommand = (program: Command): void => {
       'Print the per-directory skip inventory the refresh walker recorded. Use this when the warning at the end of `sfi refresh` flagged unknown directories.',
       false,
     )
+    .option('--strict', 'Exit 1 when there is no vault (for cron / CI wrappers; default exits 0)', false)
     .option('--vault <path>', VAULT_OPTION_HELP)
-    .action(async (flags: StatusCliFlags & { vault?: string }): Promise<void> => {
+    .action(async (flags: StatusCliFlags & { vault?: string; strict?: boolean }): Promise<void> => {
       const cwd = projectDirForAction(flags);
       if (cwd === null) return;
       const out = await runStatus({ cwd });
+      process.exitCode = statusExitCode(out, flags.strict === true);
       if (flags.json === true) {
         process.stdout.write(`${JSON.stringify(out, null, JSON_INDENT)}\n`);
         return;

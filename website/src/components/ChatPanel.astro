@@ -1,0 +1,49 @@
+---
+/**
+ * ChatPanel — the hero illustration: one real question asked of the demo org
+ * and the assistant's answer, drawn as a chat. The only shadowed element.
+ */
+import type { DemoAnswer } from "../data/demo-answers.ts";
+import CiteChip from "./CiteChip.astro";
+
+interface Props {
+  answer: DemoAnswer;
+  /** Where the chips link (the full answer). */
+  href?: string;
+}
+const { answer, href = "/demo" } = Astro.props;
+const items = answer.groups[0]?.items ?? [];
+---
+
+<figure class="chat" aria-label={`Example: asking an AI assistant “${answer.question}”`}>
+  <div class="chat-head">
+    <span class="title">Chat</span>
+    <span class="org">Verdant demo org</span>
+  </div>
+  <div class="chat-body">
+    <p class="msg-user">{answer.question}</p>
+    <div class="msg-ai">
+      <div class="ai-avatar" aria-hidden="true">
+        <svg viewBox="0 0 16 16"><path d="M3 5h7M3 8h10M3 11h5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"></path></svg>
+      </div>
+      <div>
+        <p class="ai-meta">Assistant · checked with sf-intelligence</p>
+        <p class="verdict"><span class={`pill pill-${answer.verdict.tone}`}>{answer.verdict.pill}</span> {answer.verdict.text}</p>
+        <ul class="ai-list">
+          {items.map((item) => (
+            <li>
+              <CiteChip cite={item.cite} show="api" href={href} /><br />
+              {item.lead} {item.text}
+            </li>
+          ))}
+        </ul>
+        <p class="ai-next"><b>Next:</b> {answer.next}</p>
+        <p class="ai-foot">Also lists the categories it checked and found nothing in.</p>
+      </div>
+    </div>
+  </div>
+  <div class="chat-input" aria-hidden="true">
+    <span>Ask about your org…</span>
+    <svg viewBox="0 0 18 18"><path d="M3 9h11M10 4.5 14.5 9 10 13.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"></path></svg>
+  </div>
+</figure>

@@ -13,9 +13,13 @@
  * Result aggregation:
  *   - `unhealthy` if the graph probe failed: clients cannot rely on
  *     any subsequent tool call.
- *   - `degraded` if the graph is fine but at least one issue surfaced
- *     (stale hash, missing source/, vault dir missing).
- *   - `healthy` if nothing is wrong.
+ *   - `degraded` if the graph is fine but at least one integrity issue
+ *     surfaced (stale hash, missing source/, vault dir missing, mid-build,
+ *     bared profiles, duplicate source roots).
+ *   - `healthy` otherwise. Coverage gaps (families the org lacks or the
+ *     refresh did not confirm, capped pulls, skipped directories) are listed
+ *     in `coverageGaps` and never flip `status` (FR-01). A retrieve that
+ *     errored or never finished is a refresh failure and stays in `issues`.
  *
  * Beyond the pass/fail verdict, the payload carries a `freshness` block: the
  * vault's age in days, a `stale` flag (age >= a one-week threshold), what the
@@ -25,7 +29,7 @@
  */
 
 import { existsSync } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { readdir, stat } from 'node:fs/promises';
 import { join } from 'node:path';
 
 import type {
@@ -33,11 +37,13 @@ import type {
   McpError,
   McpResponse,
 } from '@sf-intelligence/contracts';
-import { compareVersions, ok, type Result, type UpdateCheckResult } from '@sf-intelligence/core';
+import { ok, type Result, type UpdateCheckResult } from '@sf-intelligence/core';
 import { listNodesByType } from '@sf-intelligence/graph';
 import {
   computeSourceTreeHash,
+  readCoverageEntries,
   readSkippedDirectories,
+  standardFieldDescribeDisclosure,
   summarizeCoverage,
   type CoverageSummary,
   type ExtendedVaultManifest,
@@ -54,19 +60,25 @@ import {
   buildAssignmentDataCoverage,
   type AssignmentDataCoverage,
 } from './coverage-report.js';
+import { withReferencedButAbsent } from './referenced-but-absent.js';
+import { assessVaultFreshness, MS_PER_DAY } from './vault-freshness.js';
+
 
 /**
- * Age (in whole days) at or above which `health_check` flags the vault as
- * `stale` and emits a freshness nudge. Picked at 7 so a vault refreshed
- * within the last week stays quiet (no false alarm on an actively-maintained
- * vault), while a vault left untouched for a week or more surfaces a yellow
- * flag. The flag is advisory: it never changes `status` (an old vault is not
- * a broken vault), it only populates `freshness.nudge`.
+ * Is a `pending` coverage row evidence of a retrieve that was ATTEMPTED and did
+ * not finish? True while a staged build marker is present (the build is
+ * running or died mid-tier), or when a report pull ran (`reportsCap`) and
+ * landed none of a non-zero org total for that family. A pending row with no
+ * such evidence — the fold-erased Report/Dashboard default on a vault no report
+ * pull ever touched — is a coverage gap, not a failed retrieve.
  */
-const STALE_AGE_DAYS = 7;
-
-/** Milliseconds in one day, for the freshness age calculation. */
-const MS_PER_DAY = 24 * 60 * 60 * 1000;
+const pendingIsUnfinishedRetrieve = (manifest: Context['manifest'], type: string): boolean => {
+  if (manifest.staged !== undefined) return true;
+  const cap = manifest.reportsCap;
+  if (cap === undefined) return false;
+  const c = type === 'Report' ? cap.reports : type === 'Dashboard' ? cap.dashboards : undefined;
+  return c !== undefined && c.total > 0 && c.retrieved === 0;
+};
 
 /**
  * File-count threshold above which a non-empty `skippedDirectories`
@@ -113,12 +125,10 @@ export type HealthCheckInput = z.infer<typeof healthCheckInputSchema>;
  *     becomes `false` when the manifest's skip-counter records more
  *     than `SKIPPED_FILES_DEGRADED_THRESHOLD` files in unknown
  *     directories (architectural-bug-fix observability).
- *   - `reason`: structured cause when `status === 'degraded'`. Empty
- *     string in the healthy / unhealthy paths. Currently a single
- *     enumerant — `"uncovered-types-detected"` — surfaces the
- *     skip-counter degradation; pre-existing degradations
- *     (stale-hash / missing source / missing vault dir) leave
- *     `reason` empty, matching their `issues` strings.
+ *   - `reason`: structured cause of a coverage gap, independent of
+ *     `status`. Currently a single enumerant — `"uncovered-types-detected"`
+ *     — set when the skip-counter exceeds the threshold (listed in
+ *     `coverageGaps`, so `status` may still be `healthy`). Absent otherwise.
  */
 export interface HealthCheckOutput {
   readonly status: 'healthy' | 'degraded' | 'unhealthy';
@@ -142,6 +152,13 @@ export interface HealthCheckOutput {
     readonly renderComplete: boolean | null;
   }>;
   readonly coverage: CoverageSummary;
+  /**
+   * FR-01: coverage gaps (partial / not-parsed families, unrecognised source
+   * directories). Disclosed here, NOT in `issues`: an org that simply lacks a
+   * metadata family is not a broken install, so gaps never flip `status`.
+   * Tools still hedge absence claims on these families via their own caveats.
+   */
+  readonly coverageGaps: readonly string[];
   readonly reason?: 'uncovered-types-detected';
   /**
    * Vault freshness — the yellow flag for stale answers. Always present.
@@ -236,11 +253,10 @@ const buildFreshness = (
   update: UpdateCheckResult | null,
 ): HealthFreshness => {
   const refreshedAt = ctx.manifest.refreshedAt;
-  const refreshedMs = Date.parse(refreshedAt);
-  const ageDays = Number.isNaN(refreshedMs)
-    ? null
-    : Math.max(0, Math.floor((now - refreshedMs) / MS_PER_DAY));
-  const stale = ageDays !== null && ageDays >= STALE_AGE_DAYS;
+  // Age + builder drift come from the ONE shared assessment every vault-tool
+  // response is stamped with, so health_check can never disagree with it.
+  const assessed = assessVaultFreshness(ctx, now);
+  const { ageDays, stale } = assessed;
 
   const componentsChanged = Object.values(recent.lastRefreshComponentDeltas).reduce(
     (sum, n) => sum + Math.abs(n),
@@ -277,17 +293,9 @@ const buildFreshness = (
   // the older build never emitted. Purely local — reads the running version from
   // `SFI_PLUGIN_VERSION` (set by `sfi mcp` at startup) and never touches the
   // network; an absent env var or unparseable version simply skips the clause.
-  const runningVersion = process.env['SFI_PLUGIN_VERSION'];
-  const builtByVersion = ctx.manifest.version;
-  if (
-    runningVersion !== undefined &&
-    runningVersion !== '' &&
-    typeof builtByVersion === 'string' &&
-    builtByVersion !== '' &&
-    compareVersions(builtByVersion, runningVersion)
-  ) {
+  if (assessed.builderStale) {
     clauses.push(
-      `This vault was built by sf-intelligence ${builtByVersion}, but you are running ${runningVersion}; run \`/sfi-refresh\` to rebuild it with the newer version's extractors (metadata types or fixes added since ${builtByVersion} may be missing).`,
+      `This vault was built by sf-intelligence ${assessed.builtBy ?? ''}, but you are running ${assessed.running ?? ''}; run \`/sfi-refresh\` to rebuild it with the newer version's extractors (metadata types or fixes added since ${assessed.builtBy ?? ''} may be missing).`,
     );
   }
   const nudge = clauses.length > 0 ? clauses.join(' ') : null;
@@ -325,6 +333,47 @@ const probeGraph = async (
   }
 };
 
+/** Per-process cache of the last full source hash, keyed by source path. */
+const hashCache = new Map<string, { readonly fingerprint: string; readonly hash: string }>();
+
+/**
+ * Stat-only fingerprint of a source tree: file count, total bytes and newest
+ * mtime. Any edit, add or delete changes at least one of the three. `null`
+ * when the walk fails — the caller then falls back to the full hash.
+ */
+export const sourceFingerprint = async (sourcePath: string): Promise<string | null> => {
+  try {
+    const entries = await readdir(sourcePath, { recursive: true, withFileTypes: true });
+    // `parentPath` is Node >=20.12; earlier 20.x names the same value `path`.
+    const dirOf = (e: (typeof entries)[number]): string =>
+      e.parentPath ?? (e as unknown as { readonly path: string }).path;
+    const files = entries.filter((e) => e.isFile()).map((e) => join(dirOf(e), e.name));
+    let bytes = 0;
+    let newest = 0;
+    const BATCH = 64;
+    for (let i = 0; i < files.length; i += BATCH) {
+      const stats = await Promise.all(files.slice(i, i + BATCH).map((f) => stat(f)));
+      for (const st of stats) {
+        bytes += st.size;
+        if (st.mtimeMs > newest) newest = st.mtimeMs;
+      }
+    }
+    return `${files.length}:${bytes}:${newest}`;
+  } catch {
+    // Unreadable entry mid-walk: no fingerprint, so the full hash runs — the
+    // safe direction (slower, never a stale cached verdict).
+    return null;
+  }
+};
+
+/** Test seam: drop the cached source hashes. */
+export const resetHealthCheckHashCache = (): void => {
+  hashCache.clear();
+};
+
+/** Test seam: how many source trees have a cached full hash. */
+export const cachedSourceHashCount = (): number => hashCache.size;
+
 /**
  * Compare the on-disk source tree against the manifest's recorded hash.
  * Returns the per-check tri-state plus any issue string:
@@ -345,7 +394,21 @@ const probeSourceHash = async (
     };
   }
 
+  // PERF-6: re-hashing every file on every call cost 4-9s on a large vault.
+  // A cheap stat fingerprint (file count, total bytes, newest mtime) decides
+  // whether the tree could have changed since the last full hash in this
+  // process; only then is the full SHA-256 recomputed.
+  const fingerprint = await sourceFingerprint(sourcePath);
+  const cached = fingerprint === null ? undefined : hashCache.get(sourcePath);
+  if (cached !== undefined && cached.fingerprint === fingerprint) {
+    return cached.hash === ctx.manifest.sourceTreeHash
+      ? { match: true, issue: null }
+      : { match: false, issue: 'source-tree hash mismatch (vault is stale; run sfi refresh)' };
+  }
   const hashResult = await computeSourceTreeHash(sourcePath);
+  if (hashResult.ok && fingerprint !== null) {
+    hashCache.set(sourcePath, { fingerprint, hash: hashResult.value });
+  }
   if (!hashResult.ok) {
     return {
       match: null,
@@ -469,27 +532,66 @@ export const healthCheckHandler = async (
   // ComponentTypes the dispatcher didn't recognise. Vaults built
   // before the counter shipped read back as an empty map, so older
   // manifests never trip this branch.
+  // FR-01: coverage gaps are disclosed in `coverageGaps`, never in `issues`,
+  // so `status` speaks only to wiring/integrity and a healthy install of an org
+  // that lacks some metadata families can actually read `healthy`.
+  const coverageGaps: string[] = [];
   const skipped = readSkippedDirectories(ctx.manifest);
   const skippedFileCount = Object.values(skipped).reduce((sum, n) => sum + n, 0);
   const uncoveredTypesOk = skippedFileCount <= SKIPPED_FILES_DEGRADED_THRESHOLD;
   let uncoveredReason: HealthCheckOutput['reason'];
   if (!uncoveredTypesOk) {
     const dirCount = Object.keys(skipped).length;
-    issues.push(
+    coverageGaps.push(
       `vault skipped ${skippedFileCount} files in ${dirCount} unknown ${dirCount === 1 ? 'directory' : 'directories'} during refresh — run \`sfi status --skipped\` for the full list`,
     );
     uncoveredReason = 'uncovered-types-detected';
   }
 
-  const coverage = summarizeCoverage(ctx.manifest);
+  // CH-2: the same referenced-but-absent fold coverage_report applies, so the
+  // two tools cannot disagree about a family. A graph error is an issue, never
+  // a silent fallback to "covered".
+  const enriched = graphProbe.readable ? await withReferencedButAbsent(ctx) : null;
+  if (enriched !== null && !enriched.ok) {
+    issues.push(`coverage cross-check against the graph failed: ${enriched.error.message}`);
+  }
+  const summarized = enriched !== null && enriched.ok ? enriched.value.manifest : ctx.manifest;
+  const coverage = summarizeCoverage(summarized);
+  // A retrieve that FAILED (errored) or never finished is a refresh failure,
+  // not a family the org lacks — it stays an integrity issue. `pending` alone is
+  // NOT that evidence: Report/Dashboard rows start `pending` by design (their
+  // node count is fold-erased) and only a report pull clears it, so a vault
+  // with no report pull (`sfi demo`, `--no-reports`, `--no-pull`) would read
+  // "retrieve failed — re-run refresh" for a retrieve that never ran. A pending
+  // row is a failure only with evidence one was attempted (see
+  // `pendingIsUnfinishedRetrieve`); otherwise it is a coverage gap.
+  const failedSet = new Set(
+    readCoverageEntries(summarized)
+      .filter(
+        (e) =>
+          e.requested &&
+          !e.neverModeled &&
+          (e.errored || (e.pending === true && pendingIsUnfinishedRetrieve(summarized, e.type))),
+      )
+      .map((e) => e.type),
+  );
+  const failedTypes = coverage.partialTypes.filter((t) => failedSet.has(t));
+  const gapTypes = coverage.partialTypes.filter((t) => !failedSet.has(t));
   if (!coverage.coverageKnown) {
     issues.push(
       'manifest missing coverage metadata — run `/sfi-refresh` or `sfi refresh --no-pull` to recompute from existing source',
     );
-  } else if (coverage.partialTypes.length > 0) {
-    issues.push(
-      `vault coverage is partial for requested metadata: ${coverage.partialTypes.join(', ')}`,
-    );
+  } else {
+    if (failedTypes.length > 0) {
+      issues.push(
+        `vault retrieve failed or did not finish for requested metadata: ${failedTypes.join(', ')} — re-run \`sfi refresh\`; absence answers about these types are unreliable`,
+      );
+    }
+    if (gapTypes.length > 0) {
+      coverageGaps.push(
+        `vault coverage is partial for requested metadata: ${gapTypes.join(', ')}`,
+      );
+    }
   }
   // NOT PARSED, MEMBER NEVER ARRIVED — its own issue, not folded into the
   // partial line. A partial type asks for a re-retrieve; this one cannot be
@@ -499,7 +601,7 @@ export const healthCheckHandler = async (
   // vault's `issues` list is unchanged.
   const notParsedTypes = coverage.retrievedNotParsedTypes ?? [];
   if (notParsedTypes.length > 0) {
-    issues.push(
+    coverageGaps.push(
       `vault reports zero rows for ${notParsedTypes.join(', ')} but the shared retrieve container holding them came back WITHOUT their member file — nothing was read for them, and whether the org simply does not have the feature enabled or the file failed to come back CANNOT be told from this vault; treat those planes as NOT CHECKED, never as "the org has none" (a re-retrieve does not change it: the container already returned without the member — see sfi.coverage_report for the per-type detail)`,
     );
   }
@@ -523,6 +625,11 @@ export const healthCheckHandler = async (
   if (duplicateSourcePaths !== undefined && duplicateSourcePaths.components > 0) {
     issues.push(duplicateSourcePaths.disclosure);
   }
+
+  // WOW-12: core standard objects without an org describe on the last
+  // refresh are missing their describe-only standard fields.
+  const describeGap = standardFieldDescribeDisclosure(ctx.manifest);
+  if (describeGap !== null) issues.push(describeGap);
 
   // P13-STAGED-tiers: a staged refresh is mid-build. Degraded with explicit
   // tier progress, so consumers qualify every answer until the final tier
@@ -592,6 +699,7 @@ export const healthCheckHandler = async (
       issues,
       checks,
       coverage,
+      coverageGaps,
       freshness,
       assignmentData,
       vaultHistory: {

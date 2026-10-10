@@ -20,6 +20,7 @@ import { deriveDotSplitObjectAndApiName } from './path-utils.js';
 import {
   buildAlertTemplateMap,
   buildFieldUpdateTargetMap,
+  fieldUpdateValueProperties,
   isWellFormedFieldRef,
   type FieldUpdateTarget,
 } from './workflow-rule.js';
@@ -176,7 +177,10 @@ type HookType =
   | 'initialSubmission'
   | 'finalApproval'
   | 'finalRejection'
-  | 'recall';
+  | 'recall'
+  /** An `<approvalStep>`'s own `<approvalActions>` / `<rejectionActions>`. */
+  | 'stepApproval'
+  | 'stepRejection';
 
 /** The XML element name → hookType pairs walked in order, per the spec. */
 const HOOK_LIST_NAMES: readonly { readonly element: string; readonly hookType: HookType }[] = [
@@ -826,7 +830,7 @@ const hookListEdges = (
           edgeType: 'writesTo',
           confidence: 'parsed',
           source: EXTRACTOR_SOURCE,
-          properties: { hookType, operation: target.operation },
+          properties: { hookType, operation: target.operation, ...fieldUpdateValueProperties(target) },
         });
       }
     }
@@ -1173,6 +1177,31 @@ export const extractApprovalProcess = async (
     );
     if (!hookResult.ok) return hookResult;
     edges.push(...hookResult.value);
+  }
+  // A step's own approve / reject actions are hooks too: a field update that
+  // only a step runs (Status := Approved on each step's approval) is a writer
+  // of that field, and its scaffolding `references` keeps it from reading as
+  // "nothing fires this update".
+  for (const step of steps) {
+    if (typeof step !== 'object' || step === null) continue;
+    for (const [element, hookType] of [
+      ['approvalActions', 'stepApproval'],
+      ['rejectionActions', 'stepRejection'],
+    ] as const) {
+      const stepHook = hookListEdges(
+        step as Record<string, unknown>,
+        element,
+        hookType,
+        processId,
+        objectApiName,
+        fieldUpdateMap,
+        alertTemplateMap,
+        seenEmailTemplates,
+        path,
+      );
+      if (!stepHook.ok) return stepHook;
+      edges.push(...stepHook.value);
+    }
   }
 
   // Allowed-submitter references — emit one `references` edge per named entry.

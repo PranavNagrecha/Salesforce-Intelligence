@@ -1,0 +1,72 @@
+---
+import UseCaseLayout from "../../layouts/UseCaseLayout.astro";
+import { deployRisk } from "../../data/demo-answers.ts";
+import { orgTour } from "../../data/page-answers.ts";
+---
+
+<UseCaseLayout
+  title="Salesforce Org Discovery Tool for Consultants (Free)"
+  description="Learn a client's Salesforce org fast: a tour, object briefs, a data dictionary and pre-deploy reviews, from its metadata, on your laptop, read-only."
+  path="/use-cases/consultants"
+  heading="Learn a client’s org in an afternoon"
+  lede="Every engagement starts with an org you didn’t build. Read it once, read-only, and ask questions: what’s here, what runs where, who can see what, and what your changes will break."
+  crumb="For consultants"
+  audience="Salesforce consultants, partners and freelance admins"
+  short="Read the client’s org metadata once, read-only, into a folder on your laptop. Then ask your AI assistant for a tour of the org, a brief on each core object, a data dictionary, who can access what, and whether your deployment is risky. Nothing is installed in the client’s org and nothing is written to it."
+  answers={[orgTour, deployRisk]}
+  answerIntro="Two questions from the start and the end of an engagement, asked of Verdant, the demo org."
+  asks={[
+    "Give me a tour of this org.",
+    "Brief me on the Opportunity object for a new team member.",
+    "Generate a data dictionary for the objects in scope.",
+    "What runs when a Case is saved?",
+    "Who can edit Accounts, and why?",
+    "Is this deployment risky? Here’s the package.xml.",
+  ]}
+  checks={[
+    "<strong>Discovery</strong>: org tour, object briefs, integrations and the most connected objects",
+    "<strong>Documentation</strong>: data dictionary, admin handbook, architecture overview, dated to the snapshot",
+    "<strong>Access reviews</strong>: who can see or edit what, and through which profile or permission set",
+    "<strong>Pre-deploy reviews</strong>: go, review first or no-go from a package.xml or git diff",
+    "<strong>Before and after</strong>: compare two snapshots, or a sandbox against production",
+  ]}
+  limits={[
+    "The client’s records. It reads setup, not data, unless the live mode is turned on",
+    "Anything the client’s Salesforce login can’t retrieve",
+    "Changes made in the org after your refresh",
+  ]}
+  tools={["org_card", "object_360", "generate_data_dictionary", "generate_architecture_overview", "who_can_access_object", "review_change", "compare_vaults"]}
+  related={[
+    { href: "/use-cases/salesforce-metadata-analysis", label: "Understand an org you didn’t build", note: "use case" },
+    { href: "/use-cases/impact-analysis", label: "Impact analysis before you deploy", note: "use case" },
+    { href: "/blog/salesforce-data-dictionary", label: "How to create a Salesforce data dictionary", note: "guide" },
+    { href: "/licensing", label: "Licensing", note: "the full terms" },
+  ]}
+  faqs={[
+    {
+      q: "Can I use it on client orgs as a consultant?",
+      a: `Yes, as a tool in your own work. Running it on a client’s org during a paid engagement, and using what it tells you in your advice, is use of the software, not a sale of it. What needs a commercial license is charging for something whose value comes substantially from sf-intelligence: access to it, hosting it for clients, support for it, or its output sold as your product. Details on <a href="/licensing#consultants">Licensing</a>.`,
+    },
+    {
+      q: "What does the client need to give me?",
+      a: "A Salesforce login you can use with the Salesforce CLI, with permission to retrieve metadata. The refresh only reads; it never deploys or changes anything.",
+    },
+    {
+      q: "Does the client’s metadata leave my laptop?",
+      a: "Not through sf-intelligence. The snapshot stays in a folder on your computer and it sends no telemetry unless you opt in. Your AI assistant sees the answers it asks for, so follow the client’s rules on which assistant you may use.",
+    },
+  ]}
+  cta={{ question: orgTour.question, related: { href: "/licensing#consultants", label: "Licensing for consultants" } }}
+  dateModified="2026-10-10"
+>
+  <h2>A first hour on a new org</h2>
+  <ol>
+    <li><strong>Read the org.</strong> Run <code>init</code> and <code>refresh</code> against the client’s org. Large orgs can use a staged refresh that answers the main questions within minutes.</li>
+    <li><strong>Take the tour.</strong> Ask for a tour, then a brief on each object the engagement touches.</li>
+    <li><strong>Find the automation.</strong> For each core object, ask what runs when a record is saved.</li>
+    <li><strong>Check access.</strong> Ask who can see and edit the sensitive objects, and why.</li>
+    <li><strong>Write it down.</strong> Generate a data dictionary and an architecture overview to share with the client.</li>
+  </ol>
+  <h2>At the end of the engagement</h2>
+  <p>Before you hand over a release, ask whether it’s risky. The review names what will break, what couldn’t be checked, and which Apex tests cover the classes you changed, so the client sees the same evidence you do.</p>
+</UseCaseLayout>

@@ -25,6 +25,7 @@ import { buildToolDocs } from '../../src/semantic-funnel.js';
 import {
   declaredOnlyDependencyDisclosure,
   rosterDeclaredOnlyDisclosure,
+  rosterDeclaredOnlyNote,
   stripRosterDeclaredOnlyDisclosure,
 } from '../../src/tools/declared-only-disclosure.js';
 import { V01_TOOLS } from '../../src/tools/index.js';
@@ -106,6 +107,14 @@ describe('roster descriptions carry the same warning', () => {
     expect(description).toContain('sfi.effective_permissions');
   });
 
+  // A core tool advertises the SHORT form (its long form lives in `reference`,
+  // which still carries the full text). Both come from shared builders.
+  it('the core carrier advertises the short note and keeps the full text in reference', () => {
+    const tool = V01_TOOLS.find((t) => t.name === 'sfi.why_cant_user_see_record');
+    expect(tool?.description.endsWith(rosterDeclaredOnlyNote('system-permission bypass stage'))).toBe(true);
+    expect(tool?.reference?.endsWith(rosterDeclaredOnlyDisclosure('system-permission bypass stage'))).toBe(true);
+  });
+
   // The old text told a host LLM the two tools ran the SAME engine and so
   // implicitly agreed. True of the engine, materially false of the ANSWER.
   it('no longer claims the what-if tools share the effective-permissions ENGINE', () => {
@@ -119,7 +128,7 @@ describe('roster descriptions carry the same warning', () => {
   // One builder feeds both the roster text and the funnel stripper, so they
   // cannot drift into a state where the strip silently stops matching.
   it('composes the roster text from the shared builder, never an inlined copy', () => {
-    expect(roster).toContain("import { rosterDeclaredOnlyDisclosure }");
+    expect(roster).toMatch(/import \{ rosterDeclaredOnlyDisclosure[ ,}]/);
     expect(roster.match(/rosterDeclaredOnlyDisclosure\('/g) ?? []).toHaveLength(4);
     expect(roster).not.toContain('systematically UNDERSTATES effective access');
   });

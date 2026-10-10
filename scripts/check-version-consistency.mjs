@@ -92,6 +92,18 @@ if (!pkgEntry) {
   );
 }
 
+// --- 1a. registry name parity ---
+// The MCP Registry only accepts a publish if npm's `mcpName` for THIS version
+// equals server.json `name`. `mcp-publisher validate` does not check it, and the
+// registry step runs after `npm publish`, so a mismatch would strand npm ahead
+// of the registry. Fail here, before the tarball is uploaded.
+// (cliPkg is read in section 1 above.)
+if (cliPkg.mcpName !== serverJson.name) {
+  errors.push(
+    `packages/cli/package.json mcpName=${cliPkg.mcpName} !== packages/cli/server.json name=${serverJson.name}`,
+  );
+}
+
 // --- 1b. Claude Code plugin surfaces (.claude-plugin/) ---
 // Neither file was checked here until 0.3.1, and marketplace.json had drifted
 // to 0.2.5 — two releases stale — while every other surface read 0.3.1. It is
@@ -149,6 +161,22 @@ if (existsSync(join(root, pluginRel))) {
         `${pluginRel} mcpServers.${name} pins sf-intelligence@${pinned} !== expected ${expected}` +
           ' — plugin users would keep running the previous server',
       );
+    }
+  }
+}
+
+// --- 1c'. Slash-command npx pins (FR-05) ---
+// The `/sfi-*` commands fall back to `npx -y sf-intelligence@X.Y.Z <cmd>` when
+// no `sfi` is on PATH (a plugin-only install). Same failure mode as the plugin
+// pin above: a stale literal silently runs the previous CLI.
+const commandsRel = '.claude/commands';
+if (existsSync(join(root, commandsRel))) {
+  for (const f of readdirSync(join(root, commandsRel)).filter((n) => n.endsWith('.md'))) {
+    const text = readFileSync(join(root, commandsRel, f), 'utf8');
+    for (const m of text.matchAll(/sf-intelligence@(\d+\.\d+\.\d+)/g)) {
+      if (m[1] !== expected) {
+        errors.push(`${commandsRel}/${f} pins sf-intelligence@${m[1]} !== expected ${expected}`);
+      }
     }
   }
 }
@@ -340,32 +368,37 @@ if (existsSync(join(root, 'SECURITY.md'))) {
 
 // --- 1f. The website's machine-readable version must track the release ---
 //
-// `website/public/llms.txt` is the file AI crawlers and answer engines read to
-// describe this product, and it opens by stating a version. It said
-// "(version 0.3.1)" while 0.3.2 was the published release — so the canonical
-// self-description handed to every model that asked was a release behind.
+// `llms.txt` is the file AI crawlers and answer engines read to describe this
+// product, and it opens by stating a version. It once said "(version 0.3.1)"
+// while 0.3.2 was the published release, because it was a committed file that
+// recalibrate.mjs had to be remembered to patch.
 //
-// This did not need new tooling: `website/recalibrate.mjs` has always carried
-// the regex that rewrites this exact string. It simply was not run at release
-// time. A step that must be remembered is not a step, so the number is asserted
-// here instead — the release cannot go out disagreeing with itself.
-//
-// Only the VERSION is gated. The other computed figures on that page (tool
-// count, test totals, concept-model size) are DERIVED by recalibrate.mjs from a
-// built tree and cannot be recomputed from inside this script without one;
-// pinning them here would be a second source of truth, which is the failure
-// this repo keeps paying for.
-for (const rel of ['website/public/llms.txt', 'website/public/llms-full.txt']) {
-  if (!existsSync(join(root, rel))) continue;
-  const txt = readText(rel);
-  const stated = txt.match(/\(version (\d+\.\d+\.\d+)\)/);
-  if (stated === null) {
-    errors.push(`${rel} states no "(version X.Y.Z)" — recalibrate.mjs patches it; keep the anchor`);
-  } else if (stated[1] !== expected) {
-    errors.push(
-      `${rel} says "(version ${stated[1]})" but the release is ${expected} — ` +
-        'run `node website/recalibrate.mjs` (it already rewrites this string)',
-    );
+// It is now generated at site build (website/integrations/geo.mjs) from
+// website/src/data/llms-header.md, whose version is the `{{version}}` token
+// filled from website/src/data/site-data.json. So the release gate asserts the
+// two inputs instead: the header carries the token, not a literal, and
+// site-data.json states this release (run `node website/recalibrate.mjs`).
+{
+  const header = 'website/src/data/llms-header.md';
+  if (existsSync(join(root, header))) {
+    const txt = readText(header);
+    if (!txt.includes('{{version}}')) {
+      errors.push(`${header} must state the version as the {{version}} token, not a literal`);
+    }
+    const literal = txt.match(/\b(\d+\.\d+\.\d+)\b/);
+    if (literal) {
+      errors.push(`${header} contains a version literal "${literal[1]}"; use {{version}}`);
+    }
+  }
+  const siteDataRel = 'website/src/data/site-data.json';
+  if (existsSync(join(root, siteDataRel))) {
+    const siteVersion = JSON.parse(readText(siteDataRel)).version;
+    if (siteVersion !== expected) {
+      errors.push(
+        `${siteDataRel} version is ${siteVersion} but the release is ${expected} — ` +
+          'run `node website/recalibrate.mjs` (llms.txt and the site read this file)',
+      );
+    }
   }
 }
 

@@ -134,7 +134,7 @@ const CUSTOM_OBJECT_SUFFIX = '__c';
  * `__ChangeEvent` is appended). Empty / null inputs are passed through
  * by the caller's guard.
  */
-const sObjectApiNameToCdcEventName = (apiName: string): string => {
+export const sObjectApiNameToCdcEventName = (apiName: string): string => {
   if (apiName.endsWith(CUSTOM_OBJECT_SUFFIX)) {
     return apiName.slice(0, -CUSTOM_OBJECT_SUFFIX.length) + CUSTOM_CHANGE_EVENT_SUFFIX;
   }

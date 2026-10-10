@@ -249,6 +249,7 @@ describe('extractCustomApplication', () => {
           defaultLandingTab: null,
           utilityBar: null,
           tabCount: 0,
+          recordPageOverrides: [],
         });
       } finally {
         await rm(dir, { recursive: true, force: true });
@@ -379,5 +380,59 @@ describe('extractCustomApplication', () => {
         await rm(dir, { recursive: true, force: true });
       }
     });
+  });
+});
+
+// FAIL-BEFORE/PASS-AFTER (ADM-3): app-level Lightning record page activations
+// (`actionOverrides` app defaults and `profileActionOverrides` app + record
+// type + profile assignments) were never read, so layout_for_user guessed the
+// page from its NAME.
+describe('extractCustomApplication — record page activations', () => {
+  it('captures View/Flexipage app defaults and profile assignments, ignoring other overrides', async () => {
+    const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<CustomApplication xmlns="http://soap.sforce.com/2006/04/metadata">
+  <actionOverrides>
+    <actionName>View</actionName>
+    <content>Project_App_Page</content>
+    <formFactor>Large</formFactor>
+    <skipRecordTypeSelect>false</skipRecordTypeSelect>
+    <type>Flexipage</type>
+    <pageOrSobjectType>Project__c</pageOrSobjectType>
+  </actionOverrides>
+  <actionOverrides>
+    <actionName>Edit</actionName>
+    <content>Project_Edit</content>
+    <type>Flexipage</type>
+    <pageOrSobjectType>Project__c</pageOrSobjectType>
+  </actionOverrides>
+  <label>Projects</label>
+  <navType>Standard</navType>
+  <profileActionOverrides>
+    <actionName>View</actionName>
+    <content>Project_Manager_Page</content>
+    <formFactor>Large</formFactor>
+    <pageOrSobjectType>Project__c</pageOrSobjectType>
+    <recordType>Project__c.Internal</recordType>
+    <type>Flexipage</type>
+    <profile>Project Manager</profile>
+  </profileActionOverrides>
+</CustomApplication>`;
+    const { dir, path } = await writeTempAppXml('Projects.app-meta.xml', xml);
+    try {
+      const result = await extractCustomApplication(path);
+      if (!result.ok) throw new Error(result.error.message);
+      expect(result.value.nodes[0]?.properties['recordPageOverrides']).toEqual([
+        { page: 'Project_App_Page', object: 'Project__c', formFactor: 'Large', recordType: null, profile: null },
+        {
+          page: 'Project_Manager_Page',
+          object: 'Project__c',
+          formFactor: 'Large',
+          recordType: 'Project__c.Internal',
+          profile: 'Project Manager',
+        },
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
   });
 });

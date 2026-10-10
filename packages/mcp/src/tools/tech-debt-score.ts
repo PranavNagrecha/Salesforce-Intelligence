@@ -274,7 +274,22 @@ type ScoreBand =
   | 'low-debt'
   | 'moderate-debt'
   | 'high-debt'
-  | 'critical-debt';
+  | 'critical-debt'
+  /**
+   * ARCH-06. Fewer than half of the (non-opted-out) axis weight was scored, so
+   * the renormalised composite rests on too little evidence to band.
+   */
+  | 'insufficient-evidence';
+
+/**
+ * ARCH-06. Version of the scoring model (axes, weights, scale factors). Logged
+ * with every refresh-time score so a delta is only reported between scores the
+ * same model computed over the same axes.
+ */
+export const TECH_DEBT_SCORE_MODEL = 2;
+
+/** ARCH-06. Minimum share of the applicable axis weight that must be scored to band. */
+const MIN_SCORED_WEIGHT_FRACTION = 0.5;
 
 /**
  * Why an axis is not scored.
@@ -383,7 +398,19 @@ export interface TechDebtScoreOutput {
   readonly previousScore?: number;
   /** When that prior score was captured (ISO timestamp). */
   readonly previousRefreshedAt?: string;
+  /**
+   * ARCH-06. Why no `scoreDelta` is reported although a prior score exists: it
+   * was computed by a different score model or over a different axis set, so
+   * the difference would not measure a change in the org.
+   */
+  readonly scoreDeltaUnavailable?: string;
   readonly scoreBand: ScoreBand;
+  /** ARCH-06. Axes that contributed to `overallScore`, sorted. */
+  readonly scoredAxes: readonly TechDebtCategory[];
+  /** ARCH-06. Scored share of the applicable (non-opted-out) axis weight, 0-1. */
+  readonly scoredWeightFraction: number;
+  /** ARCH-06. {@link TECH_DEBT_SCORE_MODEL} that produced this score. */
+  readonly scoreModel: number;
   readonly categories: Readonly<Record<TechDebtCategory, CategoryBreakdown>>;
   readonly excludedCategories: readonly ExcludedCategory[];
   readonly weightingDisclosure: {
@@ -693,7 +720,13 @@ const computeFreshnessCounts = async (
 export const readPriorTechDebtScore = async (
   vaultRoot: string,
   currentHash: string,
-): Promise<{ readonly score: number; readonly refreshedAt: string } | null> => {
+): Promise<{
+  readonly score: number;
+  readonly refreshedAt: string;
+  /** Absent on rows logged before the axis set was recorded. */
+  readonly scoredAxes?: readonly string[];
+  readonly scoreModel?: number;
+} | null> => {
   try {
     const raw = await readFile(
       join(vaultRoot, 'meta', 'risk-scores.jsonl'),
@@ -707,6 +740,8 @@ export const readPriorTechDebtScore = async (
         sourceTreeHash?: unknown;
         techDebtScore?: unknown;
         refreshedAt?: unknown;
+        scoredAxes?: unknown;
+        scoreModel?: unknown;
       };
       if (
         entry.sourceTreeHash !== currentHash &&
@@ -716,6 +751,10 @@ export const readPriorTechDebtScore = async (
           score: entry.techDebtScore,
           refreshedAt:
             typeof entry.refreshedAt === 'string' ? entry.refreshedAt : '',
+          ...(Array.isArray(entry.scoredAxes)
+            ? { scoredAxes: entry.scoredAxes.filter((a): a is string => typeof a === 'string') }
+            : {}),
+          ...(typeof entry.scoreModel === 'number' ? { scoreModel: entry.scoreModel } : {}),
         };
       }
     }
@@ -1070,7 +1109,20 @@ export const techDebtScoreHandler = async (
   };
 
   const overallScore = weightedScore(contributions, weightsApplied, excludedSet);
-  const scoreBand = bandFor(overallScore);
+  // ARCH-06. Renormalising over the surviving axes lets two saturated axes read
+  // as an org-wide "critical": band only when at least half of the applicable
+  // (non-opted-out) weight was actually scored.
+  const scoredAxes = ALLOWED_WEIGHT_KEYS.filter((c) => !excludedSet.has(c)).slice().sort();
+  const optedOut = new Set(excluded.filter((e) => e.reason === 'user-opted-out').map((e) => e.category));
+  const applicableWeight = ALLOWED_WEIGHT_KEYS.filter((c) => !optedOut.has(c)).reduce(
+    (sum, c) => sum + weightsApplied[c],
+    0,
+  );
+  const scoredWeight = scoredAxes.reduce((sum, c) => sum + weightsApplied[c], 0);
+  const scoredWeightFraction =
+    applicableWeight > 0 ? Math.round((scoredWeight / applicableWeight) * 1000) / 1000 : 0;
+  const insufficientEvidence = scoredWeightFraction < MIN_SCORED_WEIGHT_FRACTION;
+  const scoreBand: ScoreBand = insufficientEvidence ? 'insufficient-evidence' : bandFor(overallScore);
 
   // Build categories breakdown — include all categories, but mark
   // contribution=0 when excluded so the user sees the structure.
@@ -1352,16 +1404,33 @@ export const techDebtScoreHandler = async (
     ctx.vaultRoot,
     ctx.manifest.sourceTreeHash,
   );
+  // ARCH-06. A delta is only meaningful between scores the same model computed
+  // over the same axes; otherwise it measures a change of method, not of org.
+  const deltaBlocker =
+    prior === null
+      ? null
+      : prior.scoreModel !== TECH_DEBT_SCORE_MODEL || prior.scoredAxes === undefined
+        ? 'the prior score was logged by an earlier score model without its axis set'
+        : prior.scoredAxes.slice().sort().join(',') !== scoredAxes.join(',')
+          ? `the prior score was computed over different axes (${prior.scoredAxes.join(', ') || 'none'} vs ${scoredAxes.join(', ') || 'none'})`
+          : null;
   const deltaFields =
-    prior !== null
-      ? {
-          scoreDelta: Math.round((roundedScore - prior.score) * 100) / 100,
-          previousScore: prior.score,
-          ...(prior.refreshedAt.length > 0
-            ? { previousRefreshedAt: prior.refreshedAt }
-            : {}),
-        }
-      : {};
+    prior === null
+      ? {}
+      : deltaBlocker !== null
+        ? { scoreDeltaUnavailable: `no scoreDelta: ${deltaBlocker}.` }
+        : {
+            scoreDelta: Math.round((roundedScore - prior.score) * 100) / 100,
+            previousScore: prior.score,
+            ...(prior.refreshedAt.length > 0
+              ? { previousRefreshedAt: prior.refreshedAt }
+              : {}),
+          };
+  if (insufficientEvidence) {
+    boundaries.push(
+      `scoreBand is 'insufficient-evidence': only ${scoredAxes.length} axis/axes (${scoredAxes.join(', ') || 'none'}) carrying ${Math.round(scoredWeightFraction * 100)}% of the applicable weight were scored, so overallScore is renormalised over too little evidence to band. Read the per-axis contributions instead.`,
+    );
+  }
 
   return ok({
     data: {
@@ -1369,6 +1438,9 @@ export const techDebtScoreHandler = async (
       overallScore: roundedScore,
       ...deltaFields,
       scoreBand,
+      scoredAxes,
+      scoredWeightFraction,
+      scoreModel: TECH_DEBT_SCORE_MODEL,
       categories,
       excludedCategories: excluded,
       weightingDisclosure: {

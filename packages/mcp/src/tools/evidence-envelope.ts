@@ -227,7 +227,11 @@ export const buildInterpretEvidenceEnvelope = (args: {
   readonly trust: TrustSummary;
   readonly coverageCaveat?: string;
   readonly disclosure: string;
+  /** Total claims that fired across ALL pages (the list here may be one page). */
+  readonly totalFired?: number;
 }): EvidenceEnvelopeV2 => {
+  const firedElsewhere =
+    args.interpretations.length === 0 && (args.totalFired ?? 0) > 0;
   const envelope: EvidenceEnvelopeV2 = {
     envelopeVersion: EVIDENCE_ENVELOPE_VERSION,
     claims: claimsFromInterpretations(args.interpretations),
@@ -237,8 +241,9 @@ export const buildInterpretEvidenceEnvelope = (args: {
     trust: args.trust,
     absence: {
       status: 'unknown',
-      note:
-        args.interpretations.length === 0
+      note: firedElsewhere
+        ? `This page holds no claims, but ${args.totalFired} fired for the component — page with a smaller offset.`
+        : args.interpretations.length === 0
           ? 'No concept rule fired — this is NOT an absence claim that nothing depends on the component.'
           : 'Interpret returns structural implications, not proven-none / unused absence verdicts.',
     },

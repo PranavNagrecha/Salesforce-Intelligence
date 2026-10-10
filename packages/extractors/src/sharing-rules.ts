@@ -286,6 +286,9 @@ export interface CriteriaItem {
   readonly value: string | null;
 }
 
+/** A bare field api name on the rule's own object (no relationship path). */
+const SIMPLE_FIELD_NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
+
 /**
  * Parse a rule's `<criteriaItems>` blocks into the ordered predicate list.
  *
@@ -624,7 +627,24 @@ const buildRule = (
     properties: sharedToEdgeProps,
   };
 
-  const edges: Edge[] = [parentEdge, sharedToEdge];
+  // A criteria item TESTS a field on the rule's object, and Salesforce refuses
+  // to delete a field a sharing rule's criteria reference. Without this edge a
+  // field-deletion check read the `sharing` category as "checked, none" while
+  // the criteria sat only in a node property.
+  // A criteria field may carry the object prefix (`Account.Type`); strip it.
+  const objectPrefix = `${objectApiName.toLowerCase()}.`;
+  const criteriaFields = criteriaItems
+    .map((c) => (c.field.toLowerCase().startsWith(objectPrefix) ? c.field.slice(objectPrefix.length) : c.field))
+    .filter((f) => SIMPLE_FIELD_NAME.test(f));
+  const criteriaFieldEdges: Edge[] = [...new Set(criteriaFields)].map((field) => ({
+    fromId: ruleId,
+    toId: `CustomField:${objectApiName}.${field}`,
+    edgeType: 'references',
+    confidence: 'declared',
+    source: EXTRACTOR_SOURCE,
+    properties: { referenceKind: 'sharingCriteria' },
+  }));
+  const edges: Edge[] = [parentEdge, sharedToEdge, ...criteriaFieldEdges];
   if (sharedFromResolved !== null) {
     edges.push({
       fromId: ruleId,

@@ -1,0 +1,41 @@
+---
+/**
+ * GuideArticle — renders one entry of the `guides` collection through
+ * ArticleLayout: answer box, body, FAQ (with FAQPage JSON-LD), related links,
+ * breadcrumbs and the end-of-page demo CTA. Used by every section's
+ * [slug].astro route.
+ */
+import { render, type CollectionEntry } from "astro:content";
+import ArticleLayout from "../layouts/ArticleLayout.astro";
+import { SECTION_PARENT, inlineMd, labelFor } from "../lib/guides.ts";
+
+interface Props {
+  entry: CollectionEntry<"guides">;
+}
+const { entry } = Astro.props;
+const d = entry.data;
+const { Content } = await render(entry);
+
+const related = d.related.map((href) => ({ href, label: labelFor(href) }));
+const useCase = related.find((r) => r.href.startsWith("/use-cases/"));
+const cta = d.cta === false ? false : { question: d.cta.question, related: useCase };
+---
+
+<ArticleLayout
+  title={d.title}
+  description={d.description}
+  path={d.slug}
+  heading={d.heading}
+  intro={d.intro ? inlineMd(d.intro) : undefined}
+  answer={d.answer ? inlineMd(d.answer) : undefined}
+  section={SECTION_PARENT[d.section]}
+  datePublished={d.datePublished}
+  dateModified={d.dateModified}
+  schemaType={d.schemaType}
+  steps={d.steps?.map((s) => ({ name: s.split(/(?<=\.)\s/)[0], text: s }))}
+  faqs={d.faq.map((f) => ({ q: f.q, a: inlineMd(f.a) }))}
+  related={related}
+  cta={cta}
+>
+  <Content />
+</ArticleLayout>

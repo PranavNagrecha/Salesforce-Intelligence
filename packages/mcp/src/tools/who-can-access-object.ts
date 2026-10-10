@@ -42,7 +42,17 @@
  * included — can be narrowed at runtime (mirrors why_cant_user_see_record's
  * `unknown` god-mode verdict on such objects).
  *
- * Input: `{ componentId: 'CustomObject:X', limit?, offset? }`.
+ * Input: `{ componentId: 'CustomObject:X', accessLevel?, principalType?, view?,
+ * limit?, offset? }`.
+ *
+ * `view: 'principals'` (default) collapses every path a principal holds into
+ * ONE row carrying its effective capability set (platform implications
+ * applied by `object-capabilities.ts`, e.g. Modify All ⇒ Edit + Delete) and
+ * its record scope, so "who can edit/delete X" is a filter, not a host-side
+ * join over interleaved per-capability rows. `view: 'paths'` keeps the
+ * per-capability rows. `accessLevel` keeps principals that hold that
+ * capability; `principalType` keeps one granter kind. Profile / PermissionSet
+ * rows carry the licence `audience` (internal / external / guest / unknown).
  */
 
 import type {
@@ -68,6 +78,15 @@ import {
   toCustomObjectId,
   toObjectApiName,
 } from './input-aliases.js';
+import { grantorAudience, type GrantorAudience } from './licence-audience.js';
+import {
+  closeObjectCapabilities,
+  GRANTER_KINDS,
+  OBJECT_CAPABILITIES,
+  objectCapabilitiesFromSystemPermissions,
+  sortCapabilities,
+  type ObjectCapability,
+} from './object-capabilities.js';
 import { paginateLegacy } from './page-cursor.js';
 import { toolLocalPayloadBudgetBytes } from './response-budget.js';
 import { expandRoleSubordinates, ROLE_PREFIX } from './role-hierarchy.js';
@@ -97,22 +116,88 @@ const GRANTER_KIND_SAMPLE_LIMIT = 5;
 /** Public org-wide defaults — every internal user can read (or read/write). */
 const PUBLIC_OWD_READ = new Set(['Read', 'ReadWrite', 'ReadWriteTransfer', 'FullAccess']);
 
+const WHO_CAN_ACCESS_VIEWS = ['principals', 'paths'] as const;
+
 const whoCanAccessObjectInputBaseSchema = z.object({
   componentId: z.string().min(1),
+  /** Keep only principals that hold this capability (implications applied). */
+  accessLevel: z.enum(OBJECT_CAPABILITIES).optional(),
+  /** Keep only one granter kind (GRANTER_KINDS); any other is invalid-query. */
+  principalType: z.string().min(1).optional(),
+  /** `principals` (default): one row per principal; `paths`: one row per capability path. */
+  view: z.enum(WHO_CAN_ACCESS_VIEWS).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
 });
+
+/** Forgiving spellings of an access level (`Edit`, `modify-all`, `update`). */
+const ACCESS_LEVEL_SYNONYMS: Readonly<Record<string, ObjectCapability>> = {
+  read: 'read',
+  view: 'read',
+  create: 'create',
+  edit: 'edit',
+  update: 'edit',
+  write: 'edit',
+  delete: 'delete',
+  viewall: 'viewAll',
+  viewallrecords: 'viewAll',
+  modifyall: 'modifyAll',
+  modifyallrecords: 'modifyAll',
+};
+
+
+/** Forgiving spellings of a principal kind (`permission set`, `permset`, `profiles`). */
+const PRINCIPAL_TYPE_SYNONYMS: Readonly<Record<string, string>> = {
+  profile: 'Profile',
+  permissionset: 'PermissionSet',
+  permset: 'PermissionSet',
+  role: 'Role',
+  group: 'Group',
+  publicgroup: 'Group',
+  queue: 'Queue',
+  user: 'User',
+  territory: 'Territory',
+  permissionsetgroup: 'PermissionSetGroup',
+  permsetgroup: 'PermissionSetGroup',
+  psg: 'PermissionSetGroup',
+};
+
+/**
+ * Why an unsupported `principalType` is rejected, naming the valid kinds. A
+ * permission set group grants nothing itself: its access arrives through its
+ * member permission sets, which this tool lists as `PermissionSet` rows.
+ */
+const unsupportedPrincipalTypeMessage = (value: string): string =>
+  `principalType '${value}' is not a granter kind this tool returns; valid kinds: ${GRANTER_KINDS.join(', ')}.${
+    value === 'PermissionSetGroup'
+      ? " A permission set group reaches object access only through its member permission sets, which are listed as 'PermissionSet' rows; use sfi.effective_permissions with perContainer: true to see what one group adds."
+      : value === 'Queue'
+        ? ' A queue grants no object access and is never a sharing-rule target; records a queue OWNS are a record-ownership question this offline vault cannot answer (a call without principalType lists that blind spot).'
+        : ''
+  }`;
+
+const squash = (v: string): string => v.toLowerCase().replace(/[\s_-]+/gu, '');
 
 /** Zod schema for the `sfi.who_can_access_object` tool input. */
 export const whoCanAccessObjectInputSchema = z.preprocess((raw) => {
   const merged = mergeInputAliases(raw, [
     { canonical: 'componentId', aliases: ['objectId', 'objectApiName'] },
+    { canonical: 'accessLevel', aliases: ['access', 'permission', 'capability'] },
+    { canonical: 'principalType', aliases: ['granterType', 'grantorType'] },
   ]);
   if (merged !== null && typeof merged === 'object' && !Array.isArray(merged)) {
     const o = merged as Record<string, unknown>;
     const id = typeof o.componentId === 'string' ? o.componentId : '';
     if (id.length > 0 && !id.startsWith(CUSTOM_OBJECT_PREFIX)) {
       o.componentId = toCustomObjectId(id);
+    }
+    if (typeof o.accessLevel === 'string') {
+      o.accessLevel = ACCESS_LEVEL_SYNONYMS[squash(o.accessLevel)] ?? o.accessLevel;
+    }
+    if (typeof o.principalType === 'string') {
+      // Plural forgiving: 'Territories' → 'territory', 'Profiles' → 'profile'.
+      const key = squash(o.principalType).replace(/ies$/u, 'y').replace(/s$/u, '');
+      o.principalType = PRINCIPAL_TYPE_SYNONYMS[key] ?? o.principalType;
     }
   }
   return merged;
@@ -192,6 +277,82 @@ export interface AccessGranter {
    * actually unique per row.
    */
   readonly sourceRuleId?: string;
+  /** Licence audience of a Profile / PermissionSet granter (absent for roles/groups). */
+  readonly audience?: GrantorAudience;
+  /** The licence that decided `audience`, when the container declares one. */
+  readonly licence?: string;
+  readonly capabilities?: never;
+}
+
+/**
+ * `view: 'principals'` row — EVERY path one principal holds, collapsed.
+ *
+ * `capabilities` is the effective OBJECT capability set from object
+ * permissions plus View/Modify All Data, with the platform's implications
+ * applied (Modify All ⇒ View All + Delete + Edit + Read, …). A principal
+ * reached only through a sharing rule has `capabilities: []` and a
+ * `recordSharing` level: sharing widens WHICH records, but the user still
+ * needs object CRUD from a profile or permission set.
+ */
+export interface PrincipalAccess {
+  readonly granterId: string;
+  readonly granterType: string;
+  readonly granterLabel: string;
+  readonly capabilities: readonly ObjectCapability[];
+  /** Highest record-level access a sharing rule extends to this principal. */
+  readonly recordSharing: 'read' | 'edit' | null;
+  /**
+   * `all-records`: Modify All (every capability on every record);
+   * `read-all-records`: View All (reads every record, writes only shared ones);
+   * `shared-records`: OWD + sharing decide which records.
+   */
+  readonly scope: 'all-records' | 'read-all-records' | 'shared-records';
+  /** Every path that contributed, sorted. */
+  readonly vias: readonly AccessVia[];
+  readonly audience?: GrantorAudience;
+  readonly licence?: string;
+  readonly sourceRuleIds?: readonly string[];
+  readonly detail: string;
+  readonly via?: never;
+  readonly access?: never;
+  readonly sourceRuleId?: never;
+}
+
+/** One row of `granters` — a path row or a collapsed principal row, per `view`. */
+export type WhoCanAccessRow = AccessGranter | PrincipalAccess;
+
+/**
+ * Why a principal that reaches this object was left out by the filters.
+ *
+ * - `read-only`: holds Read (and maybe View All) but not the requested level.
+ * - `record-sharing-only`: only a sharing rule reaches it, below the requested level.
+ * - `other-capabilities`: holds some object capability, just not the requested one
+ *   (e.g. Create without Edit).
+ * - `other-principal-type`: holds the requested level but is a different
+ *   granter kind than `principalType`.
+ *
+ * A principal failing BOTH filters is not counted: it answers neither half of
+ * the question.
+ */
+export type FilterExclusionReason =
+  | 'read-only'
+  | 'record-sharing-only'
+  | 'other-capabilities'
+  | 'other-principal-type';
+
+/** `excludedByFilter` — what the `accessLevel` / `principalType` filters hid. */
+export interface FilterExclusions {
+  /** Distinct principals excluded (complete, page-independent). */
+  readonly count: number;
+  readonly byReason: Readonly<Partial<Record<FilterExclusionReason, number>>>;
+  /** Up to {@link EXCLUSION_EXAMPLES_PER_REASON} per reason, ordered by reason then id. */
+  readonly examples: readonly {
+    readonly granterId: string;
+    readonly granterType: string;
+    readonly reason: FilterExclusionReason;
+    readonly capabilities: readonly ObjectCapability[];
+    readonly recordSharing: 'read' | 'edit' | null;
+  }[];
 }
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
@@ -207,14 +368,34 @@ export interface WhoCanAccessObjectOutput {
    * declare an external OWD (standard objects or non-sharing variants).
    */
   readonly externalOwd: string | null;
-  readonly granters: readonly AccessGranter[];
+  /** Which row shape `granters` carries. */
+  readonly view: 'principals' | 'paths';
+  /** The filters applied before counting and paging (absent keys = not filtered). */
+  readonly appliedFilters: {
+    readonly accessLevel?: ObjectCapability;
+    readonly principalType?: string;
+  };
+  readonly granters: readonly WhoCanAccessRow[];
+  /**
+   * Present whenever `accessLevel` or `principalType` is set: the principals the
+   * filter LEFT OUT that still reach this object, so "who can edit X" also
+   * shows "N permission sets can only read it". See {@link FilterExclusions}.
+   */
+  readonly excludedByFilter?: FilterExclusions;
   readonly summary: {
-    /** ROW count — a grantor with multiple capability paths contributes >1 row. */
+    /** ROW count (after filters) — in `paths` view a grantor can contribute >1 row. */
     readonly total: number;
     /** DISTINCT principal count (unique `granterId`) — count ACTORS by this. */
     readonly distinctGranters: number;
     readonly allRecordsAccess: number;
     readonly sharedRecordsAccess: number;
+    /**
+     * With an `accessLevel` filter: principals that match ONLY through record
+     * sharing (a role / group a rule shares with) and hold no object permission
+     * for that level themselves — their users still need it from a profile or
+     * permission set. Count "who can edit" without them.
+     */
+    readonly sharingOnlyPrincipals?: number;
     /**
      * WHO-CAN-ACCESS-DEFAULT-PAGE-UNREPRESENTATIVE: the COMPLETE per-kind
      * breakdown, independent of paging.
@@ -344,6 +525,204 @@ const sharingRuleObjectApiName = (rule: Node): string => {
 const ruleAccessToOp = (accessLevel: string): 'read' | 'edit' =>
   accessLevel === 'Edit' || accessLevel === 'ReadWrite' ? 'edit' : 'read';
 
+/** `audience` / `licence` fields for a Profile / PermissionSet granter row. */
+const audienceFields = (
+  node: Node,
+): { audience: GrantorAudience; licence?: string } => {
+  const info = grantorAudience(node);
+  return info.licence === null
+    ? { audience: info.audience }
+    : { audience: info.audience, licence: info.licence };
+};
+
+/** Effective object capabilities ONE path row confers (sharing rows confer none). */
+const pathCapabilities = (g: AccessGranter): Set<ObjectCapability> => {
+  switch (g.via) {
+    case 'object-permission-read':
+      return closeObjectCapabilities(['read']);
+    case 'object-permission-create':
+      return closeObjectCapabilities(['create']);
+    case 'object-permission-edit':
+      return closeObjectCapabilities(['edit']);
+    case 'object-permission-delete':
+      return closeObjectCapabilities(['delete']);
+    case 'view-all-object':
+      return closeObjectCapabilities(['viewAll']);
+    case 'modify-all-object':
+      return closeObjectCapabilities(['modifyAll']);
+    case 'system-view-all-data':
+      return objectCapabilitiesFromSystemPermissions(['ViewAllData']);
+    case 'system-modify-all-data':
+      return objectCapabilitiesFromSystemPermissions(['ModifyAllData']);
+    default:
+      return new Set();
+  }
+};
+
+const isSharingVia = (via: AccessVia): boolean => via.endsWith('-sharing-rule');
+
+const CAPABILITY_LABEL: Readonly<Record<ObjectCapability, string>> = {
+  read: 'Read',
+  create: 'Create',
+  edit: 'Edit',
+  delete: 'Delete',
+  viewAll: 'View All',
+  modifyAll: 'Modify All',
+};
+
+/** Collapse path rows into one row per principal (input sorted by granterId). */
+const collapseToPrincipals = (paths: readonly AccessGranter[]): PrincipalAccess[] => {
+  const byId = new Map<string, AccessGranter[]>();
+  for (const g of paths) {
+    const bucket = byId.get(g.granterId);
+    if (bucket === undefined) byId.set(g.granterId, [g]);
+    else bucket.push(g);
+  }
+  const out: PrincipalAccess[] = [];
+  for (const [granterId, rows] of byId) {
+    const first = rows[0];
+    if (first === undefined) continue;
+    const caps = new Set<ObjectCapability>();
+    let recordSharing: 'read' | 'edit' | null = null;
+    const vias = new Set<AccessVia>();
+    const ruleIds = new Set<string>();
+    const details: string[] = [];
+    const objectCaps = new Set<ObjectCapability>();
+    for (const g of rows) {
+      vias.add(g.via);
+      for (const c of pathCapabilities(g)) caps.add(c);
+      if (g.via.startsWith('object-permission-') || g.via.endsWith('-all-object')) {
+        for (const c of pathCapabilities(g)) objectCaps.add(c);
+      } else if (!details.includes(g.detail)) {
+        details.push(g.detail);
+      }
+      if (isSharingVia(g.via)) {
+        if (g.access === 'edit') recordSharing = 'edit';
+        else recordSharing ??= 'read';
+      }
+      if (g.sourceRuleId !== undefined) ruleIds.add(g.sourceRuleId);
+    }
+    if (objectCaps.size > 0) {
+      details.unshift(
+        `object permissions: ${sortCapabilities(objectCaps)
+          .map((c) => CAPABILITY_LABEL[c])
+          .join(', ')}`,
+      );
+    }
+    if (caps.size === 0 && recordSharing !== null) {
+      details.push(
+        `record sharing only — holders still need object ${recordSharing === 'edit' ? 'Edit' : 'Read'} from a profile or permission set`,
+      );
+    }
+    const scope = caps.has('modifyAll')
+      ? 'all-records'
+      : caps.has('viewAll')
+        ? 'read-all-records'
+        : 'shared-records';
+    out.push({
+      granterId,
+      granterType: first.granterType,
+      granterLabel: first.granterLabel,
+      capabilities: sortCapabilities(caps),
+      recordSharing,
+      scope,
+      vias: [...vias].sort(),
+      ...(first.audience !== undefined ? { audience: first.audience } : {}),
+      ...(first.licence !== undefined ? { licence: first.licence } : {}),
+      ...(ruleIds.size > 0 ? { sourceRuleIds: [...ruleIds].sort() } : {}),
+      detail: details.join(' | '),
+    });
+  }
+  return out;
+};
+
+/** Does this principal row hold `level` (sharing counts only for read / edit)? */
+const principalHolds = (p: PrincipalAccess, level: ObjectCapability): boolean =>
+  p.capabilities.includes(level) ||
+  (level === 'read' && p.recordSharing !== null) ||
+  (level === 'edit' && p.recordSharing === 'edit');
+
+/** Does this path row confer `level`? */
+const pathHolds = (g: AccessGranter, level: ObjectCapability): boolean =>
+  pathCapabilities(g).has(level) ||
+  (isSharingVia(g.via) && (level === 'read' || (level === 'edit' && g.access === 'edit')));
+
+const EXCLUSION_EXAMPLES_PER_REASON = 5;
+const EXCLUSION_REASON_ORDER: readonly FilterExclusionReason[] = [
+  'read-only',
+  'record-sharing-only',
+  'other-capabilities',
+  'other-principal-type',
+];
+const READ_ONLY_CAPABILITIES: ReadonlySet<ObjectCapability> = new Set(['read', 'viewAll']);
+
+/**
+ * The principals the filters left out that still reach the object (eval A06:
+ * an `accessLevel: 'edit'` answer silently dropped a View-All-only permission
+ * set, so the host never said "this one can only read"). Computed over the
+ * COMPLETE collapsed principal set, independent of view and paging.
+ */
+export const summarizeFilterExclusions = (
+  principals: readonly PrincipalAccess[],
+  level: ObjectCapability | undefined,
+  typeMatches: (granterType: string) => boolean,
+): FilterExclusions => {
+  const excluded: { p: PrincipalAccess; reason: FilterExclusionReason }[] = [];
+  for (const p of principals) {
+    const levelOk = level === undefined || principalHolds(p, level);
+    const typeOk = typeMatches(p.granterType);
+    if (levelOk && typeOk) continue;
+    if (!levelOk && !typeOk) continue;
+    if (!typeOk) {
+      excluded.push({ p, reason: 'other-principal-type' });
+      continue;
+    }
+    const reason: FilterExclusionReason =
+      p.capabilities.length === 0
+        ? 'record-sharing-only'
+        : p.capabilities.every((c) => READ_ONLY_CAPABILITIES.has(c))
+          ? 'read-only'
+          : 'other-capabilities';
+    excluded.push({ p, reason });
+  }
+  const byReason: Partial<Record<FilterExclusionReason, number>> = {};
+  const examples: FilterExclusions['examples'][number][] = [];
+  for (const reason of EXCLUSION_REASON_ORDER) {
+    const hits = excluded
+      .filter((e) => e.reason === reason)
+      .sort((a, b) => (a.p.granterId < b.p.granterId ? -1 : a.p.granterId > b.p.granterId ? 1 : 0));
+    if (hits.length === 0) continue;
+    byReason[reason] = hits.length;
+    for (const { p } of hits.slice(0, EXCLUSION_EXAMPLES_PER_REASON)) {
+      examples.push({
+        granterId: p.granterId,
+        granterType: p.granterType,
+        reason,
+        capabilities: p.capabilities,
+        recordSharing: p.recordSharing,
+      });
+    }
+  }
+  return { count: excluded.length, byReason, examples };
+};
+
+const EXCLUSION_REASON_PHRASE: Readonly<Record<FilterExclusionReason, string>> = {
+  'read-only': 'can only read (Read / View All)',
+  'record-sharing-only': 'reach it only through record sharing below that level',
+  'other-capabilities': 'hold other object capabilities but not this one',
+  'other-principal-type': 'hold the level but are a different principal type',
+};
+
+/** One sentence naming what the filter hid, or '' when nothing was hidden. */
+const exclusionNote = (ex: FilterExclusions): string =>
+  ex.count === 0
+    ? ' The filter excluded no principal that reaches this object.'
+    : ` The filter EXCLUDED ${ex.count.toString()} principal(s) that still reach this object: ${EXCLUSION_REASON_ORDER.filter(
+        (r) => (ex.byReason[r] ?? 0) > 0,
+      )
+        .map((r) => `${(ex.byReason[r] ?? 0).toString()} ${EXCLUSION_REASON_PHRASE[r]}`)
+        .join('; ')} (\`excludedByFilter\`).`;
+
 /**
  * The `sfi.who_can_access_object` MCP tool. Enumerates the profiles /
  * permission sets / roles / groups that statically gain access to an
@@ -365,6 +744,17 @@ export const whoCanAccessObjectHandler = async (
   // same object as `CustomObject:Contact`. The id used and echoed below is the
   // VAULT's exact casing; a case-only ambiguity is a named `invalid-query`; an
   // unknown name is left alone for the `component-not-found` just below.
+  // An unknown kind would filter every row out and read as "nobody has access".
+  if (
+    input.principalType !== undefined &&
+    !GRANTER_KINDS.some((t) => t.toLowerCase() === input.principalType!.toLowerCase())
+  ) {
+    return err({
+      kind: 'invalid-query',
+      message: unsupportedPrincipalTypeMessage(input.principalType),
+      path: 'principalType',
+    });
+  }
   const canonical = await canonicalizeObjectScope(ctx.graph, {
     componentId: input.componentId,
     object: toObjectApiName(input.componentId),
@@ -452,6 +842,7 @@ export const whoCanAccessObjectHandler = async (
       granterId: grantor.id,
       granterType: grantor.type,
       granterLabel: grantor.label ?? grantor.apiName,
+      ...audienceFields(grantor),
     };
     // CR-04: object CRUD bits are ORTHOGONAL — evaluate each independently
     // rather than in an exclusive else-if chain (the old chain dropped Delete
@@ -493,7 +884,12 @@ export const whoCanAccessObjectHandler = async (
     for (const node of nodesResult.value) {
       const perms = node.properties['userPermissions'];
       if (!Array.isArray(perms)) continue;
-      const base = { granterId: node.id, granterType: type, granterLabel: node.label ?? node.apiName };
+      const base = {
+        granterId: node.id,
+        granterType: type,
+        granterLabel: node.label ?? node.apiName,
+        ...audienceFields(node),
+      };
       if (perms.includes('ModifyAllData')) {
         granters.push({ ...base, via: 'system-modify-all-data', access: 'all', scope: 'all-records', detail: `Modify All Data — read/edit/delete every record of every object${restrictionCaveat}` });
       } else if (perms.includes('ViewAllData')) {
@@ -663,12 +1059,42 @@ export const whoCanAccessObjectHandler = async (
     return a.via < b.via ? -1 : a.via > b.via ? 1 : 0;
   });
 
-  const total = granters.length;
-  // CR-04: a grantor can now hold several independent capabilities, so it spans
-  // multiple rows. `total` is the ROW count; `distinctGranters` is the ACTOR
-  // count consumers should use when "how many principals" matters.
-  const distinctGranters = new Set(granters.map((g) => g.granterId)).size;
-  const allRecordsAccess = granters.filter((g) => g.scope === 'all-records').length;
+  // Filters + view. Collapse BEFORE filtering by level, so a principal's row
+  // shows its full capability set even when only one capability matched.
+  const view = input.view ?? 'principals';
+  const levelFilter = input.accessLevel;
+  const typeFilter =
+    input.principalType === undefined ? undefined : input.principalType.toLowerCase();
+  const typeMatches = (t: string): boolean =>
+    typeFilter === undefined || t.toLowerCase() === typeFilter;
+  const rows: WhoCanAccessRow[] =
+    view === 'paths'
+      ? granters.filter(
+          (g) => typeMatches(g.granterType) && (levelFilter === undefined || pathHolds(g, levelFilter)),
+        )
+      : collapseToPrincipals(granters).filter(
+          (p) =>
+            typeMatches(p.granterType) && (levelFilter === undefined || principalHolds(p, levelFilter)),
+        );
+  const excludedByFilter =
+    levelFilter !== undefined || typeFilter !== undefined
+      ? summarizeFilterExclusions(collapseToPrincipals(granters), levelFilter, typeMatches)
+      : undefined;
+  const appliedFilters = {
+    ...(levelFilter !== undefined ? { accessLevel: levelFilter } : {}),
+    ...(input.principalType !== undefined ? { principalType: input.principalType } : {}),
+  };
+
+  const total = rows.length;
+  // CR-04: in `paths` view a grantor holds several independent capabilities, so
+  // it spans multiple rows. `total` is the ROW count; `distinctGranters` is the
+  // ACTOR count consumers should use when "how many principals" matters.
+  const distinctGranters = new Set(rows.map((g) => g.granterId)).size;
+  const allRecordsAccess = rows.filter((g) => g.scope !== 'shared-records').length;
+  const sharingOnlyPrincipals =
+    view === 'principals' && levelFilter !== undefined
+      ? (rows as readonly PrincipalAccess[]).filter((p) => !p.capabilities.includes(levelFilter)).length
+      : undefined;
   const limit = input.limit ?? DEFAULT_LIMIT;
   const offset = input.offset ?? 0;
 
@@ -685,14 +1111,14 @@ export const whoCanAccessObjectHandler = async (
   // once — so `offset`/`limit` still page the whole set exactly as before; only
   // WHICH rows land on page one changes, and page one now carries every kind
   // that exists (small kinds in full, large kinds evenly).
-  const byKind = new Map<string, AccessGranter[]>();
-  for (const g of granters) {
+  const byKind = new Map<string, WhoCanAccessRow[]>();
+  for (const g of rows) {
     const bucket = byKind.get(g.granterType);
     if (bucket === undefined) byKind.set(g.granterType, [g]);
     else bucket.push(g);
   }
   const kindOrder = [...byKind.keys()].sort();
-  const interleaved: AccessGranter[] = [];
+  const interleaved: WhoCanAccessRow[] = [];
   const deepestKind = Math.max(0, ...[...byKind.values()].map((v) => v.length));
   for (let i = 0; i < deepestKind; i += 1) {
     for (const kind of kindOrder) {
@@ -708,8 +1134,25 @@ export const whoCanAccessObjectHandler = async (
   const owdNote = owdGrantsAllInternalUsers
     ? `OWD '${owd}' is PUBLIC — every internal user can ${owd === 'Read' ? 'read' : 'read and edit'} EVERY record of this object, beyond the principals listed.${externalOwdNote}`
     : `OWD '${owd}' is private/controlled — record access flows only from the listed grants/rules plus ownership.${externalOwdNote}`;
+  const externalWide = rows.filter(
+    (g) =>
+      (g.audience === 'external' || g.audience === 'guest') &&
+      (g.scope !== 'shared-records'),
+  );
+  const externalNote =
+    externalWide.length > 0
+      ? ` EXTERNAL/GUEST licence: ${[...new Set(externalWide.map((g) => g.granterId))].slice(0, 5).join(', ')} reach ALL records of this object (View/Modify All) — every holder sees other customers' records.`
+      : '';
+  const filterNote =
+    levelFilter !== undefined || typeFilter !== undefined
+      ? ` Filtered to ${levelFilter !== undefined ? `principals holding '${levelFilter}' (implied capabilities count: Modify All ⇒ Edit/Delete, Modify All Data ⇒ every capability, View All Data ⇒ Read)` : 'all access levels'}${input.principalType !== undefined ? `, principal type '${input.principalType}'` : ''}; summary counts are after the filter.${
+          sharingOnlyPrincipals !== undefined && sharingOnlyPrincipals > 0
+            ? ` ${sharingOnlyPrincipals.toString()} of them match only through record sharing and grant no object '${levelFilter ?? ''}' themselves (\`summary.sharingOnlyPrincipals\`).`
+            : ''
+        }${excludedByFilter !== undefined ? exclusionNote(excludedByFilter) : ''}`
+      : '';
   const multiRowNote =
-    total > distinctGranters
+    view === 'paths' && total > distinctGranters
       ? ` ${total} granter rows come from ${distinctGranters} distinct Profile/PermissionSet/role/group(s) — each independent capability (read/create/edit/delete + View/Modify-All) is its own row, so a principal can appear in several. Count ACTORS by \`summary.distinctGranters\`, not row count.`
       : '';
   const scanTruncated = truncatedTypes.length > 0;
@@ -867,12 +1310,16 @@ export const whoCanAccessObjectHandler = async (
       owd,
       owdGrantsAllInternalUsers,
       externalOwd,
+      view,
+      appliedFilters,
       granters: page,
+      ...(excludedByFilter !== undefined ? { excludedByFilter } : {}),
       summary: {
         total,
         distinctGranters,
         allRecordsAccess,
         sharedRecordsAccess: total - allRecordsAccess,
+        ...(sharingOnlyPrincipals !== undefined ? { sharingOnlyPrincipals } : {}),
         byGranterType,
       },
       totalCount: paged.totalCount,
@@ -886,7 +1333,7 @@ export const whoCanAccessObjectHandler = async (
       confidence: 'declared',
       ...(dataShape !== undefined ? { dataShape } : {}),
       blindSpots,
-      boundaryNote: `${owdNote} Declared static view (object permissions + sharing-rule targets + system god-mode); record-level paths are in blindSpots.${multiRowNote}${kindNote}${pageNote}${scanNote}`,
+      boundaryNote: `${owdNote} Declared static view (object permissions + sharing-rule targets + system god-mode); record-level paths are in blindSpots.${externalNote}${filterNote}${multiRowNote}${kindNote}${pageNote}${scanNote}`,
     };
   };
 

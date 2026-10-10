@@ -9,6 +9,7 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok } from '@sf-intelligence/core';
 
+import { ensureSerializableFrontmatter } from './component-markdown.js';
 import {
   escapeMarkdownBlockText,
   escapeMarkdownHeading,
@@ -232,7 +233,7 @@ export const renderFlowMarkdown = (
   try {
     return ok({
       path: buildOutputPath(node),
-      frontmatter: buildFrontmatter(node),
+      frontmatter: ensureSerializableFrontmatter(buildFrontmatter(node)),
       body: buildBody(node, edges),
     });
   } catch (cause) {

@@ -1,6 +1,6 @@
 # Routing — how a question reaches a tool
 
-This product registers 217 tools, 212 of which are advertised under
+This product registers 231 tools, 226 of which are advertised under
 `SFI_TOOL_PROFILE=full`. Routing is the machinery that turns one plain-language
 question into a choice among them. It is the difference between a capability
 existing and a capability being usable, which is why this document is long: it
@@ -46,7 +46,7 @@ returns, for one plain-language question:
 | `guidance` | Informative | One line stating the loop the host owns: read the candidates → resolve any named component → pick/sequence the tool(s) → run them → ground via `sfi.synthesize_answer`. |
 
 `answers` exists because the default tool profile is `core`, which advertises 25
-of 212 tools. For every other candidate the shortlist would otherwise name a tool
+of 226 tools. For every other candidate the shortlist would otherwise name a tool
 whose description is nowhere in your context, recoverable only by an
 `sfi.describe_analysis` round trip per candidate. The one-liner is the same text
 `sfi.list_analyses` renders, so you can pick without a second call — and, just as
@@ -91,7 +91,7 @@ way to make a tool findable is to change this document:
 | --- | --- |
 | tool **name** words | `sfi.find_dead_code` becomes `find dead code` |
 | `TOOL_KEYWORDS` | curated per-tool overlay for tools whose prose does not echo how people ask |
-| `FUNNEL_UTTERANCES` | **2,138 ask-phrasings across 212 tools** — the primary lever |
+| `FUNNEL_UTTERANCES` | **2,260 ask-phrasings across 226 tools** — the primary lever |
 | `tool.description` | the host-facing contract, **boilerplate-stripped** first |
 | capability map | `tools/capabilities.ts` CATEGORIES title / description / examples |
 | `INTERPRET_CONCEPT_CARDS` | 48 cards giving `sfi.interpret` per-concept documents |
@@ -244,7 +244,7 @@ honestly `unrouted` with candidates still present for you to reason over.
 
 ## 7. Tool profiles — and why rows carry `answers`
 
-The default tool profile is `core`, which advertises **19 of 212** tools. Every
+The default tool profile is `core`, which advertises **25 of 226** tools. Every
 other analysis is reached through `sfi.run_analysis` with a `name` and `args`,
 using `sfi.list_analyses` and `sfi.describe_analysis` as the catalog.
 
@@ -492,14 +492,15 @@ contributor, not as a decider.**
 ### Per-tool reachability
 
 Querying each tool by its own first utterance: rank-1 **75.5%**, top-8 **96.7%**
-(212 tools with utterances). Five registered tools carry no utterances at all,
-and four of those are hidden from `tools/list` on purpose:
+(measured when 212 tools had utterances; 226 have them now). Five registered
+tools carry no utterances at all, and all five are hidden from `tools/list` on
+purpose:
 `release_readiness_report`, `churn` and `cdc_subscribers` each name their
 survivor in their own description (`cdc_subscribers` folded into
 `sfi.event_topology`), and `find_apex_usages` folded into
 `sfi.find_code_usages` with a `nodeTypes` narrow. Routing to a retired tool
-would be the defect, not the fix. The fifth, `field_cleanup_candidates`, is a
-live composed tool with no ask-phrasings — a genuine reachability gap.
+would be the defect, not the fix. The fifth, `field_cleanup_candidates`, is now
+hidden: it folded into `sfi.unused_fields_deep` (`format: 'cleanup'`).
 
 ### What the deterministic layer memorised
 

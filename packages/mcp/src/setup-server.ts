@@ -41,6 +41,8 @@
  * graph/vault dependencies — it must boot when nothing else can.
  */
 
+import { dirname } from 'node:path';
+
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
   CallToolRequestSchema,
@@ -52,6 +54,8 @@ import { DOCS_URL, FEEDBACK_ISSUES_URL } from '@sf-intelligence/core';
 /** Why the full server could not start. Mirrors `prepareMcp`'s error kinds. */
 export type SetupReason =
   | 'no-vault'
+  /** An explicit `--vault` / `SFI_VAULT` path that does not exist or is not a directory (likely a typo). */
+  | 'vault-path-not-found'
   | 'vault-missing'
   | 'manifest-load-failed'
   | 'graph-open-failed'
@@ -71,6 +75,8 @@ export interface SetupState {
   readonly bindSource: string;
   /** Salesforce orgs the local `sf` CLI is authenticated to, if discoverable. */
   readonly authedOrgs: readonly string[];
+  /** The sf CLI's default org, if known — named as the default, never adopted. */
+  readonly defaultOrg?: string;
   /** Product version, for the handshake. */
   readonly version: string;
 }
@@ -96,22 +102,43 @@ const quotePath = (p: string): string => (p.includes(' ') ? `"${p}"` : p);
  * is not told to run it again.
  */
 const setupSteps = (state: SetupState): readonly string[] => {
-  const vaultFlag = `--vault ${quotePath(state.expectedVaultRoot)}`;
-  const org = state.authedOrgs[0] ?? '<your-org-alias>';
+  // FR-02: never the cwd-derived path (that is where the server already
+  // looked and failed) and never an arbitrary authed org — `authedOrgs[0]` is
+  // just the first row of `sf org list`, not a choice anyone made.
+  const vaultFlag = '--vault <absolute path to your project>/org-kb';
+  const org = '<your-org-alias>';
+  const orgHint =
+    state.defaultOrg !== undefined
+      ? ` (your sf default org is \`${state.defaultOrg}\` — use it only if that is the org this project models)`
+      : state.authedOrgs.length > 0
+        ? ' (pick one of the authenticated orgs listed in `authenticatedOrgs`)'
+        : '';
+  if (state.reason === 'vault-path-not-found') {
+    return [
+      `The vault path given via ${state.bindSource} (${quotePath(state.expectedVaultRoot)}) does not exist or is not a directory — check it for a typo. It must be the absolute path of an existing \`org-kb\` directory.`,
+      'Fix the path in the MCP server config, then restart the MCP server (or reconnect it in your client).',
+      `If you have not built a vault yet, run \`npx -y sf-intelligence init --target-org ${org}\`${orgHint} and \`npx -y sf-intelligence refresh\` in your Salesforce DX project first.`,
+    ];
+  }
   const needsInit = state.reason === 'no-vault';
 
   const steps: string[] = [];
   if (needsInit) {
     steps.push(
       'Change into the Salesforce DX repo you want to model (the directory holding `sfdx-project.json`).',
-      `Run \`npx -y sf-intelligence init --target-org ${org}\` to create the vault and bind it to one org.`,
+      `Run \`npx -y sf-intelligence init --target-org ${org}\`${orgHint} to create the vault and bind it to one org.`,
     );
   }
+  // After init the earlier step named the project; otherwise name it here —
+  // the vault's parent directory is the project `refresh` must run in.
+  const where = needsInit
+    ? 'in that project'
+    : `in the project that holds the vault (${quotePath(dirname(state.expectedVaultRoot))})`;
   steps.push(
-    `Run \`npx -y sf-intelligence refresh --target-org ${org}\` to retrieve metadata and build the vault. First run takes a few minutes on a real org.`,
+    `Run \`npx -y sf-intelligence refresh\` ${where} to retrieve metadata and build the vault. First run takes a few minutes on a real org.`,
   );
   steps.push(
-    'Restart this MCP client so the server reconnects against the built vault.',
+    'Restart this MCP server (or reconnect it in your client) — it does not reload by itself after the vault is built.',
   );
   // The cwd trap is invisible from inside the chat, so name it explicitly
   // whenever the bind came from the launch directory rather than an explicit
@@ -129,6 +156,8 @@ const headline = (state: SetupState): string => {
   switch (state.reason) {
     case 'no-vault':
       return 'sf-intelligence is running but has no knowledge base yet — the user has not built a vault for this project.';
+    case 'vault-path-not-found':
+      return `sf-intelligence was pointed at a vault path that does not exist (${state.expectedVaultRoot}) — likely a typo in --vault / SFI_VAULT.`;
     case 'vault-missing':
       return 'sf-intelligence found a vault config but no built vault — `refresh` has not completed for this project.';
     case 'manifest-load-failed':
@@ -150,16 +179,20 @@ const setupInstructions = (state: SetupState): string =>
   [
     headline(state),
     '',
-    'IMPORTANT: in this state the server can answer NOTHING about the user\'s Salesforce org — no objects, fields, permissions, Apex or Flows. Do not guess, and do not answer org questions from general Salesforce knowledge; say the knowledge base is not built yet.',
+    `IMPORTANT: in this state the server can answer NOTHING about the user's Salesforce org — no objects, fields, permissions, Apex or Flows. Do not guess, and do not answer org questions from general Salesforce knowledge; ${
+      state.reason === 'vault-path-not-found'
+        ? 'say the configured vault path does not exist.'
+        : 'say the knowledge base is not available yet.'
+    }`,
     '',
-    'Call `sfi.setup_status` for the exact next command, then offer to run it for the user. Once the vault is built, this server restarts with the full tool set.',
+    'Call `sfi.setup_status` for the exact next command, then offer to run it for the user. Once the vault is built, the user must restart this MCP server (or reconnect it) to get the full tool set — it does not reload by itself.',
   ].join('\n');
 
 /** The one tool setup mode exposes. Read-only, closed-world, no arguments. */
 const SETUP_TOOL = {
   name: 'sfi.setup_status',
   description:
-    'Report why sf-intelligence has no knowledge base for this project yet, and the exact ordered commands to build one. Read-only; runs nothing. Call this before telling the user anything about their Salesforce org — in this state the server has no org data at all.',
+    'Report why sf-intelligence has no usable knowledge base in this session (none built yet, an unfinished build, or a configured vault path that does not exist), and the exact ordered commands to fix it. Read-only; runs nothing. Call this before telling the user anything about their Salesforce org — in this state the server has no org data at all.',
   inputSchema: {
     type: 'object' as const,
     properties: {},
@@ -185,7 +218,12 @@ export const setupStatusPayload = (
   data: {
     status: 'setup-required',
     reason: state.reason,
-    detail: state.detail,
+    // FR-02: `prepareMcp`'s message for a missing path says "run sfi init",
+    // which contradicts nextSteps for a mistyped explicit path.
+    detail:
+      state.reason === 'vault-path-not-found'
+        ? `No directory at ${state.expectedVaultRoot} (set via ${state.bindSource}).`
+        : state.detail,
     summary: headline(state),
     /**
      * Honest statement of capability. The router/answer surfaces are absent in
@@ -204,8 +242,8 @@ export const setupStatusPayload = (
      * non-developer. Give the exact line for the shell they are in.
      */
     pinVaultExample: isWindows()
-      ? `$env:SFI_VAULT = '${state.expectedVaultRoot}'`
-      : `export SFI_VAULT='${state.expectedVaultRoot}'`,
+      ? `$env:SFI_VAULT = '<absolute path to your project>\\org-kb'`
+      : `export SFI_VAULT='<absolute path to your project>/org-kb'`,
     docs: DOCS_URL,
     /**
      * The feedback channel, stated where the failure is.
@@ -257,20 +295,18 @@ export const createSetupServer = (state: SetupState): Server => {
       const body = {
         error: {
           kind: 'setup-required',
-          message: `sf-intelligence has no knowledge base for this project yet, so \`${request.params.name}\` cannot answer. Call \`${SETUP_TOOL.name}\` for the exact setup commands.`,
+          message: `${headline(state)} So \`${request.params.name}\` cannot answer. Call \`${SETUP_TOOL.name}\` for the exact next commands.`,
         },
         provenance: 'setup_mode',
       };
       return {
         content: [{ type: 'text' as const, text: JSON.stringify(body) }],
-        structuredContent: body,
         isError: true,
       } satisfies CallToolResult;
     }
     const body = setupStatusPayload(state);
     return {
       content: [{ type: 'text' as const, text: JSON.stringify(body) }],
-      structuredContent: body,
     } satisfies CallToolResult;
   });
 

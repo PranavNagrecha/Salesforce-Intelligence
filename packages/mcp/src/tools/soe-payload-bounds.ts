@@ -65,6 +65,8 @@ export interface BoundableConditional {
 }
 
 export interface BoundableStep {
+  /** The step's SOE phase; read by the `largest-phase-first` step-drop strategy. */
+  readonly phase?: string;
   actions: readonly BoundableAction[];
   actionsOmitted?: number;
   conditional?: BoundableConditional;
@@ -108,6 +110,8 @@ export interface SoeBudgetResult {
   readonly conditionalsTrimmed: number;
   /** Steps dropped from container tails as a last resort (pathological step count). */
   readonly stepsOmitted: number;
+  /** ARCH-11. True when Pass 4 shed steps from the most crowded phase, not the tail. */
+  readonly stepsDroppedFromLargestPhase?: boolean;
 }
 
 const sizeOf = (payload: unknown): number =>
@@ -116,20 +120,22 @@ const sizeOf = (payload: unknown): number =>
 /** Options controlling which trim passes {@link enforceSoeByteBudget} may run. */
 export interface SoeBudgetOptions {
   /**
+   * ARCH-11. How Pass 4 sheds steps. `tail` (default) pops the tail, which
+   * keeps a resume offset valid but drops after-triggers / after-save flows /
+   * async behind a long run of validation rules. `largest-phase-first` sheds
+   * from whichever phase holds the most steps (down to {@link PHASE_STEP_FLOOR})
+   * before touching the tail, so code-bearing phases survive. Only for an
+   * UNPAGED container: it removes steps from the middle.
+   */
+  readonly stepDropStrategy?: 'tail' | 'largest-phase-first';
+  /**
    * Whether the last-resort step-drop pass (Pass 4) may run. When `false`,
    * trailing steps are NEVER dropped — only per-step actions and conditionals
    * are trimmed — so EVERY firing component stays named in the response.
    *
-   * The single-event `what_happens_on_save` view passes `false`: dropping
-   * trailing steps there silently un-names real automations (e.g. the
-   * after-triggers / post-save flows tail on a densely-automated Contact),
-   * which is the exact failure this guard exists to prevent. After actions and
-   * conditionals are slimmed, a single-event step list is small enough that
-   * the step COUNT alone never blows the budget, so step-dropping is not
-   * needed there. The four-event `order_of_execution` view leaves this `true`
-   * (default): its ~4x step count can be pathological, and a caller can still
-   * recover every dropped step by re-querying that one event through
-   * `what_happens_on_save`.
+   * Both save-order tools leave this `true` and pass `stepDropStrategy:
+   * 'largest-phase-first'` when unpaged: refusing to drop here only moved the
+   * cut to the global reducer, which tail-trims the code-bearing phases.
    *
    * @default true
    */
@@ -173,6 +179,30 @@ export interface SoeBudgetOptions {
  *   const r = enforceSoeByteBudget(data, [data.soe], { allowStepDrop: false });
  *   if (r.truncated) data.truncated = true;
  */
+/** ARCH-11. A phase is never shed below this many steps by the largest-phase-first strategy. */
+export const PHASE_STEP_FLOOR = 3;
+
+/**
+ * Index of the LAST step of the most crowded phase in `steps` (ties: the later
+ * phase), or -1 when no phase holds more than {@link PHASE_STEP_FLOOR} steps.
+ * The `save` placeholder is never a candidate.
+ */
+const crowdedPhaseDropIndex = (steps: readonly BoundableStep[]): number => {
+  const counts = new Map<string, number>();
+  const lastIndex = new Map<string, number>();
+  steps.forEach((st, i) => {
+    if (st.phase === undefined || st.phase === 'save') return;
+    counts.set(st.phase, (counts.get(st.phase) ?? 0) + 1);
+    lastIndex.set(st.phase, i);
+  });
+  let best: string | undefined;
+  for (const [phase, n] of counts) {
+    if (n <= PHASE_STEP_FLOOR) continue;
+    if (best === undefined || n >= (counts.get(best) ?? 0)) best = phase;
+  }
+  return best === undefined ? -1 : (lastIndex.get(best) ?? -1);
+};
+
 export const enforceSoeByteBudget = (
   payload: unknown,
   containers: readonly BoundableStep[][],
@@ -284,6 +314,7 @@ export const enforceSoeByteBudget = (
   // `summary.totalSteps` (set before enforcement) still reports the true total,
   // so `stepsOmitted` is an honest "N more not shown".
   let stepsOmitted = 0;
+  let droppedFromLargestPhase = false;
   for (let guard = 0; allowStepDrop && guard < 1_000_000; guard += 1) {
     if (sizeOf(payload) <= budgetBytes) break;
     let target: BoundableStep[] | undefined;
@@ -297,7 +328,14 @@ export const enforceSoeByteBudget = (
       }
     }
     if (target === undefined) break; // nothing droppable — global guard backstops
-    target.pop();
+    const fromPhase =
+      options.stepDropStrategy === 'largest-phase-first' ? crowdedPhaseDropIndex(target) : -1;
+    if (fromPhase >= 0) {
+      target.splice(fromPhase, 1);
+      droppedFromLargestPhase = true;
+    } else {
+      target.pop();
+    }
     stepsOmitted += 1;
   }
 
@@ -306,6 +344,7 @@ export const enforceSoeByteBudget = (
     actionsOmitted: totalOmitted,
     conditionalsTrimmed,
     stepsOmitted,
+    ...(droppedFromLargestPhase ? { stepsDroppedFromLargestPhase: true } : {}),
   };
 };
 
@@ -340,7 +379,11 @@ export const soeTruncationNote = (result: SoeBudgetResult): string => {
       `${result.conditionalsTrimmed} step condition(s) had their expression/fieldRefs dropped — the \`conditionContextId\` remains, fetch it with \`get_component\` for the full condition (see each step's \`conditionalTruncated\`)`,
     );
   }
-  if (result.stepsOmitted > 0) {
+  if (result.stepsOmitted > 0 && result.stepsDroppedFromLargestPhase === true) {
+    parts.push(
+      `${result.stepsOmitted} step(s) were dropped to fit, taken from the most crowded phase first so triggers, flows and duplicate rules stay named (\`summary.totalSteps\` still reports the true total; see \`phasesOmitted\`) — query a single event with \`what_happens_on_save\` to see them all`,
+    );
+  } else if (result.stepsOmitted > 0) {
     parts.push(
       `${result.stepsOmitted} trailing step(s) were dropped to fit (the tail-most async/post-save steps; \`summary.totalSteps\` still reports the true total) — query a single event with \`what_happens_on_save\` to see them all`,
     );

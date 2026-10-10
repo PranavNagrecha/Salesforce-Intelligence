@@ -426,7 +426,8 @@ describe('layoutForUserHandler', () => {
     const pageStep = result.value.data.reasoning.find(
       (s) => s.stage === 'LightningPageLookup',
     );
-    expect(pageStep?.verdict).toBe('matched');
+    // No activation metadata in this fixture: a NAME pick is a fallback (ADM-3).
+    expect(pageStep?.verdict).toBe('fallback');
   });
 
   // GUARD (LAYOUT-FOR-USER-REJECTS-PROFILEAPINAME): pre-fix a natural
@@ -645,7 +646,8 @@ describe('layoutForUserHandler — FlexiPage corpus past the 500-row scan window
     // The Classic-vs-Lightning divergence warning must NOT be suppressed.
     expect(d.boundaryNote).toContain('FlexiPage:Widget_Record_Page');
     const pageStep = d.reasoning.find((s) => s.stage === 'LightningPageLookup');
-    expect(pageStep?.verdict).toBe('matched');
+    // No activation metadata in this fixture: a NAME pick is a fallback (ADM-3).
+    expect(pageStep?.verdict).toBe('fallback');
   });
 
   it('reaches an apiName-prefix-only page past the window (no sobjectType)', async () => {
@@ -673,5 +675,185 @@ describe('layoutForUserHandler — FlexiPage corpus past the 500-row scan window
     const pageStep = d.reasoning.find((s) => s.stage === 'LightningPageLookup');
     expect(pageStep?.verdict).toBe('unknown');
     expect(pageStep?.reason).toContain('Gadget__c');
+  });
+});
+
+// FAIL-BEFORE/PASS-AFTER (ADM-3): the Lightning record page was picked by an
+// alphabetical NAME guess, ignoring the activation metadata in the vault — the
+// object's org default (`actionOverrides`) and each app's default and
+// app + record type + profile assignments (`profileActionOverrides`). It now
+// resolves from that metadata in the platform's precedence, one row per app.
+describe('layoutForUserHandler — record page activation metadata (ADM-3)', () => {
+  let actDir: string;
+  let actStore: GraphStore;
+  let actCtx: Context;
+  const PROFILE = 'Profile:Project Manager';
+
+  const actSeed: ExtractionResult = {
+    nodes: [
+      makeNode({
+        id: PROFILE,
+        type: 'Profile',
+        apiName: 'Project Manager',
+        properties: { layoutAssignments: [{ layout: 'Project__c-Project Layout' }] },
+      }),
+      makeNode({
+        id: 'Profile:Project Lead',
+        type: 'Profile',
+        apiName: 'Project Lead',
+        properties: {
+          layoutAssignments: [{ layout: 'Project__c-Project Layout' }],
+          recordTypeVisibilities: [{ recordType: 'Project__c.Internal', visible: true, default: true }],
+        },
+      }),
+      makeNode({
+        id: 'CustomObject:Project__c',
+        type: 'CustomObject',
+        apiName: 'Project__c',
+        properties: {
+          recordPageOverrides: [
+            { page: 'Project_Org_Default', object: 'Project__c', formFactor: 'Large', recordType: null, profile: null },
+          ],
+        },
+      }),
+      // Sorts FIRST by name — the old guess would have picked it.
+      makeNode({ id: 'FlexiPage:A_Project_Page', type: 'FlexiPage', apiName: 'A_Project_Page', properties: { sobjectType: 'Project__c', pageType: 'RecordPage' } }),
+      makeNode({ id: 'FlexiPage:Project_Org_Default', type: 'FlexiPage', apiName: 'Project_Org_Default', properties: { sobjectType: 'Project__c', pageType: 'RecordPage' } }),
+      makeNode({ id: 'FlexiPage:Project_Console_Page', type: 'FlexiPage', apiName: 'Project_Console_Page', properties: { sobjectType: 'Project__c', pageType: 'RecordPage' } }),
+      makeNode({ id: 'FlexiPage:Project_Internal_Page', type: 'FlexiPage', apiName: 'Project_Internal_Page', properties: { sobjectType: 'Project__c', pageType: 'RecordPage' } }),
+      makeNode({
+        id: 'CustomApplication:Console',
+        type: 'CustomApplication',
+        apiName: 'Console',
+        properties: {
+          recordPageOverrides: [
+            { page: 'Project_Console_Page', object: 'Project__c', formFactor: 'Large', recordType: null, profile: null },
+            { page: 'Project_Internal_Page', object: 'Project__c', formFactor: 'Large', recordType: 'Project__c.Internal', profile: 'Project Manager' },
+            { page: 'Project_Phone_Page', object: 'Project__c', formFactor: 'Small', recordType: 'Project__c.Internal', profile: 'Project Manager' },
+            { page: 'Project_Internal_Page', object: 'Project__c', formFactor: 'Large', recordType: 'Project__c.Internal', profile: 'Project Lead' },
+          ],
+        },
+      }),
+      makeNode({ id: 'CustomApplication:Sales', type: 'CustomApplication', apiName: 'Sales', properties: { recordPageOverrides: [] } }),
+      // Objects whose own definition is NOT in the vault (outside the retrieve
+      // scope): layouts exist, the CustomObject node does not.
+      makeNode({
+        id: 'Profile:Scope Tester',
+        type: 'Profile',
+        apiName: 'Scope Tester',
+        properties: {
+          layoutAssignments: [
+            { layout: 'Task_Item__c-Task Item Layout' },
+            { layout: 'Milestone__c-Milestone Layout' },
+          ],
+        },
+      }),
+      makeNode({ id: 'FlexiPage:Task_Item_Record_Page', type: 'FlexiPage', apiName: 'Task_Item_Record_Page', properties: { sobjectType: 'Task_Item__c', pageType: 'RecordPage' } }),
+    ],
+    edges: [],
+  };
+
+  beforeAll(async () => {
+    actDir = mkdtempSync(join(tmpdir(), 'sfi-layout-activation-'));
+    const opened = await openGraph(join(actDir, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    actStore = opened.value;
+    const imported = await importExtractionResults(actStore, [actSeed]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    actCtx = { vaultRoot: actDir, manifest: FIXTURE_MANIFEST, graph: actStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(actStore);
+    rmSync(actDir, { recursive: true, force: true });
+  });
+
+  it('uses the org default instead of the alphabetically first page', async () => {
+    const r = await layoutForUserHandler(actCtx, { objectApiName: 'Project__c', profileId: PROFILE });
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.data.flexiPageId).toBe('FlexiPage:Project_Org_Default');
+    const pageStep = r.value.data.reasoning.find((s) => s.stage === 'LightningPageLookup');
+    expect(pageStep?.verdict).toBe('matched');
+    expect(pageStep?.reason).toContain('activation metadata');
+  });
+
+  it('an app + record type + profile assignment beats the app default', async () => {
+    const r = await layoutForUserHandler(actCtx, {
+      objectApiName: 'Project__c',
+      profileId: PROFILE,
+      recordTypeId: 'RecordType:Project__c.Internal',
+    });
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.data.recordPageActivation?.byApp).toEqual([
+      {
+        appId: 'CustomApplication:Console',
+        flexiPageId: 'FlexiPage:Project_Internal_Page',
+        matchedOn: 'app-recordtype-profile',
+      },
+    ]);
+    expect(r.value.data.boundaryNote).toMatch(/CustomApplication:Console they see FlexiPage:Project_Internal_Page/);
+  });
+
+  it('without a record type, the app default applies and the record-type dependency is named', async () => {
+    const r = await layoutForUserHandler(actCtx, { objectApiName: 'Project__c', profileId: PROFILE });
+    if (!r.ok) throw new Error(r.error.message);
+    const act = r.value.data.recordPageActivation;
+    expect(act?.byApp[0]?.matchedOn).toBe('app-default');
+    expect(act?.byApp[0]?.flexiPageId).toBe('FlexiPage:Project_Console_Page');
+    expect(act?.dependsOnRecordType).toEqual(['CustomApplication:Console']);
+  });
+
+  // FAIL-BEFORE/PASS-AFTER (review): with no recordTypeId the lookup silently
+  // used the profile's DEFAULT record type, reported `app-recordtype-profile`
+  // and left `dependsOnRecordType` empty — although the page differs by the
+  // record's type. The assumption is now named and the dependency fires.
+  it('names an assumed default record type and still flags the record-type dependency', async () => {
+    const r = await layoutForUserHandler(actCtx, { objectApiName: 'Project__c', profileId: 'Profile:Project Lead' });
+    if (!r.ok) throw new Error(r.error.message);
+    const act = r.value.data.recordPageActivation;
+    expect(act?.byApp).toEqual([
+      {
+        appId: 'CustomApplication:Console',
+        flexiPageId: 'FlexiPage:Project_Internal_Page',
+        matchedOn: 'app-recordtype-profile',
+        assumedRecordType: 'Project__c.Internal',
+      },
+    ]);
+    expect(act?.dependsOnRecordType).toEqual(['CustomApplication:Console']);
+    const pageStep = r.value.data.reasoning.find((s) => s.stage === 'LightningPageLookup');
+    expect(pageStep?.reason).toMatch(/assuming the profile's default record type Project__c\.Internal/);
+  });
+
+  // FAIL-BEFORE/PASS-AFTER (second review): when the object's own definition was
+  // never extracted but apps carry activation metadata, `orgDefault` came back
+  // null and the step said "no record page is activated … system default page"
+  // — an unread slot reported as "none". It is now NOT CHECKED, with the name
+  // pick standing in for the org-default slot.
+  it('an object outside the retrieve scope reports the org default as NOT CHECKED, never "none"', async () => {
+    const r = await layoutForUserHandler(actCtx, { objectApiName: 'Milestone__c', profileId: 'Profile:Scope Tester' });
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.data.recordPageActivation?.orgDefaultChecked).toBe(false);
+    const pageStep = r.value.data.reasoning.find((s) => s.stage === 'LightningPageLookup');
+    expect(pageStep?.reason).not.toMatch(/no record page is activated/);
+    expect(pageStep?.reason).toMatch(/NOT CHECKED/);
+    expect(pageStep?.verdict).toBe('unknown');
+    expect(r.value.data.boundaryNote).toMatch(/NOT CHECKED/);
+  });
+
+  it('falls back to the name pick for an unread org-default slot, labelled as a guess', async () => {
+    const r = await layoutForUserHandler(actCtx, { objectApiName: 'Task_Item__c', profileId: 'Profile:Scope Tester' });
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.data.flexiPageId).toBe('FlexiPage:Task_Item_Record_Page');
+    expect(r.value.data.uiSurface).toBe('lightning-flexipage');
+    const pageStep = r.value.data.reasoning.find((s) => s.stage === 'LightningPageLookup');
+    expect(pageStep?.verdict).toBe('fallback');
+    expect(pageStep?.reason).toMatch(/NOT CHECKED.*picked by NAME/);
+    expect(r.value.data.boundaryNote).not.toMatch(/org default record page 'FlexiPage:Task_Item_Record_Page' applies/);
+  });
+
+  it('an extracted object still reports its org default as checked', async () => {
+    const r = await layoutForUserHandler(actCtx, { objectApiName: 'Project__c', profileId: PROFILE });
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.data.recordPageActivation?.orgDefaultChecked).toBe(true);
   });
 });

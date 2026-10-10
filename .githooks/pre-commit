@@ -4,7 +4,9 @@
 # Scans the STAGED changes against the maintainer blocklist in
 # scripts/forbidden-names.local.json (gitignored). If that file is absent
 # (a fresh clone, a contributor without the blocklist) only the generic
-# structural check runs — which is correct for a public-clean tree.
+# structural check runs — which is correct for a public-clean tree. The
+# scanner prints a loud "VACUOUS: no org blocklist" line in that case, and a
+# BROKEN blocklist file always fails the commit (never a silent pass).
 #
 # Enabled via `core.hooksPath .githooks`, set by `scripts/install-hooks.mjs`
 # on `pnpm install` (the `prepare` script). Emergency bypass for a genuine
@@ -19,7 +21,7 @@ fi
 
 # Null-delimited so paths with spaces survive; scan only staged paths.
 git diff --cached --name-only --diff-filter=ACM -z \
-  | xargs -0 node scripts/scan-org-leaks.mjs --strict --paths
+  | xargs -0 node scripts/scan-org-leaks.mjs --strict --allow-no-blocklist --paths
 status=$?
 
 if [ "$status" -ne 0 ]; then

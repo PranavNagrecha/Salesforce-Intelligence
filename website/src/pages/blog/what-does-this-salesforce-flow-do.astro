@@ -2,7 +2,7 @@
 import DocPage from "../../layouts/DocPage.astro";
 import site from "../../data/site.ts";
 
-const title = "What Does This Salesforce Flow Do? How to Read a Flow You Did Not Build";
+const title = "What Does This Salesforce Flow Do? How to Read Any Flow";
 const description =
   "How to read a Salesforce Flow you did not build: active version, trigger type, entry conditions, decisions, writes, and the limits of static reading.";
 
@@ -69,7 +69,7 @@ const jsonld = [
   heading="What does this Flow do?"
   intro={`Every guide teaches you how to build a Flow. Almost none teach you how to read one you inherited - undocumented, five versions deep, named after a project nobody remembers. The canvas is not the answer: it shows you one version's elements and hides the three things that decide behaviour - <strong>which version is live, what gates entry, and what else on the object is writing the same fields</strong>. Here is the reading order that works, and the limits of reading at all.`}
   crumbs={[{ label: "blog", href: "/blog" }, { label: "what-does-this-salesforce-flow-do", href: "/blog/what-does-this-salesforce-flow-do" }]}
-  breadcrumbs={[{ name: "Blog", path: "/blog" }, { name: "What does this Salesforce Flow do?", path: "/blog/what-does-this-salesforce-flow-do" }]}
+  breadcrumbs={[{ name: "Guides", path: "/blog" }, { name: "What does this Salesforce Flow do?", path: "/blog/what-does-this-salesforce-flow-do" }]}
   jsonld={jsonld}
   ogType="article"
   datePublished="2026-07-29"
@@ -194,7 +194,7 @@ const jsonld = [
         <div class="callout">
           <p><strong>Try it without touching your org.</strong> The demo ships a synthetic org - no Salesforce auth, no <code>sf</code> CLI, nothing to connect:</p>
         </div>
-        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
+        <div class="code-block wrap"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
         <p>Then ask it what a flow does, trace one with a record state you invent, and check an object for collisions. When you want it pointed at real metadata, that is <a href="/getting-started">getting started</a>.</p>
 
         <h2 id="hardest-question">If it cannot run the Flow, what is it good for?</h2>

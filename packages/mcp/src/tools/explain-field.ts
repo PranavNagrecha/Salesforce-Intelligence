@@ -100,6 +100,7 @@ import {
 } from './absence-disclosure.js';
 import { annotationsBlockFor, type AnnotationsBlock } from './annotations.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
+import { PICKLIST_DATA_TYPES } from './field-properties.js';
 import { objectIdCaseVariants, resolveFieldAlias } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import {
@@ -318,13 +319,6 @@ const readFieldReferenceTo = (node: Node): string | null => {
   return typeof raw === 'string' && raw.length > 0 ? raw : null;
 };
 
-/**
- * The picklist-family dataTypes whose declared value set the custom-field
- * extractor records under `properties.picklistValues`. Mirrors the
- * extractor's PICKLIST_TYPES gate — for every other dataType the property
- * is `null` by construction.
- */
-const PICKLIST_DATA_TYPES: readonly string[] = ['Picklist', 'MultiselectPicklist'];
 
 /**
  * Disclosure for a picklist-typed field whose `picklistValues` is `null`:
@@ -493,10 +487,13 @@ const findValueForField = (
   entries: readonly unknown[],
   fieldApiName: string,
 ): { value: unknown; isMasked: boolean } | null => {
+  // Salesforce api names are case-insensitive; Apex call sites (the endpoint
+  // catalog's custom-metadata reads) spell them however the developer typed.
+  const wanted = fieldApiName.toLowerCase();
   for (const entry of entries) {
     if (typeof entry !== 'object' || entry === null) continue;
     const obj = entry as Record<string, unknown>;
-    if (obj['field'] === fieldApiName) {
+    if (typeof obj['field'] === 'string' && obj['field'].toLowerCase() === wanted) {
       const value = obj['value'] === undefined ? null : obj['value'];
       const isMasked = obj['isMasked'] === true;
       return { value, isMasked };
@@ -520,7 +517,7 @@ const compareRecordValues = (
  * plus the record ids whose values could NOT be read at all. The second half
  * is what stops an empty `rows` from reading as a verified zero.
  */
-interface CollectedRecordValues {
+export interface CollectedRecordValues {
   readonly rows: readonly ExplainFieldRecordValue[];
   /** Records carrying no `values` property — a pre-v1.6 refresh. */
   readonly notExtracted: readonly string[];
@@ -534,9 +531,10 @@ interface CollectedRecordValues {
  * `ExplainFieldRecordValue` shape. Records without a value for the
  * field are omitted (per the honesty axis); records whose value list could
  * not be READ are collected separately so the caller can disclose them
- * instead of letting them vanish. Sort: `recordId` ASC.
+ * instead of letting them vanish. Sort: `recordId` ASC. Shared with the
+ * endpoint catalog, which reads a callout endpoint's custom-metadata part.
  */
-const collectRecordValues = async (
+export const collectRecordValues = async (
   ctx: Context,
   parentId: ComponentId,
   fieldApiName: string,
@@ -855,7 +853,7 @@ export const explainFieldHandler = async (
   // them so the routed "what values are in this picklist?" question gets a
   // real answer instead of a redirect (P14-USAGE-gvs-edge).
   let resolvedFromValueSet: string | null = null;
-  if (picklistValues === null && PICKLIST_DATA_TYPES.includes(fieldType)) {
+  if (picklistValues === null && PICKLIST_DATA_TYPES.has(fieldType)) {
     const fromGvs = await resolveGlobalValueSetValues(ctx, node.id);
     if (fromGvs !== null) {
       picklistValues = fromGvs.values;
@@ -879,7 +877,7 @@ export const explainFieldHandler = async (
     // NON_INLINE_VALUE_SET_NOTE.
     ...(resolvedFromValueSet === null &&
     picklistValues === null &&
-    PICKLIST_DATA_TYPES.includes(fieldType)
+    PICKLIST_DATA_TYPES.has(fieldType)
       ? { picklistValuesNote: NON_INLINE_VALUE_SET_NOTE }
       : {}),
     ...(annotations !== undefined ? { annotations } : {}),

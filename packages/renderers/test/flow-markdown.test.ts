@@ -341,3 +341,22 @@ describe('renderFlowMarkdown — markdown injection / escaping (CR-16c)', () => 
     expect(result.value.body).toContain('- **Trigger object:** `OA_Engagements__c`');
   });
 });
+
+describe('FAIL-BEFORE/PASS-AFTER: a Flow property past the frontmatter depth ceiling', () => {
+  // Before: flow-markdown (and apex-markdown) serialized `node.properties`
+  // without the depth guard component-markdown uses, so ONE Flow property
+  // shaped [{ x: [{ ... }] }] threw and aborted the whole vault render.
+  it('renders, JSON-encoding the too-deep value instead of throwing', () => {
+    const node = buildFlowNode({
+      properties: {
+        status: 'Active',
+        deep: [{ name: 'fA', pairs: [{ field: 'Invoice__c.Tier__c', value: 'Gold' }] }],
+      },
+    });
+    const result = renderFlowMarkdown(node, []);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(() => serializeFrontmatter(result.value.frontmatter)).not.toThrow();
+    expect(serializeFrontmatter(result.value.frontmatter)).toContain('Invoice__c.Tier__c');
+  });
+});

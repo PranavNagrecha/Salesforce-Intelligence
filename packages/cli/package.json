@@ -1,6 +1,6 @@
 {
   "name": "sf-intelligence",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "Salesforce Org Intelligence for AI agents: a read-only, offline, source-available MCP server and CLI. Ask about your org's metadata, dependencies, permissions, Apex and Flows \u2014 grounded in real retrieved metadata. Ships the sfi CLI and an MCP server.",
   "license": "SEE LICENSE IN LICENSE",
   "homepage": "https://sfi.auditforce.cloud",
@@ -11,7 +11,7 @@
   "bugs": {
     "url": "https://github.com/PranavNagrecha/Salesforce-Intelligence/issues"
   },
-  "mcpName": "io.github.PranavNagrecha/sf-intelligence",
+  "mcpName": "io.github.PranavNagrecha/salesforce-intelligence",
   "keywords": [
     "salesforce",
     "salesforce-metadata",

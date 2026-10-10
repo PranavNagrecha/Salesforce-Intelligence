@@ -147,6 +147,14 @@ export interface SoeInactiveSummary {
   readonly total: number;
   /** Per component type, non-zero entries only, key-sorted. */
   readonly byType: Readonly<Record<string, number>>;
+  /**
+   * `Type:apiName (reason)` for each inactive component, sorted, capped at
+   * {@link INACTIVE_NAMES_CAP}. Present even when the full roster is omitted,
+   * so "which automations look relevant but do not run" is answerable.
+   */
+  readonly names: readonly string[];
+  /** True when `names` was cut at the cap (the full list needs includeInactive). */
+  readonly namesTruncated: boolean;
   /** True when `inactiveConfigured` carries the full roster in this response. */
   readonly included: boolean;
   /** Verbatim explanation — see {@link buildInactiveSummary}. */
@@ -164,6 +172,15 @@ const inactiveByType = (
   );
 };
 
+/** Max inactive names carried by the always-present summary. */
+export const INACTIVE_NAMES_CAP = 25;
+
+/** Sorted `Type:apiName (reason)` labels for an inactive roster. */
+const inactiveNames = (firers: readonly InactiveConfiguredFirer[]): string[] =>
+  firers
+    .map((f) => `${f.componentType}:${f.apiName} (${f.inactiveReason})`)
+    .sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+
 /**
  * The CENSUS half of the note — the same on every branch, because the check
  * itself is the same on every branch. Only the "why you are not seeing the
@@ -178,7 +195,7 @@ const INACTIVE_ROSTER_INCLUDED_NOTE =
 
 /** No `phase`, no `includeInactive` — the byte-budget default, and its remedy. */
 const INACTIVE_ROSTER_OMITTED_BY_DEFAULT_NOTE =
-  'The roster is omitted by default so the byte budget goes to the automation that actually runs — re-query with includeInactive: true for the full list.';
+  'The full roster is omitted by default so the byte budget goes to the automation that actually runs; `names` lists them — re-query with includeInactive: true for the full list with each one\'s detail.';
 
 /**
  * Why a `phase`-filtered query never ships the roster: an inactive component is
@@ -221,9 +238,12 @@ export const buildInactiveSummary = (
     : included
       ? INACTIVE_ROSTER_INCLUDED_NOTE
       : INACTIVE_ROSTER_OMITTED_BY_DEFAULT_NOTE;
+  const names = inactiveNames(firers);
   return {
     total,
     byType: inactiveByType(firers),
+    names: names.slice(0, INACTIVE_NAMES_CAP),
+    namesTruncated: names.length > INACTIVE_NAMES_CAP,
     included,
     note: `${inactiveCensusSentence(total)} ${why}`,
   };

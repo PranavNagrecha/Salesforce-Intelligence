@@ -86,6 +86,22 @@ import { fullScanTruncationNote } from './scan-cap.js';
 /** Per-scan cap on the number of objects covered. */
 const OBJECT_SCAN_CAP = 50;
 
+/** Suffixes of object kinds that carry no org-wide default or sharing rules. */
+const NO_SHARING_SUFFIXES: readonly string[] = ['__mdt', '__e', '__x', '__b'];
+
+const hasNoSharingModel = (apiName: string): boolean => {
+  const lower = apiName.toLowerCase();
+  return NO_SHARING_SUFFIXES.some((suffix) => lower.endsWith(suffix));
+};
+
+/** Case-insensitive order (api names are case-insensitive), ties by raw name. */
+const byNameCaseInsensitive = (a: string, b: string): number => {
+  const la = a.toLowerCase();
+  const lb = b.toLowerCase();
+  if (la !== lb) return la < lb ? -1 : 1;
+  return a < b ? -1 : a > b ? 1 : 0;
+};
+
 /**
  * Honest disclosure of the sharing dimensions this summary does NOT model, so
  * the rules table is never read as the complete access model (P11-G5).
@@ -658,9 +674,26 @@ export const generateSharingSummaryHandler = async (
   // Apply the optional filter.
   let scanObjects = allObjects;
   const filterName = appliedScope;
+  // ADM-12: an unfiltered summary spent its 50-object cap on types that have no
+  // sharing model at all (custom metadata, platform events, external and big
+  // objects rendered as "OWD: Unknown"), and the case-sensitive id sort pushed
+  // every lowercase-namespaced object past the cap. Skip the no-sharing types
+  // (named in a boundary, never silently) and order objects that carry sharing
+  // rules first, then by case-insensitive name.
+  let excludedNoSharing = 0;
+  const sharingIndex = buildSharingRulesIndex(allSharingRules);
   if (filterName !== undefined) {
     const filter = filterName;
     scanObjects = scanObjects.filter((o) => o.apiName === filter);
+  } else {
+    const eligible = scanObjects.filter((o) => !hasNoSharingModel(o.apiName));
+    excludedNoSharing = scanObjects.length - eligible.length;
+    scanObjects = [...eligible].sort(
+      (a, b) =>
+        Number((sharingIndex.get(b.apiName) ?? []).length > 0) -
+          Number((sharingIndex.get(a.apiName) ?? []).length > 0) ||
+        byNameCaseInsensitive(a.apiName, b.apiName),
+    );
   }
   // CR-RV12: capture the TRUE matching count BEFORE the architect-tier
   // OBJECT_SCAN_CAP slice, so a >50-object org's summary discloses that it
@@ -683,13 +716,15 @@ export const generateSharingSummaryHandler = async (
         message: `graph query failed: ${objectCount.error.message}`,
       });
     }
-    totalMatchingObjects = objectCount.value;
+    // Unretrieved tail (only at the residual full-scan ceiling) is counted as
+    // matching: its eligibility is unknown, so it is never silently dropped.
+    totalMatchingObjects =
+      scanObjects.length + Math.max(0, objectCount.value - allObjects.length);
   }
   const objectScanTruncated = totalMatchingObjects > OBJECT_SCAN_CAP;
   scanObjects = scanObjects.slice(0, OBJECT_SCAN_CAP);
 
   // Build per-object sharing entries.
-  const sharingIndex = buildSharingRulesIndex(allSharingRules);
   const entries: ObjectSharing[] = [];
   // CR-CAP-05b: doc-level disclosure flags — set if any rule's subordinate-role
   // subtree was incomplete, or any recipient was roleAndSubordinatesInternal.
@@ -728,7 +763,7 @@ export const generateSharingSummaryHandler = async (
   }
 
   const sortedEntries = [...entries].sort((a, b) =>
-    a.object.apiName < b.object.apiName ? -1 : a.object.apiName > b.object.apiName ? 1 : 0,
+    byNameCaseInsensitive(a.object.apiName, b.object.apiName),
   );
 
   // C2: distinguish "the org has no sharing rules / roles" from "the SharingRule
@@ -822,6 +857,11 @@ export const generateSharingSummaryHandler = async (
   // empty (and therefore reassuring) sharing / restriction table.
   if (scan.value.scanIncomplete) {
     boundaries.push(fullScanTruncationNote(scan.value.incompleteTypes));
+  }
+  if (excludedNoSharing > 0) {
+    boundaries.push(
+      `${excludedNoSharing.toString()} object(s) with no sharing model (custom metadata \`__mdt\`, platform events \`__e\`, external \`__x\`, big objects \`__b\`) were skipped — they have no OWD or sharing rules. Name one with \`objectFilter\` to see it anyway.`,
+    );
   }
   if (targetMissing !== undefined) {
     boundaries.push(

@@ -1,0 +1,53 @@
+---
+/**
+ * InstallTabs — per-assistant setup, with copy buttons. mode="org" connects
+ * your own org (absolute --vault everywhere); mode="demo" serves the built-in
+ * demo org. Snippets live in src/data/install.ts.
+ */
+import { hosts, type InstallMode } from "../data/install.ts";
+import CmdText from "./CmdText.astro";
+
+interface Props {
+  mode?: InstallMode;
+  /** Prefix for element ids; must be unique on the page. */
+  idPrefix?: string;
+}
+const { mode = "org", idPrefix = mode === "demo" ? "demo-host" : "host" } = Astro.props;
+---
+
+<div class="tabs install-tabs">
+  <div class="tablist" role="tablist" aria-label="AI assistant">
+    {hosts.map((h, i) => (
+      <button
+        class="tab"
+        type="button"
+        role="tab"
+        id={`${idPrefix}-tab-${h.id}`}
+        aria-controls={`${idPrefix}-${h.id}`}
+        aria-selected={i === 0 ? "true" : "false"}
+        tabindex={i === 0 ? 0 : -1}
+      >{h.label}</button>
+    ))}
+  </div>
+  {hosts.map((h, i) => (
+    <div
+      class="tab-panel"
+      role="tabpanel"
+      id={`${idPrefix}-${h.id}`}
+      aria-labelledby={`${idPrefix}-tab-${h.id}`}
+      data-tab-hidden={i === 0 ? undefined : ""}
+    >
+      <p class="sr-only">{h.label}</p>
+      {h.snippets(mode).map((s, j) => (
+        <div class="code-card">
+          <div class="code-bar">
+            <span class="file">{s.file}</span>
+            <button class="copy copy-btn" type="button" data-target={`${idPrefix}-${h.id}-code-${j}`} aria-label={`Copy the ${h.label} snippet`}>Copy</button>
+          </div>
+          <pre class:list={["code", { wrap: !s.code.includes("\n") }]} id={`${idPrefix}-${h.id}-code-${j}`} tabindex="0">{s.code.includes("\n") ? s.code : <CmdText cmd={s.code} />}</pre>
+          {s.help && <p class="code-help" set:html={s.help} />}
+        </div>
+      ))}
+    </div>
+  ))}
+</div>

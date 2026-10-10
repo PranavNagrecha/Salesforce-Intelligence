@@ -474,7 +474,12 @@ export interface ExplainFlowExecutionContext {
  * exception recipient.
  */
 export interface FaultRollbackVerdict {
-  readonly rollsBackTransaction: boolean;
+  /**
+   * `null` when it cannot be determined: a record-triggered flow on a vault
+   * that predates the async-path markers, whose source file could not be read
+   * to check for an AsyncAfterCommit path (CH-8 — never guessed as `true`).
+   */
+  readonly rollsBackTransaction: boolean | null;
   readonly statement: string;
 }
 
@@ -586,10 +591,16 @@ const buildExecutionContext = async (
     const asyncFromGraph = hasAsyncAfterCommitPath(node);
     // Source-file fallback for vaults built before bundle-4 that lack the
     // scheduledPathTypes / runAsyncAfterCommit properties.
+    const fromSource = asyncFromGraph
+      ? true
+      : await readAsyncAfterCommitFromSource(vaultRoot, node);
+    // CH-8: an unreadable source is only "unknown" when the graph carries no
+    // async-path markers to settle it; a current extractor always stamps them.
+    const markersPresent =
+      typeof node.properties['runAsyncAfterCommit'] === 'boolean' ||
+      Array.isArray(node.properties['scheduledPathTypes']);
     const isAsync =
-      asyncFromGraph ||
-      (!asyncFromGraph &&
-        (await readAsyncAfterCommitFromSource(vaultRoot, node)));
+      fromSource === 'unreadable' ? (markersPresent ? false : null) : fromSource;
     faultRollback = buildFaultRollback(node, isAsync);
   }
   const runInMode = readRunInMode(node);
@@ -667,9 +678,9 @@ const hasAsyncAfterCommitPath = (node: Node): boolean => {
  * `<pathType>AsyncAfterCommit</pathType>` element that Salesforce emits in
  * `<start><scheduledPaths>` for the immediate post-commit async path.
  *
- * This is a READ-ONLY, fire-and-forget fallback: any I/O failure silently
- * returns `false` (safe: the caller will then fall through to the synchronous
- * verdict, which errs on the cautious side for rollback analysis). The check
+ * This is a READ-ONLY fallback. An I/O failure returns `'unreadable'` (CH-8):
+ * it used to return `false`, which declared a post-commit async fault to roll
+ * back the save when the file simply could not be read. The check
  * does not re-parse the XML; the substring `AsyncAfterCommit` is unique enough
  * in a flow file that a raw text scan is both fast and unambiguous.
  *
@@ -682,17 +693,17 @@ const hasAsyncAfterCommitPath = (node: Node): boolean => {
 const readAsyncAfterCommitFromSource = async (
   vaultRoot: string,
   node: Node,
-): Promise<boolean> => {
+): Promise<boolean | 'unreadable'> => {
   if (typeof node.sourcePath !== 'string' || node.sourcePath.length === 0) {
-    return false;
+    return 'unreadable';
   }
   try {
     const absPath = join(vaultRoot, node.sourcePath);
     const xml = await readFile(absPath, 'utf-8');
     return xml.includes(`<pathType>${ASYNC_AFTER_COMMIT}</pathType>`);
   } catch {
-    // I/O error (file missing, permission, etc.) — safe to ignore.
-    return false;
+    // File missing / permission: NOT "no async path" — the caller decides.
+    return 'unreadable';
   }
 };
 
@@ -716,11 +727,23 @@ const readAsyncAfterCommitFromSource = async (
  *   Pre-computed by the caller (combining in-graph property checks and the
  *   source-file XML fallback) so this function stays pure and synchronous.
  */
-const buildFaultRollback = (node: Node, isAsync: boolean): FaultRollbackVerdict => {
+const buildFaultRollback = (node: Node, isAsync: boolean | null): FaultRollbackVerdict => {
   const triggerType =
     typeof node.properties['triggerType'] === 'string'
       ? (node.properties['triggerType'] as string)
       : null;
+  // Only a record-triggered flow can carry an AsyncAfterCommit path, so only
+  // there does an unsettled async check change the verdict.
+  if (isAsync === null && triggerType !== null && triggerType.startsWith('Record')) {
+    return {
+      rollsBackTransaction: null,
+      statement:
+        'Could not determine whether this unhandled fault rolls back the triggering save: the vault predates the ' +
+        'async-path markers and the flow source could not be read to check for an AsyncAfterCommit path. A fault on ' +
+        'the synchronous path rolls the save back; one on an AsyncAfterCommit path does not. Rebuild the vault ' +
+        '(sfi refresh --no-pull) to settle it.',
+    };
+  }
   const processType =
     typeof node.properties['processType'] === 'string'
       ? (node.properties['processType'] as string)
@@ -728,7 +751,7 @@ const buildFaultRollback = (node: Node, isAsync: boolean): FaultRollbackVerdict 
   // Post-commit async path: a separate async transaction that runs AFTER the
   // triggering save committed. An unhandled fault here cannot undo the commit —
   // it silently aborts the async interview and notifies only the admin.
-  if (isAsync) {
+  if (isAsync === true) {
     return {
       rollsBackTransaction: false,
       statement:
@@ -1091,8 +1114,8 @@ const readActionCallSummariesFromNode = (node: Node): ActionCallSummary[] => {
  * all `<actionType>` / `<actionName>` pairs via a lightweight regex scan (no
  * re-parse of the full XML — fast and sufficient for action-call identification).
  *
- * Any I/O failure silently returns an empty array (safe: the caller falls back
- * to a `callsApex`-edge-only answer, which is already the pre-fix behaviour).
+ * An I/O failure returns `'unreadable'` (CH-8) so the caller can say the
+ * non-apex actions were not checked, rather than imply there are none.
  *
  * Call ONLY after `readActionCallSummariesFromNode` returns `[]` — i.e. when
  * `properties.actionCalls` is absent from the in-graph node.
@@ -1100,9 +1123,9 @@ const readActionCallSummariesFromNode = (node: Node): ActionCallSummary[] => {
 const readActionCallSummariesFromSource = async (
   vaultRoot: string,
   node: Node,
-): Promise<ActionCallSummary[]> => {
+): Promise<ActionCallSummary[] | 'unreadable'> => {
   if (typeof node.sourcePath !== 'string' || node.sourcePath.length === 0) {
-    return [];
+    return 'unreadable';
   }
   try {
     const absPath = join(vaultRoot, node.sourcePath);
@@ -1123,10 +1146,15 @@ const readActionCallSummariesFromSource = async (
     }
     return out;
   } catch {
-    // I/O error or parse failure — safe to ignore, return empty.
-    return [];
+    return 'unreadable';
   }
 };
+
+/** CH-8 disclosure when a legacy flow's non-apex actions could not be read. */
+export const FLOW_ACTIONS_UNREAD_NOTE =
+  ' NOT CHECKED: this vault predates the in-graph action-call list and the flow source could not be read, ' +
+  'so `actionCalls` holds only Apex actions — non-Apex actions (email alerts, session permission sets, subflow ' +
+  'actions) were not checked. Rebuild with sfi refresh --no-pull.';
 
 /**
  * Collect the Flow's outgoing `callsApex` edges and project each into an
@@ -1155,7 +1183,9 @@ const collectActionCalls = async (
   ctx: Context,
   flowId: ComponentId,
   node: Node,
-): Promise<Result<readonly ExplainFlowActionCall[], string>> => {
+): Promise<
+  Result<{ readonly rows: readonly ExplainFlowActionCall[]; readonly sourceUnread: boolean }, string>
+> => {
   const edgesResult = await listEdges(ctx.graph, flowId, {
     direction: 'out',
     edgeType: 'callsApex',
@@ -1181,9 +1211,13 @@ const collectActionCalls = async (
   // fallback). These are action types the extractor recognised as faultable
   // but never emits a `callsApex` edge for (e.g. activateSessionPermSet).
   let summaries = readActionCallSummariesFromNode(node);
+  let sourceUnread = false;
   if (summaries.length === 0) {
     // Vault built before bundle-4a — fall back to raw XML scan.
-    summaries = await readActionCallSummariesFromSource(ctx.vaultRoot, node);
+    const fromSource = await readActionCallSummariesFromSource(ctx.vaultRoot, node);
+    // Unread matters only when the graph has no action-call list at all.
+    sourceUnread = fromSource === 'unreadable' && !Array.isArray(node.properties['actionCalls']);
+    summaries = fromSource === 'unreadable' ? [] : fromSource;
   }
   for (const s of summaries) {
     if (s.actionType === 'apex') continue; // Already covered by callsApex edges.
@@ -1195,7 +1229,7 @@ const collectActionCalls = async (
     });
   }
 
-  return ok(out);
+  return ok({ rows: out, sourceUnread });
 };
 
 /**
@@ -1278,7 +1312,10 @@ const collectRecordLookups = async (
     // R6-11: FIELD-level dataflow-source reads (operation 'dataflowSource',
     // toId CustomField:...) are lineage plumbing, not record lookups —
     // folding them in here would render a field id as a bogus "object" row.
+    // Any FIELD-level read (dataflowSource, a Get/Update/Delete Records filter
+    // field) is not an object lookup row.
     if (edge.properties?.['operation'] === 'dataflowSource') continue;
+    if (!edge.toId.startsWith('CustomObject:')) continue;
     const object = stripObjectPrefix(edge.toId);
     if (!counts.has(object)) order.push(object);
     counts.set(object, (counts.get(object) ?? 0) + 1);
@@ -1575,12 +1612,14 @@ export const explainFlowHandler = async (
       conditionsNote,
       unclassifiedConditions: unclassified,
     },
-    actionCalls: actionCallsResult.value,
+    actionCalls: actionCallsResult.value.rows,
     subflowCalls: subflowCallsResult.value,
     recordLookups: recordLookupsResult.value,
     recordWrites: recordWritesResult.value,
     decisions,
-    disclosure: DISCLOSURE,
+    disclosure: actionCallsResult.value.sourceUnread
+      ? DISCLOSURE + FLOW_ACTIONS_UNREAD_NOTE
+      : DISCLOSURE,
     conditionsRuntimeNote: CONDITIONS_RUNTIME_NOTE,
     seeAlso: SEE_ALSO_FLOW_GRAPH,
     ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),

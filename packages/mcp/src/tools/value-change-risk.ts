@@ -40,6 +40,7 @@ import { getNodeById, listEdges, listNodesByType } from '@sf-intelligence/graph'
 
 import type { Context } from '../server.js';
 
+import { readConditionItems } from './condition-value-literals.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { FULL_SCAN_MAX_NODES, fullScanTruncationNote } from './scan-cap.js';
 import {
@@ -494,7 +495,19 @@ const findValueCouplings = async (
     if (refs.includes(fieldId) || (typeof expr === 'string' && re.test(expr))) matched.push(n);
   }
   const expressions = [...new Set(matched.map((n) => normalizeExpr(n.properties['expression'])).filter((s) => s.length > 0))].slice(0, 8);
-  const literals = [...new Set(matched.flatMap((n) => extractQuotedLiterals(String(n.properties['expression'] ?? ''))))].slice(0, 12);
+  // Structured triplets carry the compared literal exactly (Flow / workflow
+  // criteria render it UNQUOTED, so the quote scan never saw it); the quote
+  // scan stays for formula conditions and pre-upgrade vaults.
+  const literalsOf = (n: Node): string[] => {
+    const items = readConditionItems(n);
+    const structured = (items ?? [])
+      .filter((i) => i.value !== null && i.valueKind !== 'reference' && i.fieldId === fieldId)
+      .map((i) => i.value as string);
+    return structured.length > 0
+      ? structured
+      : extractQuotedLiterals(String(n.properties['expression'] ?? ''));
+  };
+  const literals = [...new Set(matched.flatMap(literalsOf))].slice(0, 12);
   return ok({ expressions, literals, incompleteTypes: scan.value.incompleteTypes });
 };
 

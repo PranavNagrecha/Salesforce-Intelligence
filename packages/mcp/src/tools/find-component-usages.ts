@@ -31,10 +31,14 @@
  * usage edges and >0 incoming `grantedBy` edges, surfaces its granters in a
  * SEPARATE `grantedBy` section so the grant surface stays answerable.
  */
-import { readFile } from 'node:fs/promises';
-import { join } from 'node:path';
-
-import type { ComponentId, Edge, McpError, McpResponse, Node } from '@sf-intelligence/contracts';
+import type {
+  ComponentId,
+  ComponentType,
+  Edge,
+  McpError,
+  McpResponse,
+  Node,
+} from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById, listEdges, searchNodes, type GraphStore } from '@sf-intelligence/graph';
 import { z } from 'zod';
@@ -53,6 +57,7 @@ import {
   type SupplementalFlowFieldWriter,
   type SupplementalFlowWriterScanTruncationCause,
 } from './flow-field-writers-scan.js';
+import { unmodeledReferrerKinds, unsearchedReferrerKinds } from './referrer-coverage.js';
 import { grepVaultSource, searchApexSourceHandler } from './search-apex-source.js';
 
 /**
@@ -68,7 +73,6 @@ const GREP_RELIANT_PREFIXES: ReadonlySet<string> = new Set([
   'CustomMetadataType',
   'CustomMetadataRecord',
   'CustomSetting',
-  'CustomLabel',
   'StaticResource',
 ]);
 
@@ -91,6 +95,31 @@ const FRONTEND_SUFFIXES = ['.js', '.html', '.cmp', '.app', '.evt', '.page', '.co
  * `staticresources/`) would flood the matches with the resource's internals.
  */
 const FRONTEND_DIR_RE = /\/(lwc|aura|pages|components)\//;
+
+/**
+ * DEV-10: a Custom Label is only ever REFERENCED through a label accessor —
+ * `Label.X` / `System.Label.X` (Apex), `$Label.X` (formula / Flow / VF),
+ * `$Label.c.X` (Aura), `{Label.X}` (FlexCard), `@salesforce/label/c.X` (LWC).
+ * The bare-name grep matched any identifier spelled the same (a local
+ * `Id MyLabelName = …`) and flipped `hasStaticEvidence` true. Anchored on the
+ * accessor; case-insensitive (Apex and formulas resolve labels that way).
+ */
+const labelReferencePattern = (name: string): string =>
+  `(?:\\$?Label\\.(?:c\\.)?|@salesforce/label/c\\.)${name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?![A-Za-z0-9_])`;
+
+/**
+ * Declarative metadata that can read a label (`$Label.X` / `{Label.X}`):
+ * formulas, validation rules, Flows, OmniStudio FlexCards / OmniScripts,
+ * custom buttons/links. Grepped for CustomLabel targets only.
+ */
+const LABEL_METADATA_SUFFIXES = [
+  '.flow-meta.xml',
+  '.field-meta.xml',
+  '.validationRule-meta.xml',
+  '.ouc-meta.xml',
+  '.os-meta.xml',
+  '.webLink-meta.xml',
+] as const;
 
 /**
  * BUNDLE directories — a strict subset of {@link FRONTEND_DIR_RE}, and the
@@ -420,6 +449,17 @@ export interface FindComponentUsagesOutput {
    * covered (byte-identical to before).
    */
   readonly coverageCaveat?: CoverageCaveat;
+  /**
+   * Present when this type has referrer kinds that are not graph edges (from
+   * the shared `referrer-coverage.ts` table): the found usages are not the
+   * whole set for those kinds.
+   */
+  readonly referrerCoverage?: {
+    readonly complete: false;
+    readonly unmodeledKinds: readonly string[];
+    /** The subset no tier here searches at all (present only when non-empty). */
+    readonly notSearched?: readonly string[];
+  };
   readonly truncated: boolean;
 }
 
@@ -535,159 +575,6 @@ const splitFieldApiName = (
   const dot = apiName.indexOf('.');
   if (dot <= 0 || dot === apiName.length - 1) return null;
   return { object: apiName.slice(0, dot), field: apiName.slice(dot + 1) };
-};
-
-/**
- * Objects whose CUSTOM fields are ONE physical field: `Activity` is the
- * abstract parent and `Task` / `Event` share its custom field set, so a Flow
- * that writes `Task.Foo__c` really does write `CustomField:Activity.Foo__c`.
- * The graph importer already re-points polymorphic Activity references this way
- * (see `sfi.safe_to_delete_field`'s polymorphic-attribution boundary); the
- * object-scope check below must not undo that by demanding a literal match.
- */
-const ACTIVITY_POLYMORPHIC_OBJECTS: ReadonlySet<string> = new Set(['activity', 'task', 'event']);
-
-/** Salesforce object api names are case-insensitive; Activity/Task/Event alias. */
-const sameObjectScope = (a: string, b: string): boolean => {
-  const x = a.toLowerCase();
-  const y = b.toLowerCase();
-  return (
-    x === y || (ACTIVITY_POLYMORPHIC_OBJECTS.has(x) && ACTIVITY_POLYMORPHIC_OBJECTS.has(y))
-  );
-};
-
-/** `<variables>` blocks in a Flow, as SObject variable name → objectType. */
-const flowSObjectVariableTypes = (xml: string): ReadonlyMap<string, string> => {
-  const out = new Map<string, string>();
-  const block = /<variables>([\s\S]*?)<\/variables>/g;
-  let m: RegExpExecArray | null;
-  while ((m = block.exec(xml)) !== null) {
-    const b = m[1] ?? '';
-    const name = /<name>([^<]+)<\/name>/.exec(b)?.[1];
-    const dataType = /<dataType>([^<]+)<\/dataType>/.exec(b)?.[1];
-    const objectType = /<objectType>([^<]+)<\/objectType>/.exec(b)?.[1];
-    if (name !== undefined && dataType === 'SObject' && objectType !== undefined) {
-      out.set(name, objectType);
-    }
-  }
-  return out;
-};
-
-/** The object a record-triggered Flow's `$Record` refers to, or null. */
-const flowTriggeringObject = (xml: string): string | null => {
-  const start = /<start>[\s\S]*?<\/start>/.exec(xml)?.[0];
-  if (start === undefined) return null;
-  return /<object>([^<]+)<\/object>/.exec(start)?.[1] ?? null;
-};
-
-/**
- * Whether an `inputAssignments` writer row really writes THIS object's field.
- *
- * - `scoped`       — some `<recordCreates>`/`<recordUpdates>` that assigns the
- *                    field is resolved to `objectApiName`.
- * - `other-object` — every such DML resolved, and to a DIFFERENT object.
- * - `unresolved`   — at least one such DML's object could not be resolved.
- */
-type InputAssignmentsObjectScope = 'scoped' | 'other-object' | 'unresolved';
-
-/**
- * FCU-INPUTASSIGNMENTS-IS-OBJECT-BLIND.
- *
- * `flow-field-writers-scan`'s `inputAssignments` mechanism matches a bare
- * `<field>NAME</field>` inside ANY `<recordCreates>` / `<recordUpdates>`
- * WITHOUT looking at the DML's own `<object>`. The field NAME alone is not an
- * identity: `Name`, `OwnerId`, `Status`, `Description` and `ParentId` exist on
- * nearly every object, and a custom leaf is routinely defined on two. Measured
- * on a real vault, `CustomField:Contract.Name` collected TEN "writers", the
- * first of which contains the string `Contract` zero times (its DML objects are
- * unrelated), and `CustomField:Case.IsVisibleInSelfService` collected a Flow
- * that writes that field on a Task.
- *
- * In `sfi.safe_to_delete_field` that over-match is CONSERVATIVE — a phantom
- * writer yields `blocking`, i.e. "do not delete". Here it points the other way:
- * it would flip `hasStaticEvidence` false→true and DELETE the empty-result
- * coverage caveat, manufacturing a confident "yes, these Flows use it" out of a
- * name collision. So this tool re-derives the enclosing DML's object before it
- * lets an `inputAssignments` row count as evidence.
- *
- * The scoping belongs in `flow-field-writers-scan.ts` itself, where all four
- * callers would inherit it — that module is shared and frozen for this release,
- * so the predicate lives here and the shared-module edit is reported upward.
- * `assignToReference` rows are NOT re-checked: the shared scan already resolves
- * those through the SObject variable's declared `objectType`.
- *
- * Exported for unit tests: the resolution ladder (`<object>` → `$Record` via
- * `<start>` → an SObject `<variables>` entry → unresolved) is the invariant.
- */
-/**
- * A Flow's deployed source XML, or `null` when it cannot be read (no node, no
- * `sourcePath` on record, or nothing readable at that path). `null` must never
- * be treated as "checked and clean" — the caller routes it to the
- * object-UNVERIFIED bucket, not to the confirmed one.
- */
-const readFlowSource = async (ctx: Context, flowId: ComponentId): Promise<string | null> => {
-  const node = await getNodeById(ctx.graph, flowId);
-  if (!node.ok || node.value === null) return null;
-  const sourcePath = node.value.sourcePath;
-  if (typeof sourcePath !== 'string' || sourcePath.length === 0) return null;
-  try {
-    return await readFile(join(ctx.vaultRoot, sourcePath), 'utf-8');
-  } catch {
-    return null;
-  }
-};
-
-export const classifyInputAssignmentsObjectScope = (
-  xml: string,
-  objectApiName: string,
-  fieldApiName: string,
-): InputAssignmentsObjectScope => {
-  const escaped = fieldApiName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-  const fieldTag = new RegExp(`<field>${escaped}</field>`);
-  const sobjectVars = flowSObjectVariableTypes(xml);
-  const triggering = flowTriggeringObject(xml);
-  let sawUnresolved = false;
-  let sawAssigning = false;
-  for (const tag of ['recordCreates', 'recordUpdates'] as const) {
-    const dmlPattern = new RegExp(`<${tag}>[\\s\\S]*?</${tag}>`, 'g');
-    let dml: RegExpExecArray | null;
-    while ((dml = dmlPattern.exec(xml)) !== null) {
-      const blk = dml[0];
-      let assignsField = false;
-      const iaPattern = /<inputAssignments>[\s\S]*?<\/inputAssignments>/g;
-      let ia: RegExpExecArray | null;
-      while ((ia = iaPattern.exec(blk)) !== null) {
-        if (fieldTag.test(ia[0])) {
-          assignsField = true;
-          break;
-        }
-      }
-      if (!assignsField) continue;
-      sawAssigning = true;
-      const declared = /<object>([^<]+)<\/object>/.exec(blk)?.[1];
-      if (declared !== undefined) {
-        if (sameObjectScope(declared, objectApiName)) return 'scoped';
-        continue;
-      }
-      const ref = /<inputReference>([^<]+)<\/inputReference>/.exec(blk)?.[1];
-      if (ref === undefined) {
-        sawUnresolved = true;
-        continue;
-      }
-      const head = ref.split('.')[0] ?? '';
-      const resolved = head === '$Record' ? triggering : (sobjectVars.get(head) ?? null);
-      if (resolved === null) {
-        sawUnresolved = true;
-        continue;
-      }
-      if (sameObjectScope(resolved, objectApiName)) return 'scoped';
-    }
-  }
-  if (sawUnresolved) return 'unresolved';
-  // No assigning DML at all means the shared scan and this re-derivation
-  // disagree about the source — treat that as unresolved, never as a clean
-  // "different object", so an unexplained disagreement can never certify.
-  return sawAssigning ? 'other-object' : 'unresolved';
 };
 
 /**
@@ -840,9 +727,16 @@ export const findComponentUsagesHandler = async (
   let grepRan = false;
   let grepMatches: { path: string; line: number; snippet: string }[] = [];
   let grepTruncated = false;
+  const isLabel = targetType === 'CustomLabel';
+  const grepQuery = isLabel ? labelReferencePattern(targetApiName) : targetApiName;
+  const grepRegex = isLabel ? true : undefined;
   if (runGrep && targetApiName.length >= 3) {
     const grepLimit = input.grepLimit ?? GREP_LIMIT_DEFAULT;
-    const gr = await searchApexSourceHandler(ctx, { query: targetApiName, limit: grepLimit });
+    const gr = await searchApexSourceHandler(ctx, {
+      query: grepQuery,
+      limit: grepLimit,
+      ...(grepRegex !== undefined ? { regex: grepRegex } : {}),
+    });
     if (gr.ok) {
       grepRan = true;
       grepMatches = (gr.value.data.matches ?? []).map((m) => ({
@@ -855,7 +749,8 @@ export const findComponentUsagesHandler = async (
     const frontendBudget = grepLimit - grepMatches.length;
     if (frontendBudget > 0) {
       const fr = await grepVaultSource(ctx, {
-        query: targetApiName,
+        query: grepQuery,
+        regex: grepRegex,
         limit: frontendBudget,
         suffixes: FRONTEND_SUFFIXES,
         pathFilter: (p) => FRONTEND_DIR_RE.test(p),
@@ -866,6 +761,20 @@ export const findComponentUsagesHandler = async (
           ...fr.value.matches.map((m) => ({ path: m.path, line: m.line, snippet: m.snippet })),
         );
         grepTruncated = grepTruncated || fr.value.truncated;
+      }
+    }
+    const metadataBudget = grepLimit - grepMatches.length;
+    if (isLabel && metadataBudget > 0) {
+      const mr = await grepVaultSource(ctx, {
+        query: grepQuery,
+        regex: true,
+        limit: metadataBudget,
+        suffixes: LABEL_METADATA_SUFFIXES,
+      });
+      if (mr.ok) {
+        grepRan = true;
+        grepMatches.push(...mr.value.matches.map((m) => ({ path: m.path, line: m.line, snippet: m.snippet })));
+        grepTruncated = grepTruncated || mr.value.truncated;
       }
     }
   }
@@ -903,27 +812,16 @@ export const findComponentUsagesHandler = async (
   // any of them count as evidence. `assignToReference` rows are already
   // object-resolved by the shared scan (through the SObject variable's declared
   // `objectType`) and are taken as-is.
+  // FCU-INPUTASSIGNMENTS-IS-OBJECT-BLIND, now fixed where all callers inherit
+  // it: the shared scan resolves each DML's object, drops other-object
+  // name matches (counted), and marks unresolvable ones `objectScope:
+  // 'unresolved'` — LEADS that never count as evidence here.
   const confirmedWriters: SupplementalFlowFieldWriter[] = [];
   const unverifiedWriters: SupplementalFlowFieldWriter[] = [];
-  let otherObjectMatchesDropped = 0;
-  if (flowWriterScan !== null && fieldParts !== null) {
-    for (const w of flowWriterScan.writers) {
-      if (w.mechanism !== 'inputAssignments') {
-        confirmedWriters.push(w);
-        continue;
-      }
-      const xml = await readFlowSource(ctx, w.componentId);
-      if (xml === null) {
-        // Source unreadable at re-derivation time — the object could not be
-        // checked, so this row is a LEAD, never confirmed evidence.
-        unverifiedWriters.push(w);
-        continue;
-      }
-      const scope = classifyInputAssignmentsObjectScope(xml, fieldParts.object, fieldParts.field);
-      if (scope === 'scoped') confirmedWriters.push(w);
-      else if (scope === 'unresolved') unverifiedWriters.push(w);
-      else otherObjectMatchesDropped += 1;
-    }
+  const otherObjectMatchesDropped = flowWriterScan?.otherObjectMatchesDropped ?? 0;
+  for (const w of flowWriterScan?.writers ?? []) {
+    if (w.objectScope === 'scoped') confirmedWriters.push(w);
+    else unverifiedWriters.push(w);
   }
   const distinctOf = (rows: readonly SupplementalFlowFieldWriter[]): number =>
     new Set(rows.map((r) => r.componentId)).size;
@@ -1010,6 +908,11 @@ export const findComponentUsagesHandler = async (
     `\`graphReferrerCount\` and each group's \`count\` are EDGE counts, not component counts: one referrer contributes one edge per relationship it has to the target (a Flow that reads, writes AND triggers on an object counts 3). ${graphReferrerCount} edge(s) here come from ${distinctReferrerCount} distinct component(s) — quote \`distinctReferrerCount\` / \`distinctReferrers\` to a human, and note the 25-row \`sample\` cap is on ROWS, so a group with multi-edge referrers shows fewer than 25 distinct components.`,
     'The grep supplement is a literal text match on the api name across Apex AND frontend bundle source — LWC, Aura, Visualforce ($Label / $Resource / @salesforce module references) — (`text-match` tier): it can OVER-match (a substring / a different component sharing the name) and UNDER-match (dynamically built references). Treat it as leads, not proof.',
   ];
+  if (isLabel) {
+    boundaries.push(
+      'For a Custom Label the grep matches only label ACCESSORS (`Label.X`, `System.Label.X`, `$Label.X`, `$Label.c.X`, `{Label.X}`, `@salesforce/label/c.X`) — never a same-named variable — and also searches formulas, validation rules, Flows, FlexCards, OmniScripts and custom links. A label name built at runtime is not visible.',
+    );
+  }
   // FCU-WRONG-CASE-ID-READS-AS-ABSENT: the answer is about a DIFFERENT id than
   // the caller passed. Say so, and echo the vault's exact casing.
   if (resolvedFrom !== null) {
@@ -1095,7 +998,20 @@ export const findComponentUsagesHandler = async (
   }
   if (GREP_RELIANT_PREFIXES.has(targetType)) {
     boundaries.push(
-      `${targetType} usage has a weaker graph tier — FRONTEND references ($Label / $Resource / $Setup and @salesforce imports in LWC/Aura/Visualforce) are modeled as graph edges on vaults refreshed at 0.1.10+, but Apex references (System.Label.X, dynamic config reads) are still grep-only, so the grep supplement carries part of the answer here. Confirm by reading the matched source.`,
+      `${targetType} usage has a weaker graph tier — FRONTEND references ($Label / $Resource / $Setup and @salesforce imports in LWC/Aura/Visualforce) are modeled as graph edges on vaults refreshed at 0.1.10+, Apex System.Label.X only on vaults refreshed after 0.3.3, and formula / dynamic config reads are grep-only, so the grep supplement carries part of the answer here. Confirm by reading the matched source.`,
+    );
+  }
+  // A05 / C07: referrer kinds this type has that are NOT graph edges, from the
+  // ONE shared referrer-coverage table — named whether or not usages were found.
+  const builtBy = ctx.manifest?.version;
+  const unmodeledKinds = unmodeledReferrerKinds(targetType as ComponentType, node, builtBy);
+  const unsearchedKinds = unsearchedReferrerKinds(targetType as ComponentType, node, builtBy);
+  if (unmodeledKinds.length > 0) {
+    boundaries.push(
+      `${targetType} referrer kinds not modeled as graph edges: ${unmodeledKinds.join('; ')}.` +
+        (unsearchedKinds.length > 0
+          ? ` Not searched by the text supplement either: ${unsearchedKinds.join('; ')} — "no usage" is not proof for these.`
+          : ' The text supplement searches them; confirm a match by reading its source.'),
     );
   }
   if (grantedBySection !== undefined) {
@@ -1135,6 +1051,15 @@ export const findComponentUsagesHandler = async (
         hasStaticEvidence,
       },
       boundaries,
+      ...(unmodeledKinds.length > 0
+        ? {
+            referrerCoverage: {
+              complete: false as const,
+              unmodeledKinds,
+              ...(unsearchedKinds.length > 0 ? { notSearched: unsearchedKinds } : {}),
+            },
+          }
+        : {}),
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       // Every tier's incompleteness folds into ONE payload flag: the graph
       // sample cap, the grep tier, the Flow-writer scan's own truncation AND

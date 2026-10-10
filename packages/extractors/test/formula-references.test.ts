@@ -89,3 +89,18 @@ describe('buildReferencesEdges — $Permission custom-permission gate', () => {
     expect(edges.filter((e) => e.toId.startsWith('CustomPermission:'))).toEqual([]);
   });
 });
+
+describe('buildReferencesEdges — $Label custom label (A05/C07)', () => {
+  it('FAIL-BEFORE/PASS-AFTER: $Label.X mints a references edge to CustomLabel:X; $Setup/$User do not', () => {
+    const edges = buildReferencesEdges(
+      'IF(Term__c = $Label.Target_Term, $User.FirstName, $Label.Target_Term & $Setup.Cfg__c.Val__c)',
+      'CustomField:Widget__c.Is_Current__c',
+      'Widget__c',
+      'formula',
+    );
+    const labels = edges.filter((e) => e.toId.startsWith('CustomLabel:'));
+    expect(labels.map((e) => e.toId)).toEqual(['CustomLabel:Target_Term']);
+    expect(labels[0]?.properties['referenceKind']).toBe('customLabel');
+    expect(edges.map((e) => e.toId)).toContain('CustomField:Widget__c.Term__c');
+  });
+});

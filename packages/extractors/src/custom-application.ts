@@ -11,6 +11,7 @@ import { err, ok } from '@sf-intelligence/core';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 import { deriveComponentApiName } from './path-utils.js';
+import { collectRecordPageOverrides } from './record-page-overrides.js';
 
 const APPLICATION_FILE_SUFFIX = '.app-meta.xml';
 const ROOT_ELEMENT = 'CustomApplication';
@@ -238,6 +239,12 @@ export const extractCustomApplication = async (
       defaultLandingTab: optionalString(rootObj, 'defaultLandingTab'),
       utilityBar,
       tabCount: tabs.length,
+      // ADM-3: app-default and app + record type + profile record page
+      // activations — which Lightning page a user sees inside this app.
+      recordPageOverrides: [
+        ...collectRecordPageOverrides(rootObj, 'actionOverrides'),
+        ...collectRecordPageOverrides(rootObj, 'profileActionOverrides'),
+      ],
     },
   };
 

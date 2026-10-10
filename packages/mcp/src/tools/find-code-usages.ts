@@ -61,7 +61,7 @@ import type {
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { getNodeById, listEdges, listEdgesForNodes } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -320,10 +320,69 @@ const resolveCodeUsage = async (
   });
 };
 
+const typeOf = (id: string): string => id.slice(0, Math.max(0, id.indexOf(':')));
+
+/** Field-level edge types that imply the referrer touches the parent object. */
+const FIELD_ROLLUP_EDGE_TYPES: ReadonlySet<string> = new Set(['readsFrom', 'writesTo', 'references']);
+
+/**
+ * DEV-11: code usages of an object's child fields, rolled up to the object.
+ * One entry per (referrer, edgeType) that has NO direct edge of that type to
+ * the object, with `properties.viaFields` naming the fields and
+ * `properties.rolledUpFrom: 'CustomField'`. Edge confidence is the weakest
+ * field edge's (`heuristic` < `parsed` < `declared`).
+ */
+const rollUpFieldUsages = async (
+  ctx: Context,
+  objectId: string,
+  direct: readonly CodeUsage[],
+  allowedEdgeTypes: ReadonlySet<EdgeType>,
+  allowedNodeTypes: ReadonlySet<ComponentType>,
+): Promise<Result<CodeUsage[], string>> => {
+  const children = await listEdges(ctx.graph, objectId as ComponentId, { direction: 'out', edgeType: 'parentOf' });
+  if (!children.ok) return err(children.error.message);
+  const fieldIds = children.value.map((e) => e.toId).filter((id) => id.startsWith('CustomField:'));
+  if (fieldIds.length === 0) return ok([]);
+  const incoming = await listEdgesForNodes(ctx.graph, fieldIds, { direction: 'in' });
+  if (!incoming.ok) return err(incoming.error.message);
+  const directKeys = new Set(direct.map((u) => `${u.id}|${u.edgeType}`));
+  const rank: Record<string, number> = { heuristic: 0, parsed: 1, declared: 2 };
+  const agg = new Map<string, { edge: Edge; fields: Set<string>; confidence: string }>();
+  for (const [fieldId, edges] of incoming.value) {
+    for (const edge of edges) {
+      if (!FIELD_ROLLUP_EDGE_TYPES.has(edge.edgeType) || !allowedEdgeTypes.has(edge.edgeType)) continue;
+      if (edge.properties['targetMissing'] === true) continue;
+      const key = `${edge.fromId}|${edge.edgeType}`;
+      if (directKeys.has(key)) continue;
+      const hit = agg.get(key);
+      if (hit === undefined) {
+        agg.set(key, { edge, fields: new Set([fieldId]), confidence: edge.confidence });
+      } else {
+        hit.fields.add(fieldId);
+        if ((rank[edge.confidence] ?? 0) < (rank[hit.confidence] ?? 0)) hit.confidence = edge.confidence;
+      }
+    }
+  }
+  const out: CodeUsage[] = [];
+  for (const { edge, fields, confidence } of agg.values()) {
+    const resolved = await resolveCodeUsage(ctx, edge, allowedNodeTypes);
+    if (!resolved.ok) return err(resolved.error);
+    if (resolved.value === null) continue;
+    out.push({
+      ...resolved.value,
+      source: edge.source,
+      properties: { rolledUpFrom: 'CustomField', viaFields: [...fields].sort(), confidence },
+    });
+  }
+  return ok(out);
+};
+
 /**
  * The `sfi.find_code_usages` MCP tool. Returns the code-only incoming
  * `readsFrom`/`writesTo`/`callsApex`/`references` edges to `targetId`,
  * each carrying the referrer node's identity and the edge's metadata.
+ * For a `CustomObject` target, code usages of its child fields are rolled
+ * up too (DEV-11 — see {@link rollUpFieldUsages}).
  * Sorted by `(id, edgeType)` ASC; truncated to `limit` (default 50,
  * max 500). `edgeTypes` and `nodeTypes` each narrow to a subset; empty
  * arrays yield an empty result.
@@ -380,6 +439,21 @@ export const findCodeUsagesHandler = async (
       usages.push(resolved.value);
     }
   }
+
+  // DEV-11: an object-level question ("which classes use Invoice__c?") must
+  // also count code that touches the object ONLY through its fields — a
+  // class that loops `for (Invoice__c r : rows)` and writes `r.Status__c`
+  // has a field edge but no object edge, and was missing from the answer
+  // while its test class (which queried the object) was listed. Roll the
+  // child CustomField edges up: one usage per (referrer, edgeType) not
+  // already present directly, carrying `viaFields[]`.
+  const rolledUp = typeOf(input.targetId) === 'CustomObject'
+    ? await rollUpFieldUsages(ctx, input.targetId, usages, allowedEdgeTypes, allowedNodeTypes)
+    : ok([] as CodeUsage[]);
+  if (!rolledUp.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${rolledUp.error}` });
+  }
+  usages.push(...rolledUp.value);
 
   const ordered = usages.sort(compareUsages);
 

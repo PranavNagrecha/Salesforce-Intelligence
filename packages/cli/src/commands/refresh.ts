@@ -85,6 +85,7 @@ import {
   vaultPaths,
   type ExtendedVaultManifest,
   type StagedBuildMarker,
+  type StandardFieldDescribeSummary,
 } from '@sf-intelligence/vault';
 import { Command } from 'commander';
 
@@ -96,6 +97,7 @@ import {
   applyReportDashboardPersistence,
   parseTypeFilter,
   renderVault,
+  resolveRecordFilterPathEdges,
   resolveRestrictionRuleProfileEdges,
   SUPPORTED_TYPES,
   walkAndExtract,
@@ -112,6 +114,7 @@ import {
   type SetupAuditTrailPersistSummary,
   type SetupAuditTrailSoql,
 } from '../setup-audit-trail.js';
+import { isAuthenticated, listAuthenticatedOrgs, loginRemedy, type OrgListResult } from '../sf-org-list.js';
 import {
   reconcileSourceDeletions,
   syncAuthoritativeRetrieveIntoSource,
@@ -280,13 +283,36 @@ export interface RefreshResult {
    * succeeded and legitimately found nothing.
    */
   readonly reportPull?: ReportPullDisclosure;
+  /** WOW-12: standard-field describe outcome (live / cached snapshot / skipped). */
+  readonly standardFieldDescribe?: StandardFieldDescribeSummary;
   /**
    * Populated only when `--with-audit-trail` (#39) runs. Summary of the
    * SetupAuditTrail JSONL append (`meta/setup-audit-trail.jsonl`). Absent on
    * the default offline refresh.
    */
   readonly auditTrail?: SetupAuditTrailPersistSummary;
+  /**
+   * Opt-ins on this run that query the org even under `--no-pull` (see
+   * {@link orgContactingOptIns}). Absent when none were requested — only then
+   * may an offline run say the org was not contacted.
+   */
+  readonly orgContactOptIns?: readonly string[];
 }
+
+/**
+ * The refresh opt-ins that contact the org regardless of `--no-pull`, as the
+ * CLI flags the user typed. `--no-pull` only skips the retrieve and the
+ * standard-object describe; these still run `sf` against the target org.
+ */
+export const orgContactingOptIns = (opts: {
+  readonly withAuditTrail?: boolean;
+  readonly withToolingApi?: boolean;
+  readonly withDataShape?: boolean;
+}): readonly string[] => [
+  ...(opts.withAuditTrail === true ? ['--with-audit-trail'] : []),
+  ...(opts.withToolingApi === true ? ['--with-tooling-api'] : []),
+  ...(opts.withDataShape === true ? ['--with-data-shape'] : []),
+];
 
 /**
  * A best-effort report/dashboard pull that did NOT deliver what it attempted.
@@ -449,6 +475,14 @@ export interface RunRefreshOptions {
   readonly withReports?: boolean;
   /** Override config.json's `targetOrg` for the retrieve step. */
   readonly targetOrg?: string;
+  /**
+   * WOW-12: with `noPull`, still run the live `sf sobject describe` for the
+   * core standard objects (contacts the org). Default off — `--no-pull` is
+   * offline and replays the cached describe snapshot instead.
+   */
+  readonly withDescribe?: boolean;
+  /** Test seam for the FR-03 auth preflight; defaults to the local `sf org list`. */
+  readonly listOrgs?: () => Promise<OrgListResult>;
   /** Comma-separated type filter ("CustomObject,Flow"). */
   readonly types?: string;
   /**
@@ -687,6 +721,77 @@ const saveExtractCache = async (
  * pending files in INPUT order so vault output stays byte-stable. Graph
  * import + renderVault remain single-threaded callers of this function.
  */
+/**
+ * WOW-10 (scanner half): the regex scanner reads every `X.Y` as `Object.Field`.
+ * Two receiver shapes are provably NOT sObjects, and their
+ * `CustomField:{X}.{Y}` edges are phantoms no field question can ever find:
+ *   - a known Apex class (`Constants.STAGE_WON`, `Controller.settings`), matched
+ *     case-insensitively — rerouted to the real dependency, one heuristic
+ *     `references ApexClass:{Class}` edge per class carrying `fields[]`
+ *     (`mechanism: 'apexStaticField'`, the extractor's shape for camelCase
+ *     members);
+ *   - a managed-package namespace (`ns.SomeApi.call()`), derived from the
+ *     vault's `ns__X__c` objects — dropped (there is no node to point at).
+ * A receiver that is also a vaulted object name is left alone.
+ */
+export const rerouteNonSObjectReceivers = <E extends { fromId: string; toId: string; edgeType: string; confidence: string; properties?: Record<string, unknown> }>(
+  edges: readonly E[],
+  roster: {
+    readonly classes: ReadonlyMap<string, string>;
+    readonly objects: ReadonlySet<string>;
+    readonly namespaces: ReadonlySet<string>;
+  },
+): E[] => {
+  const out: E[] = [];
+  const staticFields = new Map<string, { template: E; fields: Set<string> }>();
+  for (const edge of edges) {
+    const m =
+      edge.confidence === 'heuristic' && (edge.edgeType === 'readsFrom' || edge.edgeType === 'writesTo')
+        ? /^CustomField:([^.]+)\.(.+)$/.exec(edge.toId)
+        : null;
+    const receiver = (m?.[1] ?? '').toLowerCase();
+    if (m === null || roster.objects.has(receiver)) {
+      out.push(edge);
+      continue;
+    }
+    const cls = roster.classes.get(receiver);
+    if (cls !== undefined) {
+      const key = `${edge.fromId}|${cls}`;
+      const entry = staticFields.get(key) ?? { template: edge, fields: new Set<string>() };
+      entry.fields.add(m[2] ?? '');
+      staticFields.set(key, entry);
+      continue;
+    }
+    if (roster.namespaces.has(receiver)) continue;
+    out.push(edge);
+  }
+  for (const { template, fields } of staticFields.values()) {
+    const cls = roster.classes.get((/^CustomField:([^.]+)\./.exec(template.toId)?.[1] ?? '').toLowerCase()) ?? '';
+    const toId = `ApexClass:${cls}`;
+    if (toId === template.fromId) continue;
+    const sorted = [...fields].sort();
+    const existing = out.findIndex((e) => e.fromId === template.fromId && e.toId === toId && e.edgeType === 'references');
+    if (existing >= 0) {
+      const prior = out[existing]!;
+      const priorFields = Array.isArray(prior.properties?.['fields'])
+        ? (prior.properties['fields'] as unknown[]).filter((f): f is string => typeof f === 'string')
+        : typeof prior.properties?.['field'] === 'string'
+          ? [prior.properties['field'] as string]
+          : [];
+      const merged = [...new Set([...priorFields, ...sorted])].sort();
+      out[existing] = { ...prior, properties: { ...(prior.properties ?? {}), field: merged[0] ?? '', fields: merged } };
+      continue;
+    }
+    out.push({
+      ...template,
+      toId,
+      edgeType: 'references',
+      properties: { mechanism: 'apexStaticField', field: sorted[0] ?? '', fields: sorted },
+    });
+  }
+  return out;
+};
+
 export const applyApexAstEdges = async (
   results: readonly ExtractionResult[],
   progress: (message: string) => void,
@@ -697,11 +802,23 @@ export const applyApexAstEdges = async (
   readonly edgesAdded: number;
 }> => {
   const knownClasses = new Set<string>();
+  const knownObjects = new Set<string>();
   for (const r of results) {
     for (const n of r.nodes) {
       if (n.type === 'ApexClass' || n.type === 'ApexTrigger') knownClasses.add(n.apiName);
+      if (n.type === 'CustomObject') knownObjects.add(n.apiName);
     }
   }
+  const receiverRoster = {
+    classes: new Map([...knownClasses].map((c) => [c.toLowerCase(), c] as const)),
+    objects: new Set([...knownObjects].map((o) => o.toLowerCase())),
+    namespaces: new Set(
+      [...knownObjects].flatMap((o) => {
+        const ns = /^([A-Za-z][A-Za-z0-9]*)__\w+__/.exec(o)?.[1];
+        return ns === undefined ? [] : [ns.toLowerCase()];
+      }),
+    ),
+  };
 
   type PendingApex = {
     readonly resultIndex: number;
@@ -752,6 +869,7 @@ export const applyApexAstEdges = async (
       kind: p.kind,
     })),
     knownClasses,
+    { knownObjects },
   );
 
   // Phase 3 — merge edges serially in pending (input) order.
@@ -767,7 +885,7 @@ export const applyApexAstEdges = async (
     if (extracted.parseError !== undefined) {
       parseErrors += 1;
       progress(`  apex-ast fallback (scanner-only): ${apexNode.apiName} — ${extracted.parseError}`);
-      out[resultIndex] = r;
+      out[resultIndex] = { ...r, edges: rerouteNonSObjectReceivers(r.edges, receiverRoster) };
       continue;
     }
     filesParsed += 1;
@@ -855,7 +973,28 @@ export const applyApexAstEdges = async (
       if (segs.length < 2) return;
       pushEdge(`CustomField:${segs[0]}.${segs[1]}`, kind, { path: ref, viaAst: true });
     };
-    for (const read of extracted.reads) fieldEdge(read, 'readsFrom');
+    // A field named only inside a SOQL string literal is not compiler-checked:
+    // stamp it so delete-safety does not call it a compile-time reference.
+    // Per field id: any other read of the same field wins.
+    const literalOnly = new Set(extracted.literalQueryReads ?? []);
+    const fieldKey = (ref: string): string => ref.split('.').slice(0, 2).join('.');
+    const checkedFields = new Set(
+      extracted.reads.filter((r) => !literalOnly.has(r)).map(fieldKey),
+    );
+    for (const read of extracted.reads) {
+      if (literalOnly.has(read) && !checkedFields.has(fieldKey(read))) {
+        const segs = read.split('.');
+        if (segs.length >= 2) {
+          pushEdge(`CustomField:${segs[0]}.${segs[1]}`, 'readsFrom', {
+            path: read,
+            viaAst: true,
+            mechanism: 'soql-string-literal',
+          });
+        }
+        continue;
+      }
+      fieldEdge(read, 'readsFrom');
+    }
     for (const write of extracted.writes) fieldEdge(write, 'writesTo');
     // P13-AST-flip: a heuristic scanner edge with an IDENTICAL
     // (from, to, type) parsed twin is redundant — drop it so consumers
@@ -876,6 +1015,11 @@ export const applyApexAstEdges = async (
     const typedReceivers = new Set(
       [...(extracted.innerTypes ?? []), apexNode.apiName].map((t) => t.toLowerCase()),
     );
+    // WOW-10: a receiver the AST proves is a declared VARIABLE (`cc.Status`
+    // for `case cc = …`) is never an sObject api name — the scanner's
+    // `CustomField:cc.Status` is a phantom; the parsed pass emits the typed
+    // edge. A receiver that is itself a real object name is left alone.
+    const variableReceivers = new Set(extracted.variables ?? []);
     const isTypedReceiverFp = (edge: { toId: string; edgeType: string; confidence: string }): boolean => {
       if (edge.confidence !== 'heuristic') return false;
       if (edge.edgeType !== 'readsFrom' && edge.edgeType !== 'writesTo') return false;
@@ -883,6 +1027,7 @@ export const applyApexAstEdges = async (
       if (m === null) return false;
       const receiver = (m[1] ?? '').toLowerCase();
       const field = m[2] ?? '';
+      if (variableReceivers.has(receiver) && !knownObjects.has(m[1] ?? '')) return true;
       return typedReceivers.has(receiver) || field === 'class';
     };
     const deduped = newEdges.filter(
@@ -892,7 +1037,7 @@ export const applyApexAstEdges = async (
           !parsedKeys.has(`${edge.fromId}|${edge.toId}|${edge.edgeType}`)) &&
           !isTypedReceiverFp(edge as { toId: string; edgeType: string; confidence: string }),
     );
-    out[resultIndex] = { ...r, edges: deduped };
+    out[resultIndex] = { ...r, edges: rerouteNonSObjectReceivers(deduped, receiverRoster) };
   }
 
   return {
@@ -955,6 +1100,14 @@ const runRefreshBody = async (opts: RunRefreshOptions): Promise<RefreshResult> =
       noPull: false,
     });
     if (sizeNote.message) progress(sizeNote.message);
+
+    // FR-03: local auth preflight (no org contact). An alias the sf CLI does
+    // not know otherwise burns the type probe + retrieve and surfaces only
+    // sf's header line. Skipped when the list itself cannot be read.
+    // SFI_SKIP_AUTH_PREFLIGHT=1 bypasses it for auth the local list cannot
+    // see (e.g. an access token supplied only through the environment).
+    const authProblem = await authPreflight(targetOrg, opts.listOrgs ?? listAuthenticatedOrgs);
+    if (authProblem !== null) return failed(started, authProblem, []);
 
     progress(`Retrieving metadata from ${targetOrg} (this can take several minutes)...`);
     const pulled = await runSfRetrieve(targetOrg, paths.source, requestedTypes);
@@ -1186,8 +1339,19 @@ const runRefreshBody = async (opts: RunRefreshOptions): Promise<RefreshResult> =
   walked = { ...walked, results: resolveRestrictionRuleProfileEdges(walked.results) };
 
   // FLD-05: org describe snapshot for standard-object fields (Account, Contact, …).
-  // Read-only `sf sobject describe` — safe on --no-pull (no metadata retrieve).
-  walked = await appendStandardObjectDescribeFields(targetOrg, walked, progress);
+  // WOW-12: live only on a pulling refresh or --with-describe; --no-pull
+  // replays the cached snapshot and discloses objects without one.
+  const describeStep = await appendStandardObjectDescribeFields(targetOrg, walked, progress, {
+    live: describeRunsLive(opts),
+    cacheDir: join(paths.meta, 'describe-cache'),
+  });
+  walked = describeStep.walked;
+  const standardFieldDescribe = describeStep.summary;
+
+  // A RestrictionRule / ScopingRule filter path (`Advisor__r.Region__c`) tests
+  // fields on RELATED objects: resolve it through the lookups (after the
+  // describe step, so standard lookup fields are in the node set).
+  walked = { ...walked, results: resolveRecordFilterPathEdges(walked.results) };
 
   // P13-AST-edges: opt-in parser-grade Apex edge pass (lazy import — the
   // default path never loads the ANTLR grammar). Best-effort per file:
@@ -1265,6 +1429,7 @@ const runRefreshBody = async (opts: RunRefreshOptions): Promise<RefreshResult> =
     ...(reportsCapStats !== undefined ? { reportsCapStats } : {}),
     ...(reportNodeStats !== undefined ? { reportNodeStats } : {}),
     ...(reportPull !== undefined ? { reportPull } : {}),
+    standardFieldDescribe,
   };
 
   if (!renameOver) {
@@ -1483,6 +1648,8 @@ export const installSideBuildGraph = async ({
 };
 
 interface RunWithOpenGraphArgs {
+  /** WOW-12: what the standard-field describe step did (live / cached / skipped). */
+  readonly standardFieldDescribe?: StandardFieldDescribeSummary;
   /** Types whose source was reconciled against the org retrieve this run. */
   readonly reconciledTypes?: ReadonlySet<ComponentType>;
   readonly apexAstStats?: { readonly filesParsed: number; readonly parseErrors: number };
@@ -2440,7 +2607,9 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
   // unknown JSON keys. Recording it is the whole point: without it a vault
   // whose report pull ERRORED is byte-identical to one whose pull succeeded and
   // found nothing, which is exactly how "confirmed 0 reports" shipped.
-  const manifest: ExtendedVaultManifest & { readonly reportPull?: ReportPullDisclosure } = {
+  const manifest: ExtendedVaultManifest & {
+    readonly reportPull?: ReportPullDisclosure;
+  } = {
     version: PACKAGE_VERSION,
     refreshedAt: coverageComputedAt,
     sourceOrg: targetOrg,
@@ -2461,6 +2630,12 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     ...(reportsCapEvidence !== undefined ? { reportsCap: reportsCapEvidence } : {}),
     ...(args.reportNodeStats !== undefined ? { reportNodeCap: args.reportNodeStats } : {}),
     ...(args.reportPull !== undefined ? { reportPull: args.reportPull } : {}),
+    // WOW-12: record which standard objects had no describe this run, so an
+    // offline rebuild's thinner standard-field set is on the record, not only
+    // in the terminal.
+    ...(args.standardFieldDescribe !== undefined && args.standardFieldDescribe.skipped.length > 0
+      ? { standardFieldDescribe: args.standardFieldDescribe }
+      : {}),
     ...(profileGrantDisclosure !== null && profileGrantStats !== null
       ? {
           profileGrantIntegrity: {
@@ -2767,6 +2942,8 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     ...(args.reportNodeStats !== undefined ? { reportNodeCap: args.reportNodeStats } : {}),
     ...(args.reportPull !== undefined ? { reportPull: args.reportPull } : {}),
     ...(auditTrailSummary !== undefined ? { auditTrail: auditTrailSummary } : {}),
+    ...(args.standardFieldDescribe !== undefined ? { standardFieldDescribe: args.standardFieldDescribe } : {}),
+    ...(orgContactingOptIns(opts).length > 0 ? { orgContactOptIns: orgContactingOptIns(opts) } : {}),
   };
 };
 
@@ -2803,6 +2980,10 @@ interface RiskScoreEntry {
   readonly refreshedAt: string;
   readonly sourceTreeHash: string;
   readonly techDebtScore: number | null;
+  /** ARCH-06: axes the score was computed over, so a later delta compares like with like. */
+  readonly scoredAxes?: readonly string[];
+  /** ARCH-06: the score model version that produced `techDebtScore`. */
+  readonly scoreModel?: number;
 }
 
 /**
@@ -2827,13 +3008,19 @@ const appendRiskScores = async (
     const text = (result.content?.[0] as { text?: string } | undefined)?.text;
     const parsed =
       typeof text === 'string'
-        ? (JSON.parse(text) as { data?: { overallScore?: unknown } })
+        ? (JSON.parse(text) as {
+            data?: { overallScore?: unknown; scoredAxes?: unknown; scoreModel?: unknown };
+          })
         : undefined;
     const raw = parsed?.data?.overallScore;
+    const axes = parsed?.data?.scoredAxes;
+    const model = parsed?.data?.scoreModel;
     const entry: RiskScoreEntry = {
       refreshedAt: manifest.refreshedAt,
       sourceTreeHash: manifest.sourceTreeHash,
       techDebtScore: typeof raw === 'number' ? raw : null,
+      ...(Array.isArray(axes) ? { scoredAxes: axes.filter((a): a is string => typeof a === 'string') } : {}),
+      ...(typeof model === 'number' ? { scoreModel: model } : {}),
     };
     await appendFile(
       join(metaDir, 'risk-scores.jsonl'),
@@ -3780,75 +3967,114 @@ export const manifestMembersForType = (
   return ['*', ...named];
 };
 
+/** What the standard-field describe step did this run — disclosed in the summary + result. */
+export type { StandardFieldDescribeSummary } from '@sf-intelligence/vault';
+
+type DescribeField = {
+  name: string;
+  label?: string;
+  type?: string;
+  custom?: boolean;
+  nillable?: boolean;
+  inlineHelpText?: string;
+  picklistValues?: readonly { value?: string; label?: string; active?: boolean }[];
+};
+type DescribePayload = { result?: { fields?: readonly DescribeField[] }; fields?: readonly DescribeField[] };
+
+/** Options for {@link appendStandardObjectDescribeFields}. */
+export interface StandardDescribeOptions {
+  /**
+   * When false (`--no-pull` without `--with-describe`) the org is NOT
+   * contacted: fields come from `cacheDir` snapshots written by an earlier
+   * live describe, and objects without one are skipped and disclosed.
+   */
+  readonly live: boolean;
+  /** `meta/describe-cache` — one `<Object>.json` raw describe payload per object. */
+  readonly cacheDir: string;
+  /** Injection seam for tests; defaults to the real `sf` runner. */
+  readonly runSf?: typeof runSfJson;
+}
+
 /**
  * FLD-05: after source extraction, enrich the five core standard objects with
- * CustomField nodes from a live `sobject describe` (fields that Metadata API
+ * CustomField nodes from `sobject describe` (fields that Metadata API
  * retrieve does not emit as `.field-meta.xml`). Best-effort — failures are
  * non-fatal and the refresh continues with source-only fields.
+ *
+ * WOW-12: `--no-pull` is OFFLINE. The live describe runs only on a pulling
+ * refresh (or `--with-describe`); an offline rebuild replays the snapshot the
+ * last live describe cached, and says which objects had none.
  */
 export const appendStandardObjectDescribeFields = async (
   targetOrg: string,
   walked: Awaited<ReturnType<typeof walkAndExtract>>,
   progress: (message: string) => void,
-): Promise<Awaited<ReturnType<typeof walkAndExtract>>> => {
+  options: StandardDescribeOptions,
+): Promise<{ walked: Awaited<ReturnType<typeof walkAndExtract>>; summary: StandardFieldDescribeSummary }> => {
   const existingIds = existingCustomFieldIds(walked.results);
   const existingById = existingCustomFieldNodes(walked.results);
   const objectIds = new Set(
     walked.results.flatMap((r) => r.nodes.map((n) => n.id)),
   );
   const snapshots: ExtractionResult[] = [];
+  const fromLive: string[] = [];
+  const fromCache: string[] = [];
+  const skipped: string[] = [];
+  const runSf = options.runSf ?? runSfJson;
 
   for (const objectApiName of STANDARD_OBJECT_FIELD_SNAPSHOT) {
     const objectId = `CustomObject:${objectApiName}`;
     if (!objectIds.has(objectId)) continue;
+    const cachePath = join(options.cacheDir, `${objectApiName}.json`);
 
-    const parsed = await runSfJson(targetOrg, [
-      'sobject',
-      'describe',
-      '--sobject',
-      objectApiName,
-    ]);
-    if (!parsed.ok) {
-      progress(
-        `Standard-field describe for ${objectApiName} skipped (non-fatal): ${parsed.error.message}`,
-      );
+    let payload: DescribePayload | undefined;
+    if (options.live) {
+      const parsed = await runSf(targetOrg, ['sobject', 'describe', '--sobject', objectApiName]);
+      if (parsed.ok) {
+        payload = parsed.value as DescribePayload;
+        fromLive.push(objectApiName);
+        try {
+          await mkdir(options.cacheDir, { recursive: true });
+          await writeFile(cachePath, JSON.stringify(payload), 'utf8');
+        } catch {
+          // Cache is an optimisation for later offline rebuilds; never fatal.
+        }
+      } else {
+        progress(
+          `Standard-field describe for ${objectApiName} skipped (non-fatal): ${parsed.error.message}`,
+        );
+      }
+    } else {
+      try {
+        payload = JSON.parse(await readFile(cachePath, 'utf8')) as DescribePayload;
+        fromCache.push(objectApiName);
+      } catch {
+        payload = undefined;
+      }
+    }
+    if (payload === undefined) {
+      skipped.push(objectApiName);
       continue;
     }
-    const payload = parsed.value as {
-      result?: {
-        fields?: readonly {
-          name: string;
-          label?: string;
-          type?: string;
-          custom?: boolean;
-          nillable?: boolean;
-          inlineHelpText?: string;
-          picklistValues?: readonly { value?: string; label?: string; active?: boolean }[];
-        }[];
-      };
-      fields?: readonly {
-        name: string;
-        label?: string;
-        type?: string;
-        custom?: boolean;
-        nillable?: boolean;
-        inlineHelpText?: string;
-        picklistValues?: readonly { value?: string; label?: string; active?: boolean }[];
-      }[];
-    };
     const describe = payload.result ?? payload;
     const snap = buildDescribeFieldExtraction(objectApiName, describe, existingById);
     for (const node of snap.nodes) existingIds.add(node.id);
     if (snap.nodes.length > 0) snapshots.push(snap);
   }
 
+  const summary: StandardFieldDescribeSummary = { fromLive, fromCache, skipped, offline: !options.live };
+  if (!options.live && skipped.length > 0) {
+    progress(
+      `Offline (--no-pull): no cached describe for ${skipped.join(', ')} — their standard fields are source-only. Add --with-describe to fetch them from the org.`,
+    );
+  }
   const overlay = mergeDescribeFieldSnapshots(snapshots);
-  if (overlay.nodes.length === 0) return walked;
+  if (overlay.nodes.length === 0) return { walked, summary };
 
   progress(
-    `Describe snapshot: ${overlay.nodes.length} standard-field node(s) enriched for ${STANDARD_OBJECT_FIELD_SNAPSHOT.join(', ')}.`,
+    `Describe snapshot: ${overlay.nodes.length} standard-field node(s) enriched for ${[...fromLive, ...fromCache].join(', ')}${fromCache.length > 0 ? ' (cached snapshot used offline for ' + fromCache.join(', ') + ')' : ''}.`,
   );
-  return { ...walked, results: [...walked.results, overlay] };
+  return { walked: { ...walked, results: [...walked.results, overlay] }, summary };
 };
 
 /**
@@ -4294,6 +4520,22 @@ export const splitTypeBatch = (
 };
 
 /**
+ * FR-03: the refresh auth preflight. Returns the fatal message when the local
+ * sf login list was readable and does not contain `targetOrg` (alias or
+ * username); `null` to proceed. An unreadable list never blocks the refresh,
+ * and `SFI_SKIP_AUTH_PREFLIGHT=1` skips the check entirely.
+ */
+export const authPreflight = async (
+  targetOrg: string,
+  listOrgs: () => Promise<OrgListResult>,
+): Promise<string | null> => {
+  if (process.env['SFI_SKIP_AUTH_PREFLIGHT'] === '1') return null;
+  const authed = await listOrgs();
+  if (!authed.ok || isAuthenticated(authed.orgs, targetOrg)) return null;
+  return `\`${targetOrg}\` is not one of your authenticated sf orgs. ${loginRemedy(targetOrg)} (SFI_SKIP_AUTH_PREFLIGHT=1 skips this check.)`;
+};
+
+/**
  * The most informative line of a (possibly multi-line) sf error. Node wraps a
  * non-zero exit as `Command failed: <cmd>` on line 0 and prints the real cause
  * (`Error (UnsafeFilepathError): …`, a timeout, an `INVALID_TYPE`) below it — so
@@ -4301,10 +4543,29 @@ export const splitTypeBatch = (
  * bug invisible). Prefer a line that names the error; fall back to the first
  * non-`Command failed:` line, then the raw first line.
  */
-const salientErrorLine = (error: string): string => {
-  const lines = error.split('\n').map((l) => l.trim()).filter((l) => l.length > 0);
-  const named = lines.find((l) => /^Error\b|Error \(|^ERROR\b|UnsafeFilepathError|INVALID_TYPE/.test(l));
-  if (named !== undefined) return named;
+export const salientErrorLine = (error: string): string => {
+  const raw = error.split('\n').filter((l) => l.trim().length > 0);
+  const lines = raw.map((l) => l.trim());
+  const namedAt = lines.findIndex((l) => /^Error\b|Error \(|^ERROR\b|UnsafeFilepathError|INVALID_TYPE/.test(l));
+  if (namedAt >= 0) {
+    // FR-03: under an `Error (X): …` header, sf prints the CAUSE on the
+    // INDENTED line(s) that follow (e.g. "No authorization information found
+    // for <alias>."), so the header alone reads as a parse error. Keep up to
+    // two such indented detail lines; anything else after it stays out.
+    const named = lines[namedAt] ?? '';
+    const details: string[] = [];
+    if (/Error \(/.test(named)) {
+      for (const l of raw.slice(namedAt + 1)) {
+        if (details.length >= 2 || !/^\s/.test(l)) break;
+        details.push(l.trim());
+      }
+    }
+    const auth = /NamedOrgNotFound|NoAuthInfoFound|RefreshTokenAuthError|AuthInfoNotFound|expired access\/refresh token|INVALID_SESSION_ID/i.test(
+      lines.join(' '),
+    );
+    const remedy = auth ? ' — check the alias with `sf org list`, or re-authenticate with `sf org login web --alias <alias>`' : '';
+    return `${[named, ...details].join(' ')}${remedy}`;
+  }
   const nonWrapper = lines.find((l) => !l.startsWith('Command failed:'));
   return nonWrapper ?? lines[0] ?? error.trim();
 };
@@ -5248,13 +5509,21 @@ const formatChangeSummary = (cs: ChangeSummary): readonly string[] => {
 
 /** Pretty-print a `RefreshResult` to a multi-line string for the CLI handler. @example process.stdout.write(formatRefreshSummary(result)); */
 export const formatRefreshSummary = (result: RefreshResult): string => {
-  const lines: string[] = [
-    `Refresh ${result.status} in ${result.durationMs} ms`,
-    '',
-    ...formatBlock('Components', result.counts.components),
-    '',
-    ...formatBlock('Edges', result.counts.edges),
-  ];
+  // FR-11: a refresh that failed before extracting anything has no counts to
+  // show — printing empty "(none)" tables above the Fatal line buries it.
+  const nothingExtracted =
+    result.status === 'failed' &&
+    Object.keys(result.counts.components).length === 0 &&
+    Object.keys(result.counts.edges).length === 0;
+  const lines: string[] = nothingExtracted
+    ? [`Refresh failed in ${result.durationMs} ms`]
+    : [
+        `Refresh ${result.status} in ${result.durationMs} ms`,
+        '',
+        ...formatBlock('Components', result.counts.components),
+        '',
+        ...formatBlock('Edges', result.counts.edges),
+      ];
   if (result.changeSummary !== undefined) {
     lines.push('', ...formatChangeSummary(result.changeSummary));
   }
@@ -5273,6 +5542,20 @@ export const formatRefreshSummary = (result: RefreshResult): string => {
   }
   if (result.profileGrantDisclosure !== undefined) {
     lines.push('', `WARNING — ${result.profileGrantDisclosure}`);
+  }
+  const sfd = result.standardFieldDescribe;
+  if (sfd !== undefined && sfd.offline) {
+    // Only the retrieve and the describe are skipped by --no-pull; opt-ins
+    // like --with-audit-trail still query the org, so never over-claim.
+    const contacting = result.orgContactOptIns ?? [];
+    const contactLine =
+      contacting.length === 0
+        ? 'no retrieve and no describe ran; the org was not contacted.'
+        : `no retrieve and no describe ran; ${contacting.join(', ')} ${contacting.length === 1 ? 'contacts' : 'contact'} the org even with --no-pull.`;
+    lines.push(
+      '',
+      `Offline rebuild (--no-pull): ${contactLine}${sfd.fromCache.length > 0 ? ` Standard fields for ${sfd.fromCache.join(', ')} came from the describe snapshot cached by an earlier pull.` : ''}${sfd.skipped.length > 0 ? ` No describe snapshot for ${sfd.skipped.join(', ')}: their standard fields are source-only and may be incomplete (add --with-describe to fetch them).` : ''}`,
+    );
   }
   if (result.fatalError !== undefined) {
     lines.push('', `Fatal: ${result.fatalError}`);
@@ -5484,6 +5767,8 @@ const formatToolingApiSummary = (summary: ToolingApiRefreshSummary): string => {
  */
 interface RefreshCliFlags {
   readonly targetOrg?: string;
+  /** WOW-12: with --no-pull, still run the live standard-field describe. */
+  readonly withDescribe?: boolean;
   readonly pull?: boolean;
   readonly types?: string;
   readonly withToolingApi?: boolean;
@@ -5662,6 +5947,24 @@ export const markDemandQueueDrains = async (
   }
 };
 
+/**
+ * Does this refresh run the standard-field describe LIVE? Only a pulling
+ * refresh or an explicit `--with-describe`; `--no-pull` alone replays the
+ * describe cache (WOW-12).
+ */
+export const describeRunsLive = (opts: {
+  readonly noPull?: boolean;
+  readonly withDescribe?: boolean;
+}): boolean => !opts.noPull || opts.withDescribe === true;
+
+/**
+ * The re-extract after a demand retrieve: no second metadata pull, but the
+ * describe runs live — the retrieve just contacted the org, and a standard
+ * object it brought in has no describe-cache entry, so a cache replay would
+ * silently drop its describe-only fields.
+ */
+export const DEMAND_REEXTRACT_OPTIONS = { noPull: true, withDescribe: true } as const;
+
 export const runDemandRetrieve = async (opts: {
   readonly cwd: string;
   readonly components: readonly string[];
@@ -5727,9 +6030,12 @@ export const runDemandRetrieve = async (opts: {
     };
   }
   // Re-extract + rebuild the graph; the retrieved objects become L3 nodes.
+  // This run already contacted the org, so the standard-field describe runs
+  // live too (DEMAND_REEXTRACT_OPTIONS) — a just-retrieved standard object has
+  // no describe-cache entry to replay.
   const refresh = await runRefresh({
     cwd: opts.cwd,
-    noPull: true,
+    ...DEMAND_REEXTRACT_OPTIONS,
     ...(opts.onProgress !== undefined ? { onProgress: opts.onProgress } : {}),
   });
   const retrieved = plan.retrieveObjects.map((o) => `CustomObject:${o}` as ComponentId);
@@ -5770,7 +6076,8 @@ export const registerRefreshCommand = (program: Command): void => {
     .command('refresh')
     .description('Refresh the vault from a live Salesforce org')
     .option('--target-org <alias>', 'Salesforce org alias to retrieve from (overrides config.json)')
-    .option('--no-pull', 'Skip `sf project retrieve` and use the existing source tree')
+    .option('--no-pull', 'Offline rebuild from the existing source tree: no retrieve and no describe (standard-field describes replay the last cached snapshot); --with-audit-trail/--with-tooling-api/--with-data-shape still contact the org')
+    .option('--with-describe', 'With --no-pull: still fetch standard-object field describes from the org (contacts it)')
     .option('--types <list>', 'Comma-separated metadata types to restrict the refresh to')
     .option(
       '--with-data-shape',
@@ -5889,6 +6196,7 @@ export const registerRefreshCommand = (program: Command): void => {
       const result = await runRefresh({
         cwd: cwd,
         noPull: flags.pull === false,
+        ...(flags.withDescribe === true ? { withDescribe: true } : {}),
         ...(flags.targetOrg !== undefined ? { targetOrg: flags.targetOrg } : {}),
         ...(flags.types !== undefined ? { types: flags.types } : {}),
         ...(flags.withToolingApi === true ? { withToolingApi: true } : {}),

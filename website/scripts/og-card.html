@@ -1,0 +1,88 @@
+<!doctype html>
+<!--
+  og-card.html — source of public/assets/img/og-image.png (1200x630).
+  Rendered by scripts/render-og.mjs in headless Chrome. Direction B "Calm
+  product": white + slate, one teal accent, borders not shadows except the chat
+  panel. Copy is the home hero and the real demo-org answer to "Can I delete
+  the Amount field on Invoice?" (src/data/demo-answers.ts) — keep them in sync.
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+@font-face { font-family: "Figtree"; font-weight: 300 900; src: url("../public/fonts/figtree-latin.woff2") format("woff2"); }
+@font-face { font-family: "JetBrains Mono"; font-weight: 100 800; src: url("../public/fonts/jetbrains-mono-latin.woff2") format("woff2"); }
+:root {
+  --bg: #FFFFFF; --bg-subtle: #F5F7FA; --border: #E3E8EF; --border-strong: #CBD3DE;
+  --text: #0F1A2A; --text-muted: #4A5768; --accent: #0B6B6A; --accent-ink: #FFFFFF;
+  --accent-soft: #E7F3F2; --accent-text: #0A5F5E; --danger: #B42318; --danger-soft: #FDEFED;
+  --code-bg: #F3F5F8; --code-text: #1B2636;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { width: 1200px; height: 630px; overflow: hidden; }
+body {
+  background: var(--bg); color: var(--text);
+  font-family: "Figtree", system-ui, sans-serif; -webkit-font-smoothing: antialiased;
+  display: grid; grid-template-columns: 570px 1fr; gap: 40px;
+  padding: 60px 64px 56px;
+  border-top: 8px solid var(--accent);
+}
+.left { display: flex; flex-direction: column; }
+.wordmark { display: flex; align-items: center; gap: 12px; font-weight: 700; font-size: 28px; letter-spacing: -0.01em; }
+.wordmark svg { width: 38px; height: 38px; }
+.eyebrow { margin-top: 40px; font-size: 21px; font-weight: 600; color: var(--accent-text); }
+h1 { margin-top: 14px; font-size: 64px; line-height: 1.04; font-weight: 700; letter-spacing: -0.025em; }
+.lede { margin-top: 22px; font-size: 24px; line-height: 1.4; color: var(--text-muted); }
+.foot { margin-top: auto; display: flex; align-items: center; gap: 16px; font-size: 21px; color: var(--text-muted); }
+.cmd { font-family: "JetBrains Mono", monospace; font-size: 19px; color: var(--code-text); background: var(--code-bg); border: 1px solid var(--border); border-radius: 8px; padding: 8px 14px; }
+.chat {
+  align-self: center; border: 1px solid var(--border); border-radius: 14px; background: var(--bg);
+  box-shadow: 0 1px 2px rgba(15, 26, 42, .06), 0 12px 40px -12px rgba(15, 26, 42, .18);
+  overflow: hidden;
+}
+.chat-head { display: flex; justify-content: space-between; padding: 14px 20px; border-bottom: 1px solid var(--border); background: var(--bg-subtle); font-size: 16px; font-weight: 600; color: var(--text-muted); }
+.chat-body { padding: 20px 22px 22px; }
+.msg-user { margin-left: auto; width: fit-content; max-width: 100%; background: var(--accent); color: var(--accent-ink); font-size: 18px; font-weight: 500; padding: 10px 14px; border-radius: 14px 14px 4px 14px; }
+.ai-meta { margin-top: 18px; font-size: 15px; color: var(--text-muted); }
+.verdict { margin-top: 8px; display: flex; align-items: center; gap: 10px; font-size: 22px; font-weight: 700; }
+.pill { font-size: 16px; font-weight: 700; padding: 3px 12px; border-radius: 999px; background: var(--danger-soft); color: var(--danger); }
+ul { list-style: none; margin-top: 14px; display: grid; gap: 10px; }
+.chip { display: inline-flex; align-items: center; gap: 8px; border: 1px solid var(--border-strong); border-radius: 8px; padding: 6px 10px; font-size: 16px; background: var(--bg); }
+.kind { font-size: 13px; font-weight: 600; color: var(--accent-text); background: var(--accent-soft); border-radius: 5px; padding: 2px 7px; }
+.name { font-weight: 600; }
+.api { font-family: "JetBrains Mono", monospace; font-size: 13px; color: var(--text-muted); }
+.next { margin-top: 16px; font-size: 16px; color: var(--text-muted); }
+.next b { color: var(--text); }
+</style>
+</head>
+<body>
+  <div class="left">
+    <div class="wordmark">
+      <svg viewBox="0 0 26 26" aria-hidden="true">
+        <rect x="0.5" y="0.5" width="25" height="25" rx="7" fill="#0B6B6A"/>
+        <path d="M7 9.5h8M7 13h12M7 16.5h6" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/>
+        <circle cx="18.5" cy="16.5" r="2" fill="#FFFFFF"/>
+      </svg>
+      sf-intelligence
+    </div>
+    <p class="eyebrow">Free for Salesforce admins, developers and architects</p>
+    <h1>Know what breaks before you change Salesforce.</h1>
+    <p class="lede">Read-only. Runs on your computer. Every answer names the components it relied on.</p>
+    <div class="foot"><span>sfi.auditforce.cloud</span><span class="cmd">npx -y sf-intelligence demo</span></div>
+  </div>
+  <div class="chat">
+    <div class="chat-head"><span>Chat</span><span>Verdant demo org</span></div>
+    <div class="chat-body">
+      <p class="msg-user">Can I delete the Amount field on Invoice?</p>
+      <p class="ai-meta">Assistant · checked with sf-intelligence</p>
+      <p class="verdict"><span class="pill">No</span> 3 things depend on it.</p>
+      <ul>
+        <li><span class="chip"><span class="kind">Apex class</span><span class="name">PaymentService</span></span></li>
+        <li><span class="chip"><span class="kind">Formula</span><span class="name">Invoice Balance</span><span class="api">Balance__c</span></span></li>
+        <li><span class="chip"><span class="kind">Roll-up</span><span class="name">Project › Total Invoiced</span></span></li>
+      </ul>
+      <p class="next"><b>Next:</b> change those three first, then delete the field.</p>
+    </div>
+  </div>
+</body>
+</html>

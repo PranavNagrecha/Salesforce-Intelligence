@@ -88,6 +88,8 @@ const OMNI_UI_CARD_FILE_SUFFIX = '.ouc-meta.xml';
 const ROOT_ELEMENT = 'OmniUiCard';
 const NODE_TYPE = 'OmniUiCard';
 const EXTRACTOR_SOURCE = 'omni-ui-card';
+/** A `{Label.Name}` custom-label merge token inside FlexCard definition JSON. */
+const FLEXCARD_LABEL_TOKEN = /\{Label\.([A-Za-z][A-Za-z0-9_]*)\}/g;
 
 /**
  * Widget `name` discriminant for widgets that may dispatch downstream
@@ -894,6 +896,20 @@ export const extractOmniUiCardRoot = (
   const queryReads = buildQueryReads(cardId, dataSourceObj);
   rawEdges.push(...queryReads.edges);
   rawEdges.push(...buildApexRemoteEdges(cardId, apexCalls, EXTRACTOR_SOURCE));
+  // FLEXCARD-LABEL-REFS-UNGRAPHED: a card names custom labels as `{Label.X}`
+  // merge tokens (text, action URLs) anywhere in its definition JSON; none
+  // reached the label, so "where is this label used" missed every card.
+  for (const m of JSON.stringify(rootObj).matchAll(FLEXCARD_LABEL_TOKEN)) {
+    if (m[1] === undefined) continue;
+    rawEdges.push({
+      fromId: cardId,
+      toId: `CustomLabel:${m[1]}`,
+      edgeType: 'references',
+      confidence: 'parsed',
+      source: EXTRACTOR_SOURCE,
+      properties: { referenceKind: 'customLabel' },
+    });
+  }
   const edges = dedupeAndSortEdges(rawEdges);
 
   const node: Node = {

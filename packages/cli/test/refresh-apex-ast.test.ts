@@ -80,6 +80,29 @@ const LOWERSOQL = `public class LowerSoql {
   }
 }`;
 
+// WOW-10 + DEV-04: a lowercase type name (`account acc`) and an indexed
+// receiver (`rows[i].Field`). Apex types are case-insensitive; the AST pass
+// canonicalises against the vault's object roster (Account is vaulted below).
+const LOWERTYPES = `public class LowerTypes {
+  public void run(List<Account> rows) {
+    account acc = new account();
+    acc.Name = 'x';
+    for (Integer i = 0; i < rows.size(); i++) { rows[i].Custom_Flag__c = true; }
+  }
+}`;
+
+// A field named only in a SOQL string literal (a constant handed to
+// Database.query) is not compiler-checked: its edge is stamped
+// `mechanism: soql-string-literal`. A field the static SOQL also reads is not.
+const LITQUERY = `public class LitQuery {
+  public static final String Q = 'SELECT Id, Custom_Flag__c FROM Account';
+  public void run() {
+    List<SObject> rows = Database.query(Q);
+    List<Account> named = [SELECT Name FROM Account WHERE Id != null];
+    List<SObject> again = Database.query('SELECT Name FROM Account');
+  }
+}`;
+
 const seed = async (): Promise<void> => {
   vaultRoot = join(cwd, 'org-kb');
   const paths = vaultPaths(vaultRoot);
@@ -101,6 +124,8 @@ const seed = async (): Promise<void> => {
     ['SemiJoin', SEMIJOIN],
     ['TwoCaller', TWOCALLER],
     ['LowerSoql', LOWERSOQL],
+    ['LowerTypes', LOWERTYPES],
+    ['LitQuery', LITQUERY],
   ] as const) {
     await writeFile(join(dir, `${name}.cls`), body, 'utf8');
     await writeFile(join(dir, `${name}.cls-meta.xml`), meta, 'utf8');
@@ -202,6 +227,16 @@ afterEach(async () => {
 });
 
 describe('refresh apex-ast (DEFAULT ON — P13-AST-flip)', () => {
+  it('FAIL-BEFORE/PASS-AFTER: a field read only in a SOQL string literal is stamped soql-string-literal', { timeout: 30_000 }, async () => {
+    const r = await runRefresh({ cwd, noPull: true });
+    expect(r.status).toBe('success');
+    const literal = await edgeProps('ApexClass:LitQuery', 'CustomField:Account.Custom_Flag__c', 'readsFrom');
+    expect(literal?.['mechanism']).toBe('soql-string-literal');
+    const alsoStatic = await edgeProps('ApexClass:LitQuery', 'CustomField:Account.Name', 'readsFrom');
+    expect(alsoStatic).toBeDefined();
+    expect(alsoStatic?.['mechanism']).toBeUndefined();
+  });
+
   it('runs BY DEFAULT: parsed edges present with no flag at all', { timeout: 30_000 }, async () => {
     const r = await runRefresh({ cwd, noPull: true });
     expect(r.status).toBe('success');
@@ -249,6 +284,24 @@ describe('refresh apex-ast (DEFAULT ON — P13-AST-flip)', () => {
     }
   });
 
+  it('FAIL-BEFORE/PASS-AFTER: lowercase types + indexed receivers yield parsed writes; the variable-receiver phantom is dropped (WOW-10 / DEV-04)', { timeout: 30_000 }, async () => {
+    const r = await runRefresh({ cwd, noPull: true });
+    expect(r.status).toBe('success');
+    const ids = (await astEdges()).map((e) => `${e['from_id']}->${e['to_id']}:${e['edge_type']}`);
+    expect(ids).toContain('ApexClass:LowerTypes->CustomField:Account.Name:writesTo');
+    expect(ids).toContain('ApexClass:LowerTypes->CustomField:Account.Custom_Flag__c:writesTo');
+    const opened = await openGraph(vaultPaths(vaultRoot).graphDb);
+    if (!opened.ok) throw new Error(opened.error.message);
+    try {
+      const reader = await opened.value.connection.runAndReadAll(
+        "SELECT to_id FROM edges WHERE from_id = 'ApexClass:LowerTypes' AND to_id LIKE 'CustomField:acc.%'",
+      );
+      expect(reader.getRowObjectsJS()).toEqual([]);
+    } finally {
+      await closeGraph(opened.value);
+    }
+  });
+
   it('adds parsed apex-ast edges coexisting with scanner edges; broken file falls back and is counted', { timeout: 30_000 }, async () => {
     const r = await runRefresh({ cwd, noPull: true, apexAst: true });
     expect(r.status).toBe('success');
@@ -267,8 +320,8 @@ describe('refresh apex-ast (DEFAULT ON — P13-AST-flip)', () => {
     if (!manifest.ok) throw new Error('manifest unreadable');
     expect(manifest.value.apexAst?.parseErrors).toBe(1);
     // Caller + Callee + Wrapper + ChildSub + SemiJoin + TwoCaller + LowerSoql
-    // parse cleanly (Broken fails).
-    expect(manifest.value.apexAst?.filesParsed).toBe(7);
+    // + LowerTypes + LitQuery parse cleanly (Broken fails).
+    expect(manifest.value.apexAst?.filesParsed).toBe(9);
   });
 
   it('lowercase inline SOQL lands on the vaulted field id — no dangling case-variant (R6-03)', { timeout: 30_000 }, async () => {
@@ -397,5 +450,83 @@ describe('reports-cap coverage decoration (P13-REPORTS-default)', () => {
     );
     expect(summary.missingCoverage).toContain('Report'); // capped tail = not checked
     expect(summary.missingCoverage).not.toContain('Dashboard'); // fully pulled
+  });
+});
+
+// WOW-10 (scanner half): `X.Y` on a receiver that is provably not an sObject —
+// a known Apex class (any case) or a managed-package namespace — used to mint
+// a `CustomField:{X}.{Y}` phantom, and a lowercase `system.debug` minted a
+// phantom `callsApex ApexClass:system`.
+describe('refresh apex-ast — non-sObject receivers (WOW-10 scanner half)', () => {
+  const CONSTANTS = `public class Constants {
+  public static final String STAGE_WON = 'Won';
+  public static final String STAGE_LOST = 'Lost';
+}`;
+  const USES = `public class UsesConstants {
+  public void run() {
+    String a = Constants.STAGE_WON;
+    String b = constants.STAGE_LOST;
+    Object r = ns.RemoteApi.call();
+    system.debug(a + b);
+  }
+}`;
+  const seedExtra = async (): Promise<void> => {
+    const paths = vaultPaths(vaultRoot);
+    const dir = join(paths.source, 'main', 'default', 'classes');
+    const meta = `<?xml version="1.0" encoding="UTF-8"?>
+<ApexClass xmlns="http://soap.sforce.com/2006/04/metadata">
+  <apiVersion>60.0</apiVersion>
+  <status>Active</status>
+</ApexClass>
+`;
+    for (const [name, body] of [['Constants', CONSTANTS], ['UsesConstants', USES]] as const) {
+      await writeFile(join(dir, `${name}.cls`), body, 'utf8');
+      await writeFile(join(dir, `${name}.cls-meta.xml`), meta, 'utf8');
+    }
+    const objDir = join(paths.source, 'main', 'default', 'objects', 'ns__Thing__c');
+    await mkdir(objDir, { recursive: true });
+    await writeFile(
+      join(objDir, 'ns__Thing__c.object-meta.xml'),
+      `<?xml version="1.0" encoding="UTF-8"?>
+<CustomObject xmlns="http://soap.sforce.com/2006/04/metadata">
+    <deploymentStatus>Deployed</deploymentStatus>
+    <label>Thing</label>
+    <nameField><label>Thing Name</label><type>Text</type></nameField>
+    <pluralLabel>Things</pluralLabel>
+    <sharingModel>ReadWrite</sharingModel>
+</CustomObject>
+`,
+      'utf8',
+    );
+  };
+
+  const outEdges = async (fromId: string): Promise<readonly Record<string, unknown>[]> => {
+    const opened = await openGraph(vaultPaths(vaultRoot).graphDb);
+    if (!opened.ok) throw new Error(opened.error.message);
+    try {
+      const reader = await opened.value.connection.runAndReadAll(
+        `SELECT to_id, edge_type FROM edges WHERE from_id = '${fromId}' ORDER BY to_id, edge_type`,
+      );
+      return reader.getRowObjectsJS() as readonly Record<string, unknown>[];
+    } finally {
+      await closeGraph(opened.value);
+    }
+  };
+
+  it('FAIL-BEFORE/PASS-AFTER: class-static and namespace receivers are not fields; system.debug is not a class call', { timeout: 30_000 }, async () => {
+    await seedExtra();
+    const r = await runRefresh({ cwd, noPull: true });
+    expect(r.status).toBe('success');
+    const edges = await outEdges('ApexClass:UsesConstants');
+    const ids = edges.map((e) => `${String(e['to_id'])}:${String(e['edge_type'])}`);
+    // No phantom fields on a class or a namespace receiver.
+    expect(ids.filter((id) => id.startsWith('CustomField:'))).toEqual([]);
+    // No phantom call to a lowercase built-in.
+    expect(ids.some((id) => id.toLowerCase().startsWith('apexclass:system:'))).toBe(false);
+    // The real dependency survives, carrying every static member read.
+    const props = await edgeProps('ApexClass:UsesConstants', 'ApexClass:Constants', 'references');
+    expect(props).toBeDefined();
+    expect(props?.['fields']).toEqual(['STAGE_LOST', 'STAGE_WON']);
+    expect(props?.['mechanism']).toBe('apexStaticField');
   });
 });

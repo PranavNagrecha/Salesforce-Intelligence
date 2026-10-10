@@ -17,10 +17,14 @@ if (parentPort === null) {
 const knownClasses = new Set(
   Array.isArray(workerData?.knownClasses) ? workerData.knownClasses : [],
 );
+const knownObjects = new Set(
+  Array.isArray(workerData?.knownObjects) ? workerData.knownObjects : [],
+);
 
 parentPort.on('message', (job) => {
   const result = extractApexAstEdges(job.source, job.apiName, {
     knownClasses,
+    knownObjects,
     kind: job.kind,
   });
   parentPort.postMessage({ index: job.index, result });

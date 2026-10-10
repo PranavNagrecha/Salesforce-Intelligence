@@ -1,10 +1,11 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
 import type { Edge, ExtractionResult, Node, VaultManifest } from '@sf-intelligence/contracts';
+import { extractVisualforcePage } from '@sf-intelligence/extractors';
 import {
   closeGraph,
   importExtractionResults,
@@ -1624,5 +1625,119 @@ describe('guestExposureReportHandler — guest-reachable Apex is ranked on the f
     // which sent the reader away from a file the vault actually ships.
     expect(prose).not.toMatch(/NOT in the offline metadata model/);
     expect(prose).toMatch(/profile XML|\.profile-meta\.xml/i);
+  });
+});
+
+// FAIL-BEFORE/PASS-AFTER (ARCH-12): guest-loadable Visualforce pages were never
+// findings — the report counted the profile's page grant edges and still
+// disclosed the whole page plane as unchecked. Each page the guest can load is
+// now a `visualforce-page` finding rated by the controller Apex it runs; the
+// unchecked-surface row remains only for a guest profile built before page
+// grants were extracted (no `pageGrantCount`).
+//
+// The page nodes + edges below are the REAL visualforce-page extractor's
+// output over synthetic markup: the controller is a `references` out-edge with
+// `role: 'controller'`, never a node property. A first cut of this fix read a
+// `controller` property the extractor never writes, and every real guest page
+// came back `low` with no controller.
+describe('guestExposureReportHandler — guest Visualforce pages are ranked (ARCH-12)', () => {
+  const VF_SITE = 'CustomSite:Site_V';
+  const VF_PROFILE = 'Profile:Site_V Profile';
+  let vfDir: string;
+  let vfStore: GraphStore;
+  let vfCtx: Context;
+
+  const META = `<?xml version="1.0" encoding="UTF-8"?>
+<ApexPage xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>58.0</apiVersion>
+    <label>Page</label>
+</ApexPage>`;
+  const extractPage = async (dir: string, name: string, markup: string): Promise<ExtractionResult> => {
+    const pagePath = join(dir, `${name}.page`);
+    writeFileSync(pagePath, markup, 'utf-8');
+    writeFileSync(`${pagePath}-meta.xml`, META, 'utf-8');
+    const r = await extractVisualforcePage(pagePath);
+    if (!r.ok) throw new Error(r.error.message);
+    return r.value;
+  };
+
+  const vfSeed: ExtractionResult = {
+    nodes: [
+      node({
+        id: VF_SITE,
+        type: 'CustomSite',
+        apiName: 'Site_V',
+        label: 'Site_V',
+        properties: { active: true, siteType: 'Visualforce', masterLabel: 'Site_V', guestProfileName: 'Site_V Profile' },
+      }),
+      node({ id: VF_PROFILE, type: 'Profile', apiName: 'Site_V Profile', properties: { userPermissions: [], pageGrantCount: 3 } }),
+      apexClassNode('SelfRegisterController', {
+        sharingModel: 'without sharing',
+        hasAuraEnabledMethod: false,
+        qualityIssues: [issue('missing-fls-check', 'high', 12)],
+      }),
+      apexClassNode('BaseController', { sharingModel: 'with sharing', hasAuraEnabledMethod: false, qualityIssues: [] }),
+      apexClassNode('AuditExtension', {
+        sharingModel: 'without sharing',
+        hasAuraEnabledMethod: false,
+        qualityIssues: [issue('missing-fls-check', 'high', 3)],
+      }),
+    ],
+    edges: [
+      edge({ fromId: VF_PROFILE, toId: 'VisualforcePage:SelfRegister', edgeType: 'grantedBy', properties: { enabled: true } }),
+      edge({ fromId: VF_PROFILE, toId: 'VisualforcePage:Landing', edgeType: 'grantedBy', properties: { enabled: true } }),
+      edge({ fromId: VF_PROFILE, toId: 'VisualforcePage:Account_Form', edgeType: 'grantedBy', properties: { enabled: true } }),
+    ],
+  };
+
+  beforeAll(async () => {
+    vfDir = mkdtempSync(join(tmpdir(), 'sfi-guest-exposure-vf-'));
+    const pages = await Promise.all([
+      extractPage(vfDir, 'SelfRegister', '<apex:page controller="SelfRegisterController" showHeader="false">\n<apex:form/>\n</apex:page>'),
+      extractPage(vfDir, 'Landing', '<apex:page showHeader="false">\n<p>Welcome</p>\n</apex:page>'),
+      extractPage(
+        vfDir,
+        'Account_Form',
+        '<apex:page standardController="Account" extensions="BaseController, AuditExtension">\n<apex:form/>\n</apex:page>',
+      ),
+    ]);
+    const opened = await openGraph(join(vfDir, 'gv.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    vfStore = opened.value;
+    const imported = await importExtractionResults(vfStore, [vfSeed, ...pages]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    vfCtx = { vaultRoot: vfDir, manifest: MANIFEST, graph: vfStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(vfStore);
+    rmSync(vfDir, { recursive: true, force: true });
+  });
+
+  it('reads the controller from the page edges the extractor actually emits', async () => {
+    const r = await guestExposureReportHandler(vfCtx, { communityId: VF_SITE, limit: 50 });
+    if (!r.ok) throw new Error(r.error.message);
+    const pages = new Map(
+      r.value.data.findings.filter((f) => f.kind === 'visualforce-page').map((f) => [f.nodeId, f]),
+    );
+    const selfReg = pages.get('VisualforcePage:SelfRegister');
+    expect(selfReg?.pageControllers).toEqual(['SelfRegisterController']);
+    expect(selfReg?.severity).toBe('high');
+    expect(selfReg?.detail).not.toMatch(/no custom controller/);
+    // Extensions on a standard-controller page: both classes, rated by the worst.
+    const form = pages.get('VisualforcePage:Account_Form');
+    // (the extractor sorts edges by target id, so extensions come back sorted)
+    expect(form?.pageControllers).toEqual(['AuditExtension', 'BaseController']);
+    expect(form?.severity).toBe('high');
+    // A page that truly declares no Apex stays low.
+    expect(pages.get('VisualforcePage:Landing')?.pageControllers).toEqual([]);
+    expect(pages.get('VisualforcePage:Landing')?.severity).toBe('low');
+  });
+
+  it('no longer lists the page plane as unchecked once page grants were extracted', async () => {
+    const r = await guestExposureReportHandler(vfCtx, { communityId: VF_SITE });
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.data.uncheckedGuestSurfaces).toEqual([]);
+    expect(r.value.data.trust.limitations.join(' ')).not.toMatch(/Visualforce-page guest access is NOT enumerated/);
   });
 });

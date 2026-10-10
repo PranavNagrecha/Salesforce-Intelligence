@@ -112,6 +112,10 @@ const fullBodyFlowSeed: ExtractionResult = {
         triggerObject: ACCOUNT_ID,
         triggerType: 'RecordAfterSave',
         recordTriggerType: 'CreateAndUpdate',
+        // Current-extractor shape: the async-path markers are always stamped.
+        scheduledPathTypes: [],
+        runAsyncAfterCommit: false,
+        actionCalls: [],
         flowExtractionWarnings: [],
         faultableElementCount: 3,
         elementsWithoutFault: 2,
@@ -616,6 +620,37 @@ const legacyAsyncAfterCommitFlowSeed: ExtractionResult = {
   edges: [],
 };
 
+// CH-8: the same old-vault shape, but its source file is MISSING, so whether
+// the fault sits on an AsyncAfterCommit path cannot be read.
+const LEGACY_UNREADABLE_FLOW_ID = 'Flow:Invoice_Legacy_Unreadable';
+const legacyUnreadableFlowSeed: ExtractionResult = {
+  nodes: [
+    makeNode({
+      id: LEGACY_UNREADABLE_FLOW_ID,
+      type: 'Flow',
+      apiName: 'Invoice_Legacy_Unreadable',
+      label: 'Invoice Legacy Unreadable',
+      sourcePath: 'source/main/default/flows/Invoice_Legacy_Unreadable.flow-meta.xml',
+      properties: {
+        label: 'Invoice Legacy Unreadable',
+        processType: 'AutoLaunchedFlow',
+        status: 'Active',
+        interviewLabel: null,
+        runInMode: null,
+        triggerObject: 'CustomObject:Invoice__c',
+        triggerType: 'RecordAfterSave',
+        recordTriggerType: 'Update',
+        flowExtractionWarnings: [],
+        faultableElementCount: 2,
+        elementsWithoutFault: 2,
+        hasUnhandledFaults: true,
+        conditions: [],
+      },
+    }),
+  ],
+  edges: [],
+};
+
 // =============================================================================
 // Seed 7: A screen flow whose sole faultable element is an activateSessionPermSet
 // action — real-org-shape fixture matching Activate_Contact_Delete_Permission.
@@ -937,6 +972,7 @@ beforeAll(async () => {
     screenFlowSeed,
     scheduledFlowSeed,
     legacyAsyncAfterCommitFlowSeed,
+    legacyUnreadableFlowSeed,
     sessionPermFlowSeed,
     sessionPermLegacyFlowSeed,
     triggerSeed,
@@ -1426,6 +1462,22 @@ describe('explainFlowHandler', () => {
     expect(stmt).toMatch(/not user-visible|silently aborts/);
     // Must NOT contain the synchronous-rollback language.
     expect(stmt).not.toMatch(/synchronous .* flow with an unhandled fault path/);
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER (CH-8): an unreadable legacy source is unknown, not "rolls back the save"', async () => {
+    // Before: the I/O error returned `false` (no async path), so the verdict
+    // asserted rollsBackTransaction: true for a flow it never read.
+    const result = await explainFlowHandler(ctx, { flowId: LEGACY_UNREADABLE_FLOW_ID });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const verdict = result.value.data.executionContext.faultRollback;
+    expect(verdict).not.toBeNull();
+    expect(verdict?.rollsBackTransaction).toBeNull();
+    expect(verdict?.statement).toMatch(/Could not determine/);
+    expect(verdict?.statement).toMatch(/sfi refresh --no-pull/);
+    // Its non-apex actions were not read either: said, not implied empty.
+    expect(result.value.data.disclosure).toContain('non-Apex actions');
+    expect(result.value.data.disclosure).toContain('NOT CHECKED');
   });
 
   // ---------------------------------------------------------------------------

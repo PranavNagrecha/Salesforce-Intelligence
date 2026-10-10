@@ -3,12 +3,9 @@ import { basename, join, relative, sep } from 'node:path';
 
 import type { ComponentType } from '@sf-intelligence/contracts';
 import { splitPathSegments } from '@sf-intelligence/core';
-import { omnistudio } from '@sf-intelligence/extractors';
+import { BUNDLE_PARENT_DIRS, omnistudio } from '@sf-intelligence/extractors';
 
 import { componentTypeFromSourcePath } from './refresh-pipeline.js';
-
-/** Salesforce DX bundle parent directories (LWC, Aura). */
-const BUNDLE_PARENT_DIRS = new Set<string>(['lwc', 'aura']);
 
 /** Sidecar suffixes covered by a sibling primary extractor (mirrors refresh-pipeline). */
 const KNOWN_SIDECAR_SUFFIXES: readonly string[] = [

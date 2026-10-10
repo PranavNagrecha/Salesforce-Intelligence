@@ -38,10 +38,10 @@
  *     subtracted and is DISCLOSED (re-run `/sfi-refresh`) — never treated as
  *     "mutes nothing". Record-type visibility is not mutable and is never
  *     subtracted.
- *   - App / tab visibility is a SEPARATE surface (now extracted — see
- *     `app_access` / `tab_availability`); it is not part of this permission
- *     union, which composes object / field / Apex / system / custom
- *     permissions and record-type visibilities.
+ *   - App visibility is a SEPARATE surface (see `app_access`); it is not
+ *     part of this permission union, which composes object / field / Apex /
+ *     system / custom permissions, record-type visibilities, and the declared
+ *     page access and tab visibility (`pages` / `tabs`).
  *   - Field-level detail is summarised (count); use `field_access_audit`
  *     for a specific field. Record visibility still needs OWD + sharing
  *     (`why_cant_user_see_record`); object permission ≠ record access.
@@ -105,6 +105,7 @@ import type { Context } from '../server.js';
 
 import {
   edgeTargetMissing,
+  extractedList,
   familyWasExtracted,
   notExtractedFamilyDisclosure,
   unresolvedTargetsDisclosure,
@@ -175,6 +176,8 @@ const effectivePermissionsInputBaseSchema = z
     // truncated page's `nextCursor`; carries the resume offset + which list
     // (object | system) it advances. Omit = today's behavior.
     cursor: z.string().min(1).optional(),
+    /** B07: also return each container's own contribution (`perContainer`). */
+    perContainer: z.boolean().optional(),
   })
   .refine(
     (i) => i.profileId !== undefined || (i.permissionSetIds !== undefined && i.permissionSetIds.length > 0),
@@ -382,6 +385,12 @@ export interface EffectivePermissionsOutput {
    * (pre-extraction vault) contributes nothing and is disclosed.
    */
   readonly recordTypeVisibilities: readonly EffectiveRecordTypeVisibility[];
+  /** Visualforce pages the bundle may open (declared `<pageAccesses>`; capped at 100 names). */
+  readonly visualforcePages: readonly string[];
+  /** Tabs visible in the bundle (max-wins; Hidden / None omitted; capped at 100). */
+  readonly tabs: readonly { readonly tab: string; readonly visibility: string }[];
+  /** Each container's own grant — present only with `perContainer: true`. */
+  readonly perContainer?: readonly ContainerContribution[];
   /**
    * OBJECT-level permissions the platform's dependency closure requires
    * (e.g. `Account<create>` required by a granted system permission).
@@ -420,7 +429,12 @@ export interface EffectivePermissionsOutput {
      * answer to `null` would throw away information the caller can use.
      */
     readonly customPermissions: number | null;
-    readonly recordTypeVisibilities: number;
+    /** `null` when NO loaded container carries extracted record-type data (not checked). */
+    readonly recordTypeVisibilities: number | null;
+    /** Granted Visualforce pages; `null` when no loaded container carries extracted page grants. */
+    readonly visualforcePages: number | null;
+    /** Visible tabs; `null` when no loaded container carries extracted tab data. */
+    readonly tabs: number | null;
     /**
      * `objectPermissions` rows whose target object is not a node in this vault.
      * Counted over the FULL list, not the page. Present ONLY when > 0, so a
@@ -474,7 +488,42 @@ const PREFIX = {
   field: 'CustomField:',
   apex: 'ApexClass:',
   customPermission: 'CustomPermission:',
+  page: 'VisualforcePage:',
 } as const;
+
+/**
+ * Tab visibility rank, max-wins across containers. Profiles say
+ * DefaultOn / DefaultOff / Hidden; permission sets say Visible / Available /
+ * None — the same three levels under two vocabularies.
+ */
+const TAB_VISIBILITY_RANK: Readonly<Record<string, number>> = {
+  DefaultOn: 2,
+  Visible: 2,
+  DefaultOff: 1,
+  Available: 1,
+  Hidden: 0,
+  None: 0,
+};
+
+/** Cap on the named page / tab lists (counts in `summary` stay complete). */
+const NAMED_ACCESS_LIST_CAP = 100;
+
+/** One container's own contribution, for the `perContainer` breakdown. */
+export interface ContainerContribution {
+  readonly containerId: string;
+  /** `direct`, or the PermissionSetGroup id(s) that brought it in. */
+  readonly reachedVia: readonly string[];
+  readonly objects: number;
+  readonly fieldsWithFls: number;
+  readonly systemPermissions: number;
+  readonly apexClasses: number;
+  /** `null` when the container predates page-grant extraction. */
+  readonly visualforcePages: number | null;
+  /** Visible record types (narrowed to the scoped object); `null` when not extracted. */
+  readonly recordTypeVisibilities: number | null;
+  /** Per-object CRUD this container declares — present only when object-scoped. */
+  readonly objectPermissions?: Readonly<Record<string, Record<ObjectFlag, boolean>>>;
+}
 
 /**
  * The two permissions whose dependency posture is worth stating explicitly
@@ -495,7 +544,7 @@ const BROAD_PERMISSIONS_TO_REPORT: readonly string[] = Object.freeze([
 
 const BASE_DISCLOSURES: readonly string[] = Object.freeze([
   'Permission-set GROUP membership IS expanded: a PermissionSetGroup passed in `permissionSetIds` is unioned into its member permission sets (declared metadata), then each group’s muting permission set(s) are removed from THAT group’s grant per modeled permission class (object CRUD, FLS, system/user perms, custom perms, Apex-class access) before the containers union max-wins — muting is group-scoped, never org-wide. Record-type visibility is not mutable and is never removed. See any per-group muting disclosure for sets/classes that could not be applied.',
-  'App and tab visibility are a separate surface (now extracted — see `app_access` / `tab_availability`); they are not part of this permission union, which composes object / field / Apex / system / custom permissions AND record-type visibilities (for the per-object grouped record-type view use `recordtype_availability`).',
+  'App visibility is a separate surface (see `app_access`); it is not part of this permission union, which composes object / field / Apex / system / custom permissions, record-type visibilities (per object: `recordtype_availability`), and the declared Visualforce page access and tab visibility (`pages` / `tabs`; per tab across containers: `tab_availability`).',
   'Field-level access is summarised here (count of fields with FLS); use `field_access_audit` for a specific field. Object permission is NOT record access — record visibility still depends on OWD + sharing (`why_cant_user_see_record`).',
 ]);
 
@@ -518,6 +567,10 @@ interface ContainerGrant {
   readonly apex: Set<string>;
   readonly system: Set<string>;
   readonly custom: Set<string>;
+  /** Granted Visualforce pages; null = page grants not extracted for this container. */
+  pages: Set<string> | null;
+  /** Visible record-type names (`Object.RT`) this container declares; null = not extracted. */
+  rtVisible: string[] | null;
 }
 
 /** Mutable accumulator for one object's net flags + contributors + muters. */
@@ -581,6 +634,28 @@ export interface EffectiveGrantSet {
   readonly mutingNoData: ReadonlySet<string>;
   /** Muting set(s) referenced by a group but absent from the vault. */
   readonly mutingMissing: ReadonlySet<string>;
+  /** Visualforce page -> containers granting it (declared; muting not applied). */
+  readonly pageMap: ReadonlyMap<string, ReadonlySet<string>>;
+  /** Tab -> max-wins visibility + contributors. */
+  readonly tabMap: ReadonlyMap<string, { readonly visibility: string; readonly rank: number }>;
+  /** Present containers with no extracted `tabVisibilities` property. */
+  readonly containersWithoutTabData: readonly string[];
+  /** Present containers with no `pageGrantCount` (page grants not extracted). */
+  readonly containersWithoutPageData: readonly string[];
+  /** Each present container's own grant, in load order (for `perContainer`). */
+  readonly containerGrants: ReadonlyMap<string, ContainerGrantView>;
+  /** Container -> PermissionSetGroup ids that brought it in ('direct' when passed). */
+  readonly reachedVia: ReadonlyMap<string, readonly string[]>;
+}
+
+/** Read-only view of one container's own grants. */
+export interface ContainerGrantView {
+  readonly objects: ReadonlyMap<string, Record<ObjectFlag, boolean>>;
+  readonly fields: ReadonlyMap<string, { readable: boolean; editable: boolean }>;
+  readonly apex: ReadonlySet<string>;
+  readonly system: ReadonlySet<string>;
+  readonly pages: ReadonlySet<string> | null;
+  readonly rtVisible: readonly string[] | null;
 }
 
 /** True when the object row confers `flag` in the composed net grant set. */
@@ -686,6 +761,19 @@ export const computeEffectiveGrants = async (
   // Record-type visibility union: recordType -> OR'd visible + contributors.
   // NOT mutable — read from EVERY present container (members included).
   const rtVisMap = new Map<string, { visible: boolean; grantedBy: Set<string> }>();
+  const pageMap = new Map<string, Set<string>>();
+  const tabMap = new Map<string, { visibility: string; rank: number }>();
+  const containersWithoutTabData: string[] = [];
+  const containersWithoutPageData: string[] = [];
+  const reachedVia = new Map<string, string[]>();
+  for (const id of directContainerIds) reachedVia.set(id, ['direct']);
+  for (const grp of groups) {
+    for (const m of grp.memberIds) {
+      const via = reachedVia.get(m) ?? [];
+      if (!via.includes(grp.psgId)) via.push(grp.psgId);
+      reachedVia.set(m, via);
+    }
+  }
   const allContainerIds: string[] = [...directContainerIds];
   for (const g of groups) for (const m of g.memberIds) allContainerIds.push(m);
   const loadedSeen = new Set<string>();
@@ -707,19 +795,48 @@ export const computeEffectiveGrants = async (
       apex: new Set(),
       system: new Set(),
       custom: new Set(),
+      pages: familyWasExtracted(nodeResult.value.properties, 'pageGrantCount') ? new Set() : null,
+      rtVisible: null,
     };
+    // Page grants (`Profile/PermissionSet -> VisualforcePage`) arrived with
+    // `pageGrantCount`; without it the empty edge set is "not checked".
+    if (grant.pages === null) containersWithoutPageData.push(containerId);
+    // ADM-11: tab visibility (Profile <tabVisibilities> / PermissionSet
+    // <tabSettings>, both on `tabVisibilities`), max-wins across containers.
+    const tabEntries = extractedList(nodeResult.value.properties, 'tabVisibilities');
+    if (tabEntries !== null) {
+      for (const entry of tabEntries) {
+        if (entry === null || typeof entry !== 'object') continue;
+        const tab = (entry as { tab?: unknown }).tab;
+        const vis = (entry as { visibility?: unknown }).visibility;
+        if (typeof tab !== 'string' || typeof vis !== 'string') continue;
+        const rank = TAB_VISIBILITY_RANK[vis] ?? 0;
+        const prev = tabMap.get(tab);
+        if (prev === undefined || rank > prev.rank) tabMap.set(tab, { visibility: vis, rank });
+      }
+    } else {
+      containersWithoutTabData.push(containerId);
+    }
 
     // System permissions from userPermissions.
-    const perms = nodeResult.value.properties['userPermissions'];
-    if (Array.isArray(perms)) {
-      for (const p of perms) if (typeof p === 'string') grant.system.add(p);
+    for (const p of extractedList(nodeResult.value.properties, 'userPermissions') ?? []) {
+      if (typeof p === 'string') grant.system.add(p);
     }
 
     // Record-type visibilities from the container's extracted property. An
     // ABSENT key means the vault predates record-type extraction — disclosed,
     // never fabricated as "no record types" (mirrors recordtype_availability).
-    const rtRaw = nodeResult.value.properties['recordTypeVisibilities'];
-    if (Array.isArray(rtRaw)) {
+    const rtRaw = extractedList(nodeResult.value.properties, 'recordTypeVisibilities');
+    if (rtRaw !== null) {
+      grant.rtVisible = rtRaw
+        .filter(
+          (e) =>
+            e !== null &&
+            typeof e === 'object' &&
+            typeof (e as { recordType?: unknown }).recordType === 'string' &&
+            (e as { visible?: unknown }).visible !== false,
+        )
+        .map((e) => (e as { recordType: string }).recordType);
       for (const entry of rtRaw) {
         if (entry === null || typeof entry !== 'object') continue;
         const rt = (entry as { recordType?: unknown }).recordType;
@@ -781,6 +898,13 @@ export const computeEffectiveGrants = async (
       } else if (edge.toId.startsWith(PREFIX.customPermission)) {
         // CR-CAP-10: declared custom-permission grant. NOT folded into system.
         grant.custom.add(edge.toId.slice(PREFIX.customPermission.length));
+      } else if (edge.toId.startsWith(PREFIX.page)) {
+        // ADM-11: <pageAccesses enabled=true> — the extractor mints these edges.
+        const page = edge.toId.slice(PREFIX.page.length);
+        grant.pages?.add(page);
+        const holders = pageMap.get(page) ?? new Set<string>();
+        holders.add(containerId);
+        pageMap.set(page, holders);
       }
     }
     containerGrants.set(containerId, grant);
@@ -966,6 +1090,12 @@ export const computeEffectiveGrants = async (
     subtractingMutingIds,
     mutingNoData,
     mutingMissing,
+    pageMap,
+    tabMap,
+    containersWithoutTabData,
+    containersWithoutPageData,
+    containerGrants,
+    reachedVia,
   });
 };
 
@@ -999,6 +1129,11 @@ export const effectivePermissionsHandler = async (
   const grantsResult = await computeEffectiveGrants(ctx, rawContainers);
   if (!grantsResult.ok) return err(grantsResult.error);
   const g = grantsResult.value;
+  const allPages = [...g.pageMap.keys()].sort();
+  const visibleTabs = [...g.tabMap.entries()]
+    .filter(([, v]) => v.rank > 0)
+    .map(([tab, v]) => ({ tab, visibility: v.visibility }))
+    .sort((a, b) => (a.tab < b.tab ? -1 : a.tab > b.tab ? 1 : 0));
 
   if (g.presentContainers.length === 0) {
     return err({
@@ -1386,6 +1521,30 @@ export const effectivePermissionsHandler = async (
       }),
     );
   }
+  if (g.containersWithoutPageData.length > 0) {
+    disclosures.push(
+      notExtractedFamilyDisclosure({
+        subject: 'Visualforce page access',
+        verb: 'checked',
+        sentinelProperty: 'pageGrantCount',
+        containers: [...g.containersWithoutPageData].sort(),
+        surface: '`visualforcePages` / `summary.visualforcePages`',
+        zeroReading: '"no pages"',
+      }),
+    );
+  }
+  if (g.containersWithoutTabData.length > 0) {
+    disclosures.push(
+      notExtractedFamilyDisclosure({
+        subject: 'Tab visibility',
+        verb: 'checked',
+        sentinelProperty: 'tabVisibilities',
+        containers: [...g.containersWithoutTabData].sort(),
+        surface: '`tabs` / `summary.tabs`',
+        zeroReading: '"no visible tabs"',
+      }),
+    );
+  }
   // FIX 8: PUSHED, never unshifted — this is a follow-the-id caveat, not an
   // over- or under-statement of access, so it must not displace the muting
   // warnings from the front.
@@ -1445,11 +1604,54 @@ export const effectivePermissionsHandler = async (
       `Muting NOT applied for some permission set(s) — ${parts.join('; ')}. Their permissions are NOT subtracted, so effective access may be OVERSTATED for the owning group(s).`,
     );
   }
+  // ADM-11: pages and tabs are part of "what does this grant" — listed, with
+  // what is not applied to them said once.
+  if (allPages.length > 0 || visibleTabs.length > 0) {
+    disclosures.push(
+      `Visualforce page access (${allPages.length.toString()}) and tab visibility (${visibleTabs.length.toString()} visible) are the declared union${allPages.length > NAMED_ACCESS_LIST_CAP || visibleTabs.length > NAMED_ACCESS_LIST_CAP ? `; name lists are capped at ${NAMED_ACCESS_LIST_CAP.toString()} (summary counts are complete)` : ''}; group muting is not subtracted from them.`,
+    );
+  }
   if (g.missingContainers.length > 0) {
     disclosures.unshift(
       `Ignored ${g.missingContainers.length} container(s) not found in this vault: ${g.missingContainers.join(', ')}.`,
     );
   }
+
+  // B07: what EACH container contributes, so "does group X add anything" is
+  // read off the answer instead of a get_edges call per group.
+  const perContainer: ContainerContribution[] | undefined =
+    input.perContainer === true
+      ? g.presentContainers.map((id) => {
+          const own = g.containerGrants.get(id);
+          const scopedLc = scopedObject?.object.toLowerCase();
+          const objectEntries = [...(own?.objects.entries() ?? [])].filter(
+            ([o]) => scopedLc === undefined || o.toLowerCase() === scopedLc,
+          );
+          return {
+            containerId: id,
+            reachedVia: g.reachedVia.get(id) ?? ['direct'],
+            objects: objectEntries.length,
+            fieldsWithFls:
+              scopedLc === undefined
+                ? (own?.fields.size ?? 0)
+                : [...(own?.fields.keys() ?? [])].filter((f) =>
+                    f.toLowerCase().startsWith(`${scopedLc}.`),
+                  ).length,
+            systemPermissions: own?.system.size ?? 0,
+            apexClasses: own?.apex.size ?? 0,
+            visualforcePages: own?.pages == null ? null : own.pages.size,
+            recordTypeVisibilities:
+              own?.rtVisible == null
+                ? null
+                : own.rtVisible.filter(
+                    (rt) => scopedLc === undefined || objectOf(rt).toLowerCase() === scopedLc,
+                  ).length,
+            ...(scopedLc !== undefined
+              ? { objectPermissions: Object.fromEntries(objectEntries) }
+              : {}),
+          };
+        })
+      : undefined;
 
   return ok({
     data: {
@@ -1458,6 +1660,9 @@ export const effectivePermissionsHandler = async (
       systemPermissions: systemPage,
       customPermissions,
       recordTypeVisibilities: finalRecordTypeVisibilities,
+      visualforcePages: allPages.slice(0, NAMED_ACCESS_LIST_CAP),
+      tabs: visibleTabs.slice(0, NAMED_ACCESS_LIST_CAP),
+      ...(perContainer !== undefined ? { perContainer } : {}),
       impliedObjectPermissions,
       dependencyExpansion,
       summary: {
@@ -1467,7 +1672,21 @@ export const effectivePermissionsHandler = async (
         systemPermissions: systemPermissions.length,
         impliedSystemPermissions: impliedSystemCount,
         customPermissions: customPermissionsChecked ? customPermissions.length : null,
-        recordTypeVisibilities: finalRecordTypeVisibilities.length,
+        recordTypeVisibilities:
+          g.presentContainers.length > 0 &&
+          g.containersWithoutRtData.length === g.presentContainers.length
+            ? null
+            : finalRecordTypeVisibilities.length,
+        visualforcePages:
+          g.presentContainers.length > 0 &&
+          g.containersWithoutPageData.length === g.presentContainers.length
+            ? null
+            : allPages.length,
+        tabs:
+          g.presentContainers.length > 0 &&
+          g.containersWithoutTabData.length === g.presentContainers.length
+            ? null
+            : visibleTabs.length,
         ...(objectsWithMissingTarget > 0 ? { objectsWithMissingTarget } : {}),
       },
       ...(scopedObject !== null || profileContainer !== null

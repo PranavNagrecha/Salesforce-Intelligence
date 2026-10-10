@@ -268,8 +268,32 @@ export const extractValidationRule = async (
     FORMULA_ELEMENT_NAME,
   );
 
+  // B10: the field the error is shown on is a dependency too (the platform
+  // will not delete a field a validation rule displays its error on), even
+  // when the formula never reads it.
+  const displayField = toNullableString(rootObj['errorDisplayField']);
+  const displayEdges: Edge[] =
+    displayField !== null && /^[A-Za-z][A-Za-z0-9_]*$/.test(displayField)
+      ? [
+          {
+            fromId: nodeId,
+            toId: `CustomField:${objectApiName}.${displayField}`,
+            edgeType: 'references',
+            confidence: 'declared',
+            source: 'validation-rule-extractor',
+            properties: { referenceKind: 'errorDisplayField' },
+          },
+        ]
+      : [];
+
   return ok({
     nodes: [node, ...conditionNodes],
-    edges: [parentEdge, ...referencesEdges, ...firesWhenEdges, ...conditionFieldEdges],
+    edges: [
+      parentEdge,
+      ...referencesEdges,
+      ...displayEdges,
+      ...firesWhenEdges,
+      ...conditionFieldEdges,
+    ],
   });
 };

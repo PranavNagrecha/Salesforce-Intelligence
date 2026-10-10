@@ -39,6 +39,7 @@ export {
   MCP_VAULT_TOOL_ANNOTATIONS,
   V01_TOOLS,
   mcpProtocolAnnotationsFor,
+  retrievalDocument,
 } from './roster.js';
 export type { ToolDefinition } from './roster.js';
 
@@ -100,12 +101,9 @@ export const registerTools = (server: Server, ctx: Context): void => {
       },
       // MCP-01: protocol ToolAnnotations (readOnlyHint / openWorldHint).
       annotations: tool.annotations,
-      // MCP-01 (b): shared envelope schema for structuredContent.
-      outputSchema: tool.outputSchema as {
-        readonly type: 'object';
-        readonly properties?: Readonly<Record<string, unknown>>;
-        readonly required?: readonly string[];
-      },
+      // No outputSchema: results are text-only (see jsonResult). Declaring one
+      // would oblige structuredContent on every result, and SDK clients throw
+      // when a declared schema arrives without it.
     })),
   }));
 

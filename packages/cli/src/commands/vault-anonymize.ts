@@ -43,13 +43,15 @@
  * exiting, so a scrub bug is surfaced rather than silently shipped.
  */
 
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, realpathSync } from 'node:fs';
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises';
 import { basename, dirname, join, relative, resolve } from 'node:path';
 
 import { err, isPathWithin, ok, type Result } from '@sf-intelligence/core';
 import { vaultPaths } from '@sf-intelligence/vault';
 import { Command } from 'commander';
+
+import { loadForbiddenNames } from '../forbidden-names.js';
 
 import { scrubText } from './feedback.js';
 import { loadVaultConfig } from './refresh.js';
@@ -302,20 +304,33 @@ export const validateOutDir = (vaultRoot: string, outDir: string): Result<void, 
 const isLikelyBinaryFile = (path: string): boolean =>
   /\.(png|jpe?g|gif|webp|ico|zip|gz|duckdb|wal|pdf|woff2?|ttf|eot|resource)$/i.test(path);
 
-const walkFiles = async (dir: string): Promise<string[]> => {
-  const out: string[] = [];
+interface WalkResult {
+  readonly files: string[];
+  /** Symlinks and other non-regular entries — never followed, never silently dropped. */
+  readonly notFollowed: string[];
+}
+
+/**
+ * Walk `dir` WITHOUT following symlinks (`Dirent` types come from lstat).
+ * Anything that is not a regular file or directory is returned in
+ * `notFollowed` so callers can REPORT it: a symlink's target lives outside
+ * what this command scrubs and scans, so dropping it silently would let the
+ * residual scan certify a file it never read.
+ */
+const walkFiles = async (dir: string, acc: WalkResult = { files: [], notFollowed: [] }): Promise<WalkResult> => {
   let entries;
   try {
     entries = await readdir(dir, { withFileTypes: true });
   } catch {
-    return out;
+    return acc;
   }
   for (const entry of entries) {
     const full = join(dir, entry.name);
-    if (entry.isDirectory()) out.push(...(await walkFiles(full)));
-    else if (entry.isFile()) out.push(full);
+    if (entry.isDirectory()) await walkFiles(full, acc);
+    else if (entry.isFile()) acc.files.push(full);
+    else acc.notFollowed.push(full);
   }
-  return out;
+  return acc;
 };
 
 /** One skipped source file + why it was left out of the copy. */
@@ -344,7 +359,13 @@ const copyTextTree = async (
   transform: (text: string) => string,
   stats: CopyStats,
 ): Promise<void> => {
-  const files = await walkFiles(srcDir);
+  const { files, notFollowed } = await walkFiles(srcDir);
+  for (const link of notFollowed) {
+    stats.filesSkipped.push({
+      path: join(relLabel, relative(srcDir, link)),
+      reason: 'symlink or special file — not followed (its target is outside what this command scrubs)',
+    });
+  }
   for (const file of files) {
     const rel = relative(srcDir, file);
     const reportedPath = join(relLabel, rel);
@@ -421,38 +442,6 @@ const META_COPY_ALLOWLIST: readonly string[] = [
 // Residual-leak scan
 // =============================================================================
 
-interface LocalForbiddenNamePattern {
-  readonly id: string;
-  readonly re: RegExp;
-}
-
-/**
- * Best-effort load of `scripts/forbidden-names.local.json` — the SAME
- * gitignored, maintainer-only config `scripts/scan-org-leaks.mjs` reads (see
- * that script's `loadLocalConfig` — this is the source of truth for the
- * pattern-file SHAPE; real org-name patterns are never duplicated here).
- * Absent path or unparsable file → zero patterns (disclosed via
- * `localOrgNamePatternsChecked: 0` in the scan result), never a thrown error.
- */
-const loadLocalForbiddenNamePatterns = (configPath: string): readonly LocalForbiddenNamePattern[] => {
-  if (!existsSync(configPath)) return [];
-  try {
-    const cfg = JSON.parse(readFileSync(configPath, 'utf8')) as {
-      scannerPatterns?: unknown;
-      patterns?: unknown;
-    };
-    const raw = [
-      ...(Array.isArray(cfg.scannerPatterns) ? cfg.scannerPatterns : []),
-      ...(Array.isArray(cfg.patterns) ? cfg.patterns : []),
-    ];
-    return raw
-      .filter((p): p is string => typeof p === 'string')
-      .map((p, i) => ({ id: `local-${i.toString()}`, re: new RegExp(p, 'i') }));
-  } catch {
-    return [];
-  }
-};
-
 /** One residual match the scan found in the OUTPUT (a scrub gap). */
 export interface ResidualFinding {
   readonly file: string;
@@ -464,6 +453,8 @@ export interface ResidualScanResult {
   readonly findings: readonly ResidualFinding[];
   /** Count of local (maintainer-only) org-name patterns checked; 0 when no local config was found — disclosed, not silently "0 matches because unchecked". */
   readonly localOrgNamePatternsChecked: number;
+  /** Files in --out the scan could NOT read as text (binaries, symlinks) — each is also a finding. */
+  readonly filesNotScanned: number;
 }
 
 /**
@@ -482,17 +473,36 @@ export const residualLeakScan = async (
   identities: readonly string[],
   forbiddenNamesConfigPath?: string,
 ): Promise<ResidualScanResult> => {
-  const files = await walkFiles(outDir);
-  const localPatterns =
-    forbiddenNamesConfigPath !== undefined ? loadLocalForbiddenNamePatterns(forbiddenNamesConfigPath) : [];
+  const { files, notFollowed } = await walkFiles(outDir);
   const findings: ResidualFinding[] = [];
+  const blocklist = forbiddenNamesConfigPath !== undefined ? loadForbiddenNames(forbiddenNamesConfigPath) : undefined;
+  if (blocklist?.status === 'broken') {
+    // Fail CLOSED: a typo in the blocklist must never read as "0 matches".
+    findings.push({ file: blocklist.path, pattern: `blocklist-unreadable: ${blocklist.error}` });
+  }
+  const localPatterns =
+    blocklist !== undefined && (blocklist.status === 'loaded' || blocklist.status === 'empty')
+      ? blocklist.scannerPatterns.map((p, i) => ({ id: `local-${i.toString()}`, re: new RegExp(p, 'i') }))
+      : [];
+  // Nothing this command writes is a symlink or a binary, so either one in
+  // --out was NOT produced (or scrubbed) by this run and was never read here.
+  for (const link of notFollowed) {
+    findings.push({ file: relative(outDir, link), pattern: 'unscanned-symlink' });
+  }
   let filesScanned = 0;
+  let filesNotScanned = notFollowed.length;
   for (const file of files) {
-    if (isLikelyBinaryFile(file)) continue;
+    if (isLikelyBinaryFile(file)) {
+      filesNotScanned += 1;
+      findings.push({ file: relative(outDir, file), pattern: 'unscanned-binary' });
+      continue;
+    }
     let text: string;
     try {
       text = await readFile(file, 'utf8');
     } catch {
+      filesNotScanned += 1;
+      findings.push({ file: relative(outDir, file), pattern: 'unreadable' });
       continue;
     }
     filesScanned += 1;
@@ -509,7 +519,7 @@ export const residualLeakScan = async (
       if (re.test(text)) findings.push({ file: rel, pattern: id });
     }
   }
-  return { filesScanned, findings, localOrgNamePatternsChecked: localPatterns.length };
+  return { filesScanned, findings, localOrgNamePatternsChecked: localPatterns.length, filesNotScanned };
 };
 
 // =============================================================================
@@ -691,6 +701,14 @@ export const anonymizeVault = async (
 
   const outCheck = validateOutDir(opts.vaultRoot, opts.outDir);
   if (!outCheck.ok) return err(outCheck.error);
+  // A pre-populated --out would be certified by the residual scan as if this
+  // run had produced (and scrubbed) everything in it. Refuse instead.
+  const existing = await readdir(opts.outDir).catch(() => [] as string[]);
+  if (existing.length > 0) {
+    return err(
+      `--out (${resolve(opts.outDir)}) already exists and is not empty — pick a new or empty directory, so the residual scan certifies only files this run wrote.`,
+    );
+  }
 
   const identitiesResult = await collectVaultIdentities(opts.vaultRoot);
   if (!identitiesResult.ok) return err(identitiesResult.error);
@@ -768,7 +786,7 @@ export const registerVaultAnonymizeSubcommand = (vault: Command): void => {
       "Export a redacted copy of this vault to --out for external sharing (consultant / support / demo). " +
         "'redact' (default) scrubs org identity + free text (emails, URLs, Salesforce record ids, phone numbers) but KEEPS component/field API names — the residual risk (API names may themselves be identifying) is disclosed in the generated README.md. " +
         "'pseudonymize' would ALSO replace custom API names with a stable non-reversible mapping kept in a SEPARATE file outside --out — NOT YET IMPLEMENTED; the command explains why and exits non-zero rather than half-doing it. " +
-        'graph/ (DuckDB) and snapshots/ are never copied — rebuild the graph locally with `sfi refresh --no-pull` inside --out. Read-only against the source vault; --out must be a directory outside it. Prints a residual-scan summary before exiting.',
+        'graph/ (DuckDB) and snapshots/ are never copied — rebuild the graph locally with `sfi refresh --no-pull` inside --out. Read-only against the source vault; --out must be a new or empty directory outside it. Exits 2 when the residual scan finds anything (including files it could not read).',
     )
     .requiredOption('--out <dir>', 'output directory for the redacted copy (must be outside the source vault)')
     .option('--mode <mode>', "'redact' (default, keeps API names) or 'pseudonymize' (not yet implemented)", 'redact')
@@ -795,6 +813,7 @@ export const registerVaultAnonymizeSubcommand = (vault: Command): void => {
         vaultRoot: config.value.vaultRoot,
         outDir,
         mode: 'redact',
+        // Present-but-broken is passed through so the scan fails closed on it.
         ...(existsSync(forbiddenNamesConfigPath) ? { forbiddenNamesConfigPath } : {}),
       });
       if (!result.ok) {
@@ -810,15 +829,20 @@ export const registerVaultAnonymizeSubcommand = (vault: Command): void => {
       process.stdout.write(
         `Wrote ${s.filesWritten.toString()} file(s) to ${s.outDir} (mode: ${s.mode}).\n` +
           (s.filesSkipped.length > 0
-            ? `${s.filesSkipped.length.toString()} file(s) skipped (binary/unreadable) — see README.md and the CLI output above for reasons.\n`
+            ? `${s.filesSkipped.length.toString()} file(s) skipped (binary/symlink/unreadable):\n${s.filesSkipped
+                .slice(0, 20)
+                .map((f) => `  ${f.path} — ${f.reason}`)
+                .join('\n')}\n`
             : '') +
           `Residual scan: ${s.residualScan.findings.length.toString()} match(es) across ${s.residualScan.filesScanned.toString()} file(s)${localCheckNote}.\n` +
           (s.residualScan.findings.length === 0
             ? '0 residual matches — safe to share, but re-read README.md\'s residual-risk note (API names are kept in redact mode).\n'
-            : `WARNING: residual matches found — review before sharing:\n${s.residualScan.findings
+            : `NOT safe to share — residual matches found:\n${s.residualScan.findings
                 .slice(0, 20)
                 .map((f) => `  [${f.pattern}] ${f.file}`)
                 .join('\n')}\n`),
       );
+      // Findings are a failure, not a footnote: a wrapper script must not ship the copy.
+      if (s.residualScan.findings.length > 0) process.exitCode = 2;
     });
 };

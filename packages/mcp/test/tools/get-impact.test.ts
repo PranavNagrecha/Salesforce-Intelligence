@@ -22,6 +22,7 @@ import {
   getImpactHandler,
   getImpactInputSchema,
 } from '../../src/tools/get-impact.js';
+import { V01_TOOLS } from '../../src/tools/index.js';
 
 const FIXTURE_MANIFEST: VaultManifest = {
   version: '0.1.0',
@@ -697,6 +698,25 @@ describe('getImpactHandler', () => {
     expect(result.error.message).toContain('CustomField:Account.DoesNotExist__c');
     // The refusal must NOT read as an absence claim.
     expect(result.error.message).not.toMatch(/Complete impact slice/i);
+  });
+
+  // The advertised contract and the long-form `reference` (served by
+  // describe_analysis detail:'full' and indexed by the funnel) must describe
+  // the refusal above. Both used to tell the host that an unknown id returns
+  // the same empty slice as "nothing depends on it" and to probe existence
+  // first, which the handler stopped doing; the stale sentence cost every
+  // impact question an extra existence call.
+  it('the get_impact contract and reference describe the refusal, not an empty slice', () => {
+    const tool = V01_TOOLS.find((t) => t.name === 'sfi.get_impact');
+    expect(tool).toBeDefined();
+    for (const text of [tool?.description ?? '', tool?.reference ?? '']) {
+      expect(text).toContain('component-not-found');
+      expect(text).not.toMatch(/same empty result|byte-identical to a real|probe existence first/i);
+      // The phantom case is the one that still answers, and it is absent from
+      // its own slice; the contract has to say so.
+      expect(text).toMatch(/phantom/i);
+      expect(text).toContain('droppedEndpointEdges');
+    }
   });
 
   // A bare, non-canonical name is the same hazard with a friendlier face: a

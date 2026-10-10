@@ -276,3 +276,14 @@ describe('renderStatusTable', () => {
     expect(rendered).toContain('Vault is fresh.');
   });
 });
+
+// FR-11 — FAIL-BEFORE/PASS-AFTER: there was no way to make `sfi status` fail on
+// a missing vault, so a cron/CI wrapper could not detect one.
+describe('statusExitCode (FR-11)', () => {
+  it('stays 0 by default and is 1 under --strict when there is no vault', async () => {
+    const { statusExitCode } = await import('../../src/commands/status.js');
+    const none: StatusOutput = { kind: 'no-vault', message: 'No vault.' };
+    expect(statusExitCode(none, false)).toBe(0);
+    expect(statusExitCode(none, true)).toBe(1);
+  });
+});

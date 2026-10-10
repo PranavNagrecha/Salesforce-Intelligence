@@ -151,11 +151,14 @@ describe('parseDiffComponents', () => {
     ]);
   });
 
-  it('treats a rename (R###) as a modify of the NEW path', () => {
+  it('treats a rename (R###) as a delete of the OLD component plus an add of the NEW one', () => {
+    // Was: only the new path, as `modified` — the old component (and every
+    // dependent of it) silently dropped out of the review.
     const diff =
       'R100\tforce-app/main/default/classes/Old.cls\tforce-app/main/default/classes/New.cls';
     expect(parseDiffComponents(diff)).toEqual([
-      { type: 'ApexClass', apiName: 'New', changeKind: 'modified' },
+      { type: 'ApexClass', apiName: 'Old', changeKind: 'deleted' },
+      { type: 'ApexClass', apiName: 'New', changeKind: 'added' },
     ]);
   });
 

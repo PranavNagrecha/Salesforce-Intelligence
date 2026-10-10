@@ -211,6 +211,7 @@ import { coercePrefix } from './coerce-id.js';
 import { declaredOnlyDependencyDisclosure } from './declared-only-disclosure.js';
 import { expandGroupMembership } from './group-membership.js';
 import { resolveObjectAliasInVault } from './input-aliases.js';
+import { classifyUserLicence, type SubjectAudience } from './licence-audience.js';
 import {
   expandPermissionSetGroup,
   loadMutingPermissions,
@@ -280,113 +281,6 @@ const owdVerdictFor = (
   const rank = owdRank(token);
   if (rank === null) return null;
   return rank >= ACCESS_RANK[level] ? 'visible' : 'restricted';
-};
-
-/**
- * Which sharing baseline governs the subject user.
- *
- *   - `internal` — a standard/platform/integration licence. The object's
- *     `sharingModel` (the internal org-wide default) governs.
- *   - `external` — an Experience Cloud / portal / guest / external-identity
- *     licence. The object's `externalSharingModel` governs; the internal OWD
- *     does NOT apply to this user at all.
- *   - `unknown` — no profile supplied, the profile is not in this vault, it
- *     carries no `userLicense`, or the licence name is not one this build
- *     recognises. NEVER silently treated as `internal`.
- */
-type SubjectAudience = 'internal' | 'external' | 'unknown';
-
-/**
- * User licences that make their holder an EXTERNAL (Experience Cloud / portal /
- * guest) user. For these the governing record-access baseline is the object's
- * `externalSharingModel`, not `sharingModel` — Salesforce evaluates the two
- * columns against disjoint audiences.
- *
- * Matched case-insensitively on the whitespace-collapsed licence name. A licence
- * NOT in this set and not in {@link INTERNAL_USER_LICENCES} is `unknown`, not
- * `internal`: guessing "internal" is exactly the conflation this stage exists to
- * stop.
- */
-const EXTERNAL_USER_LICENCES: ReadonlySet<string> = new Set(
-  [
-    'customer community',
-    'customer community login',
-    'customer community plus',
-    'customer community plus login',
-    'partner community',
-    'partner community login',
-    'channel account',
-    'customer portal manager',
-    'customer portal manager standard',
-    'customer portal manager custom',
-    'high volume customer portal',
-    'overage high volume customer portal',
-    'authenticated website',
-    'overage authenticated website',
-    'gold partner',
-    'silver partner',
-    'bronze partner',
-    'guest user license',
-    'external identity',
-    'external identity login',
-    'external apps',
-    'external apps login',
-    'chatter external',
-    'external einstein agent',
-  ],
-);
-
-/**
- * User licences whose holders are INTERNAL org users — the audience the object's
- * `sharingModel` governs. Chatter Free / Chatter Only / Identity are internal
- * licences despite their limited CRM reach; only the Experience Cloud / portal
- * families in {@link EXTERNAL_USER_LICENCES} sit on the external column.
- */
-const INTERNAL_USER_LICENCES: ReadonlySet<string> = new Set(
-  [
-    'salesforce',
-    'salesforce platform',
-    'salesforce platform one',
-    'salesforce integration',
-    'force.com - app subscription',
-    'force.com - one app',
-    'identity',
-    'chatter free',
-    'chatter only',
-    'work.com only',
-    'knowledge only user',
-    'content only',
-    'company communities',
-    'premier support',
-    'einstein agent',
-    'analytics cloud integration user',
-    'analytics cloud security user',
-    'sales insights integration user',
-    'salesforceiq integration user',
-    'crm integration user',
-  ],
-);
-
-/**
- * Classify a raw `Profile.userLicense` value into the audience whose OWD column
- * governs it. Exact membership decides first; the two prefix rules below are a
- * documented HEURISTIC for the member-based licence variants Salesforce keeps
- * adding to the same families (`Customer Community …`, `Partner Community …`,
- * `External …`) and only ever resolve to `external`. Anything else is `unknown`.
- */
-const classifyUserLicence = (raw: string): SubjectAudience => {
-  const name = raw.trim().replace(/\s+/gu, ' ').toLowerCase();
-  if (name.length === 0) return 'unknown';
-  if (EXTERNAL_USER_LICENCES.has(name)) return 'external';
-  if (INTERNAL_USER_LICENCES.has(name)) return 'internal';
-  if (
-    name.startsWith('customer community') ||
-    name.startsWith('partner community') ||
-    name.startsWith('external ')
-  ) {
-    return 'external';
-  }
-  return 'unknown';
 };
 
 /**

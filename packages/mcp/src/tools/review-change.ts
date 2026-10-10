@@ -194,7 +194,18 @@ import {
   type Verdict,
 } from './coverage-trust.js';
 import { openVaultReadOnly } from './cross-vault-open.js';
+import {
+  assembleChangeSet,
+  assembledSetProblem,
+  buildCollisionSection,
+  buildDeployDecision,
+  MAX_CHANGE_SET,
+  type CollisionSection,
+  type DeployDecision,
+  type InputResolution,
+} from './review-change-assembly.js';
 import { isActiveSoeFirer } from './soe-active.js';
+import { TEST_REACH_EDGE_TYPES } from './test-coverage-reach.js';
 import {
   testsForChangeHandler,
   type PerChangeCoverage,
@@ -203,9 +214,6 @@ import {
 /** The three change kinds a host derives from a diff / manifest / PR. */
 export const CHANGE_KINDS = ['added', 'modified', 'deleted'] as const;
 export type ChangeKind = (typeof CHANGE_KINDS)[number];
-
-/** Hard cap on the change-set size (matches `tests_for_change` / `meaningful_test_audit`). */
-const MAX_CHANGE_SET = 500;
 
 /** Default number of detailed `reviewed[]` rows inlined (summary counts stay full). */
 const DEFAULT_LIMIT = 100;
@@ -252,32 +260,15 @@ const APEX_TYPES: ReadonlySet<string> = new Set(['ApexClass', 'ApexTrigger']);
 /**
  * REVIEW-CHANGE-UNCOVERED-IS-A-NOT-CHECKED-ZERO.
  *
- * The edge types the covering-test walk this gate composes
- * (`tests_for_change`'s `COVERAGE_EDGE_TYPES`) actually traverses. Anything
- * NOT in this set is a path by which a real test class can exercise a changed
- * component WITHOUT the walk ever seeing it — most commonly a plain
- * `new SomeClass()`, which the Apex edge builder mints as a `references` edge
- * (`properties.mechanism === 'instantiation'`), deliberately NOT as
- * `callsApex` (a constructor is not a method call).
- *
- * The consequence measured on a real production vault: for a modified Apex
- * class the gate returned `testCoverage: 'uncovered'`, `selectedTests: []`,
- * `summary.testsToRun: 0`, `trust.completeness.status: 'complete'` and
- * `trust.limitations: []` — while the SAME payload listed that class's own
- * test class in `dependents`. `uncovered` is an AFFIRMATIVE claim ("no test
- * reaches this"); the walk had only failed to look. A host reading the
- * structured fields tells the developer there are no tests to run.
- *
- * So: a zero produced while an unwalked path from a test exists is
- * `'unknown'`, never `'uncovered'`, the tests are named in a typed field, and
- * the gap downgrades the response's completeness. The walk itself is not
- * widened here — that would mean changing `tests_for_change`'s traversal,
- * which this tool composes and must not reimplement.
+ * The edge types the composed covering-test walk traverses — DERIVED from the
+ * shared walk (`test-coverage-reach.ts`), never re-listed here, so the two can
+ * not drift (a hand copy of an older two-edge list made this gate call paths
+ * the walk already follows "unwalked"). An inbound Apex edge OUTSIDE this set
+ * (e.g. a Tooling-API `dependsOnFromApi`) is a path by which a real test can
+ * exercise a change without the walk seeing it; a zero produced while such a
+ * path from a test exists is `'unknown'`, never `'uncovered'`.
  */
-const COVERAGE_WALK_EDGE_TYPES: ReadonlySet<string> = new Set([
-  'callsApex',
-  'dispatchesAsync',
-]);
+const COVERAGE_WALK_EDGE_TYPES: ReadonlySet<string> = new Set<string>(TEST_REACH_EDGE_TYPES);
 
 /** Node-id prefix for the only referrer family that can BE an Apex test. */
 const APEX_CLASS_ID_PREFIX = 'ApexClass:';
@@ -307,17 +298,17 @@ const UNCHECKED_REFERRER_NODE_BUDGET = 600;
  *
  * It is not, if any Apex test class reaches `selfId` over a reverse path that
  * uses at least ONE edge type {@link COVERAGE_WALK_EDGE_TYPES} does not
- * traverse. That is deliberately the whole transitive closure, not the direct
- * referrers: the shape measured on a real vault is TWO hops — a test class
- * `callsApex` a production class, and THAT class instantiates the changed one
- * (`references`, mechanism `instantiation`). A depth-1 check certifies such a
- * class `uncovered` while its eponymous test class exercises it.
+ * traverse, or if any referrer on ANY path carries no extracted `isTest` (the
+ * walk reads it as production code). That is deliberately the whole
+ * transitive closure, not the direct referrers: the unwalked hop can sit
+ * behind a production class (a test calls a helper that reaches the change).
  *
  * Reverse BFS from `selfId` over INBOUND edges whose source is an Apex node,
  * carrying one bit of state per visit: whether the path so far used an
- * unwalked edge. A class flagged `isTest: true` — or one carrying NO extracted
- * `isTest` property, because never-extracted is not "known not a test" (R1) —
- * is a SINK: recorded when reached dirty, never traversed THROUGH, matching
+ * unwalked edge. A class flagged `isTest: true` is a SINK: recorded when
+ * reached dirty, never traversed THROUGH; one carrying NO extracted `isTest`
+ * property is a SINK recorded on any path (never-extracted is not "known not a
+ * test", R1). Matching
  * `tests_for_change`'s own "a test class is a coverage sink" rule. An edge
  * whose source class is not in the vault at all is treated the same way — a
  * referrer we cannot read is not a referrer we can rule out. `selfId` is
@@ -361,8 +352,15 @@ const collectUncheckedTestReferrers = async (
           const referrer = res.value;
           const classified =
             referrer !== null && familyWasExtracted(referrer.properties, IS_TEST_PROPERTY);
-          if (!classified || referrer?.properties[IS_TEST_PROPERTY] === true) {
-            // Test, or test-ness never extracted: a SINK either way.
+          if (!classified) {
+            // Test-ness never extracted: the walk treats it as production
+            // code, so even a WALKED path cannot rule it out (R1). A SINK.
+            dirtyTests.add(from);
+            continue;
+          }
+          if (referrer?.properties[IS_TEST_PROPERTY] === true) {
+            // A test reached over walked edges only is the walk's to find
+            // (or the depth cap's to miss — disclosed in `boundaries`).
             if (dirty) dirtyTests.add(from);
             continue;
           }
@@ -375,7 +373,7 @@ const collectUncheckedTestReferrers = async (
       // Out of budget. Everything reached over an unwalked edge and never
       // expanded is reported, so the zero stays unproven rather than being
       // silently certified. What is dropped is the CLEAN frontier — nodes
-      // reachable only over `callsApex` / `dispatchesAsync`, which is exactly
+      // reachable only over walked edges, which is exactly
       // the territory the composed walk owns and whose depth-3 cap `boundaries`
       // already discloses. Exhaustion can therefore only ever ADD `unknown`
       // rows, never manufacture an `uncovered` one.
@@ -393,8 +391,8 @@ const collectUncheckedTestReferrers = async (
 /** The typed limitation a response carries when any row's coverage is unknown. */
 const unknownTestCoverageLimitation = (rows: number): string =>
   `Test coverage could not be determined for ${rows} changed Apex component(s): an Apex test ` +
-  'class reaches them over a path that uses at least one edge the covering-test walk does not ' +
-  'traverse (a `new SomeClass()` is minted as `references`, not `callsApex`/`dispatchesAsync`), ' +
+  'class (or a class whose test-ness was never extracted) reaches them over a path that uses at ' +
+  'least one edge the covering-test walk does not traverse (e.g. a Tooling-API `dependsOnFromApi`), ' +
   'either directly or through a production class in between. Those rows read ' +
   '`testCoverage: "unknown"` and name the tests in `uncheckedTestReferrers`; ' +
   '`summary.testsToRun` and `selectedTests` UNDER-report what must run. Run those test classes ' +
@@ -402,7 +400,7 @@ const unknownTestCoverageLimitation = (rows: number): string =>
 
 /** The `missingCoverage` marker for the same gap, for a machine consumer. */
 const UNKNOWN_TEST_COVERAGE_MARKER =
-  'test-coverage mapping (the callsApex / dispatchesAsync covering-test walk)';
+  'test-coverage mapping (the shared covering-test walk)';
 
 /**
  * Frontend bundle types whose promotion risk is OUTBOUND, not inbound. A
@@ -580,7 +578,7 @@ const buildFiringBindingReason = (
 
 /** Verbatim honesty disclosure surfaced on every response. */
 export const REVIEW_CHANGE_DISCLOSURE =
-  'review_change is a pre-deploy gate over the LAST VAULT REFRESH of the target org — the vault can have DRIFTED from what is actually deployed, so a `safe` verdict is only as fresh as the last `sfi refresh`; re-refresh before trusting it. Dependents are DIRECT (single-hop) INCOMING edges, EXCLUDING grantedBy (a Profile/PermissionSet FLS grant is ACCESS, not a breakage dependency) and parentOf (a structural object→field parent) per the access≠usage rule — the full transitive blast radius is sfi.get_impact. ONE exception to the grantedBy exclusion: for a CustomPermission the inbound grantedBy granters (Profile/PermissionSet) reference it BY NAME, so they ARE counted as dependents (deleting the permission breaks those granters). A DELETED component with ANY dependent is `blocking` (removing it breaks its dependents; a heuristic-only dependent still blocks — a false positive fails CLOSED, the safe direction for a gate). An Active DuplicateRule / MatchingRule fires on record save regardless of inbound references (parentOf is structural; any MatchingRule link is outbound), so a delete/modify the inbound gate would call `safe` is floored at `review` (never bare `safe`) when the rule is LIVE — an inactive rule keeps its table verdict. Likewise an ACTIVE record-triggered (before/after-save) Flow, an ACTIVE ApexTrigger, or an ACTIVE ValidationRule PARTICIPATES in the save transaction of its object via a binding the inbound-dependent gate is blind to — the Flow/Trigger binds OUTBOUND (`triggersOn` → object) and the ValidationRule binds via the excluded structural `parentOf` — so the gate shows 0 dependents; deleting such a live save participant is floored at `blocking` and modifying one at `review` (never bare `safe`), while an inactive/Obsolete automation keeps its table verdict (it does not fire). A MODIFIED component with firm (declared/parsed) dependents is `risky`; with heuristic-only readers it is `review` (verify the scanner inference). ADDED components are NOT analysed for their own contents — only name-collision (id already in the vault) + tests mapping; their forward references were never extracted. A component the vault does not contain under a modified/deleted label is `review`, never fabricated. Test selection composes sfi.tests_for_change: CLASS granularity, dynamic dispatch / reflection / managed-package tests invisible, depth-3 capped — SELECTION ≠ VALIDATION (a selected test that merely runs the changed code does not prove correctness). That walk follows only `callsApex` / `dispatchesAsync`, so a test that exercises a class through a plain `new SomeClass()` (minted as `references`, mechanism `instantiation`) is INVISIBLE to it — DIRECTLY, or with a production class in between (a test calls a helper and the helper instantiates the changed class). Before reporting a zero this gate therefore reverse-searches the WHOLE inbound Apex closure of the component for a test class reachable over a path that uses at least one unwalked edge; when one exists the row reads `testCoverage: "unknown"` (NEVER `uncovered`), names those test classes in `uncheckedTestReferrers`, is counted in `summary.unknownTestCoverage` rather than `uncoveredApex`, and downgrades `trust.completeness` with a `trust.limitations` entry — an empty selected-test list is then "not checked", never "no tests cover this change". The reverse search is node-budgeted, and exhausting the budget reports the unexpanded unwalked referrers as `unknown` rather than certifying. A remaining `uncovered` is therefore a zero over the extracted Apex edges only: it is still NOT proof of no coverage where the extractor never saw the call at all (dynamic dispatch / `Type.forName` / reflection / managed-package tests) or where the covering chain exceeds the composed walk’s depth-3 cap. A zero-dependent DELETE/MODIFY is "not checked", not "none", unless the vault covers every family that COULD reference the component (its usage-source families — a VisualforcePage is placed by a CustomSite, a CompactLayout is assigned by a CustomObject, a Screen Flow is embedded on a FlexiPage); a gap in any of those planes is surfaced as coverageCaveat and downgrades an otherwise-safe verdict to `review`, because absence of inbound edges is only as strong as the coverage of the families that produce them. FRONTEND BUNDLES (LightningComponentBundle / Aura / Visualforce) carry OUTBOUND risk the inbound-dependent model misses: a modified/added bundle with (almost) no incoming dependents is floored at `review` (never a bare `safe`) when it `callsApex` a controller or `references` a CustomPermission / FlexiPage — `outboundApex` / `outboundWires` name them, and `selectedTests` carries the covering tests of the Apex controllers it calls (its own bundle has no Apex tests).';
+  'review_change is a pre-deploy gate over the LAST VAULT REFRESH of the target org — the vault can have DRIFTED from what is actually deployed, so a `safe` verdict is only as fresh as the last `sfi refresh`; re-refresh before trusting it. Dependents are DIRECT (single-hop) INCOMING edges, EXCLUDING grantedBy (a Profile/PermissionSet FLS grant is ACCESS, not a breakage dependency) and parentOf (a structural object→field parent) per the access≠usage rule — the full transitive blast radius is sfi.get_impact. ONE exception to the grantedBy exclusion: for a CustomPermission the inbound grantedBy granters (Profile/PermissionSet) reference it BY NAME, so they ARE counted as dependents (deleting the permission breaks those granters). A DELETED component with ANY dependent is `blocking` (removing it breaks its dependents; a heuristic-only dependent still blocks — a false positive fails CLOSED, the safe direction for a gate). An Active DuplicateRule / MatchingRule fires on record save regardless of inbound references (parentOf is structural; any MatchingRule link is outbound), so a delete/modify the inbound gate would call `safe` is floored at `review` (never bare `safe`) when the rule is LIVE — an inactive rule keeps its table verdict. Likewise an ACTIVE record-triggered (before/after-save) Flow, an ACTIVE ApexTrigger, or an ACTIVE ValidationRule PARTICIPATES in the save transaction of its object via a binding the inbound-dependent gate is blind to — the Flow/Trigger binds OUTBOUND (`triggersOn` → object) and the ValidationRule binds via the excluded structural `parentOf` — so the gate shows 0 dependents; deleting such a live save participant is floored at `blocking` and modifying one at `review` (never bare `safe`), while an inactive/Obsolete automation keeps its table verdict (it does not fire). A MODIFIED component with firm (declared/parsed) dependents is `risky`; with heuristic-only readers it is `review` (verify the scanner inference). ADDED components are NOT analysed for their own contents — only name-collision (id already in the vault) + tests mapping; their forward references were never extracted. A component the vault does not contain under a modified/deleted label is `review`, never fabricated. Test selection composes sfi.tests_for_change: CLASS granularity, dynamic dispatch / reflection / managed-package tests invisible, depth-3 capped — SELECTION ≠ VALIDATION (a selected test that merely runs the changed code does not prove correctness). That walk follows callsApex / dispatchesAsync / inheritsFrom / references (so `new SomeClass()` counts) plus a trigger hop; an inbound Apex edge OUTSIDE that set (e.g. Tooling-API `dependsOnFromApi`) is invisible to it, directly or with a production class in between. Before reporting a zero this gate therefore reverse-searches the WHOLE inbound Apex closure of the component for a test class reachable over a path that uses at least one unwalked edge, or a class with no extracted test flag; when one exists the row reads `testCoverage: "unknown"` (NEVER `uncovered`), names those test classes in `uncheckedTestReferrers`, is counted in `summary.unknownTestCoverage` rather than `uncoveredApex`, and downgrades `trust.completeness` with a `trust.limitations` entry — an empty selected-test list is then "not checked", never "no tests cover this change". The reverse search is node-budgeted, and exhausting the budget reports the unexpanded unwalked referrers as `unknown` rather than certifying. A remaining `uncovered` is therefore a zero over the extracted Apex edges only: it is still NOT proof of no coverage where the extractor never saw the call at all (dynamic dispatch / `Type.forName` / reflection / managed-package tests) or where the covering chain exceeds the composed walk’s depth-3 cap. A zero-dependent DELETE/MODIFY is "not checked", not "none", unless the vault covers every family that COULD reference the component (its usage-source families — a VisualforcePage is placed by a CustomSite, a CompactLayout is assigned by a CustomObject, a Screen Flow is embedded on a FlexiPage); a gap in any of those planes is surfaced as coverageCaveat and downgrades an otherwise-safe verdict to `review`, because absence of inbound edges is only as strong as the coverage of the families that produce them. FRONTEND BUNDLES (LightningComponentBundle / Aura / Visualforce) carry OUTBOUND risk the inbound-dependent model misses: a modified/added bundle with (almost) no incoming dependents is floored at `review` (never a bare `safe`) when it `callsApex` a controller or `references` a CustomPermission / FlexiPage — `outboundApex` / `outboundWires` name them, and `selectedTests` carries the covering tests of the Apex controllers it calls (its own bundle has no Apex tests).';
 
 /**
  * Zod schema for the `sfi.review_change` tool input.
@@ -607,62 +605,129 @@ export const REVIEW_CHANGE_DISCLOSURE =
  *     invisible (no permission set / profile grants it). Omitted / false →
  *     output is byte-for-byte unchanged; the section is absent.
  */
-export const reviewChangeInputSchema = z.object({
-  components: z
-    .array(
-      z
-        .object({
-          type: z.string().min(1).optional(),
-          apiName: z.string().min(1).optional(),
-          componentId: z.string().min(1).optional(),
-          changeKind: z.enum(CHANGE_KINDS),
-        })
-        .superRefine((val, ctx) => {
-          // Accept EITHER the explicit { type, apiName } pair OR a single
-          // `componentId` (`Type:ApiName`) — hosts naturally forward the
-          // canonical id from `sfi.resolve`. The pair wins when both are given.
-          const hasPair = val.type !== undefined && val.apiName !== undefined;
-          if (hasPair) return;
-          if (val.componentId === undefined) {
-            ctx.addIssue({
-              code: 'custom',
-              path: ['type'],
-              message:
-                'each change entry needs `{ type, apiName }` OR `componentId` (`Type:ApiName`)',
-            });
-            return;
-          }
-          const idx = val.componentId.indexOf(':');
-          if (idx <= 0 || idx >= val.componentId.length - 1) {
-            ctx.addIssue({
-              code: 'custom',
-              path: ['componentId'],
-              message:
-                'componentId must be `Type:ApiName` (a colon that is neither the first nor last character)',
-            });
-          }
-        })
-        .transform((val) => {
-          // Normalise to the canonical { type, apiName, changeKind } shape so
-          // ALL downstream code (canonicalId, reviewed[] output) is byte-
-          // unchanged whichever selector the host supplied.
-          if (val.type !== undefined && val.apiName !== undefined) {
-            return { type: val.type, apiName: val.apiName, changeKind: val.changeKind };
-          }
-          const id = val.componentId as string;
-          const idx = id.indexOf(':');
-          return { type: id.slice(0, idx), apiName: id.slice(idx + 1), changeKind: val.changeKind };
-        }),
-    )
-    .min(1)
-    .max(MAX_CHANGE_SET),
-  limit: z.number().int().min(1).max(MAX_CHANGE_SET).optional(),
-  againstVault: z.string().min(1).optional(),
-  checkAccessParity: z.boolean().optional(),
-});
+/** Upper bound on raw `sourcePaths` entries (many files collapse to one component). */
+const MAX_SOURCE_PATHS = 5000;
+
+/** Upper bound on a pasted manifest body (a package.xml is a few KB; this is a blow-up guard). */
+const MAX_MANIFEST_CHARS = 2_000_000;
+
+/**
+ * One change entry, in whichever shape the host has it:
+ *   - a STRING: a canonical `Type:ApiName` id, or a bare api name
+ *     (`OrderService`, `Account.Industry__c`) resolved against the vault —
+ *     EXACT api-name matches only; an ambiguous or unknown name is disclosed
+ *     in `inputResolution.unresolved`, never guessed;
+ *   - an OBJECT: `{ type, apiName }` | `{ componentId }` | `{ name }`, plus an
+ *     optional `changeKind`.
+ * A missing `changeKind` defaults to `modified` and is counted in
+ * `inputResolution.changeKindDefaulted` (a deletion must be said out loud).
+ */
+const changeEntrySchema = z.union([
+  z.string().min(1),
+  z
+    .object({
+      type: z.string().min(1).optional(),
+      apiName: z.string().min(1).optional(),
+      componentId: z.string().min(1).optional(),
+      name: z.string().min(1).optional(),
+      changeKind: z.enum(CHANGE_KINDS).optional(),
+    })
+    .superRefine((val, ctx) => {
+      const hasPair = val.type !== undefined && val.apiName !== undefined;
+      if (hasPair || val.name !== undefined) return;
+      if (val.componentId === undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['type'],
+          message:
+            'each change entry needs `{ type, apiName }`, `componentId` (`Type:ApiName`), or `name`',
+        });
+        return;
+      }
+      const idx = val.componentId.indexOf(':');
+      if (idx <= 0 || idx >= val.componentId.length - 1) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['componentId'],
+          message:
+            'componentId must be `Type:ApiName` (a colon that is neither the first nor last character)',
+        });
+      }
+    }),
+]);
+
+/** A change entry after schema normalisation: typed, or a bare name to resolve. */
+export type ParsedChangeEntry =
+  | {
+      readonly type: string;
+      readonly apiName: string;
+      readonly changeKind: ChangeKind;
+      /** Set by the schema: true when the host gave no `changeKind`. */
+      readonly kindDefaulted?: boolean;
+    }
+  | { readonly name: string; readonly changeKind: ChangeKind; readonly kindDefaulted?: boolean };
+
+const normaliseEntry = (val: z.infer<typeof changeEntrySchema>): ParsedChangeEntry => {
+  const raw = typeof val === 'string' ? { componentId: val } : val;
+  // `kindDefaulted` is carried only when TRUE, so an explicit row normalises
+  // to exactly `{ type, apiName, changeKind }` (the R6-16 shape).
+  const defaulted = typeof val === 'string' || val.changeKind === undefined;
+  const kd = defaulted ? { kindDefaulted: true } : {};
+  const changeKind: ChangeKind =
+    typeof val === 'string' ? 'modified' : (val.changeKind ?? 'modified');
+  if ('type' in raw && raw.type !== undefined && 'apiName' in raw && raw.apiName !== undefined) {
+    return { type: raw.type, apiName: raw.apiName, changeKind, ...kd };
+  }
+  const id = 'componentId' in raw ? raw.componentId : undefined;
+  if (id !== undefined) {
+    const idx = id.indexOf(':');
+    if (idx > 0 && idx < id.length - 1) {
+      return { type: id.slice(0, idx), apiName: id.slice(idx + 1), changeKind, ...kd };
+    }
+    return { name: id, changeKind, ...kd };
+  }
+  return { name: ('name' in raw ? raw.name : undefined) ?? '', changeKind, ...kd };
+};
+
+export const reviewChangeInputSchema = z
+  .object({
+    components: z.array(changeEntrySchema).min(1).max(MAX_CHANGE_SET).optional(),
+    packageXml: z.string().min(1).max(MAX_MANIFEST_CHARS).optional(),
+    destructiveChangesXml: z.string().min(1).max(MAX_MANIFEST_CHARS).optional(),
+    sourcePaths: z.array(z.string().min(1)).min(1).max(MAX_SOURCE_PATHS).optional(),
+    limit: z.number().int().min(1).max(MAX_CHANGE_SET).optional(),
+    againstVault: z.string().min(1).optional(),
+    checkAccessParity: z.boolean().optional(),
+    includeCollisions: z.boolean().optional(),
+  })
+  .refine(
+    (i) =>
+      i.components !== undefined ||
+      i.packageXml !== undefined ||
+      i.destructiveChangesXml !== undefined ||
+      i.sourcePaths !== undefined,
+    {
+      message:
+        'pass the change set as `components` (ids or names), `packageXml` / `destructiveChangesXml` (the manifest body), or `sourcePaths` (changed force-app/... files, optionally `git diff --name-status` lines)',
+      path: ['components'],
+    },
+  )
+  .transform((i) => ({
+    ...i,
+    // Always an array after parsing (empty when the change set came only from
+    // a manifest / source paths), so typed callers never branch on undefined.
+    components: (i.components ?? []).map(normaliseEntry),
+  }));
 
 /** Parsed input shape. */
 export type ReviewChangeInput = z.infer<typeof reviewChangeInputSchema>;
+
+/** A change entry the review engine analyses (canonical `{ type, apiName }`). */
+export interface ReviewTarget {
+  readonly type: string;
+  readonly apiName: string;
+  readonly changeKind: ChangeKind;
+}
 
 /**
  * Whether a changed Apex component is reached by a test (or is not Apex at all).
@@ -721,9 +786,8 @@ export interface ReviewedComponent {
   readonly testCoverage: TestCoverageStatus;
   /**
    * Apex test classes that reach this component over a path using at least one
-   * edge type the covering-test walk (`callsApex` / `dispatchesAsync`) does
-   * not traverse — in practice a `new SomeClass()` instantiation, which the
-   * Apex edge builder mints as `references` (`mechanism: 'instantiation'`).
+   * edge type the shared covering-test walk does not traverse (anything
+   * outside `TEST_REACH_EDGE_TYPES`, e.g. a Tooling-API `dependsOnFromApi`).
    * The path may run THROUGH production classes, so a direct referrer of this
    * component is not necessarily listed; the test class at the far end is.
    * A class carrying no extracted `isTest` property counts as a possible test
@@ -764,8 +828,8 @@ export interface ReviewChangeSummary {
   readonly testsToRun: number;
   /**
    * Changed Apex components no test reaches over ANY extracted inbound Apex
-   * edge — neither the covering-test walk (`callsApex` / `dispatchesAsync`)
-   * nor an unwalked `references` path from a test class. Rows whose coverage
+   * edge — neither the shared covering-test walk nor an unwalked path from a
+   * test class. Rows whose coverage
    * could not be decided are counted in
    * {@link ReviewChangeSummary.unknownTestCoverage} instead, so this number
    * never launders a not-checked zero as a checked one.
@@ -811,6 +875,27 @@ export interface AgainstVaultInfo {
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface ReviewChangeOutput {
+  /**
+   * The one-line deploy call — `no-go` (something blocks) / `review-first`
+   * (nothing blocks, but something is risky, unverified, or not checked) /
+   * `go` — with the reasons that drove it. Derived from the fields below.
+   */
+  readonly deployDecision: DeployDecision;
+  /**
+   * How the change set was assembled from `packageXml` / `sourcePaths` /
+   * bare names / defaulted change kinds — including what was NOT reviewed
+   * (unresolved names, container files, unmodelled metadata, wildcard types).
+   * Non-metadata project files are listed but do not block `go`. Absent when the
+   * caller passed only typed rows with explicit change kinds.
+   */
+  readonly inputResolution?: InputResolution;
+  /**
+   * Field-write collisions and save-recursion cycles (composed from
+   * `sfi.automation_collisions`) that involve a changed component, on the
+   * objects the change set touches. Absent when no object is touched or
+   * `includeCollisions: false`.
+   */
+  readonly automationCollisions?: CollisionSection;
   /** Reviewed components, most-dangerous first, capped at `limit`. */
   readonly reviewed: readonly ReviewedComponent[];
   /** The most severe verdict across the FULL set. */
@@ -920,6 +1005,11 @@ interface CoreReview {
   readonly vaultState: McpResponse<ReviewChangeOutput>['vaultState'];
 }
 
+/** {@link runReviewCore}'s output, before the go / no-go decision is added. */
+type RawCoreReview = Omit<CoreReview, 'data'> & {
+  readonly data: Omit<ReviewChangeOutput, 'deployDecision'>;
+};
+
 /**
  * The per-component review over ONE graph — the `ctx` passed in, which is
  * either the server's own vault or, in `againstVault` mode, a shadow context
@@ -931,10 +1021,10 @@ interface CoreReview {
  */
 const runReviewCore = async (
   ctx: Context,
-  components: ReviewChangeInput['components'],
+  components: readonly ReviewTarget[],
   limitInput: number | undefined,
   checkAccessParity: boolean,
-): Promise<Result<CoreReview, McpError>> => {
+): Promise<Result<RawCoreReview, McpError>> => {
   const limit = limitInput ?? DEFAULT_LIMIT;
 
   // Pre-pass: resolve every component's node ONCE, and for FRONTEND bundles
@@ -945,7 +1035,7 @@ const runReviewCore = async (
   // select the controller's covering tests
   // (REVIEW-CHANGE-LWC-SAFE-IGNORES-CONTROLLER-AND-PAGE-WIRE).
   interface Prepared {
-    readonly change: ReviewChangeInput['components'][number];
+    readonly change: ReviewTarget;
     readonly id: ComponentId;
     readonly node: Node | null;
     readonly outboundApex: readonly ComponentId[];
@@ -1271,9 +1361,9 @@ const runReviewCore = async (
       reason =
         `${reason} TEST COVERAGE UNKNOWN, not zero: ${uncheckedTestReferrers.length} Apex test ` +
         `class(es) (${uncheckedTestReferrers.slice(0, DEPENDENT_SAMPLE_CAP).join(', ')}) reach this ` +
-        'component over a path using an edge the covering-test walk does not traverse (a ' +
-        '`new SomeClass()` is minted as `references`, not `callsApex`) — directly or through a ' +
-        'production class in between — so the empty selected-test list is "not checked", NEVER ' +
+        'component over a path using an edge the covering-test walk does not traverse, or carry ' +
+        'no extracted test flag — directly or through a production class in between — so the ' +
+        'empty selected-test list is "not checked", NEVER ' +
         '"no tests cover this". Run them.';
     }
 
@@ -1518,15 +1608,12 @@ export const reviewChangeHandler = async (
   ctx: Context,
   input: ReviewChangeInput,
 ): Promise<Result<McpResponse<ReviewChangeOutput>, McpError>> => {
-  // Default path — resolve against the current vault. Byte-identical to R6-16:
-  // the CoreReview.data object is returned unchanged, with no cross-vault keys.
+  // Default path — resolve against the current vault. With typed rows and
+  // explicit change kinds the R6-16 keys are unchanged; the conversational
+  // additions (`deployDecision`, and `inputResolution` / `automationCollisions`
+  // when they apply) are additive.
   if (input.againstVault === undefined) {
-    const core = await runReviewCore(
-      ctx,
-      input.components,
-      input.limit,
-      input.checkAccessParity ?? false,
-    );
+    const core = await reviewOn(ctx, input);
     if (!core.ok) return core;
     return ok({ data: core.value.data, vaultState: core.value.vaultState });
   }
@@ -1544,12 +1631,7 @@ export const reviewChangeHandler = async (
       manifest: resolved.value.manifest,
       graph: opened.value.store,
     };
-    const core = await runReviewCore(
-      shadowCtx,
-      input.components,
-      input.limit,
-      input.checkAccessParity ?? false,
-    );
+    const core = await reviewOn(shadowCtx, input);
     if (!core.ok) return core;
 
     const info: AgainstVaultInfo = {
@@ -1592,6 +1674,63 @@ export const reviewChangeHandler = async (
   }
 };
 
+/**
+ * Assemble the change set from whatever the host passed, run the core review
+ * over `c`'s graph, then add the automation-collision section and the
+ * go / no-go decision (WOW-6). All three additions are DERIVED from engines
+ * that already exist — nothing here re-scores a component.
+ */
+const reviewOn = async (
+  c: Context,
+  input: ReviewChangeInput,
+): Promise<Result<CoreReview, McpError>> => {
+  const assembled = await assembleChangeSet(c, input);
+  if (!assembled.ok) return assembled;
+  const problem = assembledSetProblem(assembled.value);
+  if (problem !== null) {
+    return err({ kind: 'invalid-query', message: problem, path: 'components' });
+  }
+  const targets = assembled.value.targets;
+  const core = await runReviewCore(c, targets, input.limit, input.checkAccessParity ?? false);
+  if (!core.ok) return core;
+
+  let collisions: CollisionSection | undefined;
+  if (input.includeCollisions !== false) {
+    const col = await buildCollisionSection(c, targets);
+    if (!col.ok) return col;
+    collisions = col.value;
+  }
+  const full = core.value.reviewedFull;
+  const data = core.value.data;
+  const deployDecision = buildDeployDecision({
+    summary: data.summary,
+    blockingSample: full
+      .filter((r) => r.verdict === 'blocking')
+      .map((r) => ({ id: r.id, dependentCount: r.dependentCount, reason: r.reason })),
+    riskySample: full.filter((r) => r.verdict === 'risky').map((r) => r.id),
+    coverageGap: data.coverageCaveat !== undefined,
+    addedApexUncovered: full
+      .filter((r) => r.changeKind === 'added' && r.testCoverage === 'uncovered')
+      .map((r) => r.id),
+    collisionsSkipped: input.includeCollisions === false,
+    ...(assembled.value.inputResolution !== undefined
+      ? { inputResolution: assembled.value.inputResolution }
+      : {}),
+    ...(collisions !== undefined ? { collisions } : {}),
+  });
+  return ok({
+    ...core.value,
+    data: {
+      deployDecision,
+      ...data,
+      ...(assembled.value.inputResolution !== undefined
+        ? { inputResolution: assembled.value.inputResolution }
+        : {}),
+      ...(collisions !== undefined ? { automationCollisions: collisions } : {}),
+    },
+  });
+};
+
 /** Verbatim boundary lines (also folded into `trust.limitations`-style hosting). */
 const REVIEW_CHANGE_BOUNDARIES: readonly string[] = [
   'Analysis is against the LAST VAULT REFRESH of the target org, which may drift from what is actually deployed. Re-run `sfi refresh` and re-review before trusting a `safe` verdict.',
@@ -1600,8 +1739,8 @@ const REVIEW_CHANGE_BOUNDARIES: readonly string[] = [
   'Active save-time automation binds to its object OUTSIDE the inbound-dependent model: a record-triggered (before/after-save) Flow and an ApexTrigger bind OUTBOUND via `triggersOn`, and a ValidationRule binds via the structural `parentOf` from its object (excluded as a dependent). Such a live save participant shows 0 inbound dependents, so its delete is floored at `blocking` and its modify at `review` (never bare `safe`). An INACTIVE / Obsolete automation does not fire and keeps its table verdict.',
   'ADDED components are not analysed for their own contents — only name-collision (id already present) and test mapping. Their forward references were never extracted offline.',
   'Test selection composes `sfi.tests_for_change`: CLASS-granular, blind to dynamic dispatch / reflection / managed-package tests, depth-3 capped. SELECTION ≠ VALIDATION.',
-  'The covering-test walk traverses only `callsApex` / `dispatchesAsync`. A test class that exercises a change through a plain `new SomeClass()` reaches it via a `references` edge the walk never follows — directly, or with one or more production classes in between. Before reporting a zero this gate reverse-searches the component’s WHOLE inbound Apex closure for a test reachable over a path using at least one unwalked edge; if one exists the row reports `testCoverage: "unknown"` with those tests in `uncheckedTestReferrers`, counts in `summary.unknownTestCoverage` (not `uncoveredApex`), and downgrades `trust.completeness` with a named `trust.limitations` entry. `summary.testsToRun` is then a FLOOR — run those test classes too, or the full suite.',
-  'A remaining `uncovered` is a zero over the EXTRACTED Apex edges, not a proof of no coverage. Three boundaries survive: the composed walk is depth-3 capped, so a longer all-`callsApex` chain still reports uncovered; dynamic dispatch (`Type.forName`), reflection and managed-package tests are never extracted as edges at all, so no search here can see them; and the reverse search is node-budgeted (it fails toward `unknown`, never toward a false `uncovered`). Treat `summary.uncoveredApex` as an UPPER BOUND on the unguarded surface.',
+  'The covering-test walk (shared with tests_for_change) traverses callsApex / dispatchesAsync / inheritsFrom / references plus a trigger hop. A test class that reaches a change only over another inbound edge (e.g. Tooling-API `dependsOnFromApi`) — directly, or with production classes in between — or a referrer whose test flag was never extracted, makes a zero UNPROVEN: the row reports `testCoverage: "unknown"` with those classes in `uncheckedTestReferrers`, counts in `summary.unknownTestCoverage` (not `uncoveredApex`), and downgrades `trust.completeness` with a named `trust.limitations` entry. `summary.testsToRun` is then a FLOOR — run those test classes too, or the full suite.',
+  'A remaining `uncovered` is a zero over the EXTRACTED Apex edges, not a proof of no coverage. Three boundaries survive: the composed walk is depth-3 capped, so a longer chain of walked edges still reports uncovered; dynamic dispatch (`Type.forName`), reflection and managed-package tests are never extracted as edges at all, so no search here can see them; and the reverse search is node-budgeted (it fails toward `unknown`, never toward a false `uncovered`). Treat `summary.uncoveredApex` as an UPPER BOUND on the unguarded surface.',
   'Frontend bundles (LightningComponentBundle / Aura / Visualforce) are reviewed on OUTBOUND wiring too: a modified/added bundle that calls an Apex controller or references a CustomPermission / FlexiPage is floored at `review` (never bare `safe`), with `outboundApex` / `outboundWires` naming them and the controllers’ covering tests selected. Only `callsApex` and `references`→CustomPermission/FlexiPage wiring are composed; other outbound edges (e.g. a bundle’s own field reads) are not turned into verdicts.',
 ];
 

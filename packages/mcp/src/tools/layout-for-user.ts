@@ -95,6 +95,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { extractedList } from './absence-disclosure.js';
 import { firstNonEmpty, toProfileOrPermSetId } from './input-aliases.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { clampedNodeScanLimit, FULL_SCAN_MAX_NODES } from './scan-cap.js';
@@ -218,6 +219,13 @@ export interface LayoutForUserOutput {
   readonly uiSurface: 'classic-layout' | 'lightning-flexipage' | 'unknown';
   readonly recordTypeUsed: ComponentId | null;
   readonly reasoning: readonly LayoutRoutingStep[];
+  /**
+   * Lightning record page ACTIVATION read from the vault (object org default,
+   * app defaults, app + record type + profile assignments; desktop form
+   * factor). Absent when the vault predates that extraction — then
+   * `flexiPageId` is a NAME guess and the LightningPageLookup step says so.
+   */
+  readonly recordPageActivation?: RecordPageActivation;
   /**
    * Set when Classic layout metadata is returned but Lightning pages exist —
    * or when the FlexiPage corpus exceeded the scan cap, so "no Lightning page"
@@ -503,6 +511,139 @@ const findLayoutAssignment = (
   };
 };
 
+/** One app in which this user sees a specific record page. */
+export interface AppRecordPage {
+  readonly appId: ComponentId;
+  readonly flexiPageId: ComponentId;
+  /** Which activation level decided it inside this app. */
+  readonly matchedOn: 'app-recordtype-profile' | 'app-profile' | 'app-default';
+  /**
+   * Set when `matchedOn` used a record type the caller did NOT pass (the
+   * profile's default): the page is right only for records of that type.
+   */
+  readonly assumedRecordType?: string;
+}
+
+/** Activation-metadata answer to "which Lightning record page does this user see". */
+export interface RecordPageActivation {
+  /**
+   * The object's org default record page, or null (system default page).
+   * Only meaningful when `orgDefaultChecked` is true.
+   */
+  readonly orgDefault: ComponentId | null;
+  /**
+   * False when the object's own definition (its `<actionOverrides>`, where the
+   * org default lives) was never extracted — the object is outside the retrieve
+   * scope — so `orgDefault: null` means NOT CHECKED, never "no record page".
+   */
+  readonly orgDefaultChecked: boolean;
+  /** Apps whose own assignment overrides the org default for this user. */
+  readonly byApp: readonly AppRecordPage[];
+  /**
+   * Apps with a record-type-specific profile assignment for this object when
+   * the caller passed no `recordTypeId` (whether or not the profile's default
+   * record type was assumed) — the page there depends on the record's type.
+   */
+  readonly dependsOnRecordType: readonly ComponentId[];
+}
+
+interface StoredOverride {
+  readonly page: string;
+  readonly object: string | null;
+  readonly formFactor: string | null;
+  readonly recordType: string | null;
+  readonly profile: string | null;
+}
+
+const readOverrides = (node: Node): StoredOverride[] | null => {
+  const raw = extractedList(node.properties, 'recordPageOverrides');
+  if (raw === null) return null;
+  return raw.filter(
+    (e): e is StoredOverride =>
+      e !== null && typeof e === 'object' && typeof (e as { page?: unknown }).page === 'string',
+  );
+};
+
+/** Desktop assignments only: `Large`, or no form factor declared. */
+const isDesktop = (o: StoredOverride): boolean =>
+  o.formFactor === null || o.formFactor.toLowerCase() === 'large';
+
+const sameName = (a: string | null, b: string | null): boolean =>
+  a !== null && b !== null && a.toLowerCase() === b.toLowerCase();
+
+/**
+ * ADM-3: resolve the record page from activation metadata, in the platform's
+ * precedence (app + record type + profile > app default > org default).
+ * Returns null when NO node in the vault carries `recordPageOverrides` — the
+ * vault predates the extraction and the caller must fall back to a guess.
+ */
+const resolveRecordPageActivation = async (
+  ctx: Context,
+  objectApiName: string,
+  profile: Node | null,
+  recordType: string | null,
+  recordTypeAssumed: boolean,
+): Promise<Result<RecordPageActivation | null, string>> => {
+  const objectNode = await getNodeById(ctx.graph, `CustomObject:${objectApiName}` as ComponentId);
+  if (!objectNode.ok) return err(objectNode.error.message);
+  const apps = await scanAllNodesOfTypes(ctx.graph, ['CustomApplication']);
+  if (!apps.ok) return err(apps.error.message);
+  const objectOverrides = objectNode.value === null ? null : readOverrides(objectNode.value);
+  const appOverrides = apps.value.nodes.map((app) => ({ app, overrides: readOverrides(app) }));
+  if (objectOverrides === null && appOverrides.every((a) => a.overrides === null)) return ok(null);
+
+  const forObject = (o: StoredOverride): boolean =>
+    isDesktop(o) && (o.object === null || sameName(o.object, objectApiName));
+  const orgPage = (objectOverrides ?? []).filter(forObject).find((o) => o.profile === null);
+  const profileNames = profile === null ? [] : [profile.apiName, profile.label ?? profile.apiName];
+  const rtName = recordType === null ? null : recordType.replace(/^RecordType:/, '');
+
+  const byApp: AppRecordPage[] = [];
+  const dependsOnRecordType: ComponentId[] = [];
+  for (const { app, overrides } of [...appOverrides].sort((a, b) => (a.app.id < b.app.id ? -1 : 1))) {
+    const mine = (overrides ?? []).filter(
+      (o) => forObject(o) && o.object !== null && sameName(o.object, objectApiName),
+    );
+    if (mine.length === 0) continue;
+    const forProfile = mine.filter(
+      (o) => o.profile !== null && profileNames.some((n) => sameName(n, o.profile)),
+    );
+    const exactRt = forProfile.find((o) => rtName !== null && sameName(o.recordType, rtName));
+    const anyRt = forProfile.find((o) => o.recordType === null);
+    const appDefault = mine.find((o) => o.profile === null && o.recordType === null);
+    const pick: { o: StoredOverride; on: AppRecordPage['matchedOn'] } | null =
+      exactRt !== undefined
+        ? { o: exactRt, on: 'app-recordtype-profile' }
+        : anyRt !== undefined
+          ? { o: anyRt, on: 'app-profile' }
+          : appDefault !== undefined
+            ? { o: appDefault, on: 'app-default' }
+            : null;
+    // Without a caller-supplied record type, any record-type-specific row
+    // means the page depends on the record — even when the profile's default
+    // record type picked one of them.
+    if ((rtName === null || recordTypeAssumed) && forProfile.some((o) => o.recordType !== null)) {
+      dependsOnRecordType.push(app.id);
+    }
+    if (pick !== null) {
+      byApp.push({
+        appId: app.id,
+        flexiPageId: `FlexiPage:${pick.o.page}` as ComponentId,
+        matchedOn: pick.on,
+        ...(recordTypeAssumed && pick.on === 'app-recordtype-profile' && rtName !== null
+          ? { assumedRecordType: rtName }
+          : {}),
+      });
+    }
+  }
+  return ok({
+    orgDefault: orgPage === undefined ? null : (`FlexiPage:${orgPage.page}` as ComponentId),
+    orgDefaultChecked: objectOverrides !== null,
+    byApp,
+    dependsOnRecordType,
+  });
+};
+
 /** Read a string property off a node, or null when absent/non-string. */
 const strProp = (node: Node, key: string): string | null =>
   typeof node.properties[key] === 'string' ? (node.properties[key] as string) : null;
@@ -529,8 +670,9 @@ const flexiPageBaseName = (objectApiName: string): string =>
  * object. The apiName-prefix match is kept only as a fallback for any page
  * that predates `sobjectType` extraction.
  *
- * When an object has several record pages (which one a given user is ACTIVATED
- * on is not in the metadata — the boundaryNote discloses this), the pick is
+ * Used ONLY when the vault carries no activation metadata (`recordPageOverrides`,
+ * see `resolveRecordPageActivation`); the step is then a `fallback`. When an
+ * object has several record pages, the pick is
  * DETERMINISTIC: prefer the conventional `{base}_Record_Page` default, then an
  * apiName that reads as a record page, then any RecordPage — all over an
  * apiName-sorted candidate list so the choice is stable across refreshes.
@@ -569,29 +711,13 @@ const pickFlexiPageForObject = (
 };
 
 /**
- * Resolve a Lightning FlexiPage for the object when the vault contains
- * record pages. Profile metadata still assigns Classic layouts; this
- * stage surfaces the Lightning surface users actually see.
- *
- * Searches the COMPLETE FlexiPage corpus — a `sobjectType` SQL narrow first,
- * then `scanAllNodesOfTypes` when that finds nothing (or fills its window) —
- * so a record page past the graph's 500-row `listNodesByType` ceiling is still
- * found. Reports `scanIncomplete` when even the multi-window walk stopped at
- * the residual cap, so no caller can read "not found" as "does not exist".
+ * Name-based FlexiPage pick over the COMPLETE FlexiPage corpus — used when no
+ * activation metadata answers which page is the org default.
  */
-const evaluateLightningPageLookup = async (
+const lookupFlexiPageByName = async (
   ctx: Context,
   objectApiName: string,
-): Promise<
-  Result<
-    {
-      step: LayoutRoutingStep;
-      flexiPageId: ComponentId | null;
-      scanIncomplete: boolean;
-    },
-    string
-  >
-> => {
+): Promise<Result<{ match: Node | null; scanIncomplete: boolean }, string>> => {
   // LAYOUT-FOR-USER-FLEXIPAGE-SCAN-CAP: this used to read ONE
   // `listNodesByType(..., { limit: 500 })` page — the graph's HARD ceiling,
   // served `ORDER BY id ASC OFFSET 0`. A mature Lightning org holds far more
@@ -628,7 +754,112 @@ const evaluateLightningPageLookup = async (
     scanIncomplete = full.value.scanIncomplete;
   }
 
-  const match = pickFlexiPageForObject(candidates, objectApiName);
+  return ok({ match: pickFlexiPageForObject(candidates, objectApiName), scanIncomplete });
+};
+
+/**
+ * Resolve a Lightning FlexiPage for the object when the vault contains
+ * record pages. Profile metadata still assigns Classic layouts; this
+ * stage surfaces the Lightning surface users actually see.
+ *
+ * Searches the COMPLETE FlexiPage corpus — a `sobjectType` SQL narrow first,
+ * then `scanAllNodesOfTypes` when that finds nothing (or fills its window) —
+ * so a record page past the graph's 500-row `listNodesByType` ceiling is still
+ * found. Reports `scanIncomplete` when even the multi-window walk stopped at
+ * the residual cap, so no caller can read "not found" as "does not exist".
+ */
+const evaluateLightningPageLookup = async (
+  ctx: Context,
+  objectApiName: string,
+  profile: Node | null = null,
+  recordType: string | null = null,
+  recordTypeAssumed = false,
+): Promise<
+  Result<
+    {
+      step: LayoutRoutingStep;
+      flexiPageId: ComponentId | null;
+      scanIncomplete: boolean;
+      activation?: RecordPageActivation;
+    },
+    string
+  >
+> => {
+  const activationResult = await resolveRecordPageActivation(
+    ctx,
+    objectApiName,
+    profile,
+    recordType,
+    recordTypeAssumed && recordType !== null,
+  );
+  if (!activationResult.ok) return err(activationResult.error);
+  const activation = activationResult.value;
+  if (activation !== null) {
+    const appPart =
+      activation.byApp.length > 0
+        ? ` Inside ${activation.byApp.length.toString()} app(s) this user sees an app-specific page: ${activation.byApp
+            .slice(0, 5)
+            .map(
+              (a) =>
+                `${a.appId} → ${a.flexiPageId} (${a.matchedOn}${a.assumedRecordType !== undefined ? `, assuming the profile's default record type ${a.assumedRecordType}` : ''})`,
+            )
+            .join('; ')}.`
+        : '';
+    const rtPart =
+      activation.dependsOnRecordType.length > 0
+        ? ` In ${activation.dependsOnRecordType.join(', ')} the page depends on the record type — pass recordTypeId.`
+        : '';
+    if (!activation.orgDefaultChecked) {
+      // The org default lives on the object's own <actionOverrides>, which this
+      // vault never read (the object is outside the retrieve scope). Fall back
+      // to the name pick for the org-default slot and say it was NOT CHECKED —
+      // never report the unread slot as "no record page is activated".
+      const byName = await lookupFlexiPageByName(ctx, objectApiName);
+      if (!byName.ok) return err(byName.error);
+      const { match, scanIncomplete } = byName.value;
+      const unchecked =
+        `activation metadata: the org default record page for '${objectApiName}' was NOT CHECKED — ` +
+        `the object's own definition (its <actionOverrides>) is not in this vault (outside the retrieve scope)`;
+      const reason =
+        match !== null
+          ? `${unchecked}; FlexiPage '${match.id}' targets '${objectApiName}', picked by NAME, so the org default is a guess.${appPart}${rtPart}`
+          : scanIncomplete
+            ? `${unchecked}, and the FlexiPage corpus was not fully read (scan cap ${FULL_SCAN_MAX_NODES}).${appPart}${rtPart}`
+            : `${unchecked}; no FlexiPage in the vault targets '${objectApiName}'.${appPart}${rtPart}`;
+      return ok({
+        flexiPageId: match?.id ?? null,
+        scanIncomplete,
+        activation,
+        step: step(
+          'LightningPageLookup',
+          match !== null || activation.byApp.length > 0 ? 'fallback' : 'unknown',
+          reason,
+          match?.id ?? undefined,
+        ),
+      });
+    }
+    const flexiPageId = activation.orgDefault;
+    const reason =
+      flexiPageId !== null
+        ? `activation metadata: '${flexiPageId}' is the org default record page for '${objectApiName}'.${appPart}${rtPart}`
+        : activation.byApp.length > 0
+          ? `activation metadata: no org default record page for '${objectApiName}' (outside the apps below Lightning shows the system default page).${appPart}${rtPart}`
+          : `activation metadata: no record page is activated for '${objectApiName}' (org default, app default, or app + profile) — Lightning shows the system default page built from the page layout.${rtPart}`;
+    return ok({
+      flexiPageId,
+      scanIncomplete: false,
+      activation,
+      step: step(
+        'LightningPageLookup',
+        flexiPageId !== null || activation.byApp.length > 0 ? 'matched' : 'fallback',
+        reason,
+        flexiPageId ?? undefined,
+      ),
+    });
+  }
+  const byName = await lookupFlexiPageByName(ctx, objectApiName);
+  if (!byName.ok) return err(byName.error);
+  const { match, scanIncomplete } = byName.value;
   if (match === null) {
     return ok({
       flexiPageId: null,
@@ -647,8 +878,8 @@ const evaluateLightningPageLookup = async (
     scanIncomplete,
     step: step(
       'LightningPageLookup',
-      'matched',
-      `FlexiPage '${match.id}' models the Lightning record surface for '${objectApiName}'`,
+      'fallback',
+      `FlexiPage '${match.id}' targets '${objectApiName}', picked by NAME: this vault has no record page activation metadata (built before it was extracted — re-run sfi refresh), so which page a user is activated on is a guess`,
       match.id,
     ),
   });
@@ -782,7 +1013,13 @@ export const layoutForUserHandler = async (
   }
 
   if (match === null) {
-    const lightningResult = await evaluateLightningPageLookup(ctx, objectApiName);
+    const lightningResult = await evaluateLightningPageLookup(
+      ctx,
+      objectApiName,
+      profile,
+      recordTypeId ?? defaultRecordType ?? null,
+      recordTypeId === undefined,
+    );
     if (!lightningResult.ok) {
       return err({
         kind: 'internal',
@@ -796,9 +1033,25 @@ export const layoutForUserHandler = async (
         layoutId: null,
         flexiPageId: lightningResult.value.flexiPageId,
         uiSurface:
-          lightningResult.value.flexiPageId === null ? 'unknown' : 'lightning-flexipage',
+          lightningResult.value.flexiPageId !== null ||
+          (lightningResult.value.activation?.byApp.length ?? 0) > 0
+            ? 'lightning-flexipage'
+            : 'unknown',
         recordTypeUsed: null,
         reasoning,
+        ...(lightningResult.value.activation !== undefined
+          ? { recordPageActivation: lightningResult.value.activation }
+          : {}),
+        ...((lightningResult.value.activation?.byApp.length ?? 0) > 0
+          ? {
+              boundaryNote: `No Classic layout assignment matched, but the record page is activated per app: ${(
+                lightningResult.value.activation?.byApp ?? []
+              )
+                .slice(0, 5)
+                .map((a) => `in ${a.appId} they see ${a.flexiPageId}`)
+                .join('; ')}.`,
+            }
+          : {}),
       },
       vaultState: {
         sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -809,7 +1062,13 @@ export const layoutForUserHandler = async (
 
   const layoutId = canonicaliseLayoutId(match.layout, objectApiName);
 
-  const lightningResult = await evaluateLightningPageLookup(ctx, objectApiName);
+  const lightningResult = await evaluateLightningPageLookup(
+    ctx,
+    objectApiName,
+    profile,
+    recordTypeUsed ?? recordTypeId ?? defaultRecordType ?? null,
+    recordTypeId === undefined,
+  );
   if (!lightningResult.ok) {
     return err({
       kind: 'internal',
@@ -819,19 +1078,37 @@ export const layoutForUserHandler = async (
   reasoning.push(lightningResult.value.step);
 
   const flexiPageId = lightningResult.value.flexiPageId;
+  const activation = lightningResult.value.activation;
+  const appPages = activation?.byApp ?? [];
   // With no FlexiPage found, `classic-layout` is only claimable when the
   // FlexiPage corpus was READ TO THE END. If the walk stopped at the residual
   // scan cap, the surface is genuinely unknown — never assert Classic off an
   // unfinished scan (LAYOUT-FOR-USER-FLEXIPAGE-SCAN-CAP).
   const uiSurface =
-    flexiPageId !== null
+    flexiPageId !== null || appPages.length > 0
       ? 'lightning-flexipage'
       : lightningResult.value.scanIncomplete
         ? 'unknown'
         : 'classic-layout';
+  const appNote =
+    appPages.length > 0
+      ? ` Inside ${appPages.map((a) => `${a.appId} they see ${a.flexiPageId}`).slice(0, 5).join('; ')}.`
+      : '';
+  const orgDefaultUnchecked =
+    activation !== undefined && !activation.orgDefaultChecked
+      ? `Profile layoutAssignments resolve to Classic layout '${layoutId}'; the org default record page for '${objectApiName}' was NOT CHECKED (the object's own definition is not in this vault)${flexiPageId !== null ? ` — '${flexiPageId}' targets the object, picked by name` : ''}.${appNote}`
+      : undefined;
   const boundaryNote =
-    flexiPageId !== null
-      ? `Profile layoutAssignments resolve to Classic layout '${layoutId}', but the vault models Lightning FlexiPage '${flexiPageId}' for this object — users in Lightning Experience typically see the FlexiPage.`
+    orgDefaultUnchecked !== undefined
+      ? orgDefaultUnchecked
+      : activation !== undefined
+      ? flexiPageId !== null
+        ? `Profile layoutAssignments resolve to Classic layout '${layoutId}'; in Lightning Experience the org default record page '${flexiPageId}' applies (activation metadata).${appNote}`
+        : appPages.length > 0
+          ? `Profile layoutAssignments resolve to Classic layout '${layoutId}'; there is no org default record page, so outside the apps below Lightning shows the system default page.${appNote}`
+          : undefined
+      : flexiPageId !== null
+      ? `Profile layoutAssignments resolve to Classic layout '${layoutId}', but the vault models Lightning FlexiPage '${flexiPageId}' for this object — users in Lightning Experience typically see the FlexiPage (picked by name: this vault has no record page activation metadata).`
       : lightningResult.value.scanIncomplete
         ? `Profile layoutAssignments resolve to Classic layout '${layoutId}', but the FlexiPage corpus exceeded the ${FULL_SCAN_MAX_NODES}-node scan cap and was not fully read — a Lightning record page for this object may exist beyond the cap.`
         : undefined;
@@ -844,6 +1121,7 @@ export const layoutForUserHandler = async (
       uiSurface,
       recordTypeUsed,
       reasoning,
+      ...(activation !== undefined ? { recordPageActivation: activation } : {}),
       ...(boundaryNote !== undefined ? { boundaryNote } : {}),
     },
     vaultState: {

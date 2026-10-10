@@ -87,7 +87,11 @@ export const buildProductManifestSummary = (): ProductManifestSummary => {
     `concepts:${conceptIds.join(',')}\nrules:${ruleIds.join(',')}\nmodel:${MODEL_VERSION}`,
   );
   const catalogHash = sha256(
-    V01_TOOLS.map((t) => `${t.name}\n${String(t.description ?? '').trim()}`)
+    V01_TOOLS.map(
+      (t) =>
+        `${t.name}\n${String(t.description ?? '').trim()}` +
+        (t.reference === undefined ? '' : `\n${String(t.reference).trim()}`),
+    )
       .sort()
       .join('\n---\n'),
   );

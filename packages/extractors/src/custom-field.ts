@@ -13,6 +13,7 @@ import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 import { buildReferencesEdges, collectRelationshipRefs } from './formula-references.js';
 import { deriveComponentApiName, deriveParentApiName } from './path-utils.js';
+import { STANDARD_RELATIONSHIP_SOURCE, standardLookupTargets } from './standard-relationships.js';
 
 const FIELD_FILE_SUFFIX = '.field-meta.xml';
 const ROOT_ELEMENT = 'CustomField';
@@ -654,6 +655,17 @@ export const extractCustomField = async (
   const parentId = `CustomObject:${objectApiName}`;
   const nodeId = `CustomField:${objectApiName}.${fieldApiName}`;
 
+  // STANDARD-LOOKUP-REFERENCETO-NULL: a standard lookup ships with no
+  // `<referenceTo>`; fill it from the curated platform table (never guessed).
+  const declaredReferenceTo = rootObj['referenceTo'];
+  const hasDeclaredTarget =
+    declaredReferenceTo !== undefined && declaredReferenceTo !== null && declaredReferenceTo !== '';
+  const platformTargets =
+    !hasDeclaredTarget && (dataType === 'Lookup' || dataType === 'MasterDetail' || dataType === 'Hierarchy')
+      ? standardLookupTargets(objectApiName, fieldApiName)
+      : [];
+  const baseProperties = buildProperties(rootObj, dataType);
+
   const node: Node = {
     id: nodeId,
     type: 'CustomField',
@@ -664,7 +676,15 @@ export const extractCustomField = async (
     lastModifiedDate: null,
     lastModifiedBy: null,
     apiVersion: null,
-    properties: buildProperties(rootObj, dataType),
+    properties:
+      platformTargets.length === 0
+        ? baseProperties
+        : {
+            ...baseProperties,
+            ...(platformTargets.length === 1 ? { referenceTo: platformTargets[0] } : {}),
+            referenceTargets: [...platformTargets],
+            referenceToSource: STANDARD_RELATIONSHIP_SOURCE,
+          },
   };
 
   const parentEdge: Edge = {
@@ -705,13 +725,20 @@ export const extractCustomField = async (
   // The declared delete behavior rides on the edge too, so an inbound walk from
   // the parent object (record_delete_impact) reads it without a node fetch.
   const deleteConstraint = extractDeleteConstraint(rootObj);
-  const lookupEdges: Edge[] = referenceTargets.map((target) => ({
+  const lookupEdges: Edge[] = [
+    ...referenceTargets.map((target) => ({ target, fromTable: false })),
+    ...platformTargets.map((target) => ({ target, fromTable: true })),
+  ].map(({ target, fromTable }) => ({
     fromId: nodeId,
     toId: `CustomObject:${target}`,
     edgeType: 'lookupTo',
     confidence: 'declared',
     source: 'custom-field-extractor',
-    properties: { relationshipType, ...(deleteConstraint !== null ? { deleteConstraint } : {}) },
+    properties: {
+      relationshipType,
+      ...(deleteConstraint !== null ? { deleteConstraint } : {}),
+      ...(fromTable ? { referenceToSource: STANDARD_RELATIONSHIP_SOURCE } : {}),
+    },
   }));
 
   // ROLLUP-SOURCE-EDGE: a roll-up summary field aggregates a field on a CHILD

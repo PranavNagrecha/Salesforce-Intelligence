@@ -482,9 +482,9 @@ describe('testsForChangeHandler — bounded graph queries (BFS)', () => {
     // coveringTests is sorted by (depth ASC, id ASC): the direct test first,
     // then the two depth-2 relayed tests.
     expect(d.perChange[0]?.coveringTests).toEqual([
-      { id: 'ApexClass:ServiceTest', apiName: 'ServiceTest', depth: 1 },
-      { id: 'ApexClass:ControllerTest', apiName: 'ControllerTest', depth: 2 },
-      { id: 'ApexClass:HelperTest', apiName: 'HelperTest', depth: 2 },
+      { id: 'ApexClass:ServiceTest', apiName: 'ServiceTest', depth: 1, via: 'direct' },
+      { id: 'ApexClass:ControllerTest', apiName: 'ControllerTest', depth: 2, via: 'transitive' },
+      { id: 'ApexClass:HelperTest', apiName: 'HelperTest', depth: 2, via: 'transitive' },
     ]);
   });
 

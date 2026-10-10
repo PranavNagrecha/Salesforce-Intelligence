@@ -13,8 +13,9 @@ description: |
   than fabricating when v1.2's metadata model can't tell (e.g.,
   org-default layouts, permission-set layout assignments). Discloses
   v1.2's boundary: only profile-based layout assignments are
-  resolved; permission-set layouts, app-default routing, and
-  Lightning page assignments are noted for manual verification.
+  resolved for Classic layouts; Lightning record pages come from
+  activation metadata (org, app, app + record type + profile);
+  permission-set layouts are noted for manual verification.
 ---
 
 # Admin page layout routing
@@ -551,26 +552,18 @@ when any step returned `unknown` or the top-level `layoutId` is
   still be displaying — check **Setup → Object Manager →
   {object} → Page Layouts → Page Layout Assignment** for the
   authoritative answer.
-- **Lightning record page ACTIVATION.** FlexiPages themselves ARE in
-  the vault, and `layout_for_user`'s `LightningPageLookup` stage
-  resolves one for the object (surfaced as `flexiPageId` /
-  `uiSurface`, with `boundaryNote` when a Classic layout also
-  matched). What is NOT modeled is the ACTIVATION matrix — which
-  profile / record type / app / form factor is SERVED which page is a
-  separate Lightning App Builder assignment that the retrieved
-  FlexiPage metadata does not carry (the node says so itself:
-  `activationsModeled: false`). So a non-null `flexiPageId` is a
-  candidate, never a proven per-profile assignment, and when an object
-  has several record pages the tool's pick is deterministic rather
-  than correct. `sfi.lightning_pages` enumerates all of them with the
-  same `activationDisclosure`. Direct the admin to **Setup → Object
-  Manager → {object} → Lightning Record Pages** to confirm what's
-  actually rendering.
-- **App-default routing.** A `CustomApplication` can pin
-  particular Lightning pages per record type or per app context.
-  v1.2's `CustomApplication` extractor tracks tabs (`tabs[]`) but
-  does **not** model Lightning page assignments per app. Refuse
-  the question; point to **Setup → App Manager → {App} → Edit**.
+- **Lightning record page ACTIVATION.** `layout_for_user` reads the
+  activation metadata (the object's org default, each app's default,
+  and app + record type + profile assignments; desktop form factor)
+  into `recordPageActivation` — `orgDefault`, `byApp[]` (one row per
+  app that overrides it, with `matchedOn`) and `dependsOnRecordType`
+  (pass `recordTypeId` for those apps). Only a vault refreshed before
+  that extraction falls back to a NAME pick, and the
+  `LightningPageLookup` step is then `fallback` — say it is a guess
+  and point the admin to **Setup → Object Manager → {object} →
+  Lightning Record Pages**. Phone (Small) assignments are not shown.
+- **App-default routing.** App defaults and app + record type +
+  profile assignments ARE resolved — see `recordPageActivation.byApp`.
 - **Compact layouts.** RecordType ships
   `compactLayoutAssignment`. v1.2 stores it as a property on the
   RecordType node (`properties.compactLayoutAssignment`), but

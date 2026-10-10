@@ -96,6 +96,45 @@ describe('orgRiskReportHandler (R7)', () => {
   });
 });
 
+describe('orgRiskReportHandler — ARCH-05 coverage is a caveat, not a critical org risk', () => {
+  const partialManifest: VaultManifest = {
+    ...MANIFEST,
+    coverage: [
+      { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false },
+      // Pending (staged build) and requested-but-empty: neither FAILED.
+      { type: 'Report', requested: true, retrieved: 12, errored: false, neverModeled: false, pending: true },
+      { type: 'AutoResponseRule', requested: true, retrieved: 0, errored: false, neverModeled: false },
+    ],
+  };
+
+  it('FAIL-BEFORE/PASS-AFTER: pending / empty types are not called "retrieve failed" and are not critical', async () => {
+    const r = await orgRiskReportHandler({ ...ctx, manifest: partialManifest }, { limit: 20 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const cov = r.value.data.findings.find((f) => f.category === 'coverage');
+    expect(cov).toBeDefined();
+    expect(cov?.severity).toBe('low');
+    expect(cov?.summary).not.toMatch(/retrieve (failed|errored)/);
+    expect(cov?.summary).toContain('still pending or capped: Report');
+    expect(cov?.summary).toContain('AutoResponseRule');
+  });
+
+  it('an errored retrieve is named as such, at most medium', async () => {
+    const errored: VaultManifest = {
+      ...MANIFEST,
+      coverage: [
+        { type: 'CustomObject', requested: true, retrieved: 1, errored: false, neverModeled: false },
+        { type: 'Flow', requested: true, retrieved: 0, errored: true, neverModeled: false },
+      ],
+    };
+    const r = await orgRiskReportHandler({ ...ctx, manifest: errored }, { limit: 20 });
+    if (!r.ok) throw new Error('expected ok');
+    const cov = r.value.data.findings.find((f) => f.category === 'coverage');
+    expect(cov?.severity).toBe('medium');
+    expect(cov?.summary).toContain('retrieve errored for: Flow');
+  });
+});
+
 describe('releaseReadinessReportHandler — coverage gating', () => {
   it('does NOT block readiness on never-modeled families (product limitation, not actionable)', async () => {
     // Regression: `ready` was permanently false for EVERY vault because the 5
@@ -1277,5 +1316,112 @@ describe('permissionRiskReportHandler — the advised limit is the limit the sch
     expect(
       permissionRiskReportInputSchema.safeParse({ limit: FINDINGS_LIMIT_MAX + 1 }).success,
     ).toBe(false);
+  });
+});
+
+// FAIL-BEFORE/PASS-AFTER (WOW-5): severity ignored WHO holds a grant. A
+// permission set licensed to external community users with Modify All on an
+// object ranked 'high', BELOW an internal admin profile's 'critical' admin
+// perms — although it lets every portal user edit every other customer's
+// records. The holder's licence audience now escalates record-reach grants
+// held by outsiders to critical and ranks them first within a severity.
+describe('permissionRiskReportHandler — holder audience (external licence)', () => {
+  let auDir: string;
+  let auStore: GraphStore;
+  let auCtx: Context;
+
+  const n = (o: Partial<Node> & Pick<Node, 'id' | 'type' | 'apiName'>): Node => ({
+    label: null,
+    parentId: null,
+    sourcePath: 'x',
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties: {},
+    ...o,
+  });
+  const g = (fromId: string, toId: string, properties: Record<string, unknown>): Edge => ({
+    fromId,
+    toId,
+    edgeType: 'grantedBy',
+    confidence: 'declared',
+    source: 'unit-test',
+    properties,
+  });
+
+  beforeAll(async () => {
+    auDir = mkdtempSync(join(tmpdir(), 'sfi-synth-audience-'));
+    const opened = await openGraph(join(auDir, 'a.duckdb'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    auStore = opened.value;
+    const imp = await importExtractionResults(auStore, [
+      {
+        nodes: [
+          n({ id: 'Profile:Internal_Admin', type: 'Profile', apiName: 'Internal_Admin', properties: { userLicense: 'Salesforce', userPermissions: ['ModifyAllData'] } }),
+          n({ id: 'PermissionSet:Portal_Client', type: 'PermissionSet', apiName: 'Portal_Client', properties: { license: 'Customer Community Login' } }),
+          n({ id: 'PermissionSet:Internal_Ops', type: 'PermissionSet', apiName: 'Internal_Ops', properties: { license: 'Salesforce' } }),
+          n({ id: 'PermissionSet:Portal_Pw', type: 'PermissionSet', apiName: 'Portal_Pw', properties: { license: 'Customer Community Login', userPermissions: ['PasswordNeverExpires'] } }),
+          n({ id: 'CustomObject:Application__c', type: 'CustomObject', apiName: 'Application__c' }),
+          // A group bundling the external-licensed set, and a licence-less set.
+          n({ id: 'PermissionSetGroup:Client_Group', type: 'PermissionSetGroup', apiName: 'Client_Group', properties: { permissionSets: ['Portal_Client'] } }),
+          n({ id: 'PermissionSet:Ops_No_Licence', type: 'PermissionSet', apiName: 'Ops_No_Licence' }),
+        ],
+        edges: [
+          g('PermissionSet:Portal_Client', 'CustomObject:Application__c', { allowRead: true, viewAllRecords: true, modifyAllRecords: true }),
+          g('PermissionSet:Internal_Ops', 'CustomObject:Application__c', { allowRead: true, modifyAllRecords: true }),
+          g('PermissionSet:Ops_No_Licence', 'CustomObject:Application__c', { allowRead: true, modifyAllRecords: true }),
+        ],
+      },
+    ]);
+    if (!imp.ok) throw new Error(imp.error.message);
+    auCtx = { vaultRoot: auDir, manifest: MANIFEST, graph: auStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(auStore);
+    rmSync(auDir, { recursive: true, force: true });
+  });
+
+  it('an external-licence Modify All grant is critical and ranks first', async () => {
+    const r = await permissionRiskReportHandler(auCtx, { limit: 20 });
+    if (!r.ok) throw new Error(r.error.message);
+    const op = r.value.data.findings.filter((f) => f.category === 'over-privilege');
+    const portal = op.find((f) => f.evidence[0] === 'PermissionSet:Portal_Client');
+    expect(['PermissionSet:Portal_Client', 'PermissionSetGroup:Client_Group']).toContain(op[0]?.evidence[0]);
+    expect(portal?.severity).toBe('critical');
+    expect(portal?.audience).toBe('external');
+    expect(portal?.summary).toMatch(/^EXTERNAL-licence PermissionSet Portal_Client \(Customer Community Login\)/);
+    // The same grant held internally keeps its normal severity.
+    const internal = op.find((f) => f.evidence[0] === 'PermissionSet:Internal_Ops');
+    expect(internal?.severity).toBe('high');
+    expect(internal?.audience).toBe('internal');
+  });
+
+  it('an external holder of a non-record-reach perm is labelled but not escalated', async () => {
+    const r = await permissionRiskReportHandler(auCtx, { limit: 20 });
+    if (!r.ok) throw new Error(r.error.message);
+    const pw = r.value.data.findings.find((f) => f.evidence[0] === 'PermissionSet:Portal_Pw');
+    expect(pw?.severity).toBe('medium');
+    expect(pw?.summary).toMatch(/^EXTERNAL-licence/);
+  });
+
+  // FAIL-BEFORE/PASS-AFTER (review): a permission set GROUP whose member set is
+  // external-licensed had audience undefined and was not escalated; and a
+  // licence-less set ('unknown') ranked above an internal finding of the same
+  // severity, reordering every high finding.
+  it('a group carrying an external-licence member set is external and critical', async () => {
+    const r = await permissionRiskReportHandler(auCtx, { limit: 20 });
+    if (!r.ok) throw new Error(r.error.message);
+    const grp = r.value.data.findings.find((f) => f.evidence[0] === 'PermissionSetGroup:Client_Group');
+    expect(grp?.audience).toBe('external');
+    expect(grp?.severity).toBe('critical');
+    expect(grp?.summary).toMatch(/^EXTERNAL-licence member set\(s\): PermissionSetGroup Client_Group/);
+  });
+
+  it('an unknown audience does not outrank an internal finding of the same severity', async () => {
+    const r = await permissionRiskReportHandler(auCtx, { limit: 20 });
+    if (!r.ok) throw new Error(r.error.message);
+    const order = r.value.data.findings.map((f) => f.evidence[0]);
+    expect(order.indexOf('PermissionSet:Internal_Ops')).toBeLessThan(order.indexOf('PermissionSet:Ops_No_Licence'));
   });
 });

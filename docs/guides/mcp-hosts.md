@@ -339,5 +339,5 @@ prints a fix for each problem. Include its output in a
 
 The examples above float on `latest`, which is fine for a first try. For a
 shared repo or a production config, pin an exact version —
-`sf-intelligence@0.3.1` — in the `args`. See
+`sf-intelligence@X.Y.Z` (the latest release is on [npm](https://www.npmjs.com/package/sf-intelligence)) — in the `args`. See
 [supply-chain.md](./supply-chain.md).

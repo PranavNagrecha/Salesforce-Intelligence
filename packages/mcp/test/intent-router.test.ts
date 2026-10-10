@@ -515,12 +515,14 @@ describe('Family A — schema nouns as intent signals, object binding, concept r
     // and binds the real object from "for a Contact".
     expect(
       classifyQuestion('what happens on save for a Contact').suggestedArgs,
-    ).toEqual({ event: 'update', objectApiName: 'Contact' });
+    // A bare "on save" names no single DML event: upsert (insert + update),
+    // so insert-only automation is not left out (baseline A01/B05).
+    ).toEqual({ event: 'upsert', objectApiName: 'Contact' });
     expect(
       classifyQuestion(
         'what actually happens on save for a Contact — every trigger, flow, and validation rule',
       ).suggestedArgs,
-    ).toEqual({ event: 'update', objectApiName: 'Contact' });
+    ).toEqual({ event: 'upsert', objectApiName: 'Contact' });
   });
 
   it('"What is a Profile" carries the profiles-vs-permission-sets knowledge topic', () => {
@@ -601,6 +603,11 @@ describe('classifyQuestion edge cases', () => {
     // metadata causality — neither is a runtime audit-trail ask.
     expect(classifyQuestion('what changed since the last refresh').intent).toBe('history-change');
     expect(classifyQuestion('why did the Status field change').intent).toBe('why-field-changed');
+    // ARCH-10 (FAIL-BEFORE/PASS-AFTER): the snapshot diff (named changes) is
+    // offered, not only changed_since (needs `since`).
+    expect(classifyQuestion('what changed since the last refresh').tools).toContain(
+      'sfi.diff_snapshots',
+    );
   });
 
   it('flags needsResolve when a component is named informally', () => {
@@ -706,7 +713,7 @@ describe('classifyQuestion edge cases', () => {
     // Implicit / status-change phrasings default to update.
     expect(
       classifyQuestion('what happens when an Account is saved?').suggestedArgs,
-    ).toEqual({ event: 'update' });
+    ).toEqual({ event: 'upsert' }); // "saved" = insert OR update (A01/B05)
     expect(
       classifyQuestion('what happens when a Case status changes?')
         .suggestedArgs,
@@ -833,7 +840,25 @@ describe('classifyQuestion edge cases', () => {
     expect(
       classifyQuestion('layout_for_user: which layout does a Faculty-profile user get for Case?')
         .suggestedArgs,
-    ).toEqual({ objectApiName: 'Case', profileId: 'Profile:Faculty' });
+    ).toEqual({ objectApiName: 'Case', profileName: 'Faculty' });
+  });
+
+  // ROUTE-03 — FAIL-BEFORE/PASS-AFTER: the deriver hard-coded org-specific ids
+  // ('Profile:Faculty', and 'Profile:System Administrator', which exists in NO
+  // org — the standard API name is `Admin`). Only the platform-standard id is
+  // ever emitted; anything else is the user's own word as a natural selector.
+  it('layout_for_user never emits a hard-coded org-specific profile id (ROUTE-03)', () => {
+    expect(
+      classifyQuestion('which layout does a sys admin see on Case').suggestedArgs,
+    ).toMatchObject({ profileId: 'Profile:Admin' });
+    for (const q of [
+      'layout_for_user: which layout does a Faculty-profile user get for Case?',
+      'which layout does an integration user see on Invoice__c',
+      'which page layout does the Support profile see on Case',
+    ]) {
+      const args = classifyQuestion(q).suggestedArgs ?? {};
+      expect(args['profileId']).toBeUndefined();
+    }
   });
 
   it('routes update save-order on hed__Application__c (differential b2-a-05)', () => {
@@ -3121,7 +3146,9 @@ describe('usage/impact/field-forensics REACH routing', () => {
     });
     it('"what if I change Case.Amount to a currency field" is a field what-if, NOT record-type impact', () => {
       const r = classifyQuestion('what if I change Case.Amount from a number to a currency field?');
-      expect(r.intent).toBe('what-if-field');
+      // ROUTE-06: a from-<type>-to-<type> change now reaches the dedicated
+      // field-TYPE rule (primary what_if_change_field_type), not the combined rule.
+      expect(r.intent).toBe('what-if-change-field-type');
       expect(r.tools).toContain('sfi.what_if_change_field_type');
     });
     it('a bare "trace the call graph" (no named field) is NOT field-lineage', () => {

@@ -5,6 +5,15 @@ argument-hint: "[--json]"
 
 You are about to show the SfIntelligence vault status.
 
+## Running the CLI
+
+The plugin installs the MCP server, not the `sfi` command. Before the first
+command, run `command -v sfi` via the Bash tool. If it prints a path, run the
+commands below as written. If it prints nothing, run every `sfi …` command
+below as `npx -y sf-intelligence@0.4.0 …` instead, with the same arguments.
+The Bash tool has no terminal, so the CLI cannot prompt: always pass the
+flags it would otherwise ask for.
+
 ## What to do
 
 1. Run `sfi status` via the Bash tool from the repository root,
@@ -46,8 +55,8 @@ read the summary table.
 ## Stopping conditions
 
 This is a read-only command. It never writes to the vault and
-always exits 0 — even `no-vault` is a recoverable state, not an
-error. Stop and report cleanly to the user when:
+exits 0 even for `no-vault` (a recoverable state, not an error) —
+unless `--strict` is passed, which exits 1 on `no-vault`. Stop and report cleanly to the user when:
 
 - `sfi status` exits non-zero for any reason. That is not an
   expected state; surface the stderr line verbatim and do not

@@ -304,6 +304,16 @@ const AURA_COMPONENT_TAG = /<c:([A-Za-z_][A-Za-z_0-9]*)\b/g;
 const AURA_EVENT_REF = /\$A\.get\(\s*['"]e\.c:([A-Za-z_][A-Za-z_0-9]*)['"]\s*\)/g;
 
 /**
+ * Aura: a server-side action handle `component.get('c.method')` /
+ * `cmp.get("c.method")` in controller / helper / renderer JS. In Aura JS the
+ * `c.` value provider names the bundle's APEX controller (client actions are
+ * only reachable as `{!c.x}` in markup, which this `.get(` shape never
+ * matches). Emitted with `className: 'c'` — the extractor resolves it against
+ * the root tag's `controller="..."` attribute.
+ */
+const AURA_SERVER_ACTION = /\.get\(\s*['"]c\.([A-Za-z_][A-Za-z_0-9]*)['"]\s*\)/g;
+
+/**
  * VF: `{!Object.Field}` merge token. The second IDENT must start with
  * an uppercase letter (the field-name convention for both standard
  * and custom fields). The pattern excludes the `(` lookahead so
@@ -608,12 +618,20 @@ const scanAura = (stripped: string): ScannerLists => {
     emitComponentRef(refCtx, name, m.index, m[0].length);
   }
 
+  const callCtx: ApexCallContext = { calls: [], seen: new Set<string>() };
+  AURA_SERVER_ACTION.lastIndex = 0;
+  while ((m = AURA_SERVER_ACTION.exec(stripped)) !== null) {
+    const methodName = m[1];
+    if (methodName === undefined) continue;
+    emitApexCall(callCtx, 'c', methodName, m.index, m[0].length);
+  }
+
   sweepResourcePattern(resourceCtx, AURA_LABEL_REF, 'label', stripped);
   sweepResourcePattern(resourceCtx, RESOURCE_TOKEN_REF, 'staticResource', stripped);
 
   return {
     fieldAccesses: [],
-    apexCalls: [],
+    apexCalls: callCtx.calls,
     componentRefs: refCtx.refs,
     resourceRefs: resourceCtx.refs,
   };

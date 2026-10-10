@@ -62,6 +62,7 @@ import {
   FIELD_VALUE_WRITING_EDGE_TYPES,
 } from './coverage-trust.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
+import { PICKLIST_DATA_TYPES } from './field-properties.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import {
   normalizePicklistValues,
@@ -75,16 +76,6 @@ const CUSTOM_FIELD_PREFIX = 'CustomField:';
 
 /** Maximum similarFields returned. PLAN-v2.9 §4 specifies "top-3". */
 const SIMILAR_FIELDS_LIMIT = 3;
-
-/**
- * The picklist-family dataTypes whose declared value set the custom-field
- * extractor records under `properties.picklistValues` (or leaves inline-null
- * for a GlobalValueSet reference). Mirrors `explain-field.ts`'s
- * `PICKLIST_DATA_TYPES` / the extractor's own `PICKLIST_TYPES` gate — for
- * every other dataType `picklistValues` is `null` by construction, so it is
- * never worth following `usesValueSet` off-node.
- */
-const PICKLIST_DATA_TYPES: readonly string[] = ['Picklist', 'MultiselectPicklist'];
 
 /**
  * Verbatim boundaries surfaced in every response. The skill may add
@@ -632,7 +623,7 @@ export const fieldMeaningHandler = async (
   // GlobalValueSet-driven (0.1.10+ vaults resolve the usesValueSet edge) —
   // resolve it so the answer carries the real values instead of reading as
   // "no values" (see `explain-field.ts`, which already does this).
-  if (picklistValues === null && PICKLIST_DATA_TYPES.includes(fieldType)) {
+  if (picklistValues === null && PICKLIST_DATA_TYPES.has(fieldType)) {
     const fromGvs = await resolveGlobalValueSetValues(ctx, fieldId);
     if (fromGvs !== null) {
       picklistValues = fromGvs.values.map((entry) => ({
@@ -662,7 +653,7 @@ export const fieldMeaningHandler = async (
   // R1: still null after the GVS resolution attempt above — the value set
   // is genuinely not reachable from this node, so say so instead of letting
   // `null` read like a checked-and-empty picklist.
-  if (picklistValues === null && PICKLIST_DATA_TYPES.includes(fieldType)) {
+  if (picklistValues === null && PICKLIST_DATA_TYPES.has(fieldType)) {
     boundaries.push(BOUNDARY_NON_INLINE_VALUE_SET);
   }
   if (usageResult.value.incomingReads === 0) {

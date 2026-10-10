@@ -33,6 +33,7 @@ import {
   type LiveGrantDisclosure,
   type LiveScope,
 } from '../live-consent.js';
+import { isLivePlaneEnvEnabled } from '../live-plane-env.js';
 import type { Context } from '../server.js';
 
 import { renderHybridStalenessWarning, type HybridStaleness } from './hybrid-trust.js';
@@ -103,10 +104,7 @@ const liveEnabledSchema = z.object({
 });
 
 /** Operator env override — not a substitute for a stored grant in product docs. */
-export const isLivePlaneEnabled = (): boolean => {
-  const env = process.env.SFI_LIVE_PLANE_ENABLED;
-  return env === '1' || env === 'true';
-};
+export const isLivePlaneEnabled = (): boolean => isLivePlaneEnvEnabled();
 
 export const liveTrust = (queriedAt: string): TrustSummary => {
   const grant = getActiveLiveGrant();

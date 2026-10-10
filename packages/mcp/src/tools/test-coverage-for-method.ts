@@ -71,10 +71,8 @@ import type {
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
   getNodeById,
-  listChildren,
   listEdges,
   listEdgesForNodes,
-  listNodesByIds,
 } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
@@ -83,6 +81,7 @@ import type { Context } from '../server.js';
 import { firstNonEmpty } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import { soundnessForReachabilityWalk, type Soundness } from './soundness.js';
+import { testsWritingTriggerObjects } from './test-coverage-reach.js';
 
 /**
  * BFS depth cap. Matches the v2.1 `sfi.test_coverage_gaps`
@@ -156,7 +155,7 @@ type ApexKind = (typeof APEX_KINDS)[number];
  * prose aloud; the structured fields alone let it say "nothing covers this".
  */
 const TRIGGER_MEDIATED_DISCLOSURE =
-  'TRIGGER/DML-MEDIATED COVERAGE IS NOT AN EDGE IN THIS GRAPH. The coversTest edge type is declared but emitted by NO extractor, graph-build mint, or enricher in this product, so no vault contains one; and a test that covers this code by doing DML on an object whose trigger calls it has no callsApex/dispatchesAsync path to it. totalCoveringCount therefore counts only tests that reach this component through a CALL path — a 0 means "no calling test found among the edge types walked", NEVER "no test covers this". triggerMediatedCoverage reconstructs the missing path from the edges that DO exist: the ApexTriggers on the upstream call path, the objects they fire on (triggersOn), and the test classes that write fields on those objects (writesTo). Those candidates are HEURISTIC — a field write in a test is strong evidence of DML but is not proof the record is inserted or updated, and a test that only reads is not listed. soundness.blindSpots names, in unwalkedEdgeTypes, every usage edge type this walk did not traverse. Do not delete, rename, or resign a method on the strength of a zero here: read the named candidate tests, or run the deploy against a sandbox.';
+  'TRIGGER/DML-MEDIATED COVERAGE IS NOT AN EDGE IN THIS GRAPH. The coversTest edge type is declared but emitted by NO extractor, graph-build mint, or enricher in this product, so no vault contains one; and a test that covers this code by doing DML on an object whose trigger calls it has no callsApex/dispatchesAsync path to it. totalCoveringCount therefore counts only tests that reach this component through a CALL path — a 0 means "no calling test found among the edge types walked", NEVER "no test covers this". triggerMediatedCoverage reconstructs the missing path from the edges that DO exist: the ApexTriggers on the upstream call path, the objects they fire on (triggersOn), and the test classes that write fields on those objects (writesTo) or construct a record of one (references to the object type). Those candidates are HEURISTIC — a field write in a test is strong evidence of DML but is not proof the record is inserted or updated, and a test that only reads is not listed. soundness.blindSpots names, in unwalkedEdgeTypes, every usage edge type this walk did not traverse. Do not delete, rename, or resign a method on the strength of a zero here: read the named candidate tests, or run the deploy against a sandbox.';
 
 /**
  * Verbatim v2.7 honesty disclosure. Method-level granularity promised
@@ -407,9 +406,6 @@ export interface TestCoverageForMethodOutput {
   readonly disclosure: string;
 }
 
-const isApexCallable = (id: string): boolean =>
-  id.startsWith(APEX_CLASS_PREFIX) || id.startsWith(APEX_TRIGGER_PREFIX);
-
 const isTestClass = (node: Node): boolean =>
   node.properties['isTest'] === true;
 
@@ -581,42 +577,23 @@ const buildTriggerMediatedCoverage = async (
       listTruncated: false,
     });
   }
-  // Every DML target that means "a record of this object": the object node
-  // itself plus each of its fields. `dmlTargetObject` remembers which object
-  // each one belongs to so the answer can name it.
-  const dmlTargetObject = new Map<ComponentId, ComponentId>();
-  for (const objectId of triggerObjects) {
-    dmlTargetObject.set(objectId, objectId);
-    const fields = await listChildren(ctx.graph, objectId);
-    if (!fields.ok) return err(fields.error.message);
-    for (const field of fields.value) dmlTargetObject.set(field.id, objectId);
-  }
-  const writers = await listEdgesForNodes(ctx.graph, [...dmlTargetObject.keys()], {
-    direction: 'in',
-    edgeTypes: ['writesTo'],
+  // The trigger/DML join lives ONCE in test-coverage-reach.ts (shared with
+  // apex_test_coverage / test_coverage_gaps / tests_for_change).
+  const writersRes = await testsWritingTriggerObjects(ctx.graph, triggerIds, {
+    vaultRoot: ctx.vaultRoot,
   });
-  if (!writers.ok) return err(writers.error.message);
-  const objectsByWriter = new Map<ComponentId, Set<ComponentId>>();
-  for (const [dmlTargetId, edges] of writers.value) {
-    const objectId = dmlTargetObject.get(dmlTargetId);
-    if (objectId === undefined) continue;
-    for (const edge of edges) {
-      if (excludedIds.has(edge.fromId)) continue;
-      if (!isApexCallable(edge.fromId)) continue;
-      const seen = objectsByWriter.get(edge.fromId);
-      if (seen === undefined) objectsByWriter.set(edge.fromId, new Set([objectId]));
-      else seen.add(objectId);
+  if (!writersRes.ok) return err(writersRes.error);
+  const byTest = new Map<ComponentId, { apiName: string; objects: Set<ComponentId> }>();
+  for (const list of writersRes.value.values()) {
+    for (const w of list) {
+      if (excludedIds.has(w.testId)) continue;
+      const entry = byTest.get(w.testId) ?? { apiName: w.apiName, objects: new Set<ComponentId>() };
+      entry.objects.add(w.objectId);
+      byTest.set(w.testId, entry);
     }
   }
-  const writerNodes = await listNodesByIds(ctx.graph, [...objectsByWriter.keys()]);
-  if (!writerNodes.ok) return err(writerNodes.error.message);
-  const candidates: TriggerMediatedTest[] = writerNodes.value
-    .filter((node) => isTestClass(node))
-    .map((node) => ({
-      id: node.id,
-      apiName: node.apiName,
-      viaObjects: [...(objectsByWriter.get(node.id) ?? new Set<ComponentId>())].sort(),
-    }))
+  const candidates: TriggerMediatedTest[] = [...byTest.entries()]
+    .map(([id, v]) => ({ id, apiName: v.apiName, viaObjects: [...v.objects].sort() }))
     .sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   return ok({
     ...base,

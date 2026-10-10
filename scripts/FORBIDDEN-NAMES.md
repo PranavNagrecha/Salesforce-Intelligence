@@ -17,7 +17,7 @@ cp scripts/forbidden-names.local.example.json scripts/forbidden-names.local.json
 | Key | Type | Purpose |
 |---|---|---|
 | `scannerPatterns` | `string[]` | Regex patterns matched against every git-tracked file. Use `\b` word boundaries and escape dots for domains (e.g. `\\bMyOrg\\b`, `\\bmyorg\\.my\\b`). |
-| `patterns` | `string[]` | Alias for `scannerPatterns` (back-compat; both are merged). |
+| `patterns` | `string[]` | Same as `scannerPatterns` (older key). Both the scanner and the release guard (`pnpm guard`) check the union of the two. |
 | `historyTerms` | `string[]` | Plain string literals passed to `git log -S` (used with `--git-history` flag). Add the same identifiers as plain strings here. |
 
 ## What to add
@@ -27,7 +27,17 @@ cp scripts/forbidden-names.local.example.json scripts/forbidden-names.local.json
 - **Community / Experience Cloud names** — site slugs that identify the org
 - **Usernames** — Salesforce usernames if they contain org identifiers (e.g. `admin@acmecorp.com`)
 
-The scanner is invoked automatically by `pnpm scan:leaks` (pre-commit hook) and
-in CI via `scripts/check-public-interface.mjs`. Without `forbidden-names.local.json`
-(public clone / CI) it runs only the structural `PATH-org-kb` check — which is
-correct, because a public-clean tree has no private-org names left to find.
+The scanner runs in the pre-commit hook, `pnpm scan:leaks`, CI and the publish
+workflow. One loader (`scripts/lib/forbidden-names.mjs`) serves the scanner and the
+release guard; `sfi vault anonymize` carries a TypeScript port held in sync by a
+parity test. It fails CLOSED:
+
+- A file that exists but is malformed (bad JSON, wrong shape, invalid regex) always
+  fails the run.
+- Every run prints how many patterns it loaded, or `VACUOUS: no org blocklist`.
+- `pnpm scan:leaks` (`--strict`) refuses a missing blocklist. Pass
+  `--allow-no-blocklist` or set `SFI_ALLOW_NO_BLOCKLIST=1` to accept a generic-only
+  scan (the pre-commit hook does, so contributors without the file can commit).
+- CI fails when the `ORG_LEAK_BLOCKLIST` secret is empty, except on fork PRs, which
+  cannot read secrets and run visibly VACUOUS. The release guard refuses a missing
+  blocklist whenever `CI=true`.

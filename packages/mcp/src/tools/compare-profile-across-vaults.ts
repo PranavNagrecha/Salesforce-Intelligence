@@ -63,7 +63,7 @@ import type {
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges, type GraphStore } from '@sf-intelligence/graph';
+import { type GraphStore, listEdges, parsePropertiesJson } from '@sf-intelligence/graph';
 import {
   findRegistryRoot,
   getVaultRef,
@@ -195,19 +195,6 @@ interface ProfileRow {
   readonly properties_json: string;
 }
 
-const parsePropertiesJson = (
-  raw: string | null | undefined,
-): Readonly<Record<string, unknown>> => {
-  if (typeof raw !== 'string' || raw.length === 0) return {};
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed))
-      return {};
-    return parsed as Readonly<Record<string, unknown>>;
-  } catch {
-    return {};
-  }
-};
 
 /**
  * C-3 (finding 28) — `canonicalJson(undefined)` crash-class sweep. This

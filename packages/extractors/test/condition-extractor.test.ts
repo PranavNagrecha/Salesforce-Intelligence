@@ -59,6 +59,15 @@ describe('extractConditions', () => {
         synthesized: false,
         itemCount: 1,
         booleanFilter: null,
+        // Structured triplets: value consumers compare these, never the prose.
+        conditionItems: [
+          {
+            field: 'Account.Type',
+            fieldId: 'CustomField:Account.Type',
+            operator: 'equals',
+            value: 'Tier 1',
+          },
+        ],
       });
 
       const edge = result.firesWhenEdges[0]!;

@@ -90,7 +90,22 @@ interface InterpretationsRenderLike {
   readonly sliceTruncated: boolean;
   readonly coverageCaveat?: string;
   readonly trust: TrustLike;
+  /** The page window, when the claims were paged (`sfi.interpret`). */
+  readonly page?: { readonly offset: number; readonly returned: number; readonly total: number };
 }
+
+/** One line naming the page window, or '' when the page is the whole list. */
+const interpretPageLine = (page: InterpretationsRenderLike['page']): string => {
+  if (page === undefined || (page.offset === 0 && page.returned >= page.total)) return '';
+  if (page.returned === 0) {
+    return `_No claims on this page: offset ${page.offset} is past the last of ${page.total} claim(s) that fired — pass a smaller offset._`;
+  }
+  const next = page.offset + page.returned;
+  return (
+    `_Showing claims ${page.offset + 1}-${next} of ${page.total}` +
+    (next < page.total ? `; pass offset: ${next} for more._` : '._')
+  );
+};
 
 /**
  * Render the reasoning engine's grounded interpretations: one bullet per fired
@@ -103,6 +118,10 @@ export const renderInterpretationsMarkdown = (
   data: InterpretationsRenderLike,
 ): string => {
   const header = `## Interpretations for \`${data.componentId}\` (${data.componentType})`;
+  const pageLine = interpretPageLine(data.page);
+  if (data.interpretations.length === 0 && pageLine !== '') {
+    return `${header}\n\n${pageLine}\n\n${renderTrustFooter(data.trust)}`;
+  }
   if (data.interpretations.length === 0) {
     return (
       `${header}\n\n` +
@@ -139,7 +158,7 @@ export const renderInterpretationsMarkdown = (
     ? `\n\n_Graph slice truncated at the hub cap — absence-based conclusions held to at most partial coverage._`
     : '';
   return (
-    `${header}\n\n${items.join('\n')}${caveatLine}${truncation}\n\n` +
+    `${header}\n\n${pageLine !== '' ? `${pageLine}\n\n` : ''}${items.join('\n')}${caveatLine}${truncation}\n\n` +
     renderTrustFooter(data.trust)
   );
 };

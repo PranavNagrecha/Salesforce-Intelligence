@@ -109,6 +109,7 @@ import type { Context } from '../server.js';
 
 import { familyWasExtracted, notExtractedFamilyDisclosure } from './absence-disclosure.js';
 import { firstNonEmpty } from './input-aliases.js';
+import { namedCredentialReferences } from './named-credential-references.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { fullScanTruncationNote } from './scan-cap.js';
 
@@ -250,6 +251,8 @@ export interface IntegrationMapNode {
    * not a guarantee of zero runtime use — see {@link APEX_CALLOUT_DISCLOSURE}.
    */
   readonly orphaned?: boolean;
+  /** NamedCredential only: why an `orphaned: true` may still be used at runtime (dynamic `'callout:' +` endpoints). */
+  readonly orphanedCaveat?: string;
 }
 
 /**
@@ -1413,6 +1416,24 @@ export const integrationMapHandler = async (
     const nodes = buckets.get(trustType);
     if (nodes === undefined || nodes.length === 0) continue;
     const annotated: IntegrationMapNode[] = [];
+    // NamedCredential: the SAME counting `sfi.endpoint_catalog` uses (graph
+    // referrers + dynamic-callout name literals), so the two never disagree.
+    if (trustType === 'NamedCredential') {
+      const refs = await namedCredentialReferences(ctx, nodes);
+      if (!refs.ok) return err({ kind: 'internal', message: `graph query failed: ${refs.error}` });
+      for (const node of nodes) {
+        const r = refs.value.get(node.id);
+        const referenceCount = r?.referenceCount ?? 0;
+        annotated.push({
+          ...node,
+          referenceCount,
+          orphaned: referenceCount === 0,
+          ...(r?.orphanedCaveat !== undefined ? { orphanedCaveat: r.orphanedCaveat } : {}),
+        });
+      }
+      buckets.set(trustType, annotated);
+      continue;
+    }
     for (const node of nodes) {
       const inboundResult = await listEdges(ctx.graph, node.id, {
         direction: 'in',

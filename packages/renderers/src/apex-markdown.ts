@@ -12,6 +12,7 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok } from '@sf-intelligence/core';
 
+import { ensureSerializableFrontmatter } from './component-markdown.js';
 import {
   escapeMarkdownBlockText,
   escapeMarkdownHeading,
@@ -215,7 +216,7 @@ export const renderApexMarkdown = async (
   try {
     return ok({
       path: buildOutputPath(node),
-      frontmatter: buildFrontmatter(node),
+      frontmatter: ensureSerializableFrontmatter(buildFrontmatter(node)),
       body: buildBody(node, edges, source),
     });
   } catch (cause) {

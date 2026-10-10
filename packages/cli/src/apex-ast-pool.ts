@@ -11,6 +11,8 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Worker } from 'node:worker_threads';
 
+import type { ApexAstEdges } from '@sf-intelligence/parsers/apex-ast';
+
 /** One file to parse. `index` is the dense 0..n-1 slot in the returned array. */
 export type ApexAstWorkerJob = {
   readonly index: number;
@@ -19,18 +21,12 @@ export type ApexAstWorkerJob = {
   readonly kind: 'class' | 'trigger';
 };
 
-/** Mirrors `@sf-intelligence/parsers` ApexAstEdges (kept local to avoid a hard type dep from the pool). */
-export type ApexAstWorkerEdges = {
-  readonly calls: readonly string[];
-  readonly reads: readonly string[];
-  readonly writes: readonly string[];
-  readonly parseError?: string;
-  readonly innerTypes?: readonly string[];
-  readonly callSites?: readonly {
-    readonly callee: string;
-    readonly callerMethod: string;
-  }[];
-};
+/**
+ * The worker's result IS the parser's `ApexAstEdges` (a type-only import: it
+ * is erased at build time, so the pool still never loads the ANTLR grammar).
+ * A local copy of this shape once dropped a new field without a compile error.
+ */
+export type ApexAstWorkerEdges = ApexAstEdges;
 
 type WorkerResponse = {
   readonly index: number;
@@ -42,6 +38,8 @@ export type ParseApexAstPoolOptions = {
   readonly workerPath?: string;
   /** Extra `workerData` merged with `knownClasses` (tests use this for delay probes). */
   readonly workerData?: Readonly<Record<string, unknown>>;
+  /** The vault's sObject api names — case-insensitive Apex type resolution (WOW-10). */
+  readonly knownObjects?: ReadonlySet<string>;
 };
 
 /** Worker count: one below available parallelism, floored at 1. */
@@ -128,6 +126,7 @@ export const parseApexAstInPool = async (
         workerData: {
           ...(options.workerData ?? {}),
           knownClasses: [...knownClasses],
+          knownObjects: [...(options.knownObjects ?? [])],
         },
       });
       workers.push(worker);

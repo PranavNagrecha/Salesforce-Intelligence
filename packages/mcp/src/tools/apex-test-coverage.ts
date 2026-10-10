@@ -1,9 +1,12 @@
 /**
  * Handler for the `sfi.apex_test_coverage` MCP tool.
  *
- * The developer-facing "is this tested?" tool. Maps `callsApex` references
- * FROM test classes (`properties.isTest === true`) TO the non-test ApexClasses
- * they exercise, answering two shapes of question:
+ * The developer-facing "is this tested?" tool. Maps test classes
+ * (`properties.isTest === true`) to the non-test ApexClasses they reach within
+ * 3 hops — calls, async dispatch, instantiation/static references, inheritance,
+ * and DML on an object whose trigger reaches the class (`via-trigger`,
+ * heuristic) — via the walk shared with test_coverage_gaps / tests_for_change.
+ * It answers two shapes of question:
  *
  *   - `classApiName` given → which test classes statically reference this
  *     class (its "covering" tests), and whether any exist.
@@ -28,7 +31,7 @@ import type {
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { getNodeById } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -36,6 +39,7 @@ import type { Context } from '../server.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { fullScanTruncationNote } from './scan-cap.js';
+import { type CoveringTestHit, findCoveringTests } from './test-coverage-reach.js';
 
 const DEFAULT_LIMIT = 100;
 const MAX_LIMIT = 500;
@@ -93,6 +97,15 @@ export interface ApexTestCoverageOutput {
   readonly target?: {
     readonly classApiName: string;
     readonly coveringTests: readonly ComponentId[];
+    /** Per covering test: hops, and how it reaches (`direct` | `transitive` | `via-trigger`). */
+    readonly coveringTestDetail: readonly {
+      readonly testId: ComponentId;
+      readonly depth: number;
+      readonly via: CoveringTestHit['via'];
+      readonly viaTrigger?: ComponentId;
+      /** `via-trigger` only: its own DML shows none of the trigger's events (weaker evidence). */
+      readonly eventMismatch?: true;
+    }[];
     readonly status: 'has-test-references' | 'no-test-references-found';
   };
   /** Present in org-wide mode: non-test classes with no incoming test reference (capped at `limit`). */
@@ -110,6 +123,12 @@ export interface ApexTestCoverageOutput {
     readonly nonTestClasses: number | null;
     readonly classesWithTestReferences: number;
     readonly classesWithoutTestReferences: number;
+    /**
+     * Org-wide only: of `classesWithTestReferences`, how many are reached ONLY
+     * through the heuristic trigger hop (`via-trigger`). Their coverage is
+     * inferred from a test's DML on the trigger's object, not from a reference.
+     */
+    readonly classesCoveredOnlyViaTrigger?: number;
     readonly truncated: boolean;
   };
   readonly boundaries: readonly string[];
@@ -136,6 +155,7 @@ export interface ApexTestCoverageOutput {
 const BOUNDARIES: readonly string[] = Object.freeze([
   'STATIC reference coverage, NOT runtime line-coverage %. A test referencing a class does not prove it exercises every line; the authoritative number comes from running the org Apex tests.',
   'Dynamic invocation (Type.forName, mocking frameworks, indirect dispatch) is invisible to the v1.x scanner, so a class shown as untested may still be covered at runtime — verify before assuming zero coverage.',
+  'Coverage is the shared 3-hop walk (calls, async dispatch, references, inheritance) plus a trigger hop: a test that writes an object whose trigger reaches the class counts as `via-trigger` (heuristic — a field write is strong evidence of DML, not proof). A test whose own source shows DML but no verb that fires the trigger\'s events (insert-only against an update trigger) is still credited, marked `eventMismatch` — code it calls (a service update, a workflow field update, an after-save flow) can fire the trigger.',
   'A test class is identified by `properties.isTest === true` (set by the extractor); managed-package and SeeAllData tests are out of scope.',
 ]);
 
@@ -193,28 +213,31 @@ const resolveRequestedClass = (
 
 const isTest = (n: Node): boolean => n.properties['isTest'] === true;
 
+/** Hop cap of the shared coverage walk — the same as test_coverage_gaps / tests_for_change. */
+const COVERAGE_DEPTH = 3;
+
 /**
- * Build a map from non-test ApexClass id → set of test-class ids that emit a
- * `callsApex` edge into it. One outgoing-edge query per test class.
+ * DEV-05 / ARCH-04. Map each non-test ApexClass → the test classes that reach
+ * it, via the ONE shared walk (`test-coverage-reach.ts`): call / async /
+ * reference / inheritance in-edges, tests as sinks, plus a test's DML on an
+ * object whose trigger reaches the class. It used to read `callsApex` out of
+ * each test only, so a Batch run by its own test, a constructor, a static
+ * reference, or a trigger handler exercised through DML read as untested.
  */
 const buildCoverage = async (
   ctx: Context,
-  tests: readonly Node[],
   nonTestIds: ReadonlySet<ComponentId>,
-): Promise<Result<Map<ComponentId, Set<ComponentId>>, string>> => {
-  const coverage = new Map<ComponentId, Set<ComponentId>>();
-  for (const test of tests) {
-    const r = await listEdges(ctx.graph, test.id, { direction: 'out', edgeType: 'callsApex' });
-    if (!r.ok) return err(r.error.message);
-    for (const edge of r.value) {
-      if (!nonTestIds.has(edge.toId)) continue;
-      let set = coverage.get(edge.toId);
-      if (set === undefined) {
-        set = new Set<ComponentId>();
-        coverage.set(edge.toId, set);
-      }
-      set.add(test.id);
-    }
+): Promise<Result<Map<ComponentId, ReadonlyMap<ComponentId, CoveringTestHit>>, string>> => {
+  const coverage = new Map<ComponentId, ReadonlyMap<ComponentId, CoveringTestHit>>();
+  const verbCache = new Map<ComponentId, ReadonlySet<string> | null>();
+  for (const id of nonTestIds) {
+    const r = await findCoveringTests(ctx.graph, id, {
+      maxDepth: COVERAGE_DEPTH,
+      vaultRoot: ctx.vaultRoot,
+      verbCache,
+    });
+    if (!r.ok) return r;
+    if (r.value.size > 0) coverage.set(id, r.value);
   }
   return ok(coverage);
 };
@@ -264,7 +287,7 @@ export const apexTestCoverageHandler = async (
   const nonTests = all.filter((n) => !isTest(n));
   const nonTestIds = new Set<ComponentId>(nonTests.map((n) => n.id));
 
-  const coverageResult = await buildCoverage(ctx, tests, nonTestIds);
+  const coverageResult = await buildCoverage(ctx, nonTestIds);
   if (!coverageResult.ok) {
     return err({ kind: 'internal', message: `graph query failed: ${coverageResult.error}` });
   }
@@ -272,6 +295,9 @@ export const apexTestCoverageHandler = async (
 
   const classesWithRefs = [...nonTestIds].filter((id) => (coverage.get(id)?.size ?? 0) > 0);
   const classesWithoutRefs = [...nonTestIds].filter((id) => (coverage.get(id)?.size ?? 0) === 0);
+  const triggerOnly = classesWithRefs.filter((id) =>
+    [...(coverage.get(id)?.values() ?? [])].every((h) => h.via === 'via-trigger'),
+  ).length;
 
   // The offset loop exhausts the ApexClass type (short of the
   // FULL_SCAN_MAX_NODES residual cap — see `scanIncomplete` below), so the SCAN
@@ -319,9 +345,17 @@ export const apexTestCoverageHandler = async (
   // (the ApexClass type walked to exhaustion); true only for a pathological
   // org past the residual cap, in which case the roster counts below are an
   // honest under-count rather than a silent one.
-  const boundaries = rosterResult.value.scanIncomplete
-    ? [...BOUNDARIES, fullScanTruncationNote(rosterResult.value.incompleteTypes)]
-    : BOUNDARIES;
+  const boundaries = [
+    ...BOUNDARIES,
+    ...(rosterResult.value.scanIncomplete
+      ? [fullScanTruncationNote(rosterResult.value.incompleteTypes)]
+      : []),
+    ...(triggerOnly > 0
+      ? [
+          `${triggerOnly} of the ${classesWithRefs.length} covered class(es) are credited ONLY through the heuristic trigger hop (summary.classesCoveredOnlyViaTrigger) — inferred from a test's DML on the trigger's object, not from a reference to the class. Confirm with a real test run before relying on them.`,
+        ]
+      : []),
+  ];
 
   return ok({
     data: {
@@ -333,6 +367,7 @@ export const apexTestCoverageHandler = async (
         nonTestClasses: nonTests.length,
         classesWithTestReferences: classesWithRefs.length,
         classesWithoutTestReferences: classesWithoutRefs.length,
+        classesCoveredOnlyViaTrigger: triggerOnly,
         truncated,
       },
       boundaries,
@@ -378,24 +413,25 @@ const singleClass = async (
     });
   }
 
-  const inbound = await listEdges(ctx.graph, targetId, { direction: 'in', edgeType: 'callsApex' });
-  if (!inbound.ok) {
-    return err({ kind: 'internal', message: `graph query failed: ${inbound.error.message}` });
+  // The shared coverage walk (test-coverage-reach.ts) — only TEST classes are
+  // ever returned, so a non-test caller can never be miscounted as coverage.
+  const walk = await findCoveringTests(ctx.graph, targetId, {
+    maxDepth: COVERAGE_DEPTH,
+    vaultRoot: ctx.vaultRoot,
+  });
+  if (!walk.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${walk.error}` });
   }
-
-  const covering = new Set<ComponentId>();
-  for (const edge of inbound.value) {
-    if (covering.has(edge.fromId)) continue;
-    const source = await getNodeById(ctx.graph, edge.fromId);
-    if (!source.ok) {
-      return err({ kind: 'internal', message: `graph query failed: ${source.error.message}` });
-    }
-    // Inbound `callsApex` includes regular (non-test) callers; only a test
-    // caller counts as a covering test, else a non-test class that calls the
-    // target would be miscounted as coverage (a false positive).
-    if (source.value !== null && isTest(source.value)) covering.add(edge.fromId);
-  }
-  const coveringTests = [...covering].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+  const coveringTestDetail = [...walk.value.values()]
+    .map((h) => ({
+      testId: h.testId,
+      depth: h.depth,
+      via: h.via,
+      ...(h.viaTrigger !== undefined ? { viaTrigger: h.viaTrigger } : {}),
+      ...(h.eventMismatch === true ? { eventMismatch: true as const } : {}),
+    }))
+    .sort((a, b) => (a.testId < b.testId ? -1 : a.testId > b.testId ? 1 : 0));
+  const coveringTests = coveringTestDetail.map((d) => d.testId);
 
   return ok({
     data: {
@@ -404,6 +440,7 @@ const singleClass = async (
       target: {
         classApiName: requestedClass,
         coveringTests,
+        coveringTestDetail,
         status: coveringTests.length > 0 ? 'has-test-references' : 'no-test-references-found',
       },
       summary: {

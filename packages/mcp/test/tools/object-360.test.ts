@@ -119,11 +119,13 @@ const seed: ExtractionResult = {
       // land as `false` exactly the way the extractor writes an ABSENT element.
       properties: {
         sharingModel: 'Private',
+        externalSharingModel: 'Read',
         enableHistory: true,
         enableReports: false,
         enableActivities: false,
       },
     }),
+    node({ id: 'CustomObject:Legacy_Widget__c', type: 'CustomObject', apiName: 'Legacy_Widget__c', properties: { sharingModel: 'Private' } }),
     node({ id: `${FLD}.Name__c`, type: 'CustomField', apiName: 'Name__c', parentId: OBJ }),
     node({
       id: `${FLD}.Amount__c`,
@@ -239,9 +241,11 @@ const wideSeed: ExtractionResult = (() => {
       edges.push(edge({ fromId: rid, toId: fieldId, edgeType: 'references', source: 'enterprise-metadata' }));
     }
   }
-  // 120 granters (60 Profiles + 60 PermissionSets): enough that `maxRowsPerSection:
-  // 100` cannot be honoured, which is the case the refusal note exists for.
-  for (let p = 0; p < 120; p += 1) {
+  // 160 granters (80 Profiles + 80 PermissionSets): enough that `maxRowsPerSection:
+  // 100` cannot be honoured, which is the case the refusal note exists for. (120
+  // sat within ~40 bytes of the fit boundary, so an unrelated wording change in
+  // any disclosure string flipped which ladder step fit.)
+  for (let p = 0; p < 160; p += 1) {
     const pid = `${p % 2 === 0 ? 'Profile' : 'PermissionSet'}:WideGrant_${String(p).padStart(3, '0')}`;
     nodes.push(node({ id: pid, type: p % 2 === 0 ? 'Profile' : 'PermissionSet', apiName: `WideGrant_${p}` }));
     edges.push(edge({ fromId: pid, toId: WIDE, edgeType: 'grantedBy', properties: { allowCreate: true, allowRead: true, allowEdit: true, allowDelete: false, viewAllRecords: false, modifyAllRecords: false } }));
@@ -444,15 +448,27 @@ describe('object360Handler — DEFECT 2: absent is null, never false', () => {
     expect((identity['enableHistory'] as Record<string, unknown>)['value']).toBe(true);
   });
 
-  it('never asserts externalSharingModel, which the extractor does not capture', async () => {
+  // FAIL-BEFORE/PASS-AFTER (WOW-8): object_360 hard-coded "externalSharingModel
+  // is never extracted" while the node carried it and who_can_access_object
+  // reported it. It now reads the node, and a null says WHICH reason applies.
+  it('reports the extracted externalSharingModel instead of claiming it is never captured', async () => {
     const data = await widget();
     const external = sectionOf(data, 'identity')['externalSharingModel'] as Record<string, unknown>;
-    expect(external['value']).toBeNull();
-    expect(String(external['unavailableReason'])).toContain('never captures it');
+    expect(external['value']).toBe('Read');
+    expect(external['unavailableReason']).toBeUndefined();
     // and the same object is reachable from the sharing section
     const owd = sectionOf(data, 'sharing')['orgWideDefault'] as Record<string, unknown>;
-    expect((owd['external'] as Record<string, unknown>)['value']).toBeNull();
+    expect((owd['external'] as Record<string, unknown>)['value']).toBe('Read');
     expect(owd['internal']).toBe('Private');
+    expect(JSON.stringify(data)).not.toContain('never extracted');
+  });
+
+  it('a node without the key is disclosed as an older vault, never as Public or Private', async () => {
+    const r = await object360Handler(ctx, { objectApiName: 'Legacy_Widget__c' });
+    if (!r.ok) throw new Error(r.error.message);
+    const external = sectionOf(r.value.data, 'identity')['externalSharingModel'] as Record<string, unknown>;
+    expect(external['value']).toBeNull();
+    expect(String(external['unavailableReason'])).toContain('re-run `sfi refresh`');
   });
 });
 

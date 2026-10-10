@@ -3,6 +3,7 @@
 import {
   countAssertions,
   detectCodeQualityIssues,
+  detectRecursionGuard,
   isKnownSalesforceIdLiteral,
   KNOWN_KEY_PREFIXES,
   type QualityIssue,
@@ -714,6 +715,109 @@ public without sharing class TaxCalc {
   });
 });
 
+describe('ARCH-07 — taint-aware soql-injection + entry-point sharing', () => {
+  const soql = (src: string) => run(src).filter((i) => i.rule === 'soql-injection');
+
+  it('FAIL-BEFORE/PASS-AFTER: a literal-only query (ternary of literals, joined literal set) is not flagged', () => {
+    const src = `public without sharing class Lookup {
+      // Shared lookup helper used by the registration flow.
+      private static List<SObject> find(Boolean isContact, String email) {
+        String objName = isContact ? 'Contact' : 'User';
+        String q = 'SELECT ' + String.join(new List<String>{ 'Id', 'Name' }, ',') + ' FROM ' + objName + ' WHERE Email = :email';
+        return Database.query(q);
+      }
+    }`;
+    expect(soql(src)).toEqual([]);
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a query built from custom metadata only is info, not critical', () => {
+    const src = `public class Copier {
+      public static void copy(Set<Id> relatedIds) {
+        for (Copy_Rule__mdt rule : Copy_Rule__mdt.getAll().values()) {
+          String q = 'SELECT ' + rule.Source_Field__c + ' FROM ' + rule.Source_Object__c + ' WHERE Id IN :relatedIds';
+          Database.query(q);
+        }
+      }
+    }`;
+    const issues = soql(src);
+    expect(issues).toHaveLength(1);
+    expect(issues[0]?.severity).toBe('info');
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: an untraced class member is high (review), a method parameter stays critical', () => {
+    const member = `public class Search {
+      private String filterClause;
+      public List<SObject> run() {
+        return Database.query('SELECT Id FROM Invoice__c WHERE ' + filterClause);
+      }
+    }`;
+    expect(soql(member).map((i) => i.severity)).toEqual(['high']);
+    const param = `public with sharing class Search {
+      @AuraEnabled
+      public static List<SObject> run(String filter) {
+        String where = ' WHERE ' + filter;
+        return Database.query('SELECT Id FROM Invoice__c' + where);
+      }
+    }`;
+    expect(soql(param).map((i) => i.severity)).toEqual(['critical']);
+  });
+
+  it('an Id-typed parameter cannot carry a quote and is not flagged; a page parameter is critical', () => {
+    const idParam = `public class Q {
+      public static List<SObject> byId(Id recId) {
+        return Database.query('SELECT Id FROM Project__c WHERE Id = \\'' + recId + '\\'');
+      }
+    }`;
+    expect(soql(idParam)).toEqual([]);
+    const page = `public class Ctl {
+      public List<SObject> load() {
+        String n = ApexPages.currentPage().getParameters().get('n');
+        return Database.query('SELECT Id FROM Project__c WHERE Name = \\'' + n + '\\'');
+      }
+    }`;
+    expect(soql(page).map((i) => i.severity)).toEqual(['critical']);
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: an entry-point class with no sharing keyword is flagged; declared or non-entry classes are not', () => {
+    const rest = `@RestResource(urlMapping='/invoice/*')
+global class InvoiceApi {
+  @HttpGet
+  global static String get() { return 'x'; }
+}`;
+    const restIssues = run(rest).filter((i) => i.rule === 'omitted-sharing-on-entry-point');
+    // `high`: the same severity model apex_structure's parsed check uses
+    // (omittedSharingVerdict) — a REST caller passes no sharing context.
+    expect(restIssues.map((i) => i.severity)).toEqual(['high']);
+    const aura = `public class InvoiceController {
+  @AuraEnabled public static String get() { return 'x'; }
+}`;
+    expect(run(aura).filter((i) => i.rule === 'omitted-sharing-on-entry-point').map((i) => i.severity)).toEqual(['low']);
+    const declared = `public with sharing class InvoiceController {
+  @AuraEnabled public static String get() { return 'x'; }
+}`;
+    expect(rulesOf(run(declared))).not.toContain('omitted-sharing-on-entry-point');
+    const plain = `public class InvoiceUtil { public static Integer add(Integer a) { return a; } }`;
+    expect(rulesOf(run(plain))).not.toContain('omitted-sharing-on-entry-point');
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a class doc comment or a trailing comment justifies without sharing', () => {
+    const doc = `/**
+ * Runs in system context: copies permission assignments
+ * across users, which the running user cannot see.
+ */
+@SuppressWarnings('PMD')
+public without sharing class PermissionCopier {
+  public static void copy() {}
+}`;
+    expect(rulesOf(run(doc))).not.toContain('without-sharing-no-comment');
+    const trailing = `public class Outer {
+  private without sharing class Elevated { // needs to read all invoices for totals
+  }
+}`;
+    expect(rulesOf(run(trailing))).not.toContain('without-sharing-no-comment');
+  });
+});
+
 describe('detectCodeQualityIssues — trigger-no-recursion-guard', () => {
   it('flags a trigger with no recognizable guard', () => {
     const src = `trigger AccountTrigger on Account (before update) {
@@ -735,6 +839,48 @@ describe('detectCodeQualityIssues — trigger-no-recursion-guard', () => {
       }
     }`;
     expect(rulesOf(run(src))).not.toContain('trigger-no-recursion-guard');
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER (DEV-08): a static flag held on a helper class is a guard', () => {
+    const src = `trigger InvoiceTrigger on Invoice__c (before update, after update) {
+      if (Trigger.isBefore && RecursionFlags.runBefore) {
+        RecursionFlags.runBefore = false;
+        InvoiceTriggerHelper.beforeUpdate(Trigger.new);
+      }
+      if (Trigger.isAfter && RecursionFlags.runAfter) {
+        RecursionFlags.runAfter = false;
+        InvoiceTriggerHelper.afterUpdate(Trigger.new);
+      }
+    }`;
+    expect(rulesOf(run(src))).not.toContain('trigger-no-recursion-guard');
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER (DEV-08): a static Set on a helper class is a guard', () => {
+    const src = `trigger InvoiceTrigger on Invoice__c (after update) {
+      for (Invoice__c i : Trigger.new) {
+        if (!RecursionFlags.seen.contains(i.Id)) { RecursionFlags.seen.add(i.Id); }
+      }
+    }`;
+    expect(rulesOf(run(src))).not.toContain('trigger-no-recursion-guard');
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER (DEV-08): a one-call delegating trigger (handler / managed framework) is not flagged', () => {
+    const dispatcher = `trigger InvoiceTrigger on Invoice__c (before insert, after update) {
+      TriggerDispatcher.run(new InvoiceTriggerHandler());
+    }`;
+    const managed = `trigger RollupTrigger on Invoice__c (after insert, after update, after delete) {
+      acme.RollupService.triggerHandler(Invoice__c.SObjectType);
+    }`;
+    expect(rulesOf(run(dispatcher))).not.toContain('trigger-no-recursion-guard');
+    expect(rulesOf(run(managed))).not.toContain('trigger-no-recursion-guard');
+  });
+
+  it('DEV-08: assigning a flag without checking it is still not a guard', () => {
+    const src = `trigger InvoiceTrigger on Invoice__c (after update) {
+      RecursionFlags.runAfter = false;
+      for (Invoice__c i : Trigger.new) { i.Name = 'x'; }
+    }`;
+    expect(rulesOf(run(src))).toContain('trigger-no-recursion-guard');
   });
 
   it('does not flag a non-trigger class', () => {
@@ -836,6 +982,32 @@ describe('detectCodeQualityIssues — fake-assertion', () => {
       }
     }`;
     expect(rulesOf(run(src, { isTest: true }))).not.toContain('fake-assertion');
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER (DEV-06): assert(true) in the catch of an expected-exception test is not fake', () => {
+    const src = `@isTest
+    public class T {
+      @isTest static void blankIdsThrow() {
+        try {
+          InvoiceController.load('', '');
+          System.assert(false, 'Blank ids should throw.');
+        } catch (AuraHandledException e) {
+          System.assert(true, 'AuraHandledException expected');
+        }
+      }
+    }`;
+    expect(rulesOf(run(src, { isTest: true }))).not.toContain('fake-assertion');
+  });
+
+  it('DEV-06: assert(true) outside any catch is still flagged, even after a catch block', () => {
+    const src = `@isTest
+    public class T {
+      @isTest static void t() {
+        try { InvoiceController.load('a', 'b'); } catch (Exception e) { System.assertEquals('x', e.getMessage()); }
+        System.assert(true);
+      }
+    }`;
+    expect(rulesOf(run(src, { isTest: true }))).toContain('fake-assertion');
   });
 
   it('does not flag fake assertions in a non-test class', () => {
@@ -1142,5 +1314,31 @@ describe('isKnownSalesforceIdLiteral', () => {
     expect(isKnownSalesforceIdLiteral('001Hs0000ABCDE')).toBe(false); // 14
     expect(isKnownSalesforceIdLiteral('001Hs0000ABCDEFA')).toBe(false); // 16
     expect(isKnownSalesforceIdLiteral('')).toBe(false);
+  });
+});
+
+describe('detectRecursionGuard (shared with the save-order re-entry report)', () => {
+  it('FAIL-BEFORE/PASS-AFTER: names the guard shape, including a toggled static Boolean with any name', () => {
+    expect(detectRecursionGuard('public class H { static Boolean hasRun = false; }')).toBe('static-flag');
+    expect(
+      detectRecursionGuard(
+        'public class H { private static Boolean doneOnce = false; void run() { if (doneOnce) { return; } doneOnce = true; } }',
+      ),
+    ).toBe('toggled-static-boolean');
+    expect(detectRecursionGuard('trigger T on Widget__c (after update) { if (GuardHolder.skip) return; GuardHolder.skip = true; }')).toBe(
+      'external-static',
+    );
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a toggled static Boolean tested in a different case is still a guard (Apex is case-insensitive)', () => {
+    expect(
+      detectRecursionGuard(
+        'public class H { private static Boolean doneOnce = false; void run() { if (DONEONCE) { return; } DoneOnce = true; } }',
+      ),
+    ).toBe('toggled-static-boolean');
+  });
+
+  it('returns null when no shape is visible — a declared-but-never-toggled static is not a guard', () => {
+    expect(detectRecursionGuard('public class H { static Boolean verbose = false; void run() { update rows; } }')).toBeNull();
   });
 });

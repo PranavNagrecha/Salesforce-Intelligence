@@ -53,6 +53,14 @@ export interface ApexAstEdges {
    */
   readonly innerTypes?: readonly string[];
   /**
+   * WOW-10: every declared variable name in this file (fields, properties,
+   * params, locals, for-each vars), LOWERCASED. The AST proves these
+   * receivers are variables, so the heuristic scanner's
+   * `CustomField:{variable}.{prop}` edges keyed on them are phantoms (the
+   * real typed edge, when resolvable, is emitted by this pass).
+   */
+  readonly variables?: readonly string[];
+  /**
    * CR-CAP-06: per-call-site CALLER-method attribution. Each entry pairs a
    * cross-class (or self) `callee` (`Class.method`, the same string as in
    * `calls`) with the NAME of the enclosing `MethodDeclaration` that contains
@@ -67,6 +75,13 @@ export interface ApexAstEdges {
     readonly callee: string;
     readonly callerMethod: string;
   }[];
+  /**
+   * The subset of `reads` found ONLY inside a `'SELECT ...'` string literal
+   * (e.g. a constant handed to `Database.query`). The compiler does not check
+   * a string, so Salesforce does not refuse a field delete over it — consumers
+   * must not treat these as compile-time references.
+   */
+  readonly literalQueryReads?: readonly string[];
 }
 
 export interface ApexAstOptions {
@@ -80,6 +95,13 @@ export interface ApexAstOptions {
    * fallback.
    */
   readonly kind?: 'class' | 'trigger';
+  /**
+   * The vault's sObject api names (CustomObject roster). Apex type names are
+   * case-INSENSITIVE (`case cc = obj;`, `account a`), so a declared type is
+   * canonicalised against this set before it is judged an sObject — without
+   * it a lowercase type is never resolved and the file's writes vanish.
+   */
+  readonly knownObjects?: ReadonlySet<string>;
 }
 
 const SYSTEM_TYPES = new Set([
@@ -90,6 +112,24 @@ const SYSTEM_TYPES = new Set([
   'HttpRequest', 'HttpResponse', 'QueueableContext', 'SchedulableContext',
   'Savepoint', 'System', 'Database', 'Type', 'Http', 'Trigger',
 ]);
+
+/**
+ * Element type of an indexable / `get`-able collection declaration:
+ * `List<X>` / `X[]` (index or `.get(i)`) → `X`; `Map<K, V>` (`.get(k)`) → `V`.
+ * Single-level generics only — a nested `List<List<X>>` yields `List<X>`,
+ * which then fails the sObject test honestly (no invented field edge).
+ */
+const elementTypeOf = (t: string | null): string | null => {
+  if (t === null) return null;
+  const compact = t.replace(/\s+/g, '');
+  const arr = /^(.+)\[\]$/.exec(compact);
+  if (arr !== null) return arr[1] ?? null;
+  const list = /^(?:List|Set)<(.+)>$/i.exec(compact);
+  if (list !== null) return list[1] ?? null;
+  const map = /^Map<[^,<>]+,(.+)>$/i.exec(compact);
+  if (map !== null) return map[1] ?? null;
+  return null;
+};
 
 const SYSTEM_CALL_ALLOW: Readonly<Record<string, ReadonlySet<string> | '*'>> = {
   Database: '*',
@@ -151,6 +191,9 @@ export const extractApexAstEdges = (
   options: ApexAstOptions = {},
 ): ApexAstEdges => {
   const known = options.knownClasses ?? new Set<string>();
+  /** lowercase api name → canonical, for case-insensitive type resolution. */
+  const objectCase = new Map<string, string>();
+  for (const o of options.knownObjects ?? []) objectCase.set(o.toLowerCase(), o);
   const listener = new Collecting();
   let tree: Ctx;
   try {
@@ -194,6 +237,17 @@ export const extractApexAstEdges = (
     if (idx === 0 && ext >= 0) extendsType = (kidList[ext + 1]?.getText() as string) ?? null;
   });
 
+  /**
+   * WOW-10: Apex type names are case-insensitive. Canonicalise a declared type
+   * (and each generic argument) against the vault's object roster, so
+   * `case cc` / `List<account>` resolve to `Case` / `List<Account>` instead
+   * of being rejected as non-sObjects. Unknown tokens pass through verbatim.
+   */
+  const canonicalType = (t: string): string =>
+    objectCase.size === 0
+      ? t
+      : t.replace(/[A-Za-z_][A-Za-z0-9_]*/g, (tok) => objectCase.get(tok.toLowerCase()) ?? tok);
+
   const scopeFor = (node: Ctx): Map<string, string> => {
     const md = ancestorWhere(node, (c) => ctxName(c) === 'MethodDeclaration');
     if (md === null) return orphanLocals;
@@ -210,7 +264,7 @@ export const extractApexAstEdges = (
     scope: Map<string, string>,
   ): void => {
     if (typeText === undefined || varName === undefined || typeText.length === 0) return;
-    scope.set(varName.toLowerCase(), typeText.trim());
+    scope.set(varName.toLowerCase(), canonicalType(typeText.trim()));
   };
 
   for (const md of findAll(tree, 'MethodDeclaration')) {
@@ -219,7 +273,7 @@ export const extractApexAstEdges = (
     ownMethods.add(id.toLowerCase());
     const ret = kids(md).find((k) => ctxName(k) === 'TypeRef')?.getText() as string | undefined;
     if (ret !== undefined && ret.length > 0) {
-      methodReturnTypes.set(id.toLowerCase(), ret.trim());
+      methodReturnTypes.set(id.toLowerCase(), canonicalType(ret.trim()));
     }
   }
   for (const fd of findAll(tree, 'FieldDeclaration')) {
@@ -336,7 +390,8 @@ export const extractApexAstEdges = (
     return txt === undefined || txt.length === 0 ? undefined : txt;
   };
 
-  const soqlFrom = (queryCtx: Ctx): void => {
+  const literalReads = new Set<string>();
+  const soqlFrom = (queryCtx: Ctx, into: Set<string> = reads): void => {
     const SCOPE = new Set(['Query', 'SubQuery']);
     for (const fn of findAll(queryCtx, 'FieldName')) {
       // A FROM identifier (this field is itself inside a FromNameList) names an
@@ -364,7 +419,7 @@ export const extractApexAstEdges = (
       }
       const obj = FROM_OBJ(scope);
       if (obj === undefined) continue;
-      reads.add(`${obj}.${fn.getText()}`);
+      into.add(`${obj}.${fn.getText()}`);
     }
   };
   for (const q of findAll(tree, 'Query')) soqlFrom(q);
@@ -377,7 +432,7 @@ export const extractApexAstEdges = (
         const c = new Collecting();
         qp.addErrorListener(c);
         const qt = qp.query();
-        if (c.errors.length === 0) soqlFrom(qt);
+        if (c.errors.length === 0) soqlFrom(qt, literalReads);
       } catch {
         // not a parseable constant query — runtime-dynamic; scanner territory
       }
@@ -413,7 +468,14 @@ export const extractApexAstEdges = (
   const resolveRootType = (seg: DotSeg): string | null => {
     const rootLower = seg.root.toLowerCase();
     if (/^new\s*/i.test(seg.root) || ctxName(seg.rootNode) === 'NewExpression') {
-      return seg.root.replace(/^new\s*/i, '').replace(/\(.*\)$/, '').replace(/[<>].*$/, '');
+      return canonicalType(seg.root.replace(/^new\s*/i, '').replace(/\(.*\)$/, '').replace(/[<>].*$/, ''));
+    }
+    // DEV-04: `records[i].Field` — an indexed receiver resolves to the element
+    // type of the indexed collection (`List<X>` / `X[]` / `Map<K, X>`).
+    if (ctxName(seg.rootNode) === 'ArrayExpression') {
+      const base = kids(seg.rootNode)[0];
+      if (base === undefined || ctxName(base) !== 'PrimaryExpression') return null;
+      return elementTypeOf(resolveVarType(base.getText() as string, base));
     }
     if (rootLower === 'this') return className;
     if (rootLower === 'super') return extendsType;
@@ -456,6 +518,9 @@ export const extractApexAstEdges = (
       } else if (allowSystemCall(type, method)) {
         if (record) recordCall(`${type}.${method}`, at);
         type = null;
+      } else if (method.toLowerCase() === 'get' && elementTypeOf(type) !== null) {
+        // DEV-04: `rows.get(i).Field` / `byId.get(id).Field` — the element type.
+        type = elementTypeOf(type);
       } else {
         type = null;
       }
@@ -568,11 +633,21 @@ export const extractApexAstEdges = (
     if (id !== undefined && ownMethods.has(id.toLowerCase())) recordCall(`${className}.${id}`, mc);
   }
 
+  const literalOnly = [...literalReads].filter((r) => !reads.has(r));
+  for (const r of literalOnly) reads.add(r);
   return {
     calls: [...calls].sort(),
     reads: [...reads].sort(),
+    ...(literalOnly.length > 0 ? { literalQueryReads: literalOnly.sort() } : {}),
     writes: [...writes].sort(),
     innerTypes: [...innerClasses.keys()].sort(),
+    variables: [
+      ...new Set([
+        ...fieldTypes.keys(),
+        ...orphanLocals.keys(),
+        ...[...methodLocals.values()].flatMap((m) => [...m.keys()]),
+      ]),
+    ].sort(),
     callSites: [...callSites].sort((a, b) =>
       a.callee < b.callee
         ? -1

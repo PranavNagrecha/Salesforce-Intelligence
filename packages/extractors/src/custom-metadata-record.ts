@@ -10,6 +10,7 @@ import type {
 import { err, ok } from '@sf-intelligence/core';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
+import { buildDlrsRollupEdges, isDlrsRollupType } from './dlrs-rollup.js';
 import { deriveDotSplitObjectAndApiName } from './path-utils.js';
 
 const CMD_FILE_SUFFIX = '.md-meta.xml';
@@ -518,6 +519,9 @@ export const extractCustomMetadataRecord = async (
   // become `references` edges (heuristic) so a mapping/field-copy CMDT shows up
   // in CustomObject / CustomField usages and blast-radius.
   const valueRefEdges = extractValueRefEdges(values, nodeId);
+  // DLRS-ROLLUPS-UNMODELED: a DLRS rollup definition is a writer of its
+  // target field and a reader of the child fields it aggregates.
+  const dlrsEdges = isDlrsRollupType(typeApiName) ? buildDlrsRollupEdges(nodeId, values) : [];
 
-  return ok({ nodes: [node], edges: [parentEdge, ...valueRefEdges] });
+  return ok({ nodes: [node], edges: [parentEdge, ...valueRefEdges, ...dlrsEdges] });
 };

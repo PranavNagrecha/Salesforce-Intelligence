@@ -1,0 +1,13 @@
+---
+/**
+ * CmdText — a one-line shell command, rendered so it wraps only BETWEEN
+ * arguments. Each argument is a nowrap span, so "sf-intelligence" never splits
+ * at its hyphen. The text content is unchanged (copy reads the same string).
+ */
+interface Props {
+  cmd: string;
+}
+const { cmd } = Astro.props;
+const parts = cmd.split(" ");
+---
+{parts.map((p, i) => (<>{i > 0 && " "}<span class="cmd-tok">{p}</span></>))}

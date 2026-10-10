@@ -70,6 +70,8 @@ export const oneLiner = (description: string): string => {
 
 export const listAnalysesInputSchema = z.object({
   category: z.string().optional(),
+  /** Keep only analyses whose name or one-liner contains EVERY word (case-insensitive). */
+  query: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIST_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
   // CR-22 continuation cursor: opaque token from a prior truncated page's
@@ -108,6 +110,8 @@ export interface ListAnalysesOutput {
    * unfiltered call, keeping that response byte-identical to its prior shape.
    */
   readonly appliedCategory?: string;
+  /** The `query` filter that was applied (present only on a query-filtered call). */
+  readonly appliedQuery?: string;
 }
 
 /**
@@ -148,6 +152,7 @@ const loadRoster = async (): Promise<
   ReadonlyArray<{
     readonly name: string;
     readonly description: string;
+    readonly reference?: string;
     readonly inputSchema: unknown;
     readonly hidden?: boolean;
   }>
@@ -181,8 +186,21 @@ export const listAnalysesHandler = async (
     if (!resolved.ok) return err(resolved.error);
     appliedCategory = resolved.value;
   }
-  const filtered =
+  const byCategory =
     appliedCategory === undefined ? all : all.filter((a) => a.category === appliedCategory);
+  // E: a `query` filter — every word must appear in the name or one-liner.
+  const appliedQuery = input.query?.trim();
+  const queryWords = (appliedQuery ?? '')
+    .toLowerCase()
+    .split(/[\s_.]+/)
+    .filter((w) => w.length > 0);
+  const filtered =
+    queryWords.length === 0
+      ? byCategory
+      : byCategory.filter((a) => {
+          const hay = `${a.name.replace(/_/g, ' ')} ${a.oneLiner}`.toLowerCase();
+          return queryWords.every((w) => hay.includes(w));
+        });
 
   // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
   // a stale/forged cursor (changed `category`, different tool, or refreshed
@@ -194,6 +212,7 @@ export const listAnalysesHandler = async (
   // (`core` page 1, `CORE` page 2) is the same filter, not a forged one.
   const fingerprint = argsFingerprint({
     ...(appliedCategory !== undefined ? { category: appliedCategory } : {}),
+    ...(queryWords.length > 0 ? { query: queryWords.join(' ') } : {}),
   });
   let offset = input.offset ?? 0;
   if (input.cursor !== undefined) {
@@ -231,6 +250,7 @@ export const listAnalysesHandler = async (
       offset,
       categories,
       ...(appliedCategory !== undefined ? { appliedCategory } : {}),
+      ...(queryWords.length > 0 && appliedQuery !== undefined ? { appliedQuery } : {}),
       next: 'Call sfi.describe_analysis { name } for one tool’s full input schema, then sfi.run_analysis { name, args } to execute it — identical output to calling the tool directly.',
       ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
     },
@@ -247,7 +267,8 @@ export const describeAnalysisInputSchema = z.object({
    * AUDIT-F6 progressive discovery:
    *   - `summary` — name, category, one-liner, required arg keys (default under core)
    *   - `schema`  — summary + full inputSchema
-   *   - `full`    — today's payload (description + inputSchema)
+   *   - `full`    — description + long-form `reference` (when the tool has
+   *                 one) + inputSchema
    * When omitted: `summary` under core profile, `full` under full profile.
    */
   detail: z.enum(['summary', 'schema', 'full']).optional(),
@@ -261,9 +282,43 @@ export interface DescribeAnalysisOutput {
   readonly detail: 'summary' | 'schema' | 'full';
   readonly summary: string;
   readonly required?: readonly string[];
+  /**
+   * Compact arg signature (A07 / ROUTE-01): one line per arg —
+   * `name: type` (`?` when optional) plus a short hint — so the default
+   * summary is enough to make a correct first call.
+   */
+  readonly args?: readonly string[];
   readonly description?: string;
+  /**
+   * `detail:'full'` only: the tool's long-form reference text (output fields,
+   * caveats, edge cases) for a tool whose advertised description is the short
+   * contract. Absent when the description is already the whole text.
+   */
+  readonly reference?: string;
   readonly inputSchema?: unknown;
 }
+
+const ARG_HINT_MAX = 90;
+
+/** One compact line per declared arg, from the tool's JSON input schema. */
+export const argSignature = (schema: unknown): readonly string[] => {
+  if (typeof schema !== 'object' || schema === null) return [];
+  const props = (schema as { properties?: Record<string, Record<string, unknown>> }).properties;
+  if (props === undefined) return [];
+  const required = new Set(requiredKeys(schema));
+  return Object.entries(props).map(([key, def]) => {
+    const enumVals = Array.isArray(def['enum']) ? (def['enum'] as unknown[]) : null;
+    const type =
+      enumVals !== null
+        ? enumVals.map((v) => JSON.stringify(v)).join('|')
+        : def['type'] === 'array'
+          ? `${String((def['items'] as { type?: unknown } | undefined)?.type ?? 'any')}[]`
+          : String(def['type'] ?? 'any');
+    const desc = typeof def['description'] === 'string' ? (def['description'] as string) : '';
+    const hint = desc.length > ARG_HINT_MAX ? `${desc.slice(0, ARG_HINT_MAX - 1)}…` : desc;
+    return `${key}${required.has(key) ? '' : '?'}: ${type}${hint.length > 0 ? ` — ${hint}` : ''}`;
+  });
+};
 
 const requiredKeys = (schema: unknown): readonly string[] => {
   if (
@@ -294,12 +349,14 @@ export const describeAnalysisHandler = async (
     input.detail ?? (toolProfile() === 'core' ? 'summary' : 'full');
   const summary = oneLiner(tool.description);
   const required = requiredKeys(tool.inputSchema);
+  const args = argSignature(tool.inputSchema);
   const base = {
     name: tool.name,
     category: analysisCategory(tool.name),
     detail,
     summary,
     ...(required.length > 0 ? { required } : {}),
+    ...(detail === 'summary' && args.length > 0 ? { args } : {}),
   };
   const data: DescribeAnalysisOutput =
     detail === 'summary'
@@ -309,6 +366,7 @@ export const describeAnalysisHandler = async (
         : {
             ...base,
             description: tool.description,
+            ...(tool.reference !== undefined ? { reference: tool.reference } : {}),
             inputSchema: tool.inputSchema,
           };
   return ok({

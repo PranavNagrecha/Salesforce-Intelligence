@@ -34,7 +34,7 @@ const SF_API_VERSION = '62.0';
  * `packages/mcp/test/tools/export-manifest.test.ts` parses the alias literal
  * out of BOTH files and fails when this table stops covering that one.
  */
-const METADATA_API_NAME: Readonly<Record<string, string>> = Object.freeze({
+export const METADATA_API_NAME: Readonly<Record<string, string>> = Object.freeze({
   VisualforcePage: 'ApexPage',
   VisualforceComponent: 'ApexComponent',
   SharingRule: 'SharingRules',
@@ -68,14 +68,14 @@ const METADATA_API_NAME: Readonly<Record<string, string>> = Object.freeze({
  * nodes). Passing both singleton ids therefore yields ONE member, not two —
  * they are the same deployable file.
  */
-const SETTINGS_MEMBER_NAME: Readonly<Record<string, string>> = Object.freeze({
+export const SETTINGS_MEMBER_NAME: Readonly<Record<string, string>> = Object.freeze({
   SecuritySettings: 'Security',
   SessionSettings: 'Security',
   FieldServiceSettings: 'FieldService',
 });
 
 /** Synthetic graph node types that are not deployable metadata — skipped. */
-const NON_DEPLOYABLE_TYPES: ReadonlySet<string> = new Set([
+export const NON_DEPLOYABLE_TYPES: ReadonlySet<string> = new Set([
   'ConditionalContext',
   'ReferenceStub',
 ]);

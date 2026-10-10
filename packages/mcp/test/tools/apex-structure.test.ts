@@ -165,6 +165,23 @@ const EXPOSED_SERVICE_SRC = `public without sharing class ExposedService {
 }
 `;
 
+/** A parseable REST resource with NO sharing keyword (service surface). */
+const OPEN_REST_SRC = `@RestResource(urlMapping='/orders/*')
+global class OpenRestService {
+    @HttpGet
+    global static String fetch() { return 'x'; }
+}
+`;
+
+/** A Visualforce remoting controller with no sharing keyword (service surface). */
+const REMOTE_CTL_SRC = `public class RemoteCtl {
+    @RemoteAction
+    public static List<Widget__c> find(String q) {
+        return [SELECT Id FROM Widget__c WHERE Name = :q];
+    }
+}
+`;
+
 /** Unparseable AND annotated `@RestResource` — the security-shaped parse failure. */
 const BROKEN_REST_SRC = `@RestResource(urlMapping='/widgets/*')
 public without sharing class BrokenRestService { public void go( { }
@@ -255,6 +272,15 @@ const seed: ExtractionResult = {
         sourceBytes: 900,
         modifiers: ['public'],
         qualityIssues: [
+          // The extraction-time regex twin of the parsed sharing check — a
+          // real refresh stores it beside the AST rule's subject.
+          {
+            rule: 'omitted-sharing-on-entry-point',
+            severity: 'low',
+            location: 'line 1',
+            explanation: "Lightning controller 'WidgetService' declares no sharing keyword.",
+            confidence: 'heuristic',
+          },
           {
             rule: 'dynamic-apex',
             severity: 'info',
@@ -290,6 +316,39 @@ const seed: ExtractionResult = {
         isTest: false,
         modifiers: ['public', 'without sharing'],
         qualityIssues: [],
+      },
+    }),
+    makeNode({
+      id: 'ApexClass:OpenRestService',
+      apiName: 'OpenRestService',
+      sourcePath: 'source/classes/OpenRestService.cls',
+      properties: {
+        ...CLASSIFIERS,
+        status: 'Active',
+        isTest: false,
+        modifiers: ['global'],
+        qualityIssues: [],
+      },
+    }),
+    makeNode({
+      id: 'ApexClass:RemoteCtl',
+      apiName: 'RemoteCtl',
+      sourcePath: 'source/classes/RemoteCtl.cls',
+      properties: {
+        ...CLASSIFIERS,
+        status: 'Active',
+        isTest: false,
+        modifiers: ['public'],
+        // What code_quality_audit's recognizer stores for this class.
+        qualityIssues: [
+          {
+            rule: 'omitted-sharing-on-entry-point',
+            severity: 'high',
+            location: 'line 1',
+            explanation: "Service entry point 'RemoteCtl' declares no sharing keyword.",
+            confidence: 'heuristic',
+          },
+        ],
       },
     }),
     makeNode({
@@ -517,6 +576,8 @@ beforeAll(async () => {
   write('source/classes/WidgetService.cls', WIDGET_SERVICE_SRC);
   write('source/classes/CleanService.cls', CLEAN_SERVICE_SRC);
   write('source/classes/ExposedService.cls', EXPOSED_SERVICE_SRC);
+  write('source/classes/OpenRestService.cls', OPEN_REST_SRC);
+  write('source/classes/RemoteCtl.cls', REMOTE_CTL_SRC);
   write('source/classes/BrokenService.cls', BROKEN_SRC);
   write('source/classes/BrokenRestService.cls', BROKEN_REST_SRC);
   write('source/classes/BulkService.cls', BULK_SERVICE_SRC);
@@ -680,10 +741,46 @@ describe('apexStructureHandler — the eight AST-only checks', () => {
     expect(found).toContain('soql-assigned-to-single-sobject');
   });
 
-  it('fires no-sharing-declared-on-entry-point when an entry point declares none', async () => {
+  it('fires omitted-sharing-on-entry-point when an entry point declares none', async () => {
     const found = rules(await run({ classRef: 'WidgetService' }));
-    expect(found).toContain('no-sharing-declared-on-entry-point');
+    expect(found).toContain('omitted-sharing-on-entry-point');
     expect(found).not.toContain('without-sharing-external-entry-point');
+  });
+
+  // FAIL-BEFORE/PASS-AFTER (ARCH-07 cross-tool contradiction): the parsed
+  // check and code_quality_audit's regex recognizer used two rule ids and
+  // two severity models, so one apex_structure response said BOTH "high:
+  // sharing NOT enforced" and "low: Lightning applies with sharing by default"
+  // for the same Lightning controller.
+  it('a Lightning-only controller gets ONE sharing finding, low, from the shared severity model', async () => {
+    const d = await run({ classRef: 'WidgetService' });
+    const sharing = d.review.findings.items.filter((f) =>
+      /sharing-(?:declared|on-entry-point)/.test(f.rule),
+    );
+    expect(sharing).toHaveLength(1);
+    expect(sharing[0]?.rule).toBe('omitted-sharing-on-entry-point');
+    expect(sharing[0]?.severity).toBe('low');
+    expect(sharing[0]?.confidence).toBe('declared');
+    expect(sharing[0]?.explanation).not.toMatch(/NOT enforced/);
+  });
+
+  it('a REST entry point with no keyword is high: the platform caller passes no sharing', async () => {
+    const d = await run({ classRef: 'OpenRestService' });
+    const f = d.review.findings.items.find((x) => x.rule === 'omitted-sharing-on-entry-point');
+    expect(f?.severity).toBe('high');
+    expect(f?.explanation).toMatch(/NOT enforced/);
+  });
+
+  // FAIL-BEFORE/PASS-AFTER (second review): apex_structure dropped the
+  // catalog's omitted-sharing finding whenever the parse ran, but the parsed
+  // check had no @RemoteAction kind — so a Visualforce remoting controller
+  // lost the finding entirely (code_quality_audit: high; apex_structure: none).
+  it('a @RemoteAction controller with no keyword keeps ONE high omitted-sharing finding', async () => {
+    const d = await run({ classRef: 'RemoteCtl' });
+    const sharing = d.review.findings.items.filter((x) => x.rule === 'omitted-sharing-on-entry-point');
+    expect(sharing).toHaveLength(1);
+    expect(sharing[0]?.severity).toBe('high');
+    expect(d.entryPoints.declared.items.map((e) => e.kind)).toContain('remote-action');
   });
 
   it('fires without-sharing-external-entry-point on a `without sharing` Aura class', async () => {

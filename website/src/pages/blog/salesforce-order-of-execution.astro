@@ -2,9 +2,9 @@
 import DocPage from "../../layouts/DocPage.astro";
 import site from "../../data/site.ts";
 
-const title = "Salesforce Order of Execution Explained: What Runs When You Save a Record";
+const title = "Salesforce Order of Execution: What Runs on Save";
 const description =
-  "Salesforce order of execution in plain English: the save-order sequence, where flows, validation rules, triggers and workflow fire, and the bugs it causes - offline.";
+  "Salesforce order of execution in plain English: the save-order sequence, where flows, validation rules, triggers and workflow fire, and the bugs it causes.";
 
 const faqs = [
   {
@@ -61,7 +61,7 @@ const jsonld = [
   heading="Salesforce order of execution, explained"
   intro={`When you save a record, Salesforce runs a fixed sequence of steps - and that order decides whether your automation works or fights itself. Here is the full save order in plain English, where <strong>flows vs triggers vs workflow</strong> fire, the classic bugs the order causes, and how to see your own org's real automation order and collisions.`}
   crumbs={[{ label: "blog", href: "/blog" }, { label: "salesforce-order-of-execution", href: "/blog/salesforce-order-of-execution" }]}
-  breadcrumbs={[{ name: "Blog", path: "/blog" }, { name: "Salesforce order of execution", path: "/blog/salesforce-order-of-execution" }]}
+  breadcrumbs={[{ name: "Guides", path: "/blog" }, { name: "Salesforce order of execution", path: "/blog/salesforce-order-of-execution" }]}
   jsonld={jsonld}
   ogType="article"
   datePublished="2026-07-21"

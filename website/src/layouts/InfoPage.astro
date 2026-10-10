@@ -1,0 +1,50 @@
+---
+/**
+ * InfoPage — a plain content page (trust, FAQ, licensing, docs pages, hubs):
+ * a hero with breadcrumbs, heading and lede, then the page body inside one
+ * .wrap. Sections in the slot use the patterns in pages.css (section.block,
+ * .panel, .split, .defs, .prose, …).
+ */
+import Base from "./Base.astro";
+import type { Breadcrumb } from "../components/SeoHead.astro";
+import "../styles/pages.css";
+
+interface Props {
+  title: string;
+  description: string;
+  path: string;
+  heading: string;
+  /** Intro paragraph (HTML allowed). */
+  lede?: string;
+  /** Trail after Home; the last item is this page. */
+  crumbs: Breadcrumb[];
+  /** Small line under the lede, e.g. "For developers". */
+  meta?: string;
+  jsonld?: Record<string, unknown>[];
+  dateModified?: string;
+}
+
+const { title, description, path, heading, lede, crumbs, meta, jsonld, dateModified } = Astro.props;
+---
+
+<Base title={title} description={description} path={path} breadcrumbs={crumbs} jsonld={jsonld} dateModified={dateModified}>
+  <section class="page-hero">
+    <div class="wrap">
+      <nav class="crumbs" aria-label="Breadcrumb">
+        <a href="/">Home</a>
+        {crumbs.map((c) => (
+          <><span class="sep" aria-hidden="true">/</span><a href={c.path}>{c.name}</a></>
+        ))}
+      </nav>
+      <h1>{heading}</h1>
+      {lede && <p class="lede" set:html={lede} />}
+      {meta && <p class="page-meta">{meta}</p>}
+    </div>
+  </section>
+
+  <div class="page-body">
+    <div class="wrap">
+      <slot />
+    </div>
+  </div>
+</Base>

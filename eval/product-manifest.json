@@ -1,6 +1,6 @@
 {
   "schemaVersion": "1.0",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "protocolVersion": "mcp",
   "tools": {
     "total": 231,
@@ -482,6 +482,6 @@
   "skillCount": 26,
   "slashCommandCount": 5,
   "agentCount": 4,
-  "catalogHash": "sha256:b10a69f861c1474751f043eff8fb701645e47c0ad7f322a50e7ac069c2863da9",
-  "identityHash": "sha256:a4a8b89c6532524c3b854210d70d67eb701f379486ba1f22d3aa8d68bd000274"
+  "catalogHash": "sha256:7ea8fe2e76a5bfd445a21fe393fffcca54f974ed2e830b98c0dca2a4f9752934",
+  "identityHash": "sha256:3177c589b381302280204c6337bf4eaeeb1069be08c6e566fbdb1a1d7d73a211"
 }

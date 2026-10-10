@@ -85,6 +85,7 @@ import type {
   ApexTypeStructure,
 } from '@sf-intelligence/parsers';
 import { parseApexStructure } from '@sf-intelligence/parsers';
+import { OMITTED_SHARING_RULE, omittedSharingVerdict } from '@sf-intelligence/patterns';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -311,6 +312,7 @@ export interface ApexDataAccess {
 export interface ApexDeclaredEntryPoint {
   readonly kind:
     | 'aura-enabled'
+    | 'remote-action'
     | 'invocable'
     | 'rest-resource'
     | 'webservice'
@@ -771,7 +773,7 @@ const AST_RULES = [
   'dml-before-callout',
   'database-partial-result-discarded',
   'soql-assigned-to-single-sobject',
-  'no-sharing-declared-on-entry-point',
+  'omitted-sharing-on-entry-point',
   'without-sharing-external-entry-point',
   'trigger-logic-in-trigger-body',
 ] as const;
@@ -916,15 +918,17 @@ const runAstChecks = (
         ),
       );
     } else if (structure.sharing === null) {
+      // ONE severity model with code_quality_audit's recognizer (same rule id):
+      // a Lightning-only controller runs with sharing from a component; any
+      // service surface (REST / SOAP / invocable) does not.
+      const lightningOnly = opts.externalEntryKinds.every((k) => k === 'aura-enabled');
+      const verdict = omittedSharingVerdict(
+        lightningOnly ? 'lightning' : 'service',
+        structure.name,
+        surfaces,
+      );
       findings.push(
-        finding(
-          'no-sharing-declared-on-entry-point',
-          'high',
-          'declared',
-          null,
-          null,
-          `No sharing keyword is declared on a class invoked directly by an external caller (${surfaces}). A no-keyword class INHERITS its caller's context — but the platform is the caller here, and it has no sharing context to inherit, so record sharing ends up NOT enforced. Declare \`with sharing\` to enforce it explicitly.`,
-        ),
+        finding(OMITTED_SHARING_RULE, verdict.severity, 'declared', null, null, verdict.explanation),
       );
     }
   }
@@ -1217,6 +1221,11 @@ const EXTERNAL_ANNOTATION_KINDS: readonly {
     detail: 'callable from an LWC / Aura component by any user who can load it',
   },
   {
+    test: /^@remoteaction\b/i,
+    kind: 'remote-action',
+    detail: 'callable from a Visualforce page through JavaScript remoting',
+  },
+  {
     test: /^@invocablemethod\b/i,
     kind: 'invocable',
     detail: 'callable from Flow / Process Builder as an Apex action',
@@ -1325,6 +1334,7 @@ const buildDeclaredEntryPoints = (
 /** Entry-point kinds that mean an EXTERNAL caller reaches the code directly. */
 const EXTERNAL_KINDS: ReadonlySet<ApexDeclaredEntryPoint['kind']> = new Set([
   'aura-enabled',
+  'remote-action',
   'invocable',
   'rest-resource',
   'webservice',
@@ -1934,8 +1944,6 @@ export const apexStructureHandler = async (
   const touches = buildTouches(outgoingEdges, outgoingResult.ok, receiverKind);
 
   // ---- review --------------------------------------------------------------
-  const catalogFindings = mirrorCatalogFindings(node);
-  const catalogAvailable = Array.isArray(node.properties['qualityIssues']);
   const astFindings =
     structure === null
       ? []
@@ -1943,6 +1951,15 @@ export const apexStructureHandler = async (
           externalEntryKinds,
           isTest: node.properties['isTest'] === true,
         });
+  // The parsed sharing check supersedes the catalog's regex twin (same rule id,
+  // same severity model) — but ONLY when it actually emitted the rule. An entry
+  // surface the parsed check does not model must never erase the catalog's
+  // finding (mirroring both would report one fact twice; dropping both, none).
+  const parsedEmittedSharing = astFindings.some((f) => f.rule === OMITTED_SHARING_RULE);
+  const catalogFindings = mirrorCatalogFindings(node).filter(
+    (f) => !parsedEmittedSharing || f.rule !== OMITTED_SHARING_RULE,
+  );
+  const catalogAvailable = Array.isArray(node.properties['qualityIssues']);
   const allFindings = [...catalogFindings, ...astFindings].sort(
     (a, b) =>
       SEVERITY_ORDER[a.severity] - SEVERITY_ORDER[b.severity] ||

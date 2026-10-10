@@ -65,6 +65,11 @@ import {
   appAccessInputSchema,
 } from './app-access.js';
 import {
+  expectedArgsHint,
+  normalizeToolArgs,
+  type NormalizedToolArgs,
+} from './arg-normalizer.js';
+import {
   asyncChainDepthHandler,
   asyncChainDepthInputSchema,
 } from './async-chain-depth.js';
@@ -761,6 +766,7 @@ import {
   valueChangeAuditHandler,
   valueChangeAuditInputSchema,
 } from './value-change-audit.js';
+import { applyVaultFreshness } from './vault-freshness.js';
 import {
   whatChangedSinceRefreshHandler,
   whatChangedSinceRefreshInputSchema,
@@ -1923,10 +1929,8 @@ export const dispatchTool = async (
         fieldProvenanceHandler,
       );
     // RM-wire — deterministic reasoning-engine surface (offline, cited).
-    // INTERPRET-OVERSIZE-KNOBLESS-REMEDY: `concepts` / `ruleIds` are this
-    // tool's ONLY narrowing params (no limit/offset/hops — its schema does
-    // not match the shared knob regex), so an oversize error must name THEM
-    // explicitly or the remedy prescribes parameters the tool does not have.
+    // INTERPRET-OVERSIZE-KNOBLESS-REMEDY: `concepts` / `ruleIds` do not match
+    // the shared knob regex, so name them explicitly beside limit/offset.
     case 'sfi.interpret':
       return runTool(ctx, args, interpretInputSchema, interpretHandler, {
         extraKnobs: ['ruleIds', 'concepts'],
@@ -2158,10 +2162,13 @@ const stampVaultDisclosure = <T>(
   const manifest = ctx.manifest as
     | { readonly sourceOrg?: string; readonly version?: string }
     | undefined;
+  // ARCH-02: the shared freshness assessment (age band + builder drift) —
+  // byte-transparent on a fresh, current-builder vault.
+  const assessed = applyVaultFreshness(resp, ctx);
   return {
-    ...resp,
+    ...assessed,
     vaultState: {
-      ...resp.vaultState,
+      ...assessed.vaultState,
       ...(typeof manifest?.sourceOrg === 'string'
         ? { targetOrg: manifest.sourceOrg }
         : {}),
@@ -2212,6 +2219,71 @@ const stampVaultDisclosure = <T>(
  * instead of adding its field names to the shared regex, which would bias
  * every OTHER tool's oversize guidance toward names that happen to coincide.
  */
+/** Human notes about renamed / ignored args for one call (CH-1). */
+interface ArgumentNotes {
+  readonly renamed: readonly string[];
+  readonly ignored: readonly string[];
+}
+
+const argumentNotes = (n: NormalizedToolArgs): ArgumentNotes => ({
+  renamed: n.renamed.map((r) => `${r.from}→${r.to}`),
+  ignored: [...n.ignored],
+});
+
+/**
+ * Append the expected-args hint (and any renamed / ignored args) to an invalid-query
+ * message, so the next attempt can succeed without a describe round trip.
+ * Messages that already point at sfi.resolve keep their own guidance.
+ */
+const withArgHint = (
+  message: string,
+  schema: z.ZodTypeAny,
+  notes: ArgumentNotes,
+): string => {
+  const trimmed = message.trimEnd();
+  const parts = [/[.!?)]$/.test(trimmed) ? trimmed : `${trimmed}.`];
+  if (notes.renamed.length > 0) {
+    // The error may be about an arg the caller never typed — name the mapping.
+    parts.push(`Argument(s) renamed to this tool's name: ${notes.renamed.join(', ')}.`);
+  }
+  if (notes.ignored.length > 0) {
+    parts.push(`Ignored unknown argument(s): ${notes.ignored.join(', ')}.`);
+  }
+  if (!message.includes('sfi.resolve') && !message.includes('This tool accepts')) {
+    const hint = expectedArgsHint(schema);
+    if (hint !== undefined) parts.push(hint);
+  }
+  return parts.join(' ');
+};
+
+/**
+ * Stamp renamed / ignored args on a success envelope. An ignored arg means
+ * the answer is NOT scoped by it — say so instead of letting a confident
+ * unscoped answer pass as the scoped one (CH-1).
+ */
+const stampArgumentNotes = <T,>(
+  resp: McpResponse<T>,
+  notes: ArgumentNotes,
+): McpResponse<T> => {
+  if (notes.renamed.length === 0 && notes.ignored.length === 0) return resp;
+  return {
+    ...resp,
+    ...({
+      argumentNotes: {
+        ...(notes.renamed.length > 0 ? { renamed: notes.renamed } : {}),
+        ...(notes.ignored.length > 0
+          ? {
+              ignored: notes.ignored,
+              warning:
+                'These arguments are not accepted by this tool and did NOT scope the answer. ' +
+                'Call sfi.describe_analysis for its args.',
+            }
+          : {}),
+      },
+    } as Record<string, unknown>),
+  };
+};
+
 interface RunToolOversizeExtras {
   /** Additional real knob names, merged with (never replacing) the schema-derived ones. */
   readonly extraKnobs?: readonly string[];
@@ -2229,7 +2301,11 @@ export const runTool = async <S extends z.ZodTypeAny, T>(
   ) => Promise<Result<McpResponse<T>, McpError>>,
   oversizeExtras?: RunToolOversizeExtras,
 ): Promise<CallToolResult> => {
-  const parsed = schema.safeParse(args);
+  // CH-1: map a guessed sibling arg name onto this tool's real one, and never
+  // drop an undeclared arg silently — see arg-normalizer.ts.
+  const normalized = normalizeToolArgs(schema, args);
+  const argNotes = argumentNotes(normalized);
+  const parsed = schema.safeParse(normalized.args);
   if (!parsed.success) {
     // Format the Zod issues into a concise human-readable string rather
     // than returning `parsed.error.message` — which is the pretty-printed
@@ -2241,7 +2317,10 @@ export const runTool = async <S extends z.ZodTypeAny, T>(
       )
       .join('; ');
     return jsonResult({
-      error: { kind: 'invalid-query', message },
+      error: {
+        kind: 'invalid-query',
+        message: withArgHint(message, schema, argNotes),
+      },
     });
   }
   // The tool's own declared knobs FIRST (most specific / author-confirmed),
@@ -2253,8 +2332,16 @@ export const runTool = async <S extends z.ZodTypeAny, T>(
     const result = await handler(ctx, parsed.data);
     return jsonResult(
       result.ok
-        ? stampVaultDisclosure(result.value, ctx)
-        : { error: result.error },
+        ? stampArgumentNotes(stampVaultDisclosure(result.value, ctx), argNotes)
+        : {
+            error:
+              result.error.kind === 'invalid-query'
+                ? {
+                    ...result.error,
+                    message: withArgHint(result.error.message, schema, argNotes),
+                  }
+                : result.error,
+          },
       {
         args: parsed.data as unknown as Readonly<Record<string, unknown>>,
         knobs,
@@ -2598,17 +2685,15 @@ export const jsonResult = (
 ): CallToolResult => {
   const cap = resolveResponseBudgetBytes();
   /**
-   * MCP-01 (b): always pair text (backward-compatible hosts) with
-   * `structuredContent` (hosts that honor outputSchema). Text remains the
-   * canonical UTF-8 budget surface.
+   * Text-only: the envelope is sent ONCE, as JSON in a text block. It used to
+   * be paired with an identical `structuredContent` copy, which doubled every
+   * response on the wire for no model-visible gain (each host reads one copy).
+   * The MCP spec allows text-only results when no `outputSchema` is declared,
+   * and none is (tools/index.ts). Text is the canonical UTF-8 budget surface.
    */
-  const result = (envelope: Record<string, unknown>): CallToolResult => {
-    const text = JSON.stringify(envelope);
-    return {
-      content: [{ type: 'text' as const, text }],
-      structuredContent: envelope,
-    };
-  };
+  const result = (envelope: Record<string, unknown>): CallToolResult => ({
+    content: [{ type: 'text' as const, text: JSON.stringify(envelope) }],
+  });
   const fits = (text: string): boolean =>
     Buffer.byteLength(text, 'utf8') <= cap;
   const oversizeResult = (
@@ -2638,14 +2723,10 @@ export const jsonResult = (
 
   let body = bodyInput;
   if (typeof body !== 'object' || body === null || Array.isArray(body)) {
-    // Non-object bodies are rare; keep text as the raw JSON for back-compat
-    // and wrap structuredContent so it stays a JSON object (MCP requirement).
+    // Non-object bodies are rare; text is the raw JSON.
     const text = JSON.stringify(body) ?? 'null';
     if (fits(text)) {
-      return {
-        content: [{ type: 'text' as const, text }],
-        structuredContent: { value: body as unknown },
-      };
+      return { content: [{ type: 'text' as const, text }] };
     }
     return oversizeResult(Buffer.byteLength(text, 'utf8'));
   }

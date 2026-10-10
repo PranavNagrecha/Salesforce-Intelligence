@@ -70,15 +70,25 @@ jobs:
       # into the tree or git history. The blocklist of real org terms is kept
       # out of the repo; CI materializes it from the ORG_LEAK_BLOCKLIST secret
       # (absent on fork PRs, where only the generic structural check runs).
-      - name: Org-leak scan (tree + git history)
+      - name: Org-leak scan (tree + git history) + release privacy guard
         env:
           ORG_LEAK_BLOCKLIST: ${{ secrets.ORG_LEAK_BLOCKLIST }}
+          IS_FORK_PR: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository }}
         run: |
           if [ -n "$ORG_LEAK_BLOCKLIST" ]; then
             printf '%s' "$ORG_LEAK_BLOCKLIST" > scripts/forbidden-names.local.json
+          elif [ "$IS_FORK_PR" = "true" ]; then
+            # Fork PRs cannot read secrets: run generic-only, visibly VACUOUS.
+            export SFI_ALLOW_NO_BLOCKLIST=1
+          else
+            echo "::error::ORG_LEAK_BLOCKLIST secret is empty — refusing a vacuous org-leak scan"
+            exit 1
           fi
           node scripts/scan-org-leaks.mjs --strict
           node scripts/scan-org-leaks.mjs --git-history --strict
+          # Release privacy guard runs here, while the blocklist exists — it
+          # fails closed under CI when the blocklist is missing.
+          pnpm guard
           rm -f scripts/forbidden-names.local.json
 
       - name: Public-interface guard (CI/eval reference only in-repo synthetic vaults)
@@ -123,9 +133,6 @@ jobs:
 
       - name: NL routing gate (front-door router → real tools, deterministic)
         run: pnpm eval:routing-gate
-
-      - name: Release privacy guard
-        run: pnpm guard
 
       - name: End-to-end MCP smoke
         run: pnpm e2e

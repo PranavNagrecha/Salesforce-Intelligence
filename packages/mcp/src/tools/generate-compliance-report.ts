@@ -587,10 +587,10 @@ export const generateComplianceReportHandler = async (
       classification: field.classification,
       category: field.category,
       type: field.type,
-      profilesWithRead: a.summary.profilesWithRead,
-      profilesWithEdit: a.summary.profilesWithEdit,
-      permSetsWithRead: a.summary.permSetsWithRead,
-      permSetsWithEdit: a.summary.permSetsWithEdit,
+      profilesWithRead: a.summary.declaredFls.profilesWithRead,
+      profilesWithEdit: a.summary.declaredFls.profilesWithEdit,
+      permSetsWithRead: a.summary.declaredFls.permSetsWithRead,
+      permSetsWithEdit: a.summary.declaredFls.permSetsWithEdit,
       flsReadGrantorIds,
     });
   }

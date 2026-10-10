@@ -79,7 +79,7 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import { appScopeSchema, inAppScope, resolveAppScope, scopeContrastNote, type AppScope } from './app-scope.js';
-import { readFieldDataType } from './field-properties.js';
+import { PICKLIST_DATA_TYPES, readFieldDataType } from './field-properties.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import { extractEqualityLiterals } from './picklist-literal-check.js';
 import {
@@ -97,8 +97,6 @@ const PICKLIST_INTEGRITY_MAX_LIMIT = 500;
 /** Default `limit` when the caller omits it. The slice is over FIELDS. */
 const PICKLIST_INTEGRITY_DEFAULT_LIMIT = 50;
 
-/** Field data types that carry an inline picklist value set. */
-const PICKLIST_TYPES = new Set<string>(['Picklist', 'MultiselectPicklist']);
 
 /**
  * Jaro-Winkler similarity at/above which a defined value is offered as the
@@ -979,7 +977,7 @@ export const picklistIntegrityScanHandler = async (
   const restrictionOrg = emptyRestriction();
   for (const node of scan.value.nodes) {
     const fieldType = readFieldDataType(node);
-    if (!PICKLIST_TYPES.has(fieldType)) continue;
+    if (!PICKLIST_DATA_TYPES.has(fieldType)) continue;
     const inScope = inAppScope(scope, node);
     const bucket = restrictionBucket(node);
     restrictionOrg.picklists += 1;

@@ -676,4 +676,90 @@ describe('residualLeakScan', () => {
     const result = await residualLeakScan(dir, []);
     expect(result.localOrgNamePatternsChecked).toBe(0);
   });
+
+  // KO-b — FAIL-BEFORE/PASS-AFTER: the scan used to skip binaries and
+  // symlinks without counting them, so a pre-populated --out was certified
+  // "0 residual matches — safe to share" over files it never read.
+  it('flags a binary it cannot read instead of certifying it', async () => {
+    const dir = join(root, 'foreign-binary');
+    await mkdir(join(dir, 'graph'), { recursive: true });
+    await writeFile(join(dir, 'graph', 'graph.duckdb'), 'acme-real-org owner@example.com', 'utf8');
+    const result = await residualLeakScan(dir, ['acme-real-org']);
+    expect(result.findings).toContainEqual({ file: join('graph', 'graph.duckdb'), pattern: 'unscanned-binary' });
+    expect(result.filesNotScanned).toBe(1);
+  });
+
+  it('flags a symlink in --out instead of silently dropping it', async () => {
+    const dir = join(root, 'foreign-symlink');
+    await mkdir(dir, { recursive: true });
+    const outside = join(root, 'outside-secret.md');
+    await writeFile(outside, 'acme-real-org', 'utf8');
+    symlinkSync(outside, join(dir, 'leak.md'));
+    const result = await residualLeakScan(dir, ['acme-real-org']);
+    expect(result.findings).toContainEqual({ file: 'leak.md', pattern: 'unscanned-symlink' });
+  });
+
+  it('fails closed on a present-but-broken blocklist (never "0 patterns, 0 matches")', async () => {
+    const dir = join(root, 'broken-blocklist');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'a.md'), 'redacted-org', 'utf8');
+    const cfg = join(root, 'broken-forbidden-names.json');
+    await writeFile(cfg, '{"patterns": [', 'utf8');
+    const result = await residualLeakScan(dir, [], cfg);
+    expect(result.findings.some((f) => f.pattern.startsWith('blocklist-unreadable'))).toBe(true);
+  });
+
+  it('checks a valid blocklist (scannerPatterns + patterns)', async () => {
+    const dir = join(root, 'blocklist-hit');
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, 'a.md'), 'mentions WidgetCorp here', 'utf8');
+    const cfg = join(root, 'good-forbidden-names.json');
+    await writeFile(cfg, JSON.stringify({ scannerPatterns: ['WidgetCorp'], patterns: ['OtherCorp'] }), 'utf8');
+    const result = await residualLeakScan(dir, [], cfg);
+    expect(result.localOrgNamePatternsChecked).toBe(2);
+    expect(result.findings).toContainEqual({ file: 'a.md', pattern: 'local-0' });
+  });
 });
+
+describe('anonymizeVault — refuses a pre-populated --out and reports vault symlinks (KO-b)', () => {
+  let root: string;
+  beforeAll(async () => {
+    root = await mkdtemp(join(tmpdir(), 'sfi-anon-kob-'));
+  });
+  afterAll(async () => {
+    await rm(root, { recursive: true, force: true });
+  });
+
+  it('refuses an --out that already holds files (FAIL-BEFORE: certified them as scrubbed)', async () => {
+    const vaultRoot = await seedSyntheticVault(join(root, 'a'));
+    const outDir = join(root, 'a-out');
+    await mkdir(join(outDir, 'graph'), { recursive: true });
+    await writeFile(join(outDir, 'graph', 'graph.duckdb'), `${ORG_ALIAS} owner@example.com`, 'utf8');
+    const r = await anonymizeVault({ vaultRoot, outDir, mode: 'redact' });
+    expect(r.ok).toBe(false);
+    if (!r.ok) expect(r.error).toMatch(/not empty/);
+  });
+
+  it('accepts an existing EMPTY --out', async () => {
+    const vaultRoot = await seedSyntheticVault(join(root, 'b'));
+    const outDir = join(root, 'b-out');
+    await mkdir(outDir, { recursive: true });
+    const r = await anonymizeVault({ vaultRoot, outDir, mode: 'redact' });
+    expect(r.ok).toBe(true);
+  });
+
+  it('reports a symlink inside the source vault as skipped (FAIL-BEFORE: dropped silently)', async () => {
+    const vaultRoot = await seedSyntheticVault(join(root, 'c'));
+    const target = join(root, 'c-linked.md');
+    await writeFile(target, 'linked doc', 'utf8');
+    symlinkSync(target, join(vaultRoot, 'docs', 'linked.md'));
+    const r = await anonymizeVault({ vaultRoot, outDir: join(root, 'c-out'), mode: 'redact' });
+    expect(r.ok).toBe(true);
+    if (r.ok) {
+      const skipped = r.value.filesSkipped.find((f) => f.path === join('docs', 'linked.md'));
+      expect(skipped?.reason).toMatch(/symlink/);
+      expect(r.value.residualScan.findings).toEqual([]);
+    }
+  });
+});
+

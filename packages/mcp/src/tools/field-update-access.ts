@@ -29,6 +29,8 @@
 
 import type { Node } from '@sf-intelligence/contracts';
 
+import { objectCapabilitiesFromGrant } from './object-capabilities.js';
+
 /**
  * An `objectPermissions` grant edge confers object-level EDIT.
  *
@@ -37,11 +39,11 @@ import type { Node } from '@sf-intelligence/contracts';
  * org-wide `ModifyAllData` system permission ({@link hasModifyAllData}).
  */
 export const grantsObjectEdit = (p: Readonly<Record<string, unknown>>): boolean =>
-  p['allowEdit'] === true || p['modifyAllRecords'] === true;
+  objectCapabilitiesFromGrant(p).has('edit');
 
 /** An `objectPermissions` grant edge confers object-level READ. */
 export const grantsObjectRead = (p: Readonly<Record<string, unknown>>): boolean =>
-  p['allowRead'] === true || p['viewAllRecords'] === true || grantsObjectEdit(p);
+  objectCapabilitiesFromGrant(p).has('read');
 
 /**
  * The container holds the `ModifyAllData` system permission.

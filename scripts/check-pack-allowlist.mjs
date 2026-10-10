@@ -19,6 +19,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { packChildEnv } from './lib/pack-child-env.mjs';
+
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const cliDir = join(root, 'packages/cli');
 const pkgPath = join(cliDir, 'package.json');
@@ -55,10 +57,19 @@ if (!existsSync(distIndex)) {
 const staging = mkdtempSync(join(tmpdir(), 'sfi-pack-allowlist-'));
 let tarball;
 try {
-  const pack = spawnSync('npm', ['pack', '--json', '--pack-destination', staging], {
-    cwd: cliDir,
-    encoding: 'utf8',
-  });
+  // This pack is the check's own instrument, never the release itself: when
+  // the hook runs under `npm/pnpm publish --dry-run` it must still produce a
+  // tarball to inspect, so the inherited dry-run is stripped AND overridden on
+  // the command line (a CLI flag beats any env spelling npm might read).
+  const pack = spawnSync(
+    'npm',
+    ['pack', '--json', '--dry-run=false', '--pack-destination', staging],
+    {
+      cwd: cliDir,
+      encoding: 'utf8',
+      env: packChildEnv(process.env),
+    },
+  );
   if (pack.status !== 0) {
     console.error(pack.stderr || pack.stdout);
     console.error('check-pack-allowlist: npm pack failed');

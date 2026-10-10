@@ -4,7 +4,6 @@ import { resolve } from 'node:path';
 import {
   checkForUpdate,
   err,
-  execHelper,
   formatUpdateNotice,
   ok,
   type Result,
@@ -16,11 +15,14 @@ import {
   shutdown,
   startServer,
   type Context,
+  type SetupReason,
 } from '@sf-intelligence/mcp';
 import { vaultPaths } from '@sf-intelligence/vault';
 import { Command } from 'commander';
 
 import { readCliPackageVersion } from '../package-version.js';
+import { listAuthenticatedOrgs, orgLabels } from '../sf-org-list.js';
+import { resolveVaultOption } from '../vault-option.js';
 
 /**
  * Inferred return type of `@sf-intelligence/mcp`'s `createServer`. We avoid
@@ -64,6 +66,8 @@ export interface McpStartupError {
    * placeholder rather than inventing an alias.
    */
   readonly authedOrgs: readonly string[];
+  /** The sf CLI's default org, when known — setup mode names it as a hint, never adopts it. */
+  readonly defaultOrg?: string;
 }
 
 /** Probe the authed Salesforce orgs (alias or username). Injectable for tests. */
@@ -113,46 +117,6 @@ const readBoundOrg = async (configPath: string): Promise<string | null> => {
 };
 
 /**
- * List the user's authenticated Salesforce orgs via `sf org list --json`.
- * Best-effort: any failure (no sf CLI, not logged in, malformed JSON, or a
- * wedged `sf` subprocess that outlives its timeout) yields an empty list so
- * the no-vault hint degrades gracefully rather than throwing or hanging.
- *
- * CR-RV3b: routed through {@link execHelper} (the shared cross-platform `sf`
- * exec seam) instead of a bare `promisify(execFile)` call, so this probe
- * inherits the same `SFI_SF_EXEC_TIMEOUT_MS`-backed timeout (10-min default)
- * and SIGTERM→SIGKILL escalation as every other `sf` shellout in the plugin
- * — a hung `sf` process can no longer wedge `sfi mcp` startup forever. The
- * timeout rejection is caught by the existing `catch` below exactly like any
- * other exec failure, so the graceful-degrade contract is unchanged.
- */
-const defaultListOrgs: ListOrgs = async () => {
-  try {
-    const { stdout } = await execHelper('sf', ['org', 'list', '--json'], {
-      maxBuffer: 10 * 1024 * 1024,
-    });
-    const json = JSON.parse(stdout) as {
-      result?: Record<string, readonly { alias?: string; username?: string }[]>;
-    };
-    const groups = json.result ?? {};
-    const seen = new Set<string>();
-    const out: string[] = [];
-    for (const list of Object.values(groups)) {
-      for (const org of list ?? []) {
-        const label = org.alias ?? org.username;
-        if (label && !seen.has(label)) {
-          seen.add(label);
-          out.push(label);
-        }
-      }
-    }
-    return out;
-  } catch {
-    return [];
-  }
-};
-
-/**
  * Outcome of a successful `prepareMcp` — a wired-up server and the context
  * that owns the open graph connection. Callers must connect the server to
  * a transport (via `startServer`) and call `shutdown(ctx)` when done.
@@ -188,7 +152,16 @@ export const prepareMcp = async (
   const paths = vaultPaths(vaultRoot);
 
   if (!(await pathExists(paths.config))) {
-    const orgs = await (opts.listOrgs ?? defaultListOrgs)();
+    let orgs: readonly string[];
+    let defaultOrg: string | undefined;
+    if (opts.listOrgs !== undefined) {
+      orgs = await opts.listOrgs();
+    } else {
+      const listed = await listAuthenticatedOrgs();
+      orgs = listed.ok ? orgLabels(listed.orgs) : [];
+      const d = listed.ok ? listed.orgs.find((o) => o.isDefault) : undefined;
+      defaultOrg = d?.alias ?? d?.username;
+    }
     const where = opts.vaultRoot !== undefined ? ` at ${vaultRoot}` : '';
     const base = `No vault${where}. Run \`sfi init\` followed by \`sfi refresh\`, or point \`sfi mcp --vault <path>\` at an existing org-kb.`;
     // Make the dead-end actionable: say how many orgs are authed so the user
@@ -216,6 +189,7 @@ export const prepareMcp = async (
       message: base + hint,
       vaultRoot,
       authedOrgs: orgs,
+      ...(defaultOrg !== undefined ? { defaultOrg } : {}),
     });
   }
 
@@ -272,6 +246,23 @@ export interface VaultBinding {
 }
 
 /**
+ * FR-02: which setup reason to report. An EXPLICIT `--vault` / `SFI_VAULT`
+ * path that does not exist (or is a file) is almost always a typo — telling
+ * that user to "run sfi init" builds a second vault instead of fixing the path.
+ */
+export const setupReasonFor = async (
+  kind: McpStartupError['kind'],
+  vaultRoot: string,
+  bindSource: string,
+): Promise<SetupReason> => {
+  if (bindSource === '--vault' || bindSource === 'SFI_VAULT') {
+    const st = await stat(vaultRoot).catch(() => null);
+    if (st === null || !st.isDirectory()) return 'vault-path-not-found';
+  }
+  return kind === 'no-vault' ? 'no-vault' : 'vault-missing';
+};
+
+/**
  * Resolve the vault-binding precedence for `sfi mcp`, most explicit first: the
  * `--vault` flag, then the `SFI_VAULT` env var (trimmed; blank/whitespace-only
  * is ignored so `plugin.json` can ship with an empty default), then the launch
@@ -285,19 +276,25 @@ export interface VaultBinding {
 export const resolveVaultBinding = (
   flagVault: string | undefined,
   envVault: string | undefined,
+  cwd: string = process.cwd(),
 ): VaultBinding => {
+  // One precedence + one path meaning for every command (vault-option.ts):
+  // the named path may be the org-kb folder OR the project folder holding it.
+  // A named path that holds no vault is passed through unchanged, so startup
+  // fails on it and setup mode names THAT path (vault-path-not-found /
+  // vault-missing) instead of silently falling back to ./org-kb.
+  const resolved = resolveVaultOption(flagVault, { cwd, env: envVault });
+  if (resolved.ok) {
+    return resolved.value.bindSource === 'default ./org-kb'
+      ? { vaultRoot: undefined, bindSource: 'default ./org-kb' }
+      : { vaultRoot: resolved.value.vaultRoot, bindSource: resolved.value.bindSource };
+  }
   const trimmedEnv =
-    envVault !== undefined && envVault.trim().length > 0
-      ? envVault.trim()
-      : undefined;
-  const vaultRoot = flagVault ?? trimmedEnv;
-  const bindSource =
-    flagVault !== undefined
-      ? '--vault'
-      : vaultRoot !== undefined
-        ? 'SFI_VAULT'
-        : 'default ./org-kb';
-  return { vaultRoot, bindSource };
+    envVault !== undefined && envVault.trim().length > 0 ? envVault.trim() : undefined;
+  return {
+    vaultRoot: flagVault ?? trimmedEnv,
+    bindSource: flagVault !== undefined ? '--vault' : 'SFI_VAULT',
+  };
 };
 
 /**
@@ -349,13 +346,13 @@ export const registerMcpCommand = (program: Command): void => {
         // packages/mcp/src/setup-server.ts for the full rationale.
         process.stderr.write(`sfi mcp: ${prepared.error.message}\n`);
         const setup = createSetupServer({
-          reason:
-            prepared.error.kind === 'no-vault' ? 'no-vault' : 'vault-missing',
+          reason: await setupReasonFor(prepared.error.kind, prepared.error.vaultRoot, bindSource),
           detail: prepared.error.message,
           cwd: process.cwd(),
           expectedVaultRoot: prepared.error.vaultRoot,
           bindSource,
           authedOrgs: prepared.error.authedOrgs,
+          ...(prepared.error.defaultOrg !== undefined ? { defaultOrg: prepared.error.defaultOrg } : {}),
           version: readCliPackageVersion(),
         });
         await startServer(setup);

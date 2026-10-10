@@ -14,9 +14,8 @@ const TOKENIZER_SOURCE = 'formula-tokenizer';
  * a declared dependency edge to the flat `CustomPermission:{ApiName}` definition node.
  *
  * ONLY `$Permission` is matched here. Other global variables (`$User`, `$Profile`,
- * `$Setup`, `$Label`, `$Organization`, …) are not CustomPermission references and
- * stay diagnostic-only on `globalReferences` — in particular `$Label` custom-label
- * wiring is owned by a separate code path and is deliberately untouched here.
+ * `$Setup`, `$Organization`, …) are not CustomPermission references; `$Label` is
+ * matched separately by {@link LABEL_GLOBAL_REFERENCE}.
  *
  * The trailing `$` anchors the whole path to EXACTLY two segments
  * (`$Permission.{ApiName}`). This is deliberately conservative: the tokenizer's
@@ -26,6 +25,9 @@ const TOKENIZER_SOURCE = 'formula-tokenizer';
  * permission ApiName. Custom-permission gates in formulas are always single-segment.
  */
 const PERMISSION_GLOBAL_REFERENCE = /^\$Permission\.([A-Za-z_][A-Za-z_0-9]*)$/i;
+
+/** `$Label.{Name}` (exactly two segments) — a CustomLabel read. */
+const LABEL_GLOBAL_REFERENCE = /^\$Label\.([A-Za-z_][A-Za-z_0-9]*)$/i;
 
 /**
  * Tokenize a Salesforce formula source string and produce one
@@ -53,8 +55,9 @@ const PERMISSION_GLOBAL_REFERENCE = /^\$Permission\.([A-Za-z_][A-Za-z_0-9]*)$/i;
  * `CustomPermission:{ApiName}` (the flat definition-node id) — a formula that
  * checks a custom permission (a validation-rule gate, a formula field) is a real
  * dependent of that permission. Without it "what checks My_Custom_Perm?" and
- * the change/delete gate miss formula gating. Every OTHER `$Variable` (`$User`,
- * `$Profile`, `$Setup`, `$Label`, …) is left diagnostic-only.
+ * the change/delete gate miss formula gating. `$Label.{Name}` likewise produces
+ * a `references` edge to `CustomLabel:{Name}`. Every OTHER `$Variable` (`$User`,
+ * `$Profile`, `$Setup`, …) is left diagnostic-only.
  *
  * @example
  *   const edges = buildReferencesEdges(
@@ -153,6 +156,25 @@ export const buildReferencesEdges = (
   // the change/delete gate see the formula dependency. Every other `$Variable`
   // stays diagnostic-only.
   for (const gref of tokenized.value.globalReferences) {
+    // FORMULA-LABEL-REFS-UNGRAPHED: `$Label.{Name}` reads a CustomLabel. It was
+    // left diagnostic-only, so "where is this label used" answered 0 with
+    // `complete: true` for a label several formula fields depend on.
+    const label = LABEL_GLOBAL_REFERENCE.exec(gref.path);
+    if (label !== null && label[1] !== undefined) {
+      const toId = `CustomLabel:${label[1]}`;
+      if (!seenToIds.has(toId)) {
+        seenToIds.add(toId);
+        edges.push({
+          fromId,
+          toId,
+          edgeType: 'references',
+          confidence: 'parsed',
+          source: TOKENIZER_SOURCE,
+          properties: { tokenizedFromField, formulaLength: formula.length, referenceKind: 'customLabel' },
+        });
+      }
+      continue;
+    }
     const match = PERMISSION_GLOBAL_REFERENCE.exec(gref.path);
     if (match === null) continue;
     const permApiName = match[1];

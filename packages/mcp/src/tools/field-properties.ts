@@ -16,6 +16,13 @@
 
 import type { Node } from '@sf-intelligence/contracts';
 
+/**
+ * The picklist-family data types — the ones whose declared value set the
+ * custom-field extractor records under `properties.picklistValues`. The one
+ * copy every field tool reads; a tool-local list drifts.
+ */
+export const PICKLIST_DATA_TYPES: ReadonlySet<string> = new Set(['Picklist', 'MultiselectPicklist']);
+
 /** Sentinel returned when neither property carries a string data type. */
 export const UNKNOWN_FIELD_TYPE = 'Unknown';
 

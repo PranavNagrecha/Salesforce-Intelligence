@@ -1,0 +1,40 @@
+---
+/**
+ * GuideCards — a grid of guide cards from src/data/guides.json. Used by the
+ * home Guides block, /blog, /how-to and /errors so every listing shows the
+ * same title and summary for a page.
+ */
+import type { GuideCard } from "../lib/guides.ts";
+
+interface Props {
+  cards: GuideCard[];
+  /** Show the publish date under the title (blog listings). */
+  dates?: boolean;
+  /** Heading level for card titles (h3 under a section h2, h2 on a hub with no h2). */
+  level?: "h2" | "h3";
+}
+const { cards, dates = false, level = "h3" } = Astro.props;
+const TAG: Record<string, string> = { "how-to": "How-to", errors: "Error", compare: "Comparison", setup: "Setup", blog: "Guide" };
+const fmt = (iso: string): string =>
+  new Date(iso + "T00:00:00Z").toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric", timeZone: "UTC" });
+const Title = level;
+---
+
+<div class="card-grid">
+  {cards.map((c) => (
+    <article class="new-card">
+      <span class="pill pill-neutral">{c.kind === "release" ? "Release" : TAG[c.section] ?? "Guide"}</span>
+      <Title class="guide-card-title"><a href={c.href}>{c.title}</a></Title>
+      <p>{c.text}</p>
+      {dates && <p class="guide-card-date"><time datetime={c.date}>{fmt(c.date)}</time></p>}
+    </article>
+  ))}
+</div>
+
+<style is:global>
+  .guide-card-title { font-size: 1.2rem; line-height: 1.3; letter-spacing: -0.01em; }
+  .guide-card-title a { color: var(--text); text-decoration: none; }
+  .guide-card-title a:hover { color: var(--accent-text); text-decoration: underline; }
+  .guide-card-date { font-size: .875rem; color: var(--text-muted); }
+  .hub-h2 { font-size: var(--fs-h2); letter-spacing: -0.022em; margin: 56px 0 24px; }
+</style>

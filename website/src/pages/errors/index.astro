@@ -1,0 +1,46 @@
+---
+import DocPage from "../../layouts/DocPage.astro";
+import GuideCards from "../../components/GuideCards.astro";
+import CtaBlock from "../../components/CtaBlock.astro";
+import site from "../../data/site.ts";
+import { cards } from "../../lib/guides.ts";
+
+const title = "Salesforce Error Messages Explained | sf-intelligence";
+const description =
+  "What common Salesforce errors mean, why they happen, and how to find the Flow, trigger or rule behind them, with the exact error text in every title.";
+
+const list = cards.filter((c) => c.section === "errors");
+const more = cards.filter((c) => c.section === "how-to").slice(0, 4);
+
+const jsonld = [
+  { "@type": "CollectionPage", name: "Salesforce error messages explained", description, isPartOf: { "@id": `${site.url}/#website` } },
+  {
+    "@type": "ItemList",
+    itemListElement: list.map((c, i) => ({ "@type": "ListItem", position: i + 1, name: c.title, url: `${site.url}${c.href}` })),
+  },
+];
+---
+
+<DocPage
+  title={title}
+  description={description}
+  path="/errors"
+  heading="Salesforce errors, explained"
+  intro="Each page starts from the exact error text, explains which Salesforce rule causes it, and shows how to find the automation behind it."
+  crumbs={[{ label: "Errors", href: "/errors" }]}
+  breadcrumbs={[{ name: "Errors", path: "/errors" }]}
+  jsonld={jsonld}
+>
+  <section>
+    <div class="container">
+      <GuideCards cards={list} />
+
+      <h2 class="hub-h2">Related how-to guides</h2>
+      <GuideCards cards={more} />
+
+      <div class="article-aside">
+        <CtaBlock question="What happens when I save an Installation?" />
+      </div>
+    </div>
+  </section>
+</DocPage>

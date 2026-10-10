@@ -30,10 +30,11 @@
 
 import type { ComponentId, Node } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listNodesByType } from '@sf-intelligence/graph';
+import { listEdgesForNodes, listNodesByType } from '@sf-intelligence/graph';
 
 import type { Context } from '../server.js';
 
+import { dlrsRollupWriterDetail } from './dlrs-rollup-writers.js';
 import { clampedNodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
 
 /**
@@ -50,6 +51,14 @@ export interface RollupRecalcStep {
   readonly parentObjectId: ComponentId;
   readonly summaryOperation: string | null;
   readonly summarizedField: string | null;
+  /**
+   * Absent = a native roll-up summary field. `dlrs` = a DLRS rollup definition
+   * (`dlrs__LookupRollupSummary2` record, `definitionId`) recalculated by the
+   * DLRS child trigger, not the platform rollup phase (WOW-3).
+   */
+  readonly engine?: 'dlrs';
+  readonly definitionId?: ComponentId;
+  readonly calculationMode?: string | null;
 }
 
 export interface RollupRecalcResult {
@@ -107,12 +116,86 @@ export const findRollupRecalcSteps = async (
     const step = toRollupStep(field);
     if (step !== null) steps.push(step);
   }
-  steps.sort((a, b) => (a.fieldId < b.fieldId ? -1 : a.fieldId > b.fieldId ? 1 : 0));
+  const dlrs = await findDlrsRollupRecalcSteps(ctx, childObjectApiName, scanLimit);
+  if (!dlrs.ok) return dlrs;
+  steps.push(...dlrs.value.steps);
+  const key = (s: RollupRecalcStep): string => `${s.fieldId}|${s.definitionId ?? ''}`;
+  steps.sort((a, b) => (key(a) < key(b) ? -1 : key(a) > key(b) ? 1 : 0));
 
   return ok({
     steps,
-    scanTruncated: scanHitCap(summaryFieldsResult.value.length, scanLimit),
+    scanTruncated: scanHitCap(summaryFieldsResult.value.length, scanLimit) || dlrs.value.scanTruncated,
   });
+};
+
+/** `typeApiName` spellings a DLRS rollup definition record carries. */
+const DLRS_TYPE_NAMES = ['dlrs__LookupRollupSummary2', 'dlrs__LookupRollupSummary2__mdt'] as const;
+
+/**
+ * ACTIVE DLRS rollups whose child object is `childObjectApiName` (WOW-3). A
+ * DLRS rollup is not a Summary field, so the scan above never saw it and a
+ * save on the child read "no rollup recalculation". Read from the extractor's
+ * `dlrs-rollup` writesTo edges; an inactive definition recalculates nothing
+ * and is left out.
+ */
+const findDlrsRollupRecalcSteps = async (
+  ctx: Context,
+  childObjectApiName: string,
+  scanLimit: number,
+): Promise<Result<RollupRecalcResult, string>> => {
+  const ids: ComponentId[] = [];
+  let scanTruncated = false;
+  for (const typeApiName of DLRS_TYPE_NAMES) {
+    const records = await listNodesByType(ctx.graph, 'CustomMetadataRecord', {
+      propertyStringEquals: { typeApiName },
+      limit: scanLimit,
+    });
+    if (!records.ok) return err(records.error.message);
+    scanTruncated ||= scanHitCap(records.value.length, scanLimit);
+    for (const n of records.value) ids.push(n.id);
+  }
+  if (ids.length === 0) return ok({ steps: [], scanTruncated });
+  const edges = await listEdgesForNodes(ctx.graph, ids, { direction: 'out', edgeTypes: ['writesTo'] });
+  if (!edges.ok) return err(edges.error.message);
+  const steps: RollupRecalcStep[] = [];
+  for (const [definitionId, out] of edges.value) {
+    for (const edge of out) {
+      const detail = dlrsRollupWriterDetail(edge);
+      if (detail === undefined || !detail.runnable) continue;
+      if (detail.rollup.childObject !== childObjectApiName) continue;
+      const target = edge.toId.slice('CustomField:'.length);
+      const dot = target.indexOf('.');
+      if (!edge.toId.startsWith('CustomField:') || dot <= 0) continue;
+      steps.push({
+        fieldId: edge.toId,
+        apiName: target,
+        parentObjectId: `CustomObject:${target.slice(0, dot)}` as ComponentId,
+        summaryOperation: detail.rollup.aggregateOperation,
+        summarizedField: detail.rollup.fieldToAggregate,
+        engine: 'dlrs',
+        definitionId,
+        calculationMode: detail.rollup.calculationMode,
+      });
+    }
+  }
+  return ok({ steps, scanTruncated });
+};
+
+/**
+ * The one-line action description both SOE tools print for a rollup step. A
+ * DLRS step says it runs from the DLRS child trigger (and in which mode), so it
+ * is not read as the platform's own rollup phase.
+ */
+export const describeRollupRecalc = (rollup: RollupRecalcStep): string => {
+  const base = `recalculates ${rollup.summaryOperation ?? 'unknown-operation'}(${rollup.summarizedField ?? 'record count'}) on ${rollup.parentObjectId}`;
+  if (rollup.engine !== 'dlrs') return base;
+  const mode = rollup.calculationMode ?? 'Realtime';
+  const when = /^realtime$/i.test(mode)
+    ? 'in the DLRS child trigger on this save, i.e. in the Apex trigger phase, not the platform roll-up phase (needs the dlrs trigger deployed on this object)'
+    : /^process ?builder$/i.test(mode)
+      ? 'on this save only if a Process Builder or Flow calls the DLRS invocable action for it (not modeled here)'
+      : `in DLRS ${mode} mode (queued or on demand, not on this save)`;
+  return `${base} — DLRS rollup ${rollup.definitionId ?? ''}, ${when}`;
 };
 
 /**

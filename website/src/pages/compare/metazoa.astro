@@ -1,158 +1,66 @@
 ---
-import DocPage from "../../layouts/DocPage.astro";
-
-const title = "sf-intelligence vs Metazoa Snapshot for Org Management";
-const description =
-  "Both run locally over MCP. Metazoa Snapshot is a commercial suite that deploys and migrates. sf-intelligence is a free, read-only metadata graph.";
-
-const jsonld = [
-  {
-    "@type": "FAQPage",
-    mainEntity: [
-      {
-        "@type": "Question",
-        name: "Is sf-intelligence the only local, privacy-first Salesforce MCP server?",
-        acceptedAnswer: {
-          "@type": "Answer",
-          text: "No. Metazoa states that its Snapshot MCP Server and the AI client both run entirely on your local workstation, following a Zero Trust architecture, with no public endpoint and no intermediate cloud holding your metadata. Local and read-only is a real differentiator against cloud incumbents, but it is not a category of one. Choose on price, source availability, whether the tool can write to the org, and how explicitly each finding is labelled.",
-        },
-      },
-      {
-        "@type": "Question",
-        name: "When should I buy Metazoa Snapshot instead of using sf-intelligence?",
-        acceptedAnswer: {
-          "@type": "Answer",
-          text: "When you need to act, not just understand. Snapshot deploys metadata between environments with scheduling and rollback, migrates relational data, seeds sandboxes, bulk-edits profiles and permission sets, merges similar profiles, and handles org splits, clones and merges — plus more than fifty prebuilt reports and a visual ERD. sf-intelligence has none of that and never will: it is read-only by construction.",
-        },
-      },
-      {
-        "@type": "Question",
-        name: "Do the two MCP servers do the same thing?",
-        acceptedAnswer: {
-          "@type": "Answer",
-          text: "No. Metazoa describes its MCP server in escalating capability levels: structured context about the Snapshot UI, bounded UI actions such as opening tabs, drilling into report rows and preparing deployments, and metadata fetching — with destructive or high-impact operations requiring explicit consent. It lets an agent operate the product. sf-intelligence's MCP server exposes the metadata graph itself as read-only analysis tools, with no action surface to gate.",
-        },
-      },
-    ],
-  },
-];
+import CompareLayout from "../../layouts/CompareLayout.astro";
+import { whoCanEdit } from "../../data/demo-answers.ts";
+import { SFI, VERIFIED } from "../../data/compare.ts";
 ---
 
-<DocPage
-  title={title}
-  description={description}
+<CompareLayout
+  name="Metazoa Snapshot"
+  title="sf-intelligence vs Metazoa Snapshot Compared"
+  description="Metazoa Snapshot is a paid desktop suite that changes orgs: deploys, data moves, profile cleanups. sf-intelligence is free and only reads. Compare the two."
   path="/compare/metazoa"
   heading="sf-intelligence vs Metazoa Snapshot"
-  intro="Metazoa proves that <strong>local MCP plus privacy</strong> is a shared pitch, not our moat. The durable contrasts are narrower and more honest: price, source availability, whether the tool can change your org, and how explicitly each finding is labelled."
-  crumbs={[
-    { label: "compare", href: "/compare" },
-    { label: "vs Metazoa", href: "/compare/metazoa" },
+  lede="Both run on your own computer, so “your metadata stays local” is true of each. The real difference is the verb: Snapshot changes orgs, sf-intelligence only explains them."
+  short="Metazoa Snapshot is a commercial desktop application, paired with a package installed in the org, that deploys, migrates data, cleans up profiles and ships a library of reports. Pricing is by request. sf-intelligence is free, installs nothing in the org and has no way to write to it. Plan a change with sf-intelligence; make it with a tool built to make changes."
+  rows={[
+    { label: "What it is", sfi: SFI.what, them: "An org-management suite: deployments, data migration, permission cleanups, reports and diagrams" },
+    { label: "Where it runs", sfi: SFI.where, them: "A desktop app that, in Metazoa’s words, “communicates from your personal computer to your Salesforce org”" },
+    { label: "Installed in the org", sfi: "Nothing. One read-only retrieve", them: "A managed package from AppExchange, alongside the desktop app" },
+    { label: "Writes to the org", sfi: SFI.writes, them: "Yes. Deploying and changing orgs is the core of the product" },
+    { label: "Price", sfi: SFI.price, them: "Not published. Metazoa offers “Request Pricing” and a free technical-debt assessment" },
+    { label: "AI assistant", sfi: "Works in the assistant you already use, over MCP", them: "Its own Intelligent Assistant, which Metazoa says can “take action” in an org" },
+    { label: "Source code", sfi: SFI.source, them: "Closed" },
   ]}
-  breadcrumbs={[
-    { name: "Compare", path: "/compare" },
-    { name: "vs Metazoa", path: "/compare/metazoa" },
+  chooseSfi={[
+    "To <strong>spend nothing</strong> and read the code that produces each answer",
+    "To <strong>install nothing</strong> in the Salesforce org",
+    "Answers in <strong>any MCP assistant</strong>: Claude, Cursor, VS Code + Copilot, Codex",
+    "To give an AI agent a tool that <strong>can’t change production</strong>",
   ]}
-  jsonld={jsonld}
+  chooseThem={[
+    "To <strong>deploy</strong> from sandbox to production, with scheduling and rollback",
+    "To move data, seed sandboxes, or split and merge orgs",
+    "To <strong>change permissions in bulk</strong>, not just read about them",
+    "A desktop interface, a catalogue of ready-made reports, and vendor support",
+  ]}
+  notSfi={[
+    "You need to make the change, not plan it. No deploy, migration or bulk edit, ever",
+    "You want a desktop app or ready-made reports to click through. It answers in your assistant",
+    "You need a vendor on the hook for support and training",
+  ]}
+  example={whoCanEdit}
+  exampleIntro="A permissions question asked of Verdant, the demo org: the reading half of a profile cleanup."
+  sources={[
+    { label: "metazoa.com home page", href: "https://www.metazoa.com/" },
+  ]}
+  verified={VERIFIED}
+  faqs={[
+    {
+      q: "Isn’t Metazoa also local and private?",
+      a: "Yes. Snapshot runs on your computer too, so keeping metadata off third-party servers isn’t unique to sf-intelligence. The differences are price, read-only versus write-capable, and whether anything is installed in the org.",
+    },
+    {
+      q: "Can sf-intelligence clean up profiles like Snapshot does?",
+      a: "It can tell you who can see or edit what, and through which profile or permission set. It can’t change any of it. Use it to plan the cleanup, then make the change in Salesforce or a tool built for deployments.",
+    },
+    {
+      q: "How much does Metazoa Snapshot cost?",
+      a: "Metazoa doesn’t publish prices on its site; it asks you to request pricing. sf-intelligence is free.",
+    },
+  ]}
+  related={[{ href: "/use-cases/sharing-troubleshooting", label: "Sharing and permission troubleshooting" }]}
 >
-  <section>
-    <div class="container">
-      <div class="prose">
-        <div class="callout">
-          <p><strong>Short answer:</strong> <strong>Metazoa Snapshot</strong> is a mature commercial org-management suite — deployment with scheduling and rollback, org compare, relational data migration, profile and permission-set surgery, org splits and merges, fifty-plus prebuilt reports, a desktop UI — now fronted by a local MCP server. <strong>sf-intelligence</strong> is a free, source-available, MCP-first metadata graph with confidence tiers and refusal discipline, and it is read-only by construction. If your problem is <em>doing</em> something to an org, Snapshot is the category; if your problem is <em>knowing</em> something about it, start here.</p>
-        </div>
-
-        <h2 id="summary">At a glance</h2>
-        <table class="doc-table">
-          <thead><tr><th>&nbsp;</th><th>sf-intelligence</th><th>Metazoa Snapshot</th></tr></thead>
-          <tbody>
-            <tr><td><strong>Category</strong></td><td>Free MCP metadata-intelligence graph</td><td>Commercial org-management suite with a local MCP server</td></tr>
-            <tr><td><strong>Delivery</strong></td><td>npm package; nothing installed in the org</td><td>Native desktop application plus an AppExchange managed package</td></tr>
-            <tr><td><strong>Locality</strong></td><td>Offline vault after one read-only retrieve</td><td>Runs on the workstation; Metazoa's framing is Zero Trust, no public endpoint, no intermediate cloud</td></tr>
-            <tr><td><strong>Cost</strong></td><td>Free</td><td>Paid commercial licence — Metazoa does not publish list pricing on the product page</td></tr>
-            <tr><td><strong>Source available</strong></td><td>Yes — MIT + Commons Clause, audit the code</td><td>No</td></tr>
-            <tr><td><strong>Deploy / migrate</strong></td><td><strong>No write path exists</strong></td><td>Yes — core capability: scheduling, rollback, CI, relational data migration, sandbox seeding</td></tr>
-            <tr><td><strong>Permission surgery</strong></td><td>Read and explain the cascade only</td><td>Bulk-edit profiles and permission sets, merge similar profiles, permission-matrix reports</td></tr>
-            <tr><td><strong>Prebuilt reports</strong></td><td>Composable tools, no report catalogue</td><td>Over fifty, including unused fields and picklists, Apex coverage, PMD quality, forgotten assets</td></tr>
-            <tr><td><strong>Visual UI</strong></td><td>None — CLI and MCP only</td><td>Yes — desktop UI, ERDs, schema and process diagrams, data-dictionary visualisation</td></tr>
-            <tr><td><strong>What the MCP server exposes</strong></td><td>The metadata graph as read-only analysis tools, callable from any MCP host</td><td>Snapshot itself — UI context, bounded actions including preparing deployments, metadata fetch</td></tr>
-            <tr><td><strong>Per-claim citation</strong></td><td>Canonical component ID + <code>declared</code> / <code>parsed</code> / <code>heuristic</code> tier, plus coverage caveats</td><td>Product reports and assistant UX — see Metazoa's documentation</td></tr>
-            <tr><td><strong>Who should pick which</strong></td><td>Developers and AI coding agents who need free, cited, read-only answers about one org, in any MCP host, with nothing installed in the org</td><td>Admin and release teams who need to <em>change</em> orgs safely — deploy, migrate, refactor permissions, split or merge — with a GUI, a report catalogue, vendor support and training</td></tr>
-          </tbody>
-        </table>
-
-        <h2 id="verbs">Read-only is a category boundary, not a feature gap</h2>
-        <p>Snapshot's verbs are act-shaped: deploy, roll back, migrate, seed, bulk-edit, merge, split, clone. Its MCP server is built accordingly — Metazoa describes escalating capability levels that include bounded UI actions such as opening tabs, drilling into report rows, saving output to a project folder and preparing deployments, and states that destructive or high-impact operations require explicit consent, with read-only activity distinguished from write-enabled activity. That is a well-considered design for a tool that can change production.</p>
-        <p>sf-intelligence has no such design because it has no such surface. There is no deploy code, no update call, no delete path anywhere in the product. Consent gating is not a feature we implemented well; it is a feature we did not need, because the worst outcome of a bad answer is a wrong answer rather than a wrong change. That distinction matters if you are trying to get an autonomous agent approved: "the tool cannot write" is a shorter security review than "the tool can write but asks first".</p>
-        <p>It also means Snapshot and sf-intelligence are not really substitutes at the extremes. Nothing here will refactor two hundred profiles for you. Nothing there is free.</p>
-
-        <h2 id="pricing">Pricing and licensing models</h2>
-        <p>Metazoa Snapshot is a <strong>paid commercial licence</strong>, sold with onboarding, support and training, and delivered as a desktop application plus a managed package installed in the org. Metazoa does not publish a price list on the Snapshot product page, so treat any figure you find in a third-party directory as unverified and ask them for a quote. What you are buying is not only software: it is a vendor relationship, an accountable support path, and a product that has been doing deployments and profile cleanups for years.</p>
-        <p>sf-intelligence is <strong>free</strong> and <strong>source-available under MIT + Commons Clause</strong> — deliberately not "open source", since the Commons Clause withholds the right to sell the software itself as a service. You can run it, read every line, fork it for internal use, and verify what it does with your metadata rather than taking a claim on trust. See the <a href="/licensing">licensing page</a> for what that does and does not permit. There is no managed package, so nothing is installed in your Salesforce org at all — only a local read-only retrieve into a directory you own.</p>
-
-        <h2 id="worked">Worked example: the same field, two jobs</h2>
-        <p>Take <code>Widget__c.Status__c</code> on a custom object with a lookup to <code>Account</code>. Two entirely different questions:</p>
-        <p><strong>"Who can edit it, and what breaks if it goes?"</strong> — this is the graph's job. Ask in an MCP host and you get dependents and a permission cascade, each cited:</p>
-        <div class="code-block"><div class="cb-head"><span class="fname">claude - sf-intelligence</span></div><pre><span class="tok-p">›</span> who can edit Widget__c.Status__c, and what breaks if I remove it?
-▸ field-level access: 2 permission sets grant Edit  <span class="tok-c">[declared]</span>
-  <span class="tok-s">PermissionSet:Widget_Ops</span> · <span class="tok-s">PermissionSet:Widget_Admin</span>
-▸ dependents: Flow <span class="tok-s">"Widget_Router"</span> · ValidationRule <span class="tok-s">"Widget_Status_Required"</span>
-  ApexClass <span class="tok-s">"WidgetService"</span> reads Status__c  <span class="tok-c">[parsed]</span>
-  <span class="tok-c">coverageCaveat: dynamic SOQL not visible; verdict is "no static evidence", not "safe"</span></pre></div>
-        <p><strong>"Now strip Edit from one of those permission sets across forty profiles, and deploy it to production on Friday night."</strong> — that is Snapshot's job, and sf-intelligence cannot help you with it beyond telling you what you are about to touch. The clean division of labour is to plan the change against the graph and execute it with a tool built to execute. If the change is a field removal specifically, the reasoning is written out in <a href="/blog/delete-unused-salesforce-fields">the dependency-first field cleanup guide</a>, and the permission-cascade side is covered under <a href="/use-cases/sharing-troubleshooting">sharing and permission troubleshooting</a>.</p>
-
-        <h2 id="when-sfi">Choose sf-intelligence when you want to…</h2>
-        <ul>
-          <li>Spend nothing, and read the source rather than trust a claim about what runs locally</li>
-          <li>Install nothing in the Salesforce org — no managed package, only a read-only retrieve</li>
-          <li>Work from any MCP host your team already uses, not a specific desktop application</li>
-          <li>Get an explicit confidence tier on every edge and a coverage caveat on every absence-based verdict</li>
-          <li>Hand an AI agent a tool that provably cannot change production</li>
-        </ul>
-
-        <h2 id="when-metazoa">Choose Metazoa Snapshot when you want to…</h2>
-        <ul>
-          <li>Actually deploy — sandbox to production, with scheduling, rollback and CI support</li>
-          <li>Migrate relational data, seed sandboxes, or run org splits, clones and merges</li>
-          <li>Do permission and profile surgery in bulk instead of reading about it</li>
-          <li>A catalogue of prebuilt reports and visual ERDs rather than composing your own queries</li>
-          <li>A GUI for admins who do not live in a terminal, plus vendor onboarding, support and training</li>
-          <li>A local MCP server that can drive that suite under explicit consent for high-impact operations</li>
-        </ul>
-
-        <h2 id="not">When not to use sf-intelligence</h2>
-        <ul>
-          <li><strong>You need to make the change, not plan it.</strong> This is the big one against Snapshot. No deploy, no migration, no bulk edit, no rollback — ever, by design.</li>
-          <li><strong>You want a UI.</strong> There is no desktop app, no ERD renderer and no report catalogue. It answers in text, in an editor.</li>
-          <li><strong>You want prebuilt reports to browse.</strong> The tools compose to produce answers on demand; there is no library of fifty canned reports to click through.</li>
-          <li><strong>You need vendor support.</strong> No SLA, no onboarding, no training. You read the source or file an issue.</li>
-          <li><strong>You need current-state guarantees.</strong> The vault is a point-in-time snapshot and goes stale as soon as someone edits the org; freshness is your refresh discipline.</li>
-          <li><strong>You need business record data.</strong> The vault holds metadata. An opt-in, consent-gated read-only live plane returns capped counts and samples, but this is not a data tool.</li>
-        </ul>
-
-        <h2 id="moat">What still differentiates</h2>
-        <p>Against cloud incumbents, both win on locality, and we should stop claiming sole ownership of "metadata never leaves the workstation" — Metazoa says it too, and says it credibly. Against each other the honest contrasts are cost, source availability, read-only versus write-capable, whether anything is installed in the org, and how explicitly each finding is labelled with its provenance. Those are narrower claims. They are also ones we can defend.</p>
-
-        <h2 id="demo">Try it in a minute — no org, no licence</h2>
-        <p>Evaluating an org-management suite takes a sandbox, a licence conversation and an install. Evaluating this takes one command, no Salesforce org, no authenticated <code>sf</code> CLI and no configuration. It serves a synthetic org — "Verdant Energy", a fictional solar installer — over MCP, entirely offline:</p>
-        <div class="code-block"><div class="cb-head"><span class="fname">terminal</span></div><pre><span class="tok-k">claude</span> mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo</pre></div>
-        <p>Ask it an impact or permissions question and see whether the citations hold up on metadata that is not yours. Then <a href="/getting-started">point it at a real org</a> with one read-only retrieve.</p>
-
-        <h2 id="more">More comparisons</h2>
-        <p>For the other local-and-official option, see <a href="/compare/salesforce-dx-mcp">Salesforce's own DX and Hosted MCP servers</a>, which cover live data and DevOps and are frequently registered alongside this one. For hosted alternatives in the same job class, see <a href="/compare/dx0">dx0</a> and <a href="/compare/hubbl">Hubbl</a>. Full set: <a href="/compare">compare hub</a> · <a href="/compare/elements-cloud">Elements.cloud</a> · <a href="/compare/sweep">Sweep</a>.</p>
-
-        <div class="callout"><p><strong>Disclaimer:</strong> Based on Metazoa's public Snapshot product page and MCP write-up as of July 2026, and written to be fair. Capabilities and licensing change — verify on metazoa.com, which is the authority on their product. Where Metazoa does not publish a figure we describe the model rather than repeat a third-party number. sf-intelligence is an independent project, not affiliated with Metazoa or Salesforce.</p></div>
-
-        <div style="padding-top:36px;">
-          <div class="cta-box">
-            <h2 class="screen-type">Depth you can verify, offline.</h2>
-            <p>Privacy is necessary, not sufficient. Free graph, cited claims, no write path.</p>
-            <div class="cta-actions">
-              <a class="btn btn-solid" href="/getting-started">install sf-intelligence</a>
-              <a class="btn btn-ghost" href="/ai-safety">is AI safe on my org?</a>
-            </div>
-          </div>
-        </div>
-      </div>
-    </div>
-  </section>
-</DocPage>
+  <h2>Why read-only matters here</h2>
+  <p>A tool that can deploy has to ask before it does anything risky, and someone has to trust that it asks. sf-intelligence has no deploy, update or delete code at all, so the worst a bad answer can do is be wrong. When you are getting an AI agent approved by security, “it can’t write” is a shorter review than “it can write, but it asks first”.</p>
+  <p>It also means the two aren’t really substitutes. sf-intelligence won’t refactor two hundred profiles for you; Snapshot isn’t free. A sensible split is to ask sf-intelligence what a change touches, then make the change with the tool you use for releases.</p>
+</CompareLayout>

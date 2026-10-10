@@ -2,7 +2,7 @@
 import DocPage from "../../layouts/DocPage.astro";
 import site from "../../data/site.ts";
 
-const title = "Can I Delete This Salesforce Field? A Dependency-First Field Cleanup Method";
+const title = "Can I Delete This Salesforce Field? A Cleanup Method";
 const description =
   "Field population never tells you what depends on a field. The dependency-first method for deciding if a Salesforce custom field is safe to delete.";
 
@@ -65,7 +65,7 @@ const jsonld = [
   heading="Can I delete this Salesforce field?"
   intro={`Most field cleanups start with a population report and end with a spreadsheet of percentages. That measures the wrong thing. <strong>Population tells you how much data is in a field; it never tells you what depends on it.</strong> Here is a dependency-first method - what blocks a delete, what breaks silently afterwards, and the four verdicts that make the output actionable.`}
   crumbs={[{ label: "blog", href: "/blog" }, { label: "delete-unused-salesforce-fields", href: "/blog/delete-unused-salesforce-fields" }]}
-  breadcrumbs={[{ name: "Blog", path: "/blog" }, { name: "Deleting unused Salesforce fields", path: "/blog/delete-unused-salesforce-fields" }]}
+  breadcrumbs={[{ name: "Guides", path: "/blog" }, { name: "Deleting unused Salesforce fields", path: "/blog/delete-unused-salesforce-fields" }]}
   jsonld={jsonld}
   ogType="article"
   datePublished="2026-07-28"

@@ -297,7 +297,7 @@ type Row = Readonly<Record<string, unknown>>;
  * `console.warn` so the offending row is identifiable instead of an
  * anonymous parse failure.
  */
-const parseProperties = (
+export const parsePropertiesJson = (
   raw: unknown,
   idHint?: string,
 ): Readonly<Record<string, unknown>> => {
@@ -328,7 +328,7 @@ const rowToNode = (r: Row): Node => ({
   lastModifiedDate: (r['last_modified_date'] ?? null) as string | null,
   lastModifiedBy: (r['last_modified_by'] ?? null) as string | null,
   apiVersion: (r['api_version'] ?? null) as number | null,
-  properties: parseProperties(r['properties_json'], r['id'] as string | undefined),
+  properties: parsePropertiesJson(r['properties_json'], r['id'] as string | undefined),
 });
 
 const rowToEdge = (r: Row): Edge => ({
@@ -337,7 +337,7 @@ const rowToEdge = (r: Row): Edge => ({
   edgeType: r['edge_type'] as EdgeType,
   confidence: r['confidence'] as ConfidenceLevel,
   source: r['source'] as string,
-  properties: parseProperties(
+  properties: parsePropertiesJson(
     r['properties_json'],
     r['from_id'] !== undefined && r['to_id'] !== undefined
       ? `${r['from_id'] as string} -> ${r['to_id'] as string}`

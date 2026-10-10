@@ -1,5 +1,4 @@
 // @ts-check
-import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -7,77 +6,42 @@ import { fileURLToPath } from "node:url";
 import { defineConfig } from "astro/config";
 import sitemap from "@astrojs/sitemap";
 import mdx from "@astrojs/mdx";
+import { unified } from "@astrojs/markdown-remark";
+
+import rehypeGuides from "./src/lib/rehype-guides.mjs";
+
+import geo from "./integrations/geo.mjs";
 
 const SITE = "https://sfi.auditforce.cloud";
-
-const PAGES_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), "src/pages");
-
-/**
- * Resolve a sitemap URL pathname back to the source file that produces it, so
- * `lastmod` can be stamped from the page's real content-change date.
- *   "/"            -> src/pages/index.astro
- *   "/mcp"         -> src/pages/mcp.astro
- *   "/use-cases"   -> src/pages/use-cases/index.astro
- *   "/blog/a-post" -> src/pages/blog/a-post.astro
- */
-function sourceFileFor(pathname) {
-  const slug = pathname.replace(/^\/+|\/+$/g, "");
-  const bases = slug === "" ? ["index"] : [slug, `${slug}/index`];
-  for (const base of bases) {
-    for (const ext of [".astro", ".mdx", ".md"]) {
-      const candidate = path.join(PAGES_DIR, base + ext);
-      if (fs.existsSync(candidate)) return candidate;
-    }
-  }
-  return null;
-}
+const SITE_DIR = path.dirname(fileURLToPath(import.meta.url));
 
 /**
- * Last content-change date for a page, most trustworthy source first.
+ * Last content-change date per route, from src/data/lastmod.json.
  *
- * Deliberately NOT build time. Stamping every URL with `new Date()` on each
- * deploy makes `lastmod` a lie — Google learns to discount the signal, which is
- * strictly worse than omitting it. So: real commit date, else filesystem mtime,
- * else `null` and the field is left off that entry entirely.
- *
- * `git log` is tried first but can legitimately fail on a shallow or
- * export-without-history checkout (some CI providers clone that way), hence the
- * mtime fallback rather than a hard failure.
+ * That file is written by recalibrate.mjs from the full-history local repo.
+ * The build never runs `git log` itself: Cloudflare Pages clones shallow, so
+ * `git log -- <file>` returned HEAD for every file and every sitemap entry
+ * read the same deploy timestamp. File mtime is no better there (checkout
+ * time). A route missing from lastmod.json simply gets no <lastmod>:
+ * omitting beats stamping the deploy date on everything.
  */
-const lastmodCache = new Map();
-function lastmodFor(pathname) {
-  if (lastmodCache.has(pathname)) return lastmodCache.get(pathname);
-  const file = sourceFileFor(pathname);
-  let iso = null;
-  if (file) {
-    try {
-      const out = execFileSync("git", ["log", "-1", "--format=%cI", "--", file], {
-        encoding: "utf8",
-        stdio: ["ignore", "pipe", "ignore"],
-      }).trim();
-      if (out) iso = new Date(out).toISOString();
-    } catch {
-      /* fall through to mtime */
-    }
-    if (!iso) {
-      try {
-        iso = fs.statSync(file).mtime.toISOString();
-      } catch {
-        /* leave null — omitting beats inventing */
-      }
-    }
-  }
-  lastmodCache.set(pathname, iso);
-  return iso;
+/** @type {Record<string, string>} */
+let LASTMOD = {};
+try {
+  LASTMOD = JSON.parse(fs.readFileSync(path.join(SITE_DIR, "src/data/lastmod.json"), "utf8"));
+} catch {
+  /* no file: no lastmod anywhere */
 }
+const lastmodFor = (pathname) => LASTMOD[pathname.replace(/\/+$/, "") || "/"] ?? null;
 
 // Per-route sitemap priority — home > install/getting-started/mcp > use-cases/
 // compare > glossary/faq/licensing. Pattern borrowed from open-design's landing
 // page serialize() hook. Non-canonical routes are filtered out.
 const PRIORITY = [
   [/\/$/, 1.0, "weekly"],
-  [/\/(getting-started|mcp|capabilities)$/, 0.9, "weekly"],
-  [/\/(use-cases|compare)\//, 0.8, "weekly"],
+  [/\/(getting-started|demo|mcp|capabilities)$/, 0.9, "weekly"],
+  [/\/(use-cases|compare|how-to|errors|setup)\//, 0.8, "weekly"],
+  [/\/(how-to|errors)$/, 0.8, "weekly"],
   [/\/blog(\/[^/]+)?$/, 0.8, "weekly"],
   [/\/(tools|trust|configuration)$/, 0.7, "monthly"],
 ];
@@ -91,11 +55,19 @@ export default defineConfig({
     inlineStylesheets: "always",
     format: "file", // emit /page.html so Cloudflare serves /page cleanly
   },
+  markdown: {
+    // Code blocks use the site's own calm code style (light + dark tokens),
+    // not a fixed Shiki theme. rehypeGuides adds doc-table and the framed
+    // .code-block markup — see src/lib/rehype-guides.mjs.
+    syntaxHighlight: false,
+    processor: unified({ rehypePlugins: [rehypeGuides] }),
+  },
   integrations: [
     mdx(),
+    geo({ siteDir: SITE_DIR }),
     sitemap({
       // Never list the error page (Astro usually skips it; keep the guard explicit).
-      filter: (page) => !page.includes("/404"),
+      filter: (page) => !page.includes("/404") && !/\.(json|txt|xml)$/.test(page),
       serialize(item) {
         const pathname = new URL(item.url).pathname;
         // lastmod is the ONE sitemap signal Google has said it actually uses for

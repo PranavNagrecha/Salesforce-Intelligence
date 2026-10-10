@@ -22,6 +22,7 @@ import type { Context } from '../../src/server.js';
 import { emptyQueuesAndGroupsHandler } from '../../src/tools/empty-queues-and-groups.js';
 import {
   readPriorTechDebtScore,
+  TECH_DEBT_SCORE_MODEL,
   techDebtScoreHandler,
   techDebtScoreInputSchema,
 } from '../../src/tools/tech-debt-score.js';
@@ -198,11 +199,34 @@ describe('techDebtScoreHandler — Q111 low-debt band', () => {
 
   // LAST in this describe: it writes a risk-scores log into ctx.vaultRoot, so it
   // must not run before the no-delta assertions above (afterAll wipes tempDir).
+  it('FAIL-BEFORE/PASS-AFTER (ARCH-06): no scoreDelta against a score from another model or axis set', async () => {
+    mkdirSync(join(ctx.vaultRoot, 'meta'), { recursive: true });
+    const current = await techDebtScoreHandler(ctx, {});
+    if (!current.ok) throw new Error('scorer failed');
+    const log = (row: Record<string, unknown>): void =>
+      writeFileSync(
+        join(ctx.vaultRoot, 'meta', 'risk-scores.jsonl'),
+        `${JSON.stringify({ refreshedAt: '2026-01-01T00:00:00Z', sourceTreeHash: 'sha256:OLD-STATE', techDebtScore: 99, ...row })}\n`,
+      );
+    // A legacy row (no axis set / model) and a row over different axes.
+    for (const row of [{}, { scoreModel: TECH_DEBT_SCORE_MODEL, scoredAxes: ['codeQuality'] }]) {
+      log(row);
+      const r = await techDebtScoreHandler(ctx, {});
+      if (!r.ok) throw new Error('scorer failed');
+      expect(r.value.data.scoreDelta).toBeUndefined();
+      expect(r.value.data.previousScore).toBeUndefined();
+      expect(r.value.data.scoreDeltaUnavailable).toMatch(/no scoreDelta/);
+    }
+    log({ scoreModel: TECH_DEBT_SCORE_MODEL, scoredAxes: [...current.value.data.scoredAxes] });
+  });
+
   it('reports scoreDelta vs a prior logged refresh (P9-risk-delta)', async () => {
+    const current = await techDebtScoreHandler(ctx, {});
+    if (!current.ok) throw new Error('scorer failed');
     mkdirSync(join(ctx.vaultRoot, 'meta'), { recursive: true });
     writeFileSync(
       join(ctx.vaultRoot, 'meta', 'risk-scores.jsonl'),
-      `${JSON.stringify({ refreshedAt: '2026-01-01T00:00:00Z', sourceTreeHash: 'sha256:OLD-STATE', techDebtScore: 99 })}\n`,
+      `${JSON.stringify({ refreshedAt: '2026-01-01T00:00:00Z', sourceTreeHash: 'sha256:OLD-STATE', techDebtScore: 99, scoreModel: TECH_DEBT_SCORE_MODEL, scoredAxes: current.value.data.scoredAxes })}\n`,
     );
     const r = await techDebtScoreHandler(ctx, {});
     expect(r.ok).toBe(true);
@@ -460,6 +484,23 @@ describe('techDebtScoreHandler — Q115 honesty anchor (extractor-not-run)', () 
     for (const e of r.value.data.excludedCategories) {
       expect(['user-opted-out', 'extractor-not-run']).toContain(e.reason);
     }
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER (ARCH-06): bands insufficient-evidence when under half the weight is scored', async () => {
+    // The unscored axes (codeQuality, freshness) carry most of the weight here.
+    const r = await techDebtScoreHandler(ctx, { weights: { codeQuality: 1, freshness: 1 } });
+    if (!r.ok) throw new Error('scorer failed');
+    expect(r.value.data.scoreBand).toBe('insufficient-evidence');
+    expect(r.value.data.scoredAxes).not.toContain('codeQuality');
+    expect(r.value.data.scoredWeightFraction).toBeLessThan(0.5);
+    expect(r.value.data.boundaries.join(' ')).toMatch(/insufficient-evidence/);
+    // Opting an axis OUT removes it from the denominator: the rest is enough to band.
+    const optOut = await techDebtScoreHandler(ctx, {
+      weights: { codeQuality: 1, freshness: 1 },
+      excludeCategories: ['codeQuality', 'freshness'],
+    });
+    if (!optOut.ok) throw new Error('scorer failed');
+    expect(optOut.value.data.scoreBand).not.toBe('insufficient-evidence');
   });
 
   it('emits the verbatim Q115 disclosure when extractor-not-run', async () => {

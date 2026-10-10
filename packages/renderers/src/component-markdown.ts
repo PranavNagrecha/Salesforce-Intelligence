@@ -233,7 +233,7 @@ const toFrontmatterSafeArray = (items: readonly unknown[]): unknown => {
  * structure, and the graph node (what `get_component` returns) keeps the
  * original typed `properties` object untouched.
  */
-const ensureSerializableFrontmatter = (
+export const ensureSerializableFrontmatter = (
   frontmatter: Readonly<Record<string, unknown>>,
 ): Readonly<Record<string, unknown>> => {
   try {

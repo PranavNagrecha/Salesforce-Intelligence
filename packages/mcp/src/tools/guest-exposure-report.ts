@@ -43,6 +43,7 @@
 
 import type {
   ComponentId,
+  Edge,
   McpError,
   McpResponse,
   Node,
@@ -51,7 +52,7 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { guestProfileNameForSite } from '@sf-intelligence/extractors';
-import { getNodeById, listEdges } from '@sf-intelligence/graph';
+import { getNodeById, listEdges, listEdgesForNodes } from '@sf-intelligence/graph';
 import {
   isRegulatedPiiClassification,
   type QualityIssue,
@@ -109,6 +110,7 @@ const GUEST_SECURITY_RULES: ReadonlySet<string> = new Set([
   'missing-crud-check',
   'soql-injection',
   'without-sharing-no-comment',
+  'omitted-sharing-on-entry-point',
   'dynamic-apex',
 ]);
 
@@ -128,13 +130,12 @@ const GUEST_SECURITY_RULES: ReadonlySet<string> = new Set([
  * "NOT in the offline metadata model", which sends a reader away from a file the
  * vault actually ships. The `<pageAccesses>` blocks ARE in the retrieved
  * `.profile-meta.xml`, and the pages themselves ARE modeled as
- * `VisualforcePage` nodes — it is the profile extractor that emits no
- * `Profile -> VisualforcePage` grant edge (it emits object, field, class, flow
- * and custom-permission grants and stops there). That is a gap a future
- * extraction closes, and until then a reader can open the profile file by hand.
+ * `VisualforcePage` nodes. Since page grants are extracted, this limitation
+ * fires only when no guest profile with page grants was audited (no community
+ * modeled, or a profile built before `pageGrantCount` existed).
  */
 const VISUALFORCE_GAP_LIMITATION =
-  'Visualforce-page guest access is NOT enumerated by this report. The guest profile\'s `<pageAccesses>` entries ARE present in the retrieved `.profile-meta.xml` this vault ships (see each community\'s `guestProfileSourcePath`), and the pages themselves ARE modeled as `VisualforcePage` nodes, but the profile extractor emits no `Profile -> VisualforcePage` grant edge — so no guest-exposed page can ever become a finding here. A Visualforce page RUNS its controller Apex, so this is a real guest-reachable code surface. An empty `findings` list is therefore NEVER proof that a site exposes nothing: read the `<pageAccesses>` blocks in the profile XML yourself before treating a zero as a clearance. See `uncheckedGuestSurfaces`.';
+  'Visualforce-page guest access is NOT enumerated by this answer. Either no community was modeled to attach a guest profile to, or the guest profile was built before `Profile -> VisualforcePage` grants were extracted (no `pageGrantCount`; re-run `sfi refresh` to get them). The `<pageAccesses>` entries ARE in the retrieved `.profile-meta.xml` (see each community\'s `guestProfileSourcePath`). A Visualforce page RUNS its controller Apex, so an empty `findings` list is NEVER proof that a site exposes nothing. See `uncheckedGuestSurfaces`.';
 
 /**
  * The classifier caveat, emitted on EVERY response (in `disclosures` and in
@@ -147,6 +148,10 @@ const VISUALFORCE_GAP_LIMITATION =
  * finding at all. That blind spot does not become untrue when the scoped
  * answer happens to be short, so the sentence does not ride on a condition.
  */
+/** Disclosure when every scoped guest profile's page grants were extracted. */
+const VISUALFORCE_RANKED_NOTE =
+  'Visualforce pages the guest profile can load (`<pageAccesses>`) are findings of kind `visualforce-page`, rated by the controller / extension Apex each page runs. A page with no custom controller is `low`.';
+
 const PII_RECOGNIZER_LIMITATION =
   'Which exposed fields are REGULATED is decided by the shared pii_inventory heuristic recognizer over the field\'s declared API name, label, data type and description — it covers the pii, sensitive and protected (protected-class) tiers, but a field that stores regulated data while carrying no name/description signal classifies public and is NOT reported here. Absence of a field from `findings` is therefore never proof the guest cannot see regulated data on it.';
 /** Per-response byte budget for the paged `findings` list; below the ~45 KB guard. */
@@ -267,6 +272,7 @@ export type ExposureKind =
   | 'object-crud'
   | 'pii-field-fls'
   | 'apex-enabled'
+  | 'visualforce-page'
   | 'guest-sharing-rule';
 
 /**
@@ -289,6 +295,8 @@ export interface ExposureFinding {
   readonly detail: string;
   readonly grantConfidence: 'declared';
   readonly guestLinkageConfidence: 'heuristic';
+  /** visualforce-page: the controller / extension classes the page runs. */
+  readonly pageControllers?: readonly string[];
   /** object-crud: which operations the guest profile is granted. */
   readonly access?: {
     readonly read: boolean;
@@ -837,9 +845,28 @@ const analyseGuestApex = (
 };
 
 /**
- * The `uncheckedGuestSurfaces` rows for one response. The Visualforce row is
- * UNCONDITIONAL — the grant plane is unmodeled on every vault — so this list is
- * never empty and `trust.completeness` can never be `complete`.
+ * The Apex classes a Visualforce page runs: its declared `controller=` then
+ * `extensions=` bindings, read from the page's `references` out-edges to
+ * `ApexClass:*` (role `controller` / `extension`) — the shape the
+ * visualforce-page extractor emits. Deduped, controller first.
+ */
+export const pageApexBindings = (edges: readonly Edge[]): readonly string[] => {
+  const rank = (e: Edge): number => (e.properties['role'] === 'controller' ? 0 : 1);
+  const out: string[] = [];
+  for (const e of [...edges].sort((a, b) => rank(a) - rank(b))) {
+    const role = e.properties['role'];
+    if (e.edgeType !== 'references' || (role !== 'controller' && role !== 'extension')) continue;
+    if (!e.toId.startsWith(APEX_PREFIX)) continue;
+    const cls = e.toId.slice(APEX_PREFIX.length);
+    if (!out.includes(cls)) out.push(cls);
+  }
+  return out;
+};
+
+/**
+ * The `uncheckedGuestSurfaces` rows for one response. Emitted only when a
+ * scoped guest profile predates page-grant extraction (no `pageGrantCount`);
+ * otherwise guest page grants are ranked as `visualforce-page` findings.
  *
  * `guestGrantEdgeCount` is measured, not assumed: if a future extraction starts
  * emitting `Profile -> VisualforcePage` grants, the row flips to
@@ -855,7 +882,7 @@ const buildUncheckedGuestSurfaces = (opts: {
   const evidence =
     opts.modeledPageCount === 0
       ? 'This vault holds NO `VisualforcePage` node either, so the pages themselves were not retrieved.'
-      : `${countPhrase} \`VisualforcePage\` node(s) ARE modeled in this vault, so the pages exist — only the grant edge is missing.`;
+      : `${countPhrase} \`VisualforcePage\` node(s) ARE modeled in this vault, so the pages exist.`;
   return [
     {
       surface: 'VisualforcePage',
@@ -865,7 +892,7 @@ const buildUncheckedGuestSurfaces = (opts: {
       detail:
         opts.guestPageGrantEdges > 0
           ? `${opts.guestPageGrantEdges} \`Profile -> VisualforcePage\` grant edge(s) were seen on the scoped guest profile(s) and this build does NOT rank them as findings. ${evidence} Read them directly, or from the \`<pageAccesses>\` blocks in the profile XML at \`guestProfileSourcePath\`.`
-          : `The profile extractor emits no \`Profile -> VisualforcePage\` grant edge (it emits object, field, Apex-class, flow and custom-permission grants and stops there), so a guest-exposed Visualforce page can NEVER become a finding here. ${evidence} The \`<pageAccesses>\` blocks ARE present in the retrieved profile XML at \`guestProfileSourcePath\` — open it to see which pages a guest can load. A Visualforce page RUNS its controller Apex, so this is a real guest-reachable code surface.`,
+          : `No \`Profile -> VisualforcePage\` grant edge was read for a guest profile here — no community was modeled, or the guest profile predates page-grant extraction (re-run \`sfi refresh\`). ${evidence} The \`<pageAccesses>\` blocks ARE present in the retrieved profile XML at \`guestProfileSourcePath\` — open it to see which pages a guest can load. A Visualforce page RUNS its controller Apex, so this is a real guest-reachable code surface.`,
     },
   ];
 };
@@ -1044,6 +1071,12 @@ export const guestExposureReportHandler = async (
   const pageCountIsFloor = pageScan.value.scanIncomplete;
   /** `Profile -> VisualforcePage` grant edges seen on the scoped guest profiles. */
   let guestPageGrantEdges = 0;
+  /**
+   * ARCH-12: set when a scoped guest profile carries no `pageGrantCount` — it
+   * was built before page grants were extracted, so its page plane is NOT
+   * checked. Otherwise every guest page grant is ranked as a finding.
+   */
+  let pageDataUnchecked = false;
 
   const vaultState = {
     sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -1307,6 +1340,10 @@ export const guestExposureReportHandler = async (
       const objectGrants = new Map<string, Record<(typeof OBJECT_FLAGS)[number], boolean>>();
       const fieldGrants = new Map<string, { readable: boolean; editable: boolean }>();
       const apexGrants: string[] = [];
+      const pageGrants: string[] = [];
+      if (guestProfileNode !== null && !familyWasExtracted(guestProfileNode.properties, 'pageGrantCount')) {
+        pageDataUnchecked = true;
+      }
       for (const edge of edgesResult.value) {
         if (edge.toId.startsWith(OBJECT_PREFIX)) {
           const obj = edge.toId.slice(OBJECT_PREFIX.length);
@@ -1339,6 +1376,7 @@ export const guestExposureReportHandler = async (
           // MEASURED here so `uncheckedGuestSurfaces` reports what it saw
           // rather than asserting a permanent blindness it never re-checked.
           guestPageGrantEdges += 1;
+          pageGrants.push(edge.toId.slice(VISUALFORCE_PAGE_PREFIX.length));
         }
       }
 
@@ -1445,6 +1483,58 @@ export const guestExposureReportHandler = async (
           grantConfidence: 'declared',
           guestLinkageConfidence: 'heuristic',
           apex: ranked.analysis,
+        });
+      }
+
+      // ARCH-12: Visualforce pages the guest can load, ranked by the controller
+      // Apex each page RUNS (the same class facts as apex-enabled above). The
+      // extractor records `controller=` / `extensions=` as the page's declared
+      // `references` out-edges (role controller / extension), never as node
+      // properties — read them from there.
+      const pageControllerEdges = await listEdgesForNodes(
+        ctx.graph,
+        pageGrants.map((p) => `${VISUALFORCE_PAGE_PREFIX}${p}` as ComponentId),
+        { direction: 'out', edgeTypes: ['references'] },
+      );
+      if (!pageControllerEdges.ok) {
+        return err({ kind: 'internal', message: `graph query failed: ${pageControllerEdges.error.message}` });
+      }
+      for (const page of pageGrants) {
+        const pageId = `${VISUALFORCE_PAGE_PREFIX}${page}`;
+        const pageNodeResult = await getNodeById(ctx.graph, pageId as ComponentId);
+        if (!pageNodeResult.ok) {
+          return err({ kind: 'internal', message: `graph query failed: ${pageNodeResult.error.message}` });
+        }
+        const pageNode = pageNodeResult.value;
+        const controllers = pageApexBindings(pageControllerEdges.value.get(pageId as ComponentId) ?? []);
+        let severity: ExposureSeverity = 'low';
+        const parts: string[] = [];
+        for (const cls of controllers) {
+          const clsId = `${APEX_PREFIX}${cls}`;
+          const clsNode = await getNodeById(ctx.graph, clsId as ComponentId);
+          if (!clsNode.ok) {
+            return err({ kind: 'internal', message: `graph query failed: ${clsNode.error.message}` });
+          }
+          const ranked = analyseGuestApex(clsId, cls, clsNode.value);
+          if (SEVERITY_RANK[ranked.severity] < SEVERITY_RANK[severity]) severity = ranked.severity;
+          parts.push(`${cls} (${ranked.severity})`);
+        }
+        communityFindings.push({
+          communityId: site.id,
+          guestProfileId,
+          kind: 'visualforce-page',
+          severity,
+          nodeId: pageId,
+          label: page,
+          detail:
+            pageNode === null
+              ? `guest can load Visualforce page ${page}, which is not in this vault — its controller was not read`
+              : controllers.length > 0
+                ? `guest can load Visualforce page ${page}, which runs ${parts.join(', ')} — rated by its controller Apex`
+                : `guest can load Visualforce page ${page} (no custom controller or extension declared)`,
+          grantConfidence: 'declared',
+          guestLinkageConfidence: 'heuristic',
+          pageControllers: controllers,
         });
       }
     }
@@ -1594,7 +1684,7 @@ export const guestExposureReportHandler = async (
   const disclosures: string[] = [
     'The guest-profile identity is HEURISTIC: it is inferred from Salesforce\'s "{Site Label} Profile" naming convention, not a declared metadata pointer. Every finding\'s underlying CRUD/FLS/apex grant is `declared`, but that the profile IS the site guest user is heuristic — so the report confidence is `heuristic`. Confirm the guest profile in Setup.',
     'Object CRUD + FLS are the DECLARED static grant. Actual record visibility to a guest also depends on OWD + guest/criteria sharing rules (record level) — guest sharing rules are surfaced as their own findings, but whether a specific record matches is not modeled here.',
-    VISUALFORCE_GAP_LIMITATION,
+    pageDataUnchecked ? VISUALFORCE_GAP_LIMITATION : VISUALFORCE_RANKED_NOTE,
     PII_RECOGNIZER_LIMITATION,
   ];
   if (objectScope !== null) {
@@ -1643,11 +1733,11 @@ export const guestExposureReportHandler = async (
     'SharingRule',
   ]);
 
-  const uncheckedGuestSurfaces = buildUncheckedGuestSurfaces({
-    modeledPageCount,
-    pageCountIsFloor,
-    guestPageGrantEdges,
-  });
+  // ARCH-12: the page plane is unchecked only for a guest profile built before
+  // page grants were extracted; otherwise its pages are findings above.
+  const uncheckedGuestSurfaces = pageDataUnchecked
+    ? buildUncheckedGuestSurfaces({ modeledPageCount, pageCountIsFloor, guestPageGrantEdges })
+    : [];
   /**
    * NEVER `complete`. This report enumerates four guest planes and the
    * Visualforce-page grant plane is not one of them, on any vault — so the
@@ -1659,7 +1749,9 @@ export const guestExposureReportHandler = async (
    */
   const completenessStatus: 'partial' | 'unknown' =
     coverage.status === 'unknown' ? 'unknown' : 'partial';
-  const uncheckedSurfaceNames = uncheckedGuestSurfaces.map((u) => u.surface).join(', ');
+  const gapClause = pageDataUnchecked
+    ? `NOT A COMPLETE PICTURE OF GUEST REACH: this report enumerates object CRUD, PII field FLS, Apex-class access and guest sharing rules, and does NOT enumerate ${uncheckedGuestSurfaces.map((u) => u.surface).join(', ')} guest access for a guest profile built before page grants were extracted — a Visualforce page runs its controller Apex, and its \`<pageAccesses>\` grants live in the profile XML at each community's \`guestProfileSourcePath\`. So \`findings: []\` here is never a clearance; see \`uncheckedGuestSurfaces\` and \`trust.limitations\`.`
+    : 'Covers object CRUD, PII field FLS, Apex-class access, Visualforce page access (ranked by the controller Apex each page runs) and guest sharing rules.';
 
   return ok({
     data: {
@@ -1689,7 +1781,7 @@ export const guestExposureReportHandler = async (
         : {}),
       confidence: 'heuristic',
       disclosures,
-      boundaryNote: `Ranked guest-exposure audit across ${communities.length} modeled community surface(s)${objectScope !== null ? `, scoped to object '${objectScope}'` : ''}; ${bySeverity.critical} critical, ${bySeverity.high} high. NOT A COMPLETE PICTURE OF GUEST REACH: this report enumerates object CRUD, PII field FLS, Apex-class access and guest sharing rules, and does NOT enumerate ${uncheckedSurfaceNames} guest access — a Visualforce page runs its controller Apex, and its \`<pageAccesses>\` grants live in the profile XML at each community's \`guestProfileSourcePath\`, unreachable from this graph. So \`findings: []\` here is never a clearance; see \`uncheckedGuestSurfaces\` and \`trust.limitations\`. Findings page with offset/limit; \`communities\` and \`summary\` hold complete counts. \`appliedScope\` echoes the scope actually applied. Confidence is heuristic — the guest-profile linkage is a naming convention.`,
+      boundaryNote: `Ranked guest-exposure audit across ${communities.length} modeled community surface(s)${objectScope !== null ? `, scoped to object '${objectScope}'` : ''}; ${bySeverity.critical} critical, ${bySeverity.high} high. ${gapClause} Findings page with offset/limit; \`communities\` and \`summary\` hold complete counts. \`appliedScope\` echoes the scope actually applied. Confidence is heuristic — the guest-profile linkage is a naming convention.`,
       // The recognizer caveat rides on EVERY response, findings or none — it
       // describes what the classifier cannot see, which does not become untrue
       // when a scope happens to surface nothing. An empty `limitations` next to
@@ -1703,7 +1795,9 @@ export const guestExposureReportHandler = async (
             : {}),
         },
         undefined,
-        [VISUALFORCE_GAP_LIMITATION, PII_RECOGNIZER_LIMITATION],
+        pageDataUnchecked
+          ? [VISUALFORCE_GAP_LIMITATION, PII_RECOGNIZER_LIMITATION]
+          : [PII_RECOGNIZER_LIMITATION],
       ),
       ...(paged.nextCursor !== null
         ? { nextCursor: paged.nextCursor, pageInfo: paged.pageInfo }

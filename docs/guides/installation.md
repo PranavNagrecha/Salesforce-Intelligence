@@ -86,7 +86,7 @@ CLI (global or local).
 `.mcp.json` at the repo root, which you can commit so your team shares it):
 
 ```sh
-claude mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-intelligence mcp
+claude mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-intelligence mcp --vault "$PWD/org-kb"
 ```
 
 Use `--scope user` instead to make it available in every project on your
@@ -267,8 +267,9 @@ published or written back to the org.
 | `sfi doctor` says `sf` not found, but it is installed | IDE/MCP subprocess didn't inherit your shell `PATH` (e.g. `/usr/local/bin`, `/opt/homebrew/bin`) | doctor now probes those locations and reports a PATH warning; add the Salesforce CLI directory to the PATH of whatever launches the client |
 | `npx` re-downloads the package every run | That's how `npx` works | Run `npm install -g sf-intelligence` once, then use the `sfi` command |
 | `sfi: command not found` | The CLI isn't installed globally | `npm install -g sf-intelligence`, or call it through `npx -y sf-intelligence <command>` |
-| `sfi init` reports "no DX project" | You're not in a Salesforce DX project | `cd` into the directory that contains `sfdx-project.json`, then re-run |
-| `sfi refresh` reports "no vault" | `sfi init` hasn't run in this repo yet | Run `sfi init` first; pick a target-org alias when prompted |
+| `sfi init` printed "Scaffolded sfdx-project.json" | You ran it outside a Salesforce DX project, so it created a minimal one there | If that was not the repo that represents your org, delete `org-kb/`, `sfdx-project.json` and `force-app/`, `cd` into the right repo and re-run |
+| `sfi refresh` reports "no vault" | `sfi init` hasn't run in this repo yet | Run `sfi init --target-org <alias>` first |
+| `sfi refresh` says the alias "is not one of your authenticated sf orgs" | The alias is mistyped, or that org's login expired | `sf org list` to check the alias, or `sf org login web --alias <alias>` |
 | Windows: `sfi refresh` fails with a database lock error | Windows will not let a file be replaced while another process holds it open, and a connected MCP server holds the vault database | Close your MCP client (or stop `sfi mcp`), re-run the refresh, then reopen the client. This does not affect macOS/Linux, where the swap happens behind a live server |
 | `sf project retrieve` fails during refresh | `sf` not authenticated, or wrong alias | `sf org login web --alias my-org-alias`, then re-run `sfi refresh --target-org my-org-alias` |
 | Server connects but offers only `sfi.setup_status` | No vault built yet — this is setup mode, working as intended | Run `sfi init` then `sfi refresh` (§4), then restart the client. Ask your chat to run `sfi.setup_status` for the exact commands |

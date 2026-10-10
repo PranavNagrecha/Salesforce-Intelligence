@@ -63,6 +63,13 @@ for (const file of slashFiles) {
   }
 
   const text = readFileSync(join(commandsDir, file), 'utf8');
+  // FR-05: the plugin installs the MCP server, never an `sfi` binary, so a
+  // slash command that runs `sfi <cmd>` must say how to run it without one.
+  if ([...text.matchAll(SUBCOMMAND_RE)].length > 0 && !/npx -y sf-intelligence@\d+\.\d+\.\d+/.test(text)) {
+    problems.push(
+      `${file}: runs \`sfi <cmd>\` but gives no \`npx -y sf-intelligence@<version>\` fallback — a plugin-only install has no \`sfi\` on PATH`,
+    );
+  }
   for (const m of text.matchAll(SUBCOMMAND_RE)) {
     const sub = m[1];
     referenced.add(sub);

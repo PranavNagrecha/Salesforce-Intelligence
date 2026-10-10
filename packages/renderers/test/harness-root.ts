@@ -15,25 +15,36 @@ import { it } from 'vitest';
 const MAX_WALK_UP_LEVELS = 8;
 
 /**
- * Walk up from the current working directory looking for the build harness
- * root — the first ancestor directory that contains a `tests/fixtures`
- * folder. Returns that absolute path, or `null` when no such ancestor exists
- * within {@link MAX_WALK_UP_LEVELS} levels (the published product copy, which
- * ships without the harness-side fixtures, hits this `null` case).
+ * Locate the build harness root — the directory holding the maintainer-only
+ * `tests/fixtures` + `tests/golden` trees (real-org fixtures that never ship).
  *
- * The function never throws: a missing harness is an expected, recoverable
- * condition that callers handle by skipping fixture-bound suites.
+ * CH-4: this used to be a silent walk-up for ANY ancestor `tests/fixtures`, so
+ * 136 extractor assertions skipped on every machine but a frozen harness copy
+ * (including CI) without anyone choosing that — and an unrelated ancestor
+ * `tests/fixtures` would have switched them on against the wrong data. Now:
  *
- * @example
- * const HARNESS_ROOT = findHarnessRoot();
- * if (HARNESS_ROOT !== null) {
- *   const fixture = resolve(HARNESS_ROOT, 'tests/fixtures/dx/...');
- * }
+ *   1. `SFI_HARNESS_ROOT=<dir>` names the harness explicitly (run the suites
+ *      from any checkout). A set-but-wrong path THROWS — never a quiet skip.
+ *   2. Otherwise walk up, but only accept an ancestor holding BOTH
+ *      `tests/fixtures` and `tests/golden`.
+ *   3. `SFI_REQUIRE_HARNESS=1` turns a missing harness into a failure (for
+ *      maintainer gate runs that must not pass while asserting nothing).
+ *
+ * Kept byte-identical in packages/{extractors,parsers,renderers}/test —
+ * enforced by packages/extractors/test/harness-root-parity.test.ts.
  */
 export function findHarnessRoot(): string | null {
+  const explicit = process.env['SFI_HARNESS_ROOT'];
+  if (explicit !== undefined && explicit.trim() !== '') {
+    const root = resolve(explicit.trim());
+    if (!existsSync(resolve(root, 'tests', 'fixtures'))) {
+      throw new Error(`SFI_HARNESS_ROOT=${root} has no tests/fixtures — fix the path or unset it.`);
+    }
+    return root;
+  }
   let current = process.cwd();
   for (let level = 0; level <= MAX_WALK_UP_LEVELS; level += 1) {
-    if (existsSync(resolve(current, 'tests', 'fixtures'))) {
+    if (existsSync(resolve(current, 'tests', 'fixtures')) && existsSync(resolve(current, 'tests', 'golden'))) {
       return current;
     }
     const parent = dirname(current);
@@ -48,11 +59,14 @@ export function findHarnessRoot(): string | null {
 const HARNESS_FIXTURES_AVAILABLE = findHarnessRoot() !== null;
 
 if (!HARNESS_FIXTURES_AVAILABLE) {
+  const message =
+    'SfIntelligence: harness fixtures NOT found — every itHarness test in this file is SKIPPED and asserts nothing. ' +
+    'Set SFI_HARNESS_ROOT=<path to the build harness> to run them, or SFI_REQUIRE_HARNESS=1 to make a missing harness fail.';
+  if (process.env['SFI_REQUIRE_HARNESS'] === '1') {
+    throw new Error(message);
+  }
   // eslint-disable-next-line no-console -- one-time operator note, test-only.
-  console.info(
-    'SfIntelligence: harness fixtures not found (this is the published product ' +
-      'copy); harness-bound tests skipped. Run from the build harness for full coverage.',
-  );
+  console.warn(message);
 }
 
 /**

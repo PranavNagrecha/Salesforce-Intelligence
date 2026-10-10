@@ -185,13 +185,24 @@ export interface ApexScannerOutput {
 }
 
 /**
+ * Apex identifiers are case-insensitive: `system.debug(…)` and
+ * `string.isBlank(…)` name the same built-ins as `System` / `String`, so a
+ * case-sensitive deny-list let them through as phantom `ApexClass:system`
+ * call targets (WOW-10).
+ */
+const caseInsensitiveNames = (names: readonly string[]): { readonly has: (name: string) => boolean } => {
+  const lower = new Set(names.map((n) => n.toLowerCase()));
+  return { has: (name: string) => lower.has(name.toLowerCase()) };
+};
+
+/**
  * Static-helper / built-in class names whose `Class.method(...)` and
  * `Class.field` shapes must NOT be reported as SObject field accesses.
  * User-defined helper classes are reclassified by the extractor after
  * cross-checking against the org's known Apex set; this set covers the
  * names that cannot be user-defined.
  */
-const KEYWORD_CLASSES = new Set<string>([
+const KEYWORD_CLASSES = caseInsensitiveNames([
   'Blob',
   'Boolean',
   'Crypto',
@@ -231,7 +242,7 @@ const KEYWORD_CLASSES = new Set<string>([
  * an `ApexClass:Account` edge that import-time `targetMissing` tagging
  * hides from the subgraph, which is acceptable for this heuristic tier.
  */
-const COLLECTION_CLASSES = new Set<string>([
+const COLLECTION_CLASSES = caseInsensitiveNames([
   'List',
   'Map',
   'Set',

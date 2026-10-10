@@ -120,33 +120,19 @@ API calls.
 
 Rebind this repo to a different Salesforce org.
 
-## Reloading the MCP server after a refresh
+## Refreshing while the MCP server is running
 
-The MCP server opens the vault — the DuckDB graph and the manifest — **once when
-it starts**, and holds it read-only for the life of the process. That shared,
-read-only handle is deliberate: it lets more than one `sfi mcp` instance serve
-the same vault at once. But it has one consequence worth knowing on day one:
+On macOS and Linux you can run `sfi refresh` with the MCP server connected. The
+rebuild swaps in behind it, and the server reopens the new vault on the next
+question. No reload is needed.
 
-- **A `sfi refresh` is not reflected in an already-running server until you
-  reload it.** The refresh rebuilds `org-kb/graph/graph.duckdb`, but the running
-  server is still answering from the copy it opened at startup. Reload (or
-  restart) the MCP server so it reopens the rebuilt vault.
-- **A running server can also block the refresh.** `sfi refresh` needs an
-  exclusive write lock; the server's shared read lock can deny it, surfacing as a
-  `locked` / "database is locked" error. If you see that, stop or reload the
-  server, run the refresh, then bring the server back.
+**On Windows you cannot.** Windows will not let a refresh replace the database
+file while a connected server holds it open. Close your MCP client (or stop
+`sfi mcp`), run the refresh, then reopen the client. See
+[`mcp-hosts.md`](./mcp-hosts.md#windows-refreshing-while-your-chat-is-open).
 
-How to reload, by client:
-
-- **Claude Code** — toggle the server off and on (or restart Claude). `/mcp`
-  should re-list `sf-intelligence` as connected afterward.
-- **Cursor / other IDE clients** — Settings → MCP → reload, or restart the IDE;
-  these do not pick up vault or config changes live.
-- **Claude Desktop** — quit and reopen the app.
-
-This is only for picking up a *refresh* (or a package upgrade). Ordinary
-questions never need a reload — the server answers them from the vault it already
-has open. The reload table for *config* changes (a new `.mcp.json`) is in
+A package **upgrade** still needs a restart, because the running server is the
+old code. The reload steps for *config* changes (a new `.mcp.json`) are in
 [`installation.md`](./installation.md) §5.
 
 ## Good first questions

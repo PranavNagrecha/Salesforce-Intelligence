@@ -32,6 +32,8 @@
 import type { ComponentId, ComponentType, EdgeType, Node } from '@sf-intelligence/contracts';
 import { getNodeById, type GraphStore } from '@sf-intelligence/graph';
 
+import { unmodeledReferrerKinds, verdictHedgingReferrerKinds } from './referrer-coverage.js';
+
 /**
  * The referrer classes that CAN reference a `CustomField` / `CustomObject` but
  * are NOT modeled as incoming graph edges — so an edge-walking impact analysis
@@ -39,12 +41,7 @@ import { getNodeById, type GraphStore } from '@sf-intelligence/graph';
  * `unwalked-referrer-class` blind spot so a caller sees exactly what was not
  * walked. Order is fixed for determinism.
  */
-export const UNWALKED_REFERRER_CLASSES = [
-  'roll-up source coupling',
-  'layout placement',
-  'flow decision/filter reads',
-  'tab/app membership',
-] as const;
+export const UNWALKED_REFERRER_CLASSES: readonly string[] = unmodeledReferrerKinds('CustomField');
 
 /** A named static-analysis blind spot affecting a result. */
 export interface SoundnessBlindSpot {
@@ -131,10 +128,22 @@ const UNWALKED_REFERRER_NOTE =
  */
 const unwalkedReferrerClassesFor = (
   rootType: ComponentType | null,
+  root?: Node | null,
+  builtBy?: string | null,
 ): readonly string[] =>
-  rootType === 'CustomField' || rootType === 'CustomObject'
-    ? UNWALKED_REFERRER_CLASSES
-    : [];
+  // Generic kinds (reflection) are part of every tool's standing disclosure and
+  // the `dynamic-apex` signal; only root-specific unmodeled kinds block `complete`.
+  verdictHedgingReferrerKinds(rootType, root, builtBy);
+
+/**
+ * Note for a root type other than CustomField / CustomObject, built from the
+ * shared referrer-coverage table (A04 / A05 / C02 / C07).
+ */
+const referrerNoteFor = (rootType: ComponentType, kinds: readonly string[]): string =>
+  `Not every way a ${rootType} can be referenced is modeled as a graph edge. Not walked here: ` +
+  `${kinds.join('; ')}. Treat "no referrers found" for these kinds as "not checked", never ` +
+  `as "nothing references this" — search the source (sfi.find_component_usages runs a text ` +
+  `supplement) before changing or deleting it.`;
 
 /**
  * The component types the code-quality recognizer family actually runs over.
@@ -290,14 +299,19 @@ export const soundnessFromIds = async (
 export const soundnessForImpactWalk = (
   nodes: Iterable<Node>,
   rootType: ComponentType | null,
+  root?: Node | null,
+  builtBy?: string | null,
 ): Soundness => {
   const base = soundnessFromNodes(nodes);
-  const referrerClasses = unwalkedReferrerClassesFor(rootType);
-  if (referrerClasses.length === 0) return base;
+  const referrerClasses = unwalkedReferrerClassesFor(rootType, root, builtBy);
+  if (referrerClasses.length === 0 || rootType === null) return base;
   const referrerBlindSpot: SoundnessBlindSpot = {
     kind: 'unwalked-referrer-class',
     componentIds: [],
-    note: UNWALKED_REFERRER_NOTE,
+    note:
+      rootType === 'CustomField' || rootType === 'CustomObject'
+        ? UNWALKED_REFERRER_NOTE
+        : referrerNoteFor(rootType, referrerClasses),
     referrerClasses,
   };
   return {

@@ -109,6 +109,13 @@ import {
   REPORT_DASHBOARD_USAGE_CAVEAT,
   reportDashboardUsageDetail,
 } from './report-dashboard-usage.js';
+import {
+  reportTypeColumnNote,
+  reportTypesWithColumn,
+  reportTypesWithUnattributedColumnNamed,
+  reportTypeScanGap,
+  scanReportTypeColumns,
+} from './report-type-columns.js';
 import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
 import { indexRestatedConditionEdges } from './restated-condition-edges.js';
 
@@ -314,6 +321,8 @@ export interface Field360Summary {
    * curated deletion vocabulary and do reach these edges.
    */
   readonly unclassifiedReferrerCount?: number;
+  /** ADM-5: custom ReportTypes listing this field as a column (no graph edge exists for it). */
+  readonly reportTypeColumns?: readonly string[];
 }
 
 /** Output payload wrapped inside `McpResponse` on success. */
@@ -453,7 +462,7 @@ const AUTOMATION_NODE_TYPES: ReadonlySet<ComponentType> = new Set([
 ]);
 
 /** Node types whose edges land in the `integrations` section. */
-const INTEGRATION_NODE_TYPES: ReadonlySet<ComponentType> = new Set([
+export const INTEGRATION_NODE_TYPES: ReadonlySet<ComponentType> = new Set([
   'NamedCredential',
   'ConnectedApp',
   'AuthProvider',
@@ -1128,7 +1137,12 @@ export const field360Handler = async (
       edgeType: 'writesTo',
       confidence: 'heuristic',
       source: `flow-field-writers-scan:${w.mechanism}`,
-      properties: { supplemental: true, mechanism: w.mechanism },
+      properties: {
+        supplemental: true,
+        mechanism: w.mechanism,
+        // `unresolved`: the DML's object could not be resolved — a lead.
+        objectScope: w.objectScope,
+      },
     });
   }
 
@@ -1379,7 +1393,7 @@ export const field360Handler = async (
   }
 
   const isPii = detectIsPii(fieldNode);
-  const risk = computeRisk(
+  const computedRisk = computeRisk(
     perSectionCounts,
     isPii,
     isFormula,
@@ -1387,6 +1401,32 @@ export const field360Handler = async (
     restated.suppressedConditionCount,
     unclassified.length + unresolvedReferrerCount,
   );
+  // ADM-5: a custom ReportType column mints no edge. Read it with the scan
+  // safe_to_delete_field and unused_fields_deep share, so a column-only field
+  // never reads `low` here while the delete tools say `review`.
+  const reportTypeScan = await scanReportTypeColumns(ctx);
+  const reportTypeColumnIds = reportTypesWithColumn(
+    reportTypeScan,
+    parentObjectApi,
+    fieldNode.apiName,
+  );
+  const reportTypeGap = reportTypeScanGap(reportTypeScan, fieldNode.apiName);
+  // A same-named column on a relationship path may be this field: never `low`.
+  const reportTypeMaybeColumn =
+    reportTypesWithUnattributedColumnNamed(reportTypeScan, fieldNode.apiName).length > 0;
+  const risk =
+    reportTypeColumnIds.length > 0 || reportTypeMaybeColumn
+      ? {
+          level: computedRisk.level === 'low' ? ('medium' as const) : computedRisk.level,
+          factors: [
+            // `narrow-footprint` is the `low` label; it no longer applies.
+            ...computedRisk.factors.filter((f) => f !== 'narrow-footprint'),
+            reportTypeColumnIds.length > 0
+              ? `report-type-column-in-${reportTypeColumnIds.length}`
+              : 'report-type-column-unattributed',
+          ],
+        }
+      : computedRisk;
 
   const grantedByCount = incoming.filter(
     (e) => e.edgeType === 'grantedBy',
@@ -1403,6 +1443,7 @@ export const field360Handler = async (
     ...(unclassifiedReferrerTotal > 0
       ? { unclassifiedReferrerCount: unclassifiedReferrerTotal }
       : {}),
+    ...(reportTypeColumnIds.length > 0 ? { reportTypeColumns: reportTypeColumnIds } : {}),
   };
 
   const overallConfidence = computeOverallConfidence(
@@ -1415,6 +1456,8 @@ export const field360Handler = async (
     FIELD_360_Q165_DISCLOSURE,
     'list view column AND filter field IDENTITY are composed into the `listViews` section (heuristic regex; a row\'s `referenceKind` is `fieldRef` for a column, `filterRef` for a filter predicate, or `columnAndFilter` for both) — but the saved view\'s runtime filter PREDICATE EVALUATION (whether a given record passes the filter) stays unmodeled and remains in dataNotAvailable as `list-view-filters`',
   ];
+  if (reportTypeColumnIds.length > 0) boundaries.push(reportTypeColumnNote(reportTypeColumnIds));
+  if (reportTypeGap !== null) boundaries.push(reportTypeGap);
   // UNCLASSIFIED-REFERRERS-READ-AS-ABSENCE: name every referrer no section
   // holds, with its id and the edge that produced it, so the reader can go look
   // instead of concluding from `count: 0` that nothing is there. Capped at 10

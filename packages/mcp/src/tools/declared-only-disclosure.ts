@@ -98,6 +98,17 @@ export const rosterDeclaredOnlyDisclosure = (noun: string): string =>
   'for the expanded set.';
 
 /**
+ * The SHORT advertised form of {@link rosterDeclaredOnlyDisclosure}, for a tool
+ * whose long-form text lives in its roster `reference` (a core tool paid for on
+ * every `tools/list`). It keeps the three facts a host must act on: the marker,
+ * that the answer is a LOWER BOUND, and which tool gives the expanded set. The
+ * handler's own `disclosures` carry the full explanation at answer time.
+ */
+export const rosterDeclaredOnlyNote = (noun: string): string =>
+  ` DEPENDENCY EXPANSION IS NOT APPLIED HERE: declared grants only, so its ${noun} is a LOWER BOUND; ` +
+  '`sfi.effective_permissions` on the same bundle gives the expanded set.';
+
+/**
  * Remove every roster disclosure from a tool description.
  *
  * ## Why the retrieval corpus must not see this text

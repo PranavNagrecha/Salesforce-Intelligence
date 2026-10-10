@@ -363,7 +363,12 @@ run `/sfi-refresh` again. Reasons to refresh:
   This skips stage 1 entirely and runs extract → import → render →
   manifest against whatever is already on disk under
   `org-kb/source/`. Faster, and useful when you've already paid the
-  network cost.
+  network cost. It runs no retrieve and no describe: standard-object
+  field describes (Account, Contact, …) are replayed from the snapshot
+  the last pulling refresh cached, and the summary names any object
+  without one. Add `--with-describe` to fetch those from the org.
+  `--with-audit-trail`, `--with-tooling-api` and `--with-data-shape`
+  still query the org when combined with `--no-pull`.
 
 - **You upgraded SfIntelligence to a new version.** Refresh to let
   the new extractors and renderers populate the vault with their

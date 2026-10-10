@@ -1,104 +1,104 @@
 ---
-import DocPage from "../../layouts/DocPage.astro";
+import InfoPage from "../../layouts/InfoPage.astro";
+import CtaBlock from "../../components/CtaBlock.astro";
 import site from "../../data/site.ts";
+import { VERIFIED } from "../../data/compare.ts";
 
-const title = "Compare Salesforce Org Intelligence Tools | sf-intelligence";
+const title = "Compare sf-intelligence with Salesforce Tools";
 const description =
-  "Compare sf-intelligence with Salesforce MCP servers, metadata tools and org-audit platforms by deployment, data access, writes and evidence.";
+  "How free, local sf-intelligence compares with Salesforce's MCP servers, Elements.cloud, Clientell, dx0, Hubbl, Metazoa and Sweep, and when to pick each one.";
 
 const pages = [
-  {
-    href: "/compare/salesforce-dx-mcp",
-    tag: "first-party",
-    title: "vs Salesforce DX / hosted MCP",
-    blurb:
-      "Official MCP is table-stakes describe, CRUD, and DevOps. sf-intelligence is the offline dependency/impact layer those servers still lack.",
-  },
-  {
-    href: "/compare/elements-cloud",
-    tag: "enterprise SaaS",
-    title: "vs Elements.cloud",
-    blurb:
-      "Hosted Change Intelligence + Conversational Org Intelligence (MCP targeted Spring 2026). Cloud governance vs free local vault.",
-  },
-  {
-    href: "/compare/dx0",
-    tag: "hosted chat",
-    title: "vs dx0",
-    blurb:
-      "Polished cloud org-chat with ISO 27001 and per-seat pricing. Contrast is MCP-native + offline + free — not 'cloud is insecure.'",
-  },
-  {
-    href: "/compare/hubbl",
-    tag: "AI-readiness",
-    title: "vs Hubbl",
-    blurb:
-      "Commercial 'Intelligence Layer for Salesforce' audits and benchmarks. Editor-native free graph vs vendor audit motion.",
-  },
-  {
-    href: "/compare/metazoa",
-    tag: "local commercial",
-    title: "vs Metazoa Snapshot",
-    blurb:
-      "Local MCP + full org-management suite. Privacy alone is shared — depth, honesty labels, and free OSS still differ.",
-  },
-  {
-    href: "/compare/sweep",
-    tag: "RevOps",
-    title: "vs Sweep",
-    blurb:
-      "Multi-system GTM/RevOps agentic layer. Different buyer than a single-org developer MCP.",
-  },
+  { href: "/compare/salesforce-dx-mcp", name: "Salesforce’s MCP servers", text: "Salesforce’s servers act on the org: records, deploys, tests. sf-intelligence explains how it’s built. Many people run both." },
+  { href: "/compare/elements-cloud", name: "Elements.cloud", text: "A paid metadata platform that now has an MCP server too. The differences left are price, where the metadata lives, and scope." },
+  { href: "/compare/clientell", name: "Clientell", text: "A hosted org map for AI assistants from $249 a month, with team memory and work-tool links." },
+  { href: "/compare/dx0", name: "dx0", text: "A hosted, per-seat tool for understanding inherited business systems, with certification and a web app." },
+  { href: "/compare/hubbl", name: "Hubbl", text: "Scans an org and hands back a scored, benchmarked fix list. A different shape of answer." },
+  { href: "/compare/metazoa", name: "Metazoa Snapshot", text: "A paid desktop suite that changes orgs: deploys, data moves, profile cleanups." },
+  { href: "/compare/sweep", name: "Sweep", text: "An agentic layer for revenue operations across several systems. A different buyer." },
 ];
 
 const jsonld = [
   {
     "@type": "CollectionPage",
-    name: "Compare Salesforce org-intelligence tools",
+    "@id": `${site.url}/compare#collection`,
+    name: "Compare sf-intelligence with other Salesforce tools",
     description,
     isPartOf: { "@id": `${site.url}/#website` },
-  },
-  {
-    "@type": "ItemList",
-    itemListElement: pages.map((p, i) => ({
-      "@type": "ListItem",
-      position: i + 1,
-      name: p.title,
-      url: `${site.url}${p.href}`,
-    })),
+    mainEntity: {
+      "@type": "ItemList",
+      itemListElement: pages.map((p, i) => ({
+        "@type": "ListItem",
+        position: i + 1,
+        name: `sf-intelligence vs ${p.name}`,
+        url: `${site.url}${p.href}`,
+      })),
+    },
   },
 ];
 ---
 
-<DocPage
+<InfoPage
   title={title}
   description={description}
   path="/compare"
-  heading="Compare Salesforce org-intelligence and metadata-analysis approaches"
-  intro="First-party MCP made shallow org access free. These pages spell out what still differs: offline dependency graph, impact, permissions math, confidence labels — and when a commercial or Salesforce-native tool is the better buy."
-  crumbs={[{ label: "compare", href: "/compare" }]}
-  breadcrumbs={[{ name: "Compare", path: "/compare" }]}
+  heading="How it compares"
+  lede="Asking an AI assistant about your Salesforce org is no longer rare: Salesforce, Elements, Clientell, Hubbl and dx0 all offer some version of it. These pages say plainly what still differs and when another tool is the better buy."
+  crumbs={[{ name: "Compare", path: "/compare" }]}
   jsonld={jsonld}
+  dateModified={VERIFIED}
 >
-  <section>
-    <div class="container">
-      <div class="callout" style="margin-bottom:28px;">
-        <p><strong>How to read these:</strong> each page is written to help you pick the right tool (or both), not to win a feature checklist. Longer competitive framing lives in the repo's <a href="https://github.com/PranavNagrecha/Salesforce-Intelligence/blob/main/docs/POSITIONING.md">docs/POSITIONING.md</a>. For packing existing tools into an AI / Agentforce prep narrative, see the <a href="/use-cases/agent-readiness-audit">agent-readiness audit</a>.</p>
-      </div>
-      <div class="grid cols-3">
-        {pages.map((p) => (
-          <article class="card">
-            <div class="tagn">{p.tag}</div>
-            <h3><a href={p.href}>{p.title}</a></h3>
-            <p>{p.blurb}</p>
-          </article>
-        ))}
-      </div>
-      <p class="center" style="margin-top:36px; display:flex; gap:12px; justify-content:center; flex-wrap:wrap;">
-        <a class="btn btn-ghost" href="/use-cases">› use cases</a>
-        <a class="btn btn-ghost" href="/ai-safety">› is AI safe on my org?</a>
-        <a class="btn btn-solid" href="/getting-started">get started</a>
-      </p>
+  <section class="block" aria-labelledby="three">
+    <h2 id="three">Three differences that still hold</h2>
+    <div class="card-grid three">
+      <article class="new-card">
+        <h3>It costs nothing</h3>
+        <p>No seats, no org fees, no trial clock. Most tools in this list charge per user, per org or as a share of your Salesforce spend.</p>
+      </article>
+      <article class="new-card">
+        <h3>The metadata stays on your computer</h3>
+        <p>It reads your org once, read-only, into a folder on your laptop, and answers from there. Nothing is uploaded and it can’t write to the org.</p>
+      </article>
+      <article class="new-card">
+        <h3>Every answer shows its working</h3>
+        <p>Each answer names the components it relies on and what it couldn’t check. The code that produces it is public, so you can read it.</p>
+      </article>
     </div>
   </section>
-</DocPage>
+
+  <section class="block" aria-labelledby="pages">
+    <h2 id="pages">Side by side</h2>
+    <p>Each page has a short answer, a table, when to pick each tool, when sf-intelligence is the wrong tool, and the sources we checked.</p>
+    <p>Weighing several at once? <a href="/compare/salesforce-mcp-servers">Salesforce MCP servers compared</a> puts six servers side by side: what each one can change, where it runs and what it costs.</p>
+    <div class="card-grid">
+      {pages.map((p) => (
+        <article class="new-card">
+          <h3><a href={p.href}>sf-intelligence vs {p.name}</a></h3>
+          <p>{p.text}</p>
+        </article>
+      ))}
+    </div>
+    <p class="meta-line">Competitor facts last verified <time datetime={VERIFIED}>{new Date(VERIFIED + "T00:00:00Z").toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", timeZone: "UTC" })}</time> against each vendor’s public pages. Spotted something out of date? <a href={`${site.github}/issues`} rel="noopener">Open an issue</a>.</p>
+  </section>
+
+  <section class="block narrow" aria-labelledby="not">
+    <h2 id="not">When to pick something else</h2>
+    <ul class="ticks minus">
+      <li>You want the tool to <strong>change</strong> the org: deploy, edit records, clean up profiles. sf-intelligence only reads.</li>
+      <li>The people who need answers won’t use an AI assistant. There is no web app or dashboard.</li>
+      <li>You need a vendor contract, support hours or security certification.</li>
+    </ul>
+  </section>
+
+  <nav class="block narrow" aria-labelledby="more">
+    <h2 id="more">Before you decide</h2>
+    <ul class="link-list">
+      <li><a href="/demo">See real answers on the demo org</a><span> · no install needed</span></li>
+      <li><a href="/trust">How it keeps your org safe</a></li>
+      <li><a href="/ai-safety">Is AI safe on my Salesforce org?</a></li>
+      <li><a href="/use-cases">What people use it for</a></li>
+    </ul>
+  </nav>
+
+  <CtaBlock title="Judge it on the demo org" />
+</InfoPage>

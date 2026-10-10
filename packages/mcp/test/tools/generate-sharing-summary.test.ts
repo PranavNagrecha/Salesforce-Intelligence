@@ -1021,3 +1021,64 @@ describe('generateSharingSummaryHandler — objects past the 500-node id-ASC cap
     expect(body).toContain('(`Zzz_Late_Object__c`)');
   });
 });
+
+// FAIL-BEFORE/PASS-AFTER (ADM-12): the unfiltered summary spent its 50-object
+// cap on custom metadata / platform event types (rendered "OWD: Unknown") and,
+// sorting case-sensitively, pushed every lowercase-namespaced object past the
+// cap, so they were silently uncovered.
+describe('generateSharingSummaryHandler — no-sharing types and lowercase namespaces', () => {
+  let store: GraphStore;
+  let ctx: Context;
+
+  const obj = (api: string, sharingModel?: string): Node =>
+    makeNode({
+      id: `CustomObject:${api}`,
+      type: 'CustomObject',
+      apiName: api,
+      label: api,
+      properties: sharingModel === undefined ? {} : { sharingModel },
+    });
+
+  const seedNs: ExtractionResult = {
+    nodes: [
+      ...Array.from({ length: 48 }, (_, i) => obj(`Upper_${String(i).padStart(2, '0')}__c`, 'Private')),
+      ...Array.from({ length: 6 }, (_, i) => obj(`Config_${String(i)}__mdt`)),
+      obj('Order_Event__e'),
+      obj('ns__Application__c', 'Private'),
+      obj('ns__Term__c', 'Read'),
+    ],
+    edges: [],
+  };
+
+  beforeAll(async () => {
+    const built = await makeFreshCtx('no-sharing-types.db');
+    store = built.store;
+    ctx = built.ctx;
+    const imported = await importExtractionResults(store, [seedNs]);
+    if (!imported.ok) throw new Error(imported.error.message);
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+  });
+
+  it('skips __mdt / __e types and covers lowercase-namespaced objects', async () => {
+    const r = await generateSharingSummaryHandler(ctx, {});
+    if (!r.ok) throw new Error(r.error.message);
+    const ids = r.value.data.document.frontmatter.componentIds;
+    expect(ids.some((id) => id.endsWith('__mdt') || id.endsWith('__e'))).toBe(false);
+    expect(ids).toContain('CustomObject:ns__Application__c');
+    expect(ids).toContain('CustomObject:ns__Term__c');
+    // 50 eligible objects fit the cap exactly: nothing is reported as cut.
+    expect(r.value.data.scanTruncated).toBeUndefined();
+    expect(r.value.data.document.boundaries.join('\n')).toMatch(
+      /7 object\(s\) with no sharing model .* were skipped/,
+    );
+  });
+
+  it('still answers a no-sharing type when it is named explicitly', async () => {
+    const r = await generateSharingSummaryHandler(ctx, { objectFilter: 'Config_0__mdt' });
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.data.document.frontmatter.componentIds).toContain('CustomObject:Config_0__mdt');
+  });
+});

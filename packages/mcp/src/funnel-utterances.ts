@@ -1532,6 +1532,9 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'the Status field keeps changing on its own — what\'s causing it?',
     'trace all the things that could write to Case.Status__c',
     'which automation is responsible for populating Amount__c?',
+    // Value-shaped asks (the `value` filter).
+    'what sets Status__c to Closed?',
+    'which automation flips this checkbox to true?',
     // R5 show-me utterances
     'show me why <Field__c> changed',
     'pull up the change history for <Field__c>',
@@ -2150,6 +2153,16 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'before I deploy this package, did I grant the new field to a permission set or does it ship for nobody?',
     'is it safe to release these fields, or did I forget the permission set that grants access?',
     'does this changeset ship the permissions, or are the new fields invisible with no grant?',
+    // WOW-6: the everyday deploy-risk phrasings that reached interpret /
+    // installed_package_catalog / omni_version_diff instead.
+    "what's risky in this deployment?",
+    "what's risky in deploying the changes in my package.xml?",
+    "I'm deploying a new version of <ApexClass> and two flows — what could go wrong?",
+    'what could go wrong if I deploy these changes?',
+    'what should I test before deploying this release?',
+    'here are the files I changed in force-app — is it safe to deploy?',
+    'I am deleting <FlowName> and <FieldName> in this release — what breaks?',
+    'go or no-go on this deployment?',
   ],
   // LANE-E: `sfi.cdc_subscribers` is a HIDDEN back-compat alias now and must
   // carry NO corpus key (the parity test fails on a stale key routing to a
@@ -2764,6 +2777,12 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'give me an impact assessment for the Contact object before a schema change',
     'I inherited this org — brief me on the <Object__c> object',
     'what is the blast radius of deleting this object?',
+    // WOW-9: single-object documentation asks (answered by `format: 'handbook'`).
+    'document the Case object for a new hire',
+    'write a new-hire brief for the <Object__c> object',
+    'explain the Opportunity object to a new team member',
+    'onboarding guide for the <Object__c> object',
+    'document this object: key fields, record types, automation and who can access it',
   ],
   'sfi.field_lineage': [
     'show me the lineage of Priority__c — where does it come from and where does it go?',

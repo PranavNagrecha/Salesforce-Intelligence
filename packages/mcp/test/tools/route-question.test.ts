@@ -546,16 +546,20 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
     if (!r.ok) return;
     const { route, invoke } = r.value.data;
     expect(invoke).toBeDefined();
-    expect(invoke).toHaveLength(route.tools.length);
-    // The resolve preamble (a core tool) stays a direct call with NO args —
-    // suggestedArgs belong to the primary answering tool, not resolve.
-    const resolveIdx = route.tools.indexOf('sfi.resolve');
-    if (resolveIdx !== -1) {
-      expect(invoke?.[resolveIdx]).toEqual({ tool: 'sfi.resolve', args: {} });
-    }
-    const primaryIdx = route.tools.findIndex((t) => t !== 'sfi.resolve');
-    const primary = invoke?.[primaryIdx];
-    const routed = route.tools[primaryIdx]!;
+    // ROUTE-01: an `sfi.resolve {}` step is NOT executable (query is required)
+    // and pointless once the entity is bound — invoke[] never carries one.
+    expect(
+      invoke?.some(
+        (step) => step.tool === 'sfi.resolve' && Object.keys(step.args).length === 0,
+      ),
+    ).toBe(false);
+    const routed = route.tools.find((t) => t !== 'sfi.resolve')!;
+    const primary = invoke?.find(
+      (step) =>
+        step.tool === routed ||
+        (step.tool === 'sfi.run_analysis' &&
+          (step.args as { readonly name?: string }).name === routed),
+    );
     // Assert the LAW, not the membership. This used to pin
     // `sfi.run_analysis` because the routed tool happened to be non-core; when
     // that tool joined the core roster the test failed for the RIGHT behaviour.
@@ -1071,7 +1075,8 @@ describe('routeQuestionHandler — schema nouns are intent signals, not entity l
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.route.intent).toBe('trigger-order');
-    expect(r.value.data.route.suggestedArgs).toEqual({ event: 'update', objectApiName: 'Case' });
+    // "on save" = insert OR update → upsert (baseline A01/B05).
+    expect(r.value.data.route.suggestedArgs).toEqual({ event: 'upsert', objectApiName: 'Case' });
     expect(r.value.data.entityEvidence?.query).toBe('Case');
     expect(r.value.data.entityEvidence?.typeHints).toEqual(['CustomObject']);
     expect(r.value.data.entityEvidence?.disposition).toBe('exact');

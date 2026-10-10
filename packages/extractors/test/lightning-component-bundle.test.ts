@@ -452,3 +452,32 @@ describe('resource reference edges (P14-USAGE-label-static-graph)', () => {
     }
   });
 });
+
+describe('schema-import field edges (WOW-11)', () => {
+  it('FAIL-BEFORE/PASS-AFTER: a @salesforce/schema import mints a DECLARED field edge stamped schema-import', async () => {
+    const { tempDir, bundleDir } = await writeTempLwcBundle('invoiceLink', {
+      jsBody: [
+        `import LINK_FIELD from '@salesforce/schema/Invoice__c.Resume_Link__c';`,
+        `import { LightningElement } from 'lwc';`,
+        `export default class InvoiceLink extends LightningElement {`,
+        `  fields = [LINK_FIELD];`,
+        `}`,
+      ].join('\n'),
+    });
+    try {
+      const result = await extractLightningComponentBundle(bundleDir);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const fieldEdges = result.value.edges.filter(
+        (e) => e.toId === 'CustomField:Invoice__c.Resume_Link__c',
+      );
+      // Exactly one edge per (toId, edgeType) — a duplicate would be
+      // REPLACED at import by whichever came last.
+      expect(fieldEdges).toHaveLength(1);
+      expect(fieldEdges[0]?.confidence).toBe('declared');
+      expect(fieldEdges[0]?.properties['mechanism']).toBe('schema-import');
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});

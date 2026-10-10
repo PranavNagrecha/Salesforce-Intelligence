@@ -822,16 +822,22 @@ describe('orderOfExecutionHandler — truncation phase honesty (WHAT-HAPPENS-ON-
     // The dropped later phases are still CLAIMED by phaseCounts...
     expect(insert.summary.phaseCounts['duplicate-rules']).toBe(1);
     expect(insert.summary.phaseCounts['after-triggers']).toBe(1);
-    // ...but their steps were tail-dropped from soe. That contradiction must be
-    // DISCLOSED via phasesOmitted (the field did not exist pre-fix).
+    // ARCH-11: the byte cut now sheds from the most crowded phase (the 90
+    // validation rules) instead of the tail, so the duplicate rule and the
+    // after-trigger stay NAMED...
+    const presentPhases = insert.soe.map((st) => st.phase);
+    expect(presentPhases).toContain('duplicate-rules');
+    expect(presentPhases).toContain('after-triggers');
+    // ...and the shortfall that remains must still be DISCLOSED via
+    // phasesOmitted (the field did not exist pre-fix), never silent.
     expect(insert.phasesOmitted).toBeDefined();
     const omittedPhases = (insert.phasesOmitted ?? []).map((p) => p.phase);
-    expect(omittedPhases).toContain('duplicate-rules');
-    expect(omittedPhases).toContain('after-triggers');
+    expect(omittedPhases).toContain('pre-save-validation');
+    expect(omittedPhases).not.toContain('duplicate-rules');
     // Each omission carries the true declared count and the (smaller) present count.
-    const dupOmission = insert.phasesOmitted?.find((p) => p.phase === 'duplicate-rules');
-    expect(dupOmission?.declared).toBe(1);
-    expect(dupOmission?.present).toBe(0);
+    const vrOmission = insert.phasesOmitted?.find((p) => p.phase === 'pre-save-validation');
+    expect(vrOmission?.declared).toBe(90);
+    expect(vrOmission?.present).toBeLessThan(90);
     // The disclosure names the truncation-vs-counts contradiction.
     expect(data.disclosure).toMatch(/still reports them/i);
   });
@@ -1305,7 +1311,7 @@ describe('orderOfExecutionHandler', () => {
     // Not one byte of the mandated text may change; the assertion below pins
     // the rider that follows it on this fixture.
     expect(result.value.data.disclosure.startsWith(
-      "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Duplicate rules are modeled as their own `duplicate-rules` phase, running after before-triggers and validation but BEFORE the save — evaluated on insert/update only, with the effective Block/Allow/Alert/Report operations surfaced per rule. Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Parent Summary (roll-up) fields that aggregate this object recalculate in the `post-save-rollup-recalc` phase, capped to ONE level — a grandparent's own rollup on that recalculated parent is NOT walked — and the parent's own triggers/flows/workflows that its recalculated save would fire are NOT expanded (no re-entrancy). Entitlement-process and milestone-type METADATA is modeled elsewhere in the vault (R6-18: `EntitlementProcess`/`MilestoneType` nodes, queryable via `sfi.get_component` / `sfi.get_edges`, including each milestone's declared target `minutesToComplete` as of R7-C7) — but this composition does NOT simulate entitlement milestones as an order-of-execution phase: whether a specific record is currently on-track or breached against those target minutes is live, per-record timer data this offline vault cannot hold. Criteria-based sharing recalculation — the FINAL step in Salesforce's documented order-of-execution, evaluated after every phase modeled here (including post-save-async) — is also NOT modeled: a save that causes a record to newly match or stop matching a criteria-based sharing rule's criteria triggers a sharing recalculation this composition does not surface. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.",
+      "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Duplicate rules are modeled as their own `duplicate-rules` phase, running after before-triggers and validation but BEFORE the save — evaluated on insert/update only, with the effective Block/Allow/Alert/Report operations surfaced per rule. Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once; `reentry` names the steps that write back to this object, what the documented second pass re-runs, and any visible recursion guard. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Parent Summary (roll-up) fields that aggregate this object recalculate in the `post-save-rollup-recalc` phase, capped to ONE level — a grandparent's own rollup on that recalculated parent is NOT walked — and the parent's own triggers/flows/workflows that its recalculated save would fire are NOT expanded (no re-entrancy). Entitlement-process and milestone-type METADATA is modeled elsewhere in the vault (R6-18: `EntitlementProcess`/`MilestoneType` nodes, queryable via `sfi.get_component` / `sfi.get_edges`, including each milestone's declared target `minutesToComplete` as of R7-C7) — but this composition does NOT simulate entitlement milestones as an order-of-execution phase: whether a specific record is currently on-track or breached against those target minutes is live, per-record timer data this offline vault cannot hold. Criteria-based sharing recalculation — the FINAL step in Salesforce's documented order-of-execution, evaluated after every phase modeled here (including post-save-async) — is also NOT modeled: a save that causes a record to newly match or stop matching a criteria-based sharing rule's criteria triggers a sharing recalculation this composition does not surface. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.",
       ),
     ).toBe(true);
     // CHECKED-and-nothing-demoted: this fixture's object has no Apex

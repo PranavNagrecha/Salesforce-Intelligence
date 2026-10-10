@@ -7,7 +7,7 @@ import type {
   Node,
   Result,
 } from '@sf-intelligence/contracts';
-import { err, ok } from '@sf-intelligence/core';
+import { edgeLiteralValues, edgeReferenceValues, err, ok } from '@sf-intelligence/core';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 import {
@@ -17,6 +17,7 @@ import {
 } from './condition-extractor.js';
 import {
   buildFlowDataflowIndex,
+  collectFormulaValueRefs,
   DATAFLOW_SOURCE_OPERATION,
   traceValueReference,
   type DataflowConfidence,
@@ -1494,7 +1495,10 @@ const pickTripletMember = (
  * at all (Salesforce allows it for unary tests) yields `value: null`, which
  * `CriteriaItem` documents and the expression renderer handles.
  */
-const parseFlowConditionTriplet = (raw: unknown): CriteriaItem | null => {
+const parseFlowConditionTriplet = (
+  raw: unknown,
+  index?: FlowDataflowIndex,
+): CriteriaItem | null => {
   if (typeof raw !== 'object' || raw === null) return null;
   const obj = raw as Record<string, unknown>;
   const fieldRaw = pickTripletMember(obj, ['leftValueReference', 'field']);
@@ -1507,6 +1511,7 @@ const parseFlowConditionTriplet = (raw: unknown): CriteriaItem | null => {
   }
   const rightValueRaw = pickTripletMember(obj, ['rightValue', 'value']);
   let value: string | null = null;
+  let valueKind: 'literal' | 'reference' | undefined;
   if (typeof rightValueRaw === 'object' && rightValueRaw !== null) {
     const wrapper = rightValueRaw as Record<string, unknown>;
     // Try the documented scalar wrappers in source order.
@@ -1521,17 +1526,84 @@ const parseFlowConditionTriplet = (raw: unknown): CriteriaItem | null => {
       const v = unwrapSingle(wrapper[key]);
       if (v !== undefined && v !== null && v !== '') {
         value = String(v);
+        valueKind = key === 'elementReference' ? 'reference' : 'literal';
         break;
       }
     }
   } else if (rightValueRaw !== undefined && rightValueRaw !== null && rightValueRaw !== '') {
     value = String(rightValueRaw);
+    valueKind = 'literal';
   }
+  const field = String(fieldRaw);
+  const fieldRef = index !== undefined ? resolveFlowFieldPath(field, index) : null;
   return {
-    field: String(fieldRaw),
+    field,
     operation: String(operatorRaw),
     value,
+    ...(valueKind !== undefined ? { valueKind } : {}),
+    ...(fieldRef !== null ? { fieldRef } : {}),
   };
+};
+
+/**
+ * The SObject a Flow record RESOURCE holds — a typed record variable, a Get
+ * Records element whose output is stored automatically (the element name IS
+ * the record), or a loop over either (the loop name is the current item).
+ * `null` when the resource is untyped or unknown. Depth-capped for loop chains.
+ */
+const resolveRecordResourceObject = (
+  name: string,
+  index: FlowDataflowIndex,
+  depth = 0,
+): string | null => {
+  const variable = index.variables.get(name);
+  if (variable !== undefined && variable.objectType !== null) return variable.objectType;
+  const lookup = index.lookups.get(name);
+  if (lookup !== undefined && lookup.object !== null && lookup.outputReference === null) {
+    return lookup.object;
+  }
+  const collection = index.loops.get(name);
+  if (collection !== undefined && collection !== null && depth < 3) {
+    return resolveRecordResourceObject(collection, index, depth + 1);
+  }
+  return null;
+};
+
+/**
+ * Resolve a Flow field path rooted at a record RESOURCE (`Get_Acct.Status__c`,
+ * `acctVar.Status__c`, `Loop_Item.Status__c`) to `{Object}.{Field}`. Returns
+ * `null` for `$`-globals (the condition helper resolves `$Record` against the
+ * trigger object itself), relationship traversals, and untyped heads — never
+ * a guess. Without this, a decision on `Get_Acct.Status__c` minted a phantom
+ * `CustomField:Get_Acct.Status__c` and the real field never saw the reader.
+ */
+export const resolveFlowFieldPath = (
+  path: string,
+  index: FlowDataflowIndex,
+): string | null => {
+  const ref = stripMergeWrapper(path);
+  if (ref.startsWith('$')) return null;
+  const parts = ref.split('.');
+  if (parts.length !== 2) return null;
+  const [head, field] = parts as [string, string];
+  if (head.length === 0 || field.length === 0) return null;
+  const object = resolveRecordResourceObject(head, index);
+  return object === null ? null : `${object}.${field}`;
+};
+
+/**
+ * `<start><doesRequireRecordChangedToMeetCriteria>` — the "only when a record
+ * is updated to meet the condition requirements" entry setting. `null` when
+ * not declared. ONE reader shared by the Flow node, the entry
+ * ConditionalContext, and the on-demand flow_graph projection.
+ */
+export const readEntryRequiresRecordChange = (
+  startObj: Record<string, unknown> | null,
+): boolean | null => {
+  if (startObj === null) return null;
+  const s = toNonEmptyString(startObj['doesRequireRecordChangedToMeetCriteria']);
+  if (s === null) return null;
+  return s.toLowerCase() === 'true';
 };
 
 /**
@@ -1572,6 +1644,7 @@ const buildFlowDecisionSourceName = (
 
 const collectFlowConditionSources = (
   rootObj: Record<string, unknown>,
+  index: FlowDataflowIndex,
 ): readonly ConditionSource[] => {
   const sources: ConditionSource[] = [];
 
@@ -1591,7 +1664,7 @@ const collectFlowConditionSources = (
       const ruleObj = rule as Record<string, unknown>;
       const conditions: CriteriaItem[] = [];
       for (const triplet of toArray(ruleObj['conditions'])) {
-        const parsed = parseFlowConditionTriplet(triplet);
+        const parsed = parseFlowConditionTriplet(triplet, index);
         if (parsed !== null) conditions.push(parsed);
       }
       if (conditions.length === 0) continue;
@@ -1617,7 +1690,7 @@ const collectFlowConditionSources = (
     const filterFormula = toNullableString(startObj['filterFormula']);
     const startFilters: CriteriaItem[] = [];
     for (const triplet of toArray(startObj['filters'])) {
-      const parsed = parseFlowConditionTriplet(triplet);
+      const parsed = parseFlowConditionTriplet(triplet, index);
       if (parsed !== null) startFilters.push(parsed);
     }
     const filterLogic = toNullableString(startObj['filterLogic']);
@@ -1630,6 +1703,7 @@ const collectFlowConditionSources = (
         filters: startFilters,
         filterLogic,
         filterFormula,
+        entryRequiresRecordChange: readEntryRequiresRecordChange(startObj),
       });
     }
   }
@@ -1662,6 +1736,151 @@ const collectFlowConditionSources = (
   }
 
   return sources;
+};
+
+/**
+ * The DML / query elements whose `<filters>` select records BY FIELD VALUE.
+ * Each carries `<object>` plus `<filters><field>/<operator>/<value>` triplets.
+ */
+const RECORD_FILTER_ELEMENTS = [
+  ['recordLookups', 'recordLookup'],
+  ['recordUpdates', 'recordUpdate'],
+  ['recordDeletes', 'recordDelete'],
+] as const;
+
+/**
+ * Emit one FIELD-level `readsFrom` edge per `<filters>` triplet of a Get /
+ * Update / Delete Records element (`operation: 'recordFilter'`), carrying the
+ * operator and the compared value (`filterValue` + `filterValueKind`
+ * literal|reference). Before this, a filter field was invisible to every
+ * incoming-edge walk — a picklist value or field used only as a Get Records
+ * criterion read as unused (and "safe to remove").
+ */
+const buildRecordFilterEdges = (
+  flowId: string,
+  rootObj: Record<string, unknown>,
+): Edge[] => {
+  const edges: Edge[] = [];
+  for (const [tag, element] of RECORD_FILTER_ELEMENTS) {
+    for (const raw of toArray(rootObj[tag])) {
+      const el = asRecord(raw);
+      if (el === null) continue;
+      const object = toNonEmptyString(el['object']);
+      if (object === null) continue;
+      for (const rawFilter of toArray(el['filters'])) {
+        const item = parseFlowConditionTriplet(rawFilter);
+        if (item === null || item.field.includes('.')) continue;
+        const properties: Record<string, unknown> = {
+          operation: 'recordFilter',
+          element,
+          filterOperator: item.operation,
+        };
+        if (item.value !== null) {
+          properties['filterValue'] = item.value;
+          properties['filterValueKind'] = item.valueKind ?? 'literal';
+        }
+        edges.push({
+          fromId: flowId,
+          toId: `CustomField:${object}.${item.field}`,
+          edgeType: 'readsFrom',
+          confidence: 'parsed',
+          source: EDGE_SOURCE,
+          properties,
+        });
+      }
+    }
+  }
+  return edges;
+};
+
+/**
+ * Field writes made through a record VARIABLE: `<assignments>` items that set
+ * `<var>.<Field>` where `<var>` is a typed record resource that some Create /
+ * Update Records element later persists (`<inputReference>var</inputReference>`,
+ * directly or after being `Add`ed to a persisted collection). The DML names
+ * only the variable, so without this the field write — and the literal it
+ * sets — never reached the graph. Emitted at `heuristic` confidence
+ * (`operation: 'recordVariableFieldAssignment'`): persistence is inferred from
+ * the DML's presence, not proven per execution path. Assignments to variables
+ * that are never persisted are in-memory only and are NOT emitted.
+ */
+const buildRecordVariableFieldAssignmentEdges = (
+  flowId: string,
+  rootObj: Record<string, unknown>,
+  dataflowIndex: FlowDataflowIndex,
+): Edge[] => {
+  const persisted = new Set<string>();
+  for (const tag of ['recordUpdates', 'recordCreates'] as const) {
+    for (const raw of toArray(rootObj[tag])) {
+      const el = asRecord(raw);
+      const ref = el === null ? null : toNonEmptyString(el['inputReference']);
+      if (ref !== null && !ref.startsWith('$')) persisted.add(ref);
+    }
+  }
+  if (persisted.size === 0) return [];
+  // A single record added to a persisted collection is persisted too.
+  const addedTo: Array<{ collection: string; member: string }> = [];
+  for (const rawAssign of toArray(rootObj['assignments'])) {
+    const assign = asRecord(rawAssign);
+    if (assign === null) continue;
+    for (const rawItem of toArray(assign['assignmentItems'])) {
+      const item = asRecord(rawItem);
+      if (item === null) continue;
+      const target = toNonEmptyString(item['assignToReference']);
+      const op = toNonEmptyString(item['operator']);
+      const member = parseAssignedValue(item);
+      if (target !== null && op === 'Add' && member?.kind === 'reference') {
+        addedTo.push({ collection: target, member: member.value });
+      }
+    }
+  }
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const { collection, member } of addedTo) {
+      if (persisted.has(collection) && !persisted.has(member)) {
+        persisted.add(member);
+        grew = true;
+      }
+    }
+  }
+  const edges: Edge[] = [];
+  for (const rawAssign of toArray(rootObj['assignments'])) {
+    const assign = asRecord(rawAssign);
+    if (assign === null) continue;
+    for (const rawItem of toArray(assign['assignmentItems'])) {
+      const item = asRecord(rawItem);
+      if (item === null) continue;
+      const target = toNonEmptyString(item['assignToReference']);
+      if (target === null) continue;
+      const ref = stripMergeWrapper(target);
+      const dot = ref.indexOf('.');
+      if (dot <= 0 || ref.startsWith('$')) continue;
+      const head = ref.slice(0, dot);
+      const field = ref.slice(dot + 1);
+      if (field.length === 0 || field.includes('.') || !persisted.has(head)) continue;
+      const object = resolveFlowFieldPath(ref, dataflowIndex)?.split('.')[0] ?? null;
+      if (object === null) continue;
+      const properties: Record<string, unknown> = {
+        operation: 'recordVariableFieldAssignment',
+        recordVariable: head,
+      };
+      const assigned = parseAssignedValue(item);
+      if (assigned !== null) {
+        properties['assignedValue'] = assigned.value;
+        properties['assignedValueKind'] = assigned.kind;
+      }
+      edges.push({
+        fromId: flowId,
+        toId: `CustomField:${object}.${field}`,
+        edgeType: 'writesTo',
+        confidence: 'heuristic',
+        source: EDGE_SOURCE,
+        properties,
+      });
+    }
+  }
+  return edges;
 };
 
 /**
@@ -1700,13 +1919,47 @@ const edgeOperation = (edge: Edge): string => {
  * of the Flow we want tests to depend on.
  */
 const dedupeAndSortEdges = (edges: readonly Edge[]): Edge[] => {
-  const seen = new Set<string>();
-  const out: Edge[] = [];
+  const byKey = new Map<string, Edge>();
+  const literalsByKey = new Map<string, string[]>();
+  const referencesByKey = new Map<string, string[]>();
+  const pushUnique = (m: Map<string, string[]>, key: string, v: string | null): void => {
+    if (v === null) return;
+    const values = m.get(key) ?? [];
+    if (!values.includes(v)) values.push(v);
+    m.set(key, values);
+  };
   for (const edge of edges) {
     const key = `${edge.fromId}|${edge.toId}|${edge.edgeType}|${edge.source}|${edgeOperation(edge)}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(edge);
+    for (const v of edgeLiteralValues(edge)) pushUnique(literalsByKey, key, v);
+    for (const v of edgeReferenceValues(edge)) pushUnique(referencesByKey, key, v);
+    if (!byKey.has(key)) byKey.set(key, edge);
+  }
+  // Two writes of the same field by the same operation (Status := 'Open' in
+  // one element, 'Closed' or {!varStatus} in another) share a key; the first
+  // edge wins but EVERY distinct literal survives on `literalValues` and every
+  // variable source on `referenceValues`, whichever kind came first — so
+  // "which flows set Status to Closed" never loses a write, and a writer that
+  // ALSO writes from a variable is never read as literal-only.
+  const out: Edge[] = [];
+  for (const [key, edge] of byKey) {
+    const values = literalsByKey.get(key) ?? [];
+    const refs = referencesByKey.get(key) ?? [];
+    const keptLiteral = edgeLiteralValues(edge)[0] ?? null;
+    const keptRef = edgeReferenceValues(edge)[0] ?? null;
+    const needLiterals = values.length > 1 || (values.length === 1 && keptLiteral === null);
+    const needRefs = refs.length > 1 || (refs.length === 1 && keptRef === null);
+    out.push(
+      needLiterals || needRefs
+        ? {
+            ...edge,
+            properties: {
+              ...edge.properties,
+              ...(needLiterals ? { literalValues: values } : {}),
+              ...(needRefs ? { referenceValues: refs } : {}),
+            },
+          }
+        : edge,
+    );
   }
   out.sort((a, b) => {
     if (a.toId !== b.toId) return a.toId < b.toId ? -1 : 1;
@@ -1981,6 +2234,10 @@ export const extractFlow = async (
     ),
   );
   rawEdges.push(...buildDataflowReadEdges(flowId, dataflowCollector));
+  rawEdges.push(...buildRecordFilterEdges(flowId, rootObj));
+  rawEdges.push(
+    ...buildRecordVariableFieldAssignmentEdges(flowId, rootObj, dataflowIndex),
+  );
   // CUSTOM-LABEL-USAGES-MISS-FLOW-LABEL-REFS: `$Label.{ApiName}` merge refs in
   // formulas / text templates → heuristic `references` edges to the CustomLabel
   // node. Scans the raw XML (the refs live in string content no other builder
@@ -1995,7 +2252,8 @@ export const extractFlow = async (
   // Flows (autolaunched / screen / scheduled), `parentObjectApiName`
   // is null and bare field names remain in their dangling form per
   // the helper's documented behaviour.
-  const conditionSources = collectFlowConditionSources(rootObj);
+  const conditionSources = collectFlowConditionSources(rootObj, dataflowIndex);
+  const formulaValues = collectFormulaValueRefs(dataflowIndex);
   const { conditionNodes, firesWhenEdges, conditionsMirror, conditionFieldEdges } =
     extractConditions({
       parentId: flowId,
@@ -2051,6 +2309,11 @@ export const extractFlow = async (
       // use this to place these flows in post-save-async rather than
       // post-save-flows.
       hasImmediateConnector: startProps.hasImmediateConnector,
+      // Every <start><scheduledPaths> entry, INCLUDING time-offset paths that
+      // carry no <pathType> (which `scheduledPathTypes` cannot show). A flow
+      // with no immediate connector and >0 scheduled paths never runs in the
+      // triggering transaction.
+      scheduledPathCount: toArray(asRecord(unwrapSingle(rootObj['start']))?.['scheduledPaths']).length,
       // <Flow><triggerOrder> (top-level, NOT under <start>) — the declared Flow
       // Trigger Order (1-2000), or null when this flow declares none. ALWAYS
       // written (null included) so a consumer can tell "this flow declares no
@@ -2058,11 +2321,23 @@ export const extractFlow = async (
       // all": the KEY's absence is the only honest signal of the latter. See
       // extractTriggerOrder + soe-trigger-order.ts.
       triggerOrder: extractTriggerOrder(rootObj),
+      // <start><doesRequireRecordChangedToMeetCriteria>: true = fires only on
+      // the save that CHANGES the record to meet the entry criteria. Always
+      // written (null = not declared) so an absent key means "not extracted".
+      entryRequiresRecordChange: readEntryRequiresRecordChange(
+        asRecord(unwrapSingle(rootObj['start'])),
+      ),
       // bundle-4(a): every <actionCalls> element's {actionType, actionName}
       // (apex AND non-apex). Apex calls also get a `callsApex` edge; non-apex
       // action types (e.g. activateSessionPermSet) emit no edge, so this list
       // is the only place explain_flow can identify the faultable element type.
       actionCalls: actionCallSummaries,
+      // `<formulas>` resources that compare a record field to a quoted literal
+      // (`ISPICKVAL({!$Record.Status__c}, 'Closed')`) — no edge carries them.
+      // ALWAYS written (empty included): an absent key means a vault built
+      // before this was extracted, which value-removal checks must disclose.
+      formulaValueRefs: formulaValues.refs,
+      formulaComparisons: formulaValues.comparisons,
       flowExtractionWarnings: warnings,
       conditions: conditionsMirror,
       faultableElementCount: faultCoverage.faultableElementCount,

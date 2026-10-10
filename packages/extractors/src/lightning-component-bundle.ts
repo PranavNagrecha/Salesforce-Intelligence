@@ -368,19 +368,37 @@ const buildScannerEdges = (
   }
 
   const raw: Edge[] = [];
+  // One field edge per (toId, edgeType): the graph PK is
+  // (fromId, toId, edgeType, source), so a second access to the same field
+  // would REPLACE the first at import. A `@salesforce/schema` import wins —
+  // it is a compiler-checked reference (`declared`, mechanism
+  // `schema-import`; Salesforce refuses to delete a field a component
+  // imports), while an in-body access stays `heuristic`.
+  const fieldEdges = new Map<string, Edge>();
   for (const access of result.value.fieldAccesses) {
     // Drop phantom edges to unresolved JS receivers (locals, loop vars,
     // event detail) — LWC-JS-RECEIVER-FIELD-PHANTOMS.
     if (!resolvableObjects.has(access.object)) continue;
-    raw.push({
+    const toId = `CustomField:${access.object}.${access.field}`;
+    const edgeType = access.type === 'write' ? 'writesTo' : 'readsFrom';
+    const isSchemaImport = access.origin === 'schema-import';
+    const key = `${edgeType}|${toId}`;
+    const prior = fieldEdges.get(key);
+    if (prior !== undefined && (prior.confidence === 'declared' || !isSchemaImport)) continue;
+    fieldEdges.set(key, {
       fromId: ownerId,
-      toId: `CustomField:${access.object}.${access.field}`,
-      edgeType: access.type === 'write' ? 'writesTo' : 'readsFrom',
-      confidence: 'heuristic',
+      toId,
+      edgeType,
+      confidence: isSchemaImport ? 'declared' : 'heuristic',
       source: EDGE_SOURCE,
-      properties: { offset: access.offset, length: access.length },
+      properties: {
+        offset: access.offset,
+        length: access.length,
+        ...(isSchemaImport ? { mechanism: 'schema-import' } : {}),
+      },
     });
   }
+  raw.push(...fieldEdges.values());
   for (const call of result.value.apexCalls) {
     raw.push({
       fromId: ownerId,
@@ -388,7 +406,12 @@ const buildScannerEdges = (
       edgeType: 'callsApex',
       confidence: 'declared',
       source: EDGE_SOURCE,
+      // `methods[]` is the shape every method-level reader keys on; a bundle
+      // importing several methods of one class folds them onto ONE edge in
+      // `mergeAndSortEdges` (MEMBER-IDENTITY-DEDUPE) instead of keeping only
+      // the first import.
       properties: {
+        methods: [call.methodName],
         methodName: call.methodName,
         offset: call.offset,
         length: call.length,
@@ -421,7 +444,8 @@ const buildScannerEdges = (
  *   - One `references` edge per `<targetConfig><objects><object>` to
  *     `CustomObject:{ObjectApiName}` at `confidence: 'declared'`.
  *   - `readsFrom` / `writesTo` edges to `CustomField:{object}.{field}`
- *     (`confidence: 'heuristic'`) ONLY for field accesses whose `object`
+ *     (`confidence: 'declared'` + `mechanism: 'schema-import'` for a
+ *     `@salesforce/schema` import, else `'heuristic'`) ONLY for field accesses whose `object`
  *     resolves to a real SObject — a `@salesforce/schema` import, a
  *     `getRecord` wire array, or a `<targetConfig>` object. In-body
  *     `receiver.Field` accesses against unresolved JS locals emit NO

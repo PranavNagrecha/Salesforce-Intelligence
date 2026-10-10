@@ -1,0 +1,13 @@
+---
+/** /blog/<slug> pages from src/content/guides/blog/*.md. Hand-written .astro pages in this folder take precedence. */
+import GuideArticle from "../../components/GuideArticle.astro";
+import { guidesIn } from "../../lib/guides.ts";
+
+export async function getStaticPaths() {
+  const entries = await guidesIn("blog");
+  return entries.map((entry) => ({ params: { slug: entry.id.split("/")[1] }, props: { entry } }));
+}
+const { entry } = Astro.props;
+---
+
+<GuideArticle entry={entry} />

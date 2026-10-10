@@ -27,6 +27,7 @@ import {
   isChangeEventEntityId,
   listEdges,
 } from '@sf-intelligence/graph';
+import { standardFieldDescribeGapFor } from '@sf-intelligence/vault';
 
 import type { Context } from '../server.js';
 
@@ -60,6 +61,22 @@ const isKnownStandardFieldId = (id: string): boolean => {
 };
 
 /**
+ * WOW-12: a STANDARD field id (`CustomField:Account.BillingCity`) on an object
+ * whose describe-only fields are missing from this vault (no live or cached
+ * describe on the last refresh). Its absence says nothing about the org — the
+ * field may well exist — so it must never read as "not found" or "external".
+ */
+const describeGapForStandardFieldId = (ctx: Context, id: string): string | null => {
+  if (!id.startsWith('CustomField:')) return null;
+  const rest = id.slice('CustomField:'.length);
+  const dot = rest.indexOf('.');
+  if (dot < 0) return null;
+  const fieldApi = rest.slice(dot + 1).toLowerCase();
+  if (fieldApi.endsWith('__c') || fieldApi.endsWith('__mdt')) return null;
+  return standardFieldDescribeGapFor(ctx.manifest, rest.slice(0, dot));
+};
+
+/**
  * Build a `component-not-found` message for `id` that distinguishes a
  * genuinely-unknown id from a PHANTOM (referenced-but-not-retrieved).
  *
@@ -86,6 +103,13 @@ export const phantomAwareNotFoundMessage = async (
   // runs first and merely omits the edge-count addendum when refs is
   // unknown (same as when refs is genuinely 0 — no claim either way).
   const refs = inbound.ok ? inbound.value.length : null;
+  const describeGap = describeGapForStandardFieldId(ctx, id);
+  if (describeGap !== null) {
+    return (
+      `\`${id}\` has no ${kindLabel} node in this vault, and this is NOT evidence it is absent from ` +
+      `the org: ${describeGap}`
+    );
+  }
   // CHANGEEVENT-IS-NOT-A-RETRIEVE-GAP: a `CustomObject:{X}ChangeEvent` target is
   // a Change Data Capture stream the platform synthesises; the Metadata API
   // emits no component for it on ANY org. The generic phantom message below ends

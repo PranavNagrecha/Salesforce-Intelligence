@@ -1200,8 +1200,9 @@ const findVarAssignment = (
   // identifier-shaped. Skip generic-parameter shapes for v2.1
   // simplicity; if a variable is assigned via `Map<X,Y> v = ...`
   // the regex still matches because the modifier prefix is loose.
+  // `\b` before the name: searching `e` must not match `name = ...`.
   const re = new RegExp(
-    `(?:[A-Za-z_][A-Za-z_0-9<>,\\s.]*\\s+)?${escapeForRegex(
+    `(?:[A-Za-z_][A-Za-z_0-9<>,\\s.]*\\s+)?\\b${escapeForRegex(
       varName,
     )}\\s*=\\s*([^;]+);`,
     'g',
@@ -1309,6 +1310,204 @@ const tokenIsSafe = (
   return false;
 };
 
+/**
+ * ARCH-07. Where an unsafe concatenation token's value comes from, worst first:
+ *   - `input`   — traces to a parameter of the enclosing method, or to a
+ *                 Visualforce page parameter (`ApexPages.currentPage()`). A
+ *                 caller-controlled string reaches the query: real injection.
+ *   - `unknown` — a class member, a method call, or a local whose origin the
+ *                 one-method walk cannot see. Worth a review, not proven taint.
+ *   - `config`  — read from custom metadata (`__mdt`) or a hierarchy/list
+ *                 custom setting (`getInstance` / `getOrgDefaults` / `getAll`):
+ *                 admin-controlled configuration, not user input.
+ *   - `safe`    — literals, escaped values, ternaries/`String.join` over
+ *                 literal-only operands.
+ */
+type QueryTaint = 'input' | 'unknown' | 'config' | 'safe';
+const TAINT_RANK: Readonly<Record<QueryTaint, number>> = { safe: 0, config: 1, unknown: 2, input: 3 };
+const worseTaint = (a: QueryTaint, b: QueryTaint): QueryTaint =>
+  TAINT_RANK[a] >= TAINT_RANK[b] ? a : b;
+
+const INJECTION_SAFE_SCALAR_TYPES: ReadonlySet<string> = new Set([
+  'id', 'integer', 'long', 'decimal', 'double', 'boolean', 'date', 'datetime', 'time',
+]);
+const PAGE_PARAM_PATTERN = /\bApexPages\s*\.\s*currentPage\s*\(\s*\)\s*\.\s*getParameters\b/;
+const CONFIG_READ_PATTERN =
+  /__mdt\b|\.\s*getInstance\s*\(|\.\s*getOrgDefaults\s*\(|\.\s*getValues\s*\(|\.\s*getAll\s*\(/;
+
+/**
+ * Parameter name → declared type of the method whose body encloses `offset`
+ * (empty for none).
+ */
+const enclosingMethodParams = (stripped: string, offset: number): ReadonlyMap<string, string> => {
+  const names = new Map<string, string>();
+  const { bodyStart, sigStart } = enclosingMethodStart(stripped, offset);
+  if (sigStart >= bodyStart) return names;
+  const close = stripped.lastIndexOf(')', bodyStart);
+  if (close <= sigStart) return names;
+  const inner = stripped.slice(sigStart + 1, close);
+  let depth = 0;
+  let start = 0;
+  const pushParam = (raw: string): void => {
+    const m = /^(?:final\s+)?([\s\S]*?)\s+([A-Za-z_][A-Za-z_0-9]*)$/.exec(raw.trim());
+    if (m !== null && m[2] !== undefined) names.set(m[2], (m[1] ?? '').replace(/\s+/g, ''));
+  };
+  for (let i = 0; i < inner.length; i += 1) {
+    const ch = inner[i];
+    if (ch === '<') depth += 1;
+    else if (ch === '>') depth -= 1;
+    else if (ch === ',' && depth === 0) {
+      pushParam(inner.slice(start, i));
+      start = i + 1;
+    }
+  }
+  pushParam(inner.slice(start));
+  return names;
+};
+
+/** Split `a ? b : c` at top level; null when `expr` is not a ternary. */
+const splitTernary = (expr: string): readonly [string, string] | null => {
+  let depth = 0;
+  let inStr = false;
+  let q = -1;
+  for (let i = 0; i < expr.length; i += 1) {
+    const ch = expr[i];
+    if (inStr) {
+      if (ch === '\\') i += 1;
+      else if (ch === "'") inStr = false;
+      continue;
+    }
+    if (ch === "'") inStr = true;
+    else if (ch === '(' || ch === '{' || ch === '[') depth += 1;
+    else if (ch === ')' || ch === '}' || ch === ']') depth -= 1;
+    else if (depth === 0 && ch === '?' && q < 0) q = i;
+    else if (depth === 0 && ch === ':' && q >= 0)
+      return [expr.slice(q + 1, i).trim(), expr.slice(i + 1).trim()];
+  }
+  return null;
+};
+
+const stripOuterParens = (expr: string): string => {
+  let e = expr.trim();
+  while (e.startsWith('(') && findMatchingParen(e, 0) === e.length - 1) e = e.slice(1, -1).trim();
+  return e;
+};
+
+/**
+ * Classify one concatenation token. `depth` bounds the local-variable walk
+ * (a local assigned from another local, …) so a cycle cannot loop.
+ */
+const tokenTaint = (
+  rawToken: string,
+  source: string,
+  stripped: string,
+  offset: number,
+  params: ReadonlyMap<string, string>,
+  depth: number,
+): QueryTaint => {
+  const token = stripOuterParens(rawToken);
+  if (token.length === 0 || tokenIsSafe(token, null, offset)) return 'safe';
+  if (PAGE_PARAM_PATTERN.test(token)) return 'input';
+  const ternary = splitTernary(token);
+  if (ternary !== null) {
+    return worseTaint(
+      tokenTaint(ternary[0], source, stripped, offset, params, depth),
+      tokenTaint(ternary[1], source, stripped, offset, params, depth),
+    );
+  }
+  // `new List<String>{ 'a', 'b' }` / `new Set<String>{...}` of literals only.
+  const literalCollection = /^new\s+(?:List|Set)\s*<\s*String\s*>\s*\{([\s\S]*)\}$/.exec(token);
+  if (literalCollection !== null) {
+    const items = (literalCollection[1] ?? '').split(',').map((s) => s.trim()).filter((s) => s.length > 0);
+    return items.every((s) => tokenIsSafe(s, null, offset)) ? 'safe' : 'unknown';
+  }
+  // `String.join(x, sep)` — the separator is a literal in practice; the
+  // joined collection carries the taint.
+  const join = /^String\s*\.\s*join\s*\(/.exec(token);
+  if (join !== null) {
+    const open = token.indexOf('(');
+    const close = findMatchingParen(token, open);
+    if (close === token.length - 1) {
+      const args = tokenizeTopLevelCommas(token.slice(open + 1, close));
+      return tokenTaint(args[0] ?? '', source, stripped, offset, params, depth);
+    }
+  }
+  if (CONFIG_READ_PATTERN.test(token)) return 'config';
+  const root = /^([A-Za-z_][A-Za-z_0-9]*)/.exec(token)?.[1];
+  if (root === undefined) return /\b[A-Za-z_]/.test(token) ? 'unknown' : 'safe';
+  const paramType = params.get(root);
+  if (paramType !== undefined) {
+    // A scalar-typed parameter (`Id`, `Integer`, `Date`, …) cannot carry a quote.
+    return token === root && INJECTION_SAFE_SCALAR_TYPES.has(paramType.toLowerCase()) ? 'safe' : 'input';
+  }
+  // Declared as a custom-metadata record (`for (Cfg__mdt c : ...)`, `Cfg__mdt c = ...`).
+  if (new RegExp(`\\b[A-Za-z_][A-Za-z_0-9]*__mdt\\s+${escapeForRegex(root)}\\b`).test(stripped)) {
+    return 'config';
+  }
+  if (depth <= 0) return 'unknown';
+  const rhs = findVarAssignment(source, root, offset);
+  if (rhs === null) return 'unknown';
+  if (/^String\.escapeSingleQuotes\s*\(/.test(rhs)) return 'safe';
+  let worst: QueryTaint = 'safe';
+  for (const t of tokenizeConcatExpr(rhs)) {
+    worst = worseTaint(worst, tokenTaint(t, source, stripped, offset, params, depth - 1));
+    if (worst === 'input') break;
+  }
+  // A collection local assigned from a literal-free builder (`new List<String>()`)
+  // is filled elsewhere — the fill is invisible to this walk.
+  if (worst === 'safe' && /^new\b/.test(rhs) && !/^new\s+(?:List|Set)\s*<\s*String\s*>\s*\{/.test(rhs)) {
+    return 'unknown';
+  }
+  return worst;
+};
+
+/** Top-level comma split (parens / braces / strings respected). */
+const tokenizeTopLevelCommas = (expr: string): readonly string[] => {
+  const out: string[] = [];
+  let depth = 0;
+  let inStr = false;
+  let start = 0;
+  for (let i = 0; i < expr.length; i += 1) {
+    const ch = expr[i];
+    if (inStr) {
+      if (ch === '\\') i += 1;
+      else if (ch === "'") inStr = false;
+      continue;
+    }
+    if (ch === "'") inStr = true;
+    else if (ch === '(' || ch === '{' || ch === '<') depth += 1;
+    else if (ch === ')' || ch === '}' || ch === '>') depth -= 1;
+    else if (ch === ',' && depth === 0) {
+      out.push(expr.slice(start, i).trim());
+      start = i + 1;
+    }
+  }
+  out.push(expr.slice(start).trim());
+  return out;
+};
+
+const SOQL_INJECTION_EXPLANATION: Readonly<Record<Exclude<QueryTaint, 'safe'>, string>> = {
+  input:
+    'concatenates a method parameter or page parameter into the query — SOQL injection risk. ' +
+    'Use binding variables (:var) or String.escapeSingleQuotes() on every input.',
+  unknown:
+    'concatenates a value whose origin is not traced to a caller input (class member, method call or ' +
+    'out-of-method local) — review it; bind (:var) or escape if it can carry user input.',
+  config:
+    'concatenates values read from custom metadata / custom settings only — admin-controlled ' +
+    'configuration, not user input; low injection risk.',
+};
+const SOQL_INJECTION_SEVERITY: Readonly<Record<Exclude<QueryTaint, 'safe'>, QualityIssue['severity']>> = {
+  input: 'critical',
+  unknown: 'high',
+  config: 'info',
+};
+
+/**
+ * ARCH-07: taint-aware. `critical` only when a concatenated value traces to a
+ * method parameter or Visualforce page parameter; `high` for an untraced value;
+ * `info` for configuration-only reads; nothing for literal-only queries.
+ */
 const detectSoqlInjection = (
   source: string,
   stripped: string,
@@ -1323,53 +1522,43 @@ const detectSoqlInjection = (
     if (closeParen === -1) continue;
     // Read the arg expression from the RAW source so string literals
     // survive — the offsets are valid because stripCommentsAndStrings
-    // preserves byte length.
-    const argExpr = source.slice(openParen + 1, closeParen).trim();
+    // preserves byte length. Only the FIRST argument is the query text
+    // (`queryWithBinds(q, binds, mode)`).
+    const argExpr = tokenizeTopLevelCommas(source.slice(openParen + 1, closeParen))[0] ?? '';
     if (argExpr.length === 0) continue;
-
-    // Case 1: arg contains a concatenation. Tokenize and check each token.
+    let concat: string | null = null;
+    let label = '';
     if (argExpr.includes('+')) {
-      const tokens = tokenizeConcatExpr(argExpr);
-      const unsafe = tokens.some(
-        (t) => t.length > 0 && !tokenIsSafe(t, source, m!.index),
-      );
-      if (unsafe) {
-        issues.push({
-          rule: 'soql-injection',
-          severity: 'critical',
-          location: `line ${offsetToLine(source, m.index)}`,
-          explanation:
-            'Database.query argument is built by string concatenation with an unescaped variable — ' +
-            'SOQL injection risk. Use binding variables (:var) or String.escapeSingleQuotes() on every input.',
-          confidence: 'heuristic',
-        });
-      }
-      continue;
-    }
-
-    // Case 2: arg is a bare identifier. Walk back to find its assignment;
-    // if the assignment is itself an unsafe concatenation, flag.
-    if (/^[A-Za-z_][A-Za-z_0-9]*$/.test(argExpr)) {
+      concat = argExpr;
+    } else if (/^[A-Za-z_][A-Za-z_0-9]*$/.test(argExpr)) {
       const rhs = findVarAssignment(source, argExpr, m.index);
-      if (rhs === null) continue;
-      if (rhs.includes('+')) {
-        const tokens = tokenizeConcatExpr(rhs);
-        const unsafe = tokens.some(
-          (t) => t.length > 0 && !tokenIsSafe(t, source, m!.index),
-        );
-        if (unsafe) {
-          issues.push({
-            rule: 'soql-injection',
-            severity: 'critical',
-            location: `line ${offsetToLine(source, m.index)}`,
-            explanation:
-              `Database.query argument '${argExpr}' was built via unsafe concatenation — ` +
-              'SOQL injection risk. Use binding variables (:var) or String.escapeSingleQuotes().',
-            confidence: 'heuristic',
-          });
-        }
-      }
+      // `q += ...` appends are folded in: the last plain assignment plus
+      // every `q += expr` before the call.
+      const appends: string[] = [];
+      const appendRe = new RegExp(`\\b${escapeForRegex(argExpr)}\\s*\\+=\\s*([^;]+);`, 'g');
+      let a: RegExpExecArray | null;
+      while ((a = appendRe.exec(source)) !== null && a.index < m.index) appends.push((a[1] ?? '').trim());
+      const parts = [rhs ?? '', ...appends].filter((p) => p.length > 0);
+      if (!parts.some((p) => p.includes('+')) && appends.length === 0) continue;
+      concat = parts.join(' + ');
+      label = ` '${argExpr}'`;
     }
+    if (concat === null) continue;
+    const params = enclosingMethodParams(stripped, m.index);
+    let worst: QueryTaint = 'safe';
+    for (const t of tokenizeConcatExpr(concat)) {
+      if (t.length === 0) continue;
+      worst = worseTaint(worst, tokenTaint(t, source, stripped, m.index, params, 2));
+      if (worst === 'input') break;
+    }
+    if (worst === 'safe') continue;
+    issues.push({
+      rule: 'soql-injection',
+      severity: SOQL_INJECTION_SEVERITY[worst],
+      location: `line ${offsetToLine(source, m.index)}`,
+      explanation: `Database.query argument${label} ${SOQL_INJECTION_EXPLANATION[worst]}`,
+      confidence: 'heuristic',
+    });
   }
   return issues;
 };
@@ -1427,6 +1616,39 @@ const hasPrecedingComment = (source: string, decOffset: number): boolean => {
   return false;
 };
 
+/**
+ * ARCH-07. A justification can also sit in the class doc comment (any length,
+ * separated from the declaration only by annotations / blank lines) or as a
+ * trailing comment on the declaration line itself.
+ */
+const hasDocOrTrailingComment = (source: string, decOffset: number): boolean => {
+  const substantive = (text: string): boolean =>
+    text.replace(/[\s*/]/g, '').length >= 10;
+  const lineEnd = source.indexOf('\n', decOffset);
+  const declLine = source.slice(decOffset, lineEnd < 0 ? source.length : lineEnd);
+  const trailing = /\/\/(.*)$|\/\*([\s\S]*?)\*\//.exec(declLine);
+  if (trailing !== null && substantive(trailing[1] ?? trailing[2] ?? '')) return true;
+  let lineStart = decOffset;
+  while (lineStart > 0 && source[lineStart - 1] !== '\n') lineStart -= 1;
+  const before = source.slice(0, lineStart).split('\n');
+  if (before[before.length - 1] === '') before.pop();
+  // Skip blank and annotation lines between the comment and the declaration.
+  while (before.length > 0 && /^\s*(?:@[A-Za-z_][\w.]*(?:\([^)]*\))?\s*)*$/.test(before[before.length - 1] ?? '')) {
+    before.pop();
+  }
+  const last = (before[before.length - 1] ?? '').trim();
+  if (last.endsWith('*/')) {
+    const text = before.join('\n');
+    const open = text.lastIndexOf('/*');
+    return open >= 0 && substantive(text.slice(open + 2, text.length - 2));
+  }
+  const lines: string[] = [];
+  while (before.length > 0 && /^\s*\/\//.test(before[before.length - 1] ?? '')) {
+    lines.push((before.pop() ?? '').replace(/^\s*\/\//, ''));
+  }
+  return substantive(lines.join(' '));
+};
+
 const detectWithoutSharingNoComment = (
   source: string,
 ): readonly QualityIssue[] => {
@@ -1435,6 +1657,7 @@ const detectWithoutSharingNoComment = (
   let m: RegExpExecArray | null;
   while ((m = re.exec(source)) !== null) {
     if (hasPrecedingComment(source, m.index)) continue;
+    if (hasDocOrTrailingComment(source, m.index)) continue;
     issues.push({
       rule: 'without-sharing-no-comment',
       severity: 'medium',
@@ -1448,22 +1671,179 @@ const detectWithoutSharingNoComment = (
   return issues;
 };
 
+// ---------- recognizer 9b: omitted-sharing-on-entry-point ----------------
+
+// The OUTERMOST class declaration (modifiers + optional sharing keyword).
+const TOP_LEVEL_CLASS_PATTERN =
+  /^\s*((?:(?:public|private|global|protected|virtual|abstract|with\s+sharing|without\s+sharing|inherited\s+sharing)\s+)*)class\s+([A-Za-z_][A-Za-z_0-9]*)/im;
+const SERVICE_ENTRY_PATTERN =
+  /@(?:RemoteAction|InvocableMethod|RestResource|Http(?:Get|Post|Put|Patch|Delete))\b|\bwebservice\s+static\b/i;
+const AURA_ENTRY_PATTERN = /@AuraEnabled\b/i;
+
+/** Rule id shared by every tool that reports a no-keyword entry point. */
+export const OMITTED_SHARING_RULE = 'omitted-sharing-on-entry-point';
+
+/**
+ * Which caller reaches a no-keyword entry point. `service` = REST / SOAP /
+ * remote action / invocable (and any mix that includes one); `lightning` =
+ * `@AuraEnabled` only.
+ */
+export type OmittedSharingSurface = 'service' | 'lightning';
+
+/**
+ * THE severity model for "an entry-point class declares no sharing keyword" —
+ * the one answer `code_quality_audit` (this recognizer) and `apex_structure`
+ * (its parsed check) both emit, so the two can no longer disagree.
+ *
+ * A REST / SOAP / remote / invocable entry point has no caller sharing context
+ * to inherit, so it runs WITHOUT sharing — the same exposure as an explicit
+ * `without sharing` entry point (`high`). A Lightning-only controller runs
+ * with sharing when invoked from a Lightning component (the platform default
+ * for implicit-sharing `@AuraEnabled` controllers); other Apex callers pass
+ * their own context — so the keyword is a clarity fix there (`low`).
+ */
+export const omittedSharingVerdict = (
+  surface: OmittedSharingSurface,
+  className: string,
+  callers: string,
+): { readonly severity: 'high' | 'low'; readonly explanation: string } =>
+  surface === 'service'
+    ? {
+        severity: 'high',
+        explanation: `Entry-point class '${className}' (${callers}) declares no sharing keyword. The platform is the caller and has no sharing context to pass on, so record sharing is NOT enforced. Declare \`with sharing\` (or \`inherited sharing\`) explicitly.`,
+      }
+    : {
+        severity: 'low',
+        explanation: `Lightning controller '${className}' declares no sharing keyword. Called from a Lightning component it runs with sharing (the platform default for implicit-sharing @AuraEnabled controllers); other Apex callers pass their own context. Declare the sharing mode explicitly.`,
+      };
+
+/**
+ * ARCH-07. A top-level class that is an entry point (Visualforce remote action,
+ * invocable action, REST / SOAP service, Lightning controller) and declares NO
+ * sharing keyword. Severity and wording come from {@link omittedSharingVerdict}.
+ */
+const detectOmittedSharingOnEntryPoint = (
+  stripped: string,
+  isTest: boolean,
+): readonly QualityIssue[] => {
+  if (isTest || /@isTest\b/i.test(stripped)) return [];
+  const decl = TOP_LEVEL_CLASS_PATTERN.exec(stripped);
+  if (decl === null) return [];
+  // Only the outermost declaration: nothing but annotations / whitespace before it.
+  const head = stripped.slice(0, decl.index);
+  if (head.includes('{')) return [];
+  if (/\bsharing\b/i.test(decl[1] ?? '')) return [];
+  const service = SERVICE_ENTRY_PATTERN.test(stripped);
+  const aura = AURA_ENTRY_PATTERN.test(stripped);
+  if (!service && !aura) return [];
+  const verdict = omittedSharingVerdict(
+    service ? 'service' : 'lightning',
+    decl[2] ?? '',
+    service ? 'REST / SOAP / remote action / invocable' : '@AuraEnabled',
+  );
+  return [
+    {
+      rule: OMITTED_SHARING_RULE,
+      severity: verdict.severity,
+      location: `line ${offsetToLine(stripped, decl.index + (decl[0].length - decl[0].trimStart().length))}`,
+      explanation: verdict.explanation,
+      confidence: 'heuristic',
+    },
+  ];
+};
+
 // ---------- recognizer 10: trigger-no-recursion-guard ---------------------
 
 // Trigger source starts with the keyword `trigger`. The recognizer
 // pattern-matches the body for a recognized guard shape.
 const TRIGGER_HEADER_PATTERN = /\btrigger\s+([A-Za-z_][A-Za-z_0-9]*)\s+on\b/;
 
-const RECURSION_GUARD_PATTERNS = [
+/** The recursion-guard shapes {@link detectRecursionGuard} recognizes. */
+export type RecursionGuardKind =
+  | 'static-flag'
+  | 'static-id-set'
+  | 'trigger-handler-framework'
+  | 'trigger-is-executing'
+  | 'external-static'
+  | 'toggled-static-boolean';
+
+const RECURSION_GUARD_PATTERNS: ReadonlyArray<readonly [RecursionGuardKind, RegExp]> = [
   // Static Boolean flag pattern.
-  /\bstatic\s+Boolean\s+(?:isFirstRun|hasRun|alreadyRan|running|executed|isFirstExecution|isExecuting)\b/i,
+  ['static-flag', /\bstatic\s+Boolean\s+(?:isFirstRun|hasRun|alreadyRan|running|executed|isFirstExecution|isExecuting)\b/i],
   // Static Set<Id> pattern.
-  /\bstatic\s+Set\s*<\s*Id\s*>\s+(?:processedIds|firedIds|seenIds|handledIds)\b/i,
+  ['static-id-set', /\bstatic\s+Set\s*<\s*Id\s*>\s+(?:processedIds|firedIds|seenIds|handledIds)\b/i],
   // Common TriggerHandler framework class references.
-  /\bTriggerHandler\.|new\s+TriggerHandler\s*\(/,
+  ['trigger-handler-framework', /\bTriggerHandler\.|new\s+TriggerHandler\s*\(/],
   // `Trigger.isExecuting` static check.
-  /\bTrigger\.isExecuting\b/,
+  ['trigger-is-executing', /\bTrigger\.isExecuting\b/],
 ];
+
+/**
+ * DEV-08. A guard held as a static on ANOTHER class: the trigger both tests
+ * `Helper.flag` in an `if (...)` condition and reassigns `Helper.flag = true|false`,
+ * or consults a static collection (`Helper.processedIds.contains(...)` / `.add(...)`).
+ */
+const hasExternalStaticGuard = (stripped: string): boolean => {
+  const assignRe = /\b([A-Z][A-Za-z_0-9]*)\.([A-Za-z_][A-Za-z_0-9]*)\s*=\s*(?:true|false)\b/g;
+  let m: RegExpExecArray | null;
+  while ((m = assignRe.exec(stripped)) !== null) {
+    const member = `${m[1] ?? ''}\\.${m[2] ?? ''}`;
+    if (new RegExp(`\\bif\\s*\\([^{;]*\\b${member}\\b`).test(stripped)) return true;
+  }
+  return /\b(?!Trigger\.)[A-Z][A-Za-z_0-9]*\.[A-Za-z_][A-Za-z_0-9]*\.(?:contains|containsAll|add|addAll)\s*\(/.test(stripped);
+};
+
+/**
+ * DEV-08. A trigger whose whole body is ONE delegating call —
+ * `Dispatcher.run(new XHandler());`, `ns.RollupService.triggerHandler(...)` —
+ * keeps any recursion guard in the class it delegates to, which this per-file
+ * recognizer cannot see. Absence of a guard in the trigger file is then not
+ * evidence of a missing guard, so no finding is raised.
+ */
+const isPureDelegationTrigger = (stripped: string): boolean => {
+  const open = stripped.indexOf('{');
+  const close = stripped.lastIndexOf('}');
+  if (open < 0 || close <= open) return false;
+  const body = stripped.slice(open + 1, close).trim();
+  return /^(?:new\s+)?[A-Za-z_][\w.]*\s*\([^;{}]*\)\s*;$/.test(body);
+};
+
+/**
+ * A class-level `static Boolean x` that the same source both tests in an
+ * `if (...)` and reassigns to `true`/`false` — the generic in-class guard shape
+ * whose variable name is not one of the conventional ones above. (A trigger
+ * cannot declare statics, so this only ever matches a handler/helper class.)
+ */
+const hasToggledStaticBoolean = (stripped: string): boolean => {
+  const declRe = /\bstatic\s+(?:final\s+)?Boolean\s+([A-Za-z_][A-Za-z_0-9]*)\b/gi;
+  let m: RegExpExecArray | null;
+  while ((m = declRe.exec(stripped)) !== null) {
+    const name = m[1] ?? '';
+    if (name === '') continue;
+    // Apex identifiers are case-insensitive: `DoneOnce` and `doneOnce` are one variable.
+    const tested = new RegExp(`\\bif\\s*\\([^{;]*\\b${name}\\b`, 'i').test(stripped);
+    const assigned = new RegExp(`\\b${name}\\s*=\\s*(?:true|false)\\b`, 'i').test(stripped);
+    if (tested && assigned) return true;
+  }
+  return false;
+};
+
+/**
+ * The recursion guard VISIBLE in one Apex source file, or `null` when none of
+ * the recognized shapes is present. Shared by the `trigger-no-recursion-guard`
+ * recognizer and the save-order re-entry report, so the two can never disagree
+ * about what counts as a guard. `null` means "no recognized shape in THIS
+ * file" — never "the save is unguarded": a guard can live in another class.
+ */
+export const detectRecursionGuard = (source: string): RecursionGuardKind | null => {
+  for (const [kind, p] of RECURSION_GUARD_PATTERNS) {
+    if (p.test(source)) return kind;
+  }
+  const stripped = stripCommentsAndStrings(source);
+  if (hasExternalStaticGuard(stripped)) return 'external-static';
+  if (hasToggledStaticBoolean(stripped)) return 'toggled-static-boolean';
+  return null;
+};
 
 const detectTriggerNoRecursionGuard = (
   source: string,
@@ -1471,9 +1851,7 @@ const detectTriggerNoRecursionGuard = (
 ): readonly QualityIssue[] => {
   const triggerMatch = TRIGGER_HEADER_PATTERN.exec(stripped);
   if (triggerMatch === null) return [];
-  for (const p of RECURSION_GUARD_PATTERNS) {
-    if (p.test(source)) return [];
-  }
+  if (detectRecursionGuard(source) !== null || isPureDelegationTrigger(stripped)) return [];
   return [
     {
       rule: 'trigger-no-recursion-guard',
@@ -1569,6 +1947,35 @@ const FAKE_ASSERTEQUALS_SELF_PATTERN =
 const FAKE_ASSERTEQUALS_LITERAL_PATTERN =
   /\bSystem\.assertEquals\s*\(\s*('(?:\\.|[^'\\])*'|\d+)\s*,\s*('(?:\\.|[^'\\])*'|\d+)\s*[,)]/g;
 
+/**
+ * DEV-06. True when `offset` sits inside a `catch (...) { ... }` block of
+ * `stripped`. `System.assert(true, 'expected exception')` there is the
+ * canonical expected-exception acknowledgment (the `try` holds the call and an
+ * `assert(false)` fail-guard), not a tautology: reaching the catch IS the
+ * behaviour under test.
+ */
+const isInsideCatchBlock = (stripped: string, offset: number): boolean => {
+  const catchRe = /\bcatch\s*\([^)]*\)\s*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = catchRe.exec(stripped)) !== null) {
+    const open = m.index + m[0].length - 1;
+    if (open > offset) break;
+    let depth = 0;
+    for (let i = open; i < stripped.length; i += 1) {
+      const ch = stripped[i];
+      if (ch === '{') depth += 1;
+      else if (ch === '}') {
+        depth -= 1;
+        if (depth === 0) {
+          if (offset > open && offset < i) return true;
+          break;
+        }
+      }
+    }
+  }
+  return false;
+};
+
 const detectFakeAssertion = (
   source: string,
   stripped: string,
@@ -1589,7 +1996,10 @@ const detectFakeAssertion = (
   };
   let m: RegExpExecArray | null;
   const re1 = new RegExp(FAKE_ASSERT_BOOL_PATTERN.source, 'g');
-  while ((m = re1.exec(stripped)) !== null) flag(m.index, 'tautology boolean');
+  while ((m = re1.exec(stripped)) !== null) {
+    if (isInsideCatchBlock(stripped, m.index)) continue; // expected-exception idiom
+    flag(m.index, 'tautology boolean');
+  }
   const re2 = new RegExp(FAKE_ASSERTEQUALS_SELF_PATTERN.source, 'g');
   while ((m = re2.exec(stripped)) !== null) {
     if ((m[1] ?? '') === (m[2] ?? '')) flag(m.index, 'self-equals');
@@ -1746,6 +2156,7 @@ export const detectCodeQualityIssues = (
     ...detectMissingFlsCheck(source, stripped, metadata.isTest),
     ...detectSoqlInjection(source, stripped),
     ...detectWithoutSharingNoComment(source),
+    ...detectOmittedSharingOnEntryPoint(stripped, metadata.isTest),
     ...detectTriggerNoRecursionGuard(source, stripped),
     ...detectOldApiVersion(metadata),
     ...detectDatabaseUpsertNoOptions(source, stripped),

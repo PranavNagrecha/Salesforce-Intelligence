@@ -398,7 +398,7 @@ Two things to read before the findings:
   (`callout-in-loop`, `async-dispatch-in-loop`, `dml-before-callout`,
   `database-partial-result-discarded`,
   `soql-assigned-to-single-sobject`,
-  `no-sharing-declared-on-entry-point`,
+  `omitted-sharing-on-entry-point`,
   `without-sharing-external-entry-point`,
   `trigger-logic-in-trigger-body`) carry `parsed` or `declared`. The
   19-rule recognizer catalog is mirrored alongside them verbatim at

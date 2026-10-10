@@ -55,7 +55,7 @@ import type {
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import type { GraphStore } from '@sf-intelligence/graph';
+import { type GraphStore, parsePropertiesJson } from '@sf-intelligence/graph';
 import {
   listSnapshots,
   loadSnapshot,
@@ -282,16 +282,6 @@ interface RawEdgeRow {
   readonly properties_json: string;
 }
 
-const parsePropertiesJson = (raw: string | null | undefined): Readonly<Record<string, unknown>> => {
-  if (typeof raw !== 'string' || raw.length === 0) return {};
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return {};
-    return parsed as Readonly<Record<string, unknown>>;
-  } catch {
-    return {};
-  }
-};
 
 /**
  * Capture a transient snapshot of the current live graph store. Uses

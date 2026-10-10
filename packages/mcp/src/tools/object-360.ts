@@ -65,8 +65,8 @@
  * reported on" in the same response that named dozens of its report-referenced
  * fields. Every such flag is therefore tri-state here: `true` when declared
  * true, `null` otherwise, with the reason stated. `externalSharingModel` is
- * declared in the source XML and never captured by the extractor — always
- * `null` + reason, never a silent absence.
+ * read from the node; when it is missing the `null` says whether the vault
+ * predates its extraction or the XML declares none — never a silent absence.
  *
  * ── BOTH grant tiers name Profiles, not just the object tier ────────────────
  *
@@ -117,7 +117,7 @@ import {
   listNodesByIds,
   resolveComponents,
 } from '@sf-intelligence/graph';
-import { summarizeCoverage } from '@sf-intelligence/vault';
+import { standardFieldDescribeGapFor, summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -130,6 +130,7 @@ import {
   GRAPH_TRAVERSAL_REQUIRED_COVERAGE,
 } from './coverage-trust.js';
 import { objectIdCaseVariants } from './input-aliases.js';
+import { buildObjectHandbook } from './object-handbook.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import {
   REPORT_DASHBOARD_USAGE_CAVEAT,
@@ -294,6 +295,9 @@ const OBJECT_360_DATA_NOT_AVAILABLE: readonly string[] = Object.freeze([
   'last-used — "when was this object last used" is not in the vault: there is no login, record, report-run or API telemetry. Every date in this response is SCHEMA-shaped (`brief.lastMetadataChange`), never activity. For runtime signal use `sfi.live_recent_activity`.',
 ]);
 
+/** Output formats: the sectioned accounting, or the new-hire Markdown brief. */
+export const OBJECT_360_FORMATS = ['sections', 'handbook'] as const;
+
 /** Zod schema for the `sfi.object_360` tool input. */
 export const object360InputSchema = z
   .object({
@@ -319,6 +323,13 @@ export const object360InputSchema = z
       .min(1)
       .max(MAX_ROWS_PER_SECTION_CAP)
       .optional(),
+    /**
+     * `sections` (default) is the full JSON accounting. `handbook` is a compact
+     * Markdown brief of ONE object for a new team member (purpose, key fields,
+     * picklists, record types, relationships, save order, access, integrations,
+     * risk signals, next tools) — see `object-handbook.ts`.
+     */
+    format: z.enum(OBJECT_360_FORMATS).optional(),
   })
   .strict();
 
@@ -383,6 +394,33 @@ const declaredFlag = (
       `\`${key}\` is not declared true in the retrieved metadata. The extractor writes \`false\` BOTH for a ` +
       `declared \`false\` AND for an element the XML never declares, so the two are indistinguishable here — ` +
       `reported as \`null\` (UNKNOWN), never as "the feature is off".`,
+  };
+};
+
+/**
+ * The external org-wide default, read from the node (the object extractor
+ * captures `<externalSharingModel>`). WOW-8: this used to be a hard-coded
+ * "never extracted" literal that contradicted the node and
+ * `who_can_access_object`. `null` keeps its two distinct reasons.
+ */
+const externalOwdFlag = (
+  props: Readonly<Record<string, unknown>>,
+): Object360DeclaredFlag => {
+  const raw = props['externalSharingModel'];
+  if (typeof raw === 'string' && raw.length > 0) return { value: raw };
+  if (!('externalSharingModel' in props)) {
+    return {
+      value: null,
+      unavailableReason:
+        'This vault was built before the extractor captured `externalSharingModel` — re-run `sfi refresh`. ' +
+        'NOT EXTRACTED here; never read this null as Public or Private.',
+    };
+  }
+  return {
+    value: null,
+    unavailableReason:
+      'The object\'s source XML declares no `externalSharingModel` (common on standard objects), so the ' +
+      'external default is not in the metadata — check Setup > Sharing Settings. Never read this null as Public or Private.',
   };
 };
 
@@ -553,7 +591,7 @@ const resolveObjectId = (input: Object360Input): Result<ComponentId, McpError> =
  * to the object even means), NOT a gate: this tool draws no conclusion from it
  * about what the reader may do.
  */
-const classifyObjectKind = (
+export const classifyObjectKind = (
   apiName: string,
 ): { readonly kind: 'standard' | 'custom' | 'managed'; readonly namespace: string | null } => {
   const segments = apiName.split('__');
@@ -596,7 +634,7 @@ interface FamilyAvailability {
  * confirmed"), and absent from coverage entirely ("never modeled — not
  * checked").
  */
-const familyAvailability = (
+export const familyAvailability = (
   ctx: Context,
   type: string,
   observed: number,
@@ -653,7 +691,7 @@ const familyAvailability = (
 };
 
 /** The graph reads this handler makes, gathered once and then rendered purely. */
-interface Gathered {
+export interface Object360Gathered {
   readonly objectNode: Node | null;
   readonly objectInbound: readonly Edge[];
   readonly children: readonly Node[];
@@ -668,7 +706,7 @@ interface Gathered {
 }
 
 /** Nothing landed at all: no node of its own, no inbound edge, no child. */
-const isEmptyGather = (g: Gathered): boolean =>
+const isEmptyGather = (g: Object360Gathered): boolean =>
   g.objectNode === null && g.objectInbound.length === 0 && g.children.length === 0;
 
 /**
@@ -735,7 +773,7 @@ const gatherFor = async (
   ctx: Context,
   objectId: ComponentId,
   apiName: string,
-): Promise<Result<Gathered, McpError>> => {
+): Promise<Result<Object360Gathered, McpError>> => {
   const nodeResult = await getNodeById(ctx.graph, objectId);
   if (!nodeResult.ok) {
     return err({ kind: 'internal', message: `graph query failed: ${nodeResult.error.message}` });
@@ -879,6 +917,17 @@ export const object360Handler = async (
       ? new Set(OBJECT_360_SECTIONS)
       : new Set(input.includeSections);
 
+  const format = input.format ?? 'sections';
+  if (format === 'handbook' && (input.includeSections !== undefined || input.maxRowsPerSection !== undefined)) {
+    return err({
+      kind: 'invalid-query',
+      message:
+        '`includeSections` and `maxRowsPerSection` shape the `sections` format only; the `handbook` format ranks ' +
+        'and caps its own lists to fit and states every true total. Drop them, or pass `format: "sections"`.',
+      path: 'format',
+    });
+  }
+
   let objectId = requestedId;
   let apiName = requestedApiName;
   /** The id the caller passed, when it differed from the one profiled. */
@@ -928,6 +977,10 @@ export const object360Handler = async (
       message: `${missing}${missing.endsWith('.') ? '' : '.'}${suggestion}`,
       path: requestedId,
     });
+  }
+
+  if (format === 'handbook') {
+    return ok(await buildObjectHandbook(ctx, objectId, apiName, gathered, resolvedFrom));
   }
 
   // ── Byte fit: render purely at descending caps until the payload fits ────
@@ -985,7 +1038,7 @@ const renderResponse = (
   objectId: ComponentId,
   apiName: string,
   wanted: ReadonlySet<Object360Section>,
-  g: Gathered,
+  g: Object360Gathered,
   scope: RenderScope,
 ): McpResponse<Readonly<Record<string, unknown>>> => {
   const ledger = newLedger();
@@ -1544,12 +1597,7 @@ const renderResponse = (
   const sharingSection = {
     orgWideDefault: {
       internal: stringProp(props, 'sharingModel'),
-      external: {
-        value: null,
-        unavailableReason:
-          '`externalSharingModel` IS declared in the object\'s source XML but the extractor never captures it, so ' +
-          'it is absent from every object node here. NOT EXTRACTED — never read this null as Public or Private.',
-      } satisfies Object360DeclaredFlag,
+      external: externalOwdFlag(props),
     },
     sharingRules: {
       total: sharingRuleChildren.length,
@@ -1908,7 +1956,7 @@ const renderResponse = (
     'This tool reports facts and does NOT adjudicate. No field in this response says whether a change or a deletion is safe, blocked or advisable — active automation, permission grants and existing records are consequences to weigh, not prohibitions.',
     'Usage is the set of MODELED incoming edges. String-BUILT dynamic SOQL, reflective `sObject.get()` / `Type.forName` dispatch, integration payloads naming the object only at runtime, and managed-package internals are invisible to static extraction — a small usage figure is never proof of disuse.',
     tierNote,
-    'Absent is never `false` and empty is never "none". Edges pointing at un-noded field ids are counted and disclosed (`usage.fieldLevel.unresolvedNote`); `enable*` flags are tri-state (`identity.flagsNote`); `externalSharingModel` is never extracted (`sharing.orgWideDefault.external`); cross-object formula traversal is unresolved (`relationships.usedInFormulaFields.boundaryNote`); every family carries an `availability` note saying what its empty result means.',
+    'Absent is never `false` and empty is never "none". Edges pointing at un-noded field ids are counted and disclosed (`usage.fieldLevel.unresolvedNote`); `enable*` flags are tri-state (`identity.flagsNote`); `externalSharingModel` is null only with a stated reason (`sharing.orgWideDefault.external`); cross-object formula traversal is unresolved (`relationships.usedInFormulaFields.boundaryNote`); every family carries an `availability` note saying what its empty result means.',
     'Every date here is a SCHEMA change, never activity (`brief.lastMetadataChange.warning`). Record counts, dates, owners and creators are RECORD DATA — see `dataNotAvailable` for the live tool that answers each.',
     'Edge `confidence` differs by producer: object properties, relationship declarations and permission grants are `declared`; Apex-sourced edges are `parsed` (AST) or `heuristic`. This response is `mixed` — do not read a heuristic edge as a proven reference, or its absence as a proven non-reference.',
   ];
@@ -1917,6 +1965,10 @@ const renderResponse = (
       ? buildEmptyTraversalCoverageCaveat(ctx, GRAPH_TRAVERSAL_REQUIRED_COVERAGE)
       : undefined;
   if (coverageCaveat !== undefined) boundaries.push(coverageCaveat.message);
+  // WOW-12: an object whose describe-only standard fields are missing from this
+  // vault — every field count above is then a lower bound.
+  const describeGap = standardFieldDescribeGapFor(ctx.manifest, apiName);
+  if (describeGap !== null) boundaries.push(describeGap);
 
   // A truncation disclosure for a section the caller filtered OUT would name a
   // list that is not in the response. Keep only the rows whose section shipped.

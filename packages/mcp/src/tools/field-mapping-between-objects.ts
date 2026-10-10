@@ -54,7 +54,7 @@ import type {
   PageInfo,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { closeGraph, openGraph, type GraphStore } from '@sf-intelligence/graph';
+import { closeGraph, type GraphStore, openGraph, parsePropertiesJson } from '@sf-intelligence/graph';
 import {
   findRegistryRoot,
   getVaultRef,
@@ -67,6 +67,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import { PICKLIST_DATA_TYPES } from './field-properties.js';
 import { resolveExistingObjectScope } from './input-aliases.js';
 import {
   argsFingerprint,
@@ -176,19 +177,6 @@ interface CompactField {
   readonly type: string;
 }
 
-const parsePropertiesJson = (
-  raw: string | null | undefined,
-): Readonly<Record<string, unknown>> => {
-  if (typeof raw !== 'string' || raw.length === 0) return {};
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed))
-      return {};
-    return parsed as Readonly<Record<string, unknown>>;
-  } catch {
-    return {};
-  }
-};
 
 /**
  * Load the CustomField children of ONE object.
@@ -296,7 +284,6 @@ const TEXT_TYPES = new Set<string>([
 ]);
 const NUMBER_TYPES = new Set<string>(['Number', 'Currency', 'Percent', 'Double']);
 const DATE_TYPES = new Set<string>(['Date', 'DateTime', 'Time']);
-const PICKLIST_TYPES = new Set<string>(['Picklist', 'MultiselectPicklist']);
 const REFERENCE_TYPES = new Set<string>(['Lookup', 'MasterDetail', 'Reference']);
 
 const typeCompatible = (a: string, b: string): boolean => {
@@ -304,7 +291,7 @@ const typeCompatible = (a: string, b: string): boolean => {
   if (TEXT_TYPES.has(a) && TEXT_TYPES.has(b)) return true;
   if (NUMBER_TYPES.has(a) && NUMBER_TYPES.has(b)) return true;
   if (DATE_TYPES.has(a) && DATE_TYPES.has(b)) return true;
-  if (PICKLIST_TYPES.has(a) && PICKLIST_TYPES.has(b)) return true;
+  if (PICKLIST_DATA_TYPES.has(a) && PICKLIST_DATA_TYPES.has(b)) return true;
   if (REFERENCE_TYPES.has(a) && REFERENCE_TYPES.has(b)) return true;
   return false;
 };

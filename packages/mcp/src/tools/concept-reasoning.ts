@@ -48,6 +48,7 @@
 
 import type {
   ComponentId,
+  ConceptKind,
   ConfidenceLevel,
   EvidenceAbsenceV2,
   EvidenceClaimV2,
@@ -57,9 +58,11 @@ import type {
   Node,
   TrustSummary,
 } from '@sf-intelligence/contracts';
+import type { GraphStore } from '@sf-intelligence/graph';
 import { buildMixedFreshness } from '@sf-intelligence/vault';
 
 import {
+  CONCEPTS,
   type ConceptCoverageReport,
   reasonAboutComponent,
   type ReasonAboutComponentResult,
@@ -134,6 +137,30 @@ export const CONCEPT_RESERVATION_MAX_BYTES = 3_500;
  */
 export const CONCEPT_BLOCK_HARD_MAX_BYTES = 6_000;
 
+/**
+ * How many grounding ids each claim carries inside a COMPOSED answer. On a hub
+ * object one claim can cite 60+ ids (~3 KB), so the old fit had to drop every
+ * claim to stay under {@link CONCEPT_BLOCK_HARD_MAX_BYTES} (measured: 0 of 15
+ * claims shown on a standard object). Sampling the citation list, with the true
+ * count in `groundedInTotal`, keeps the claim. `sfi.interpret` pages the rest.
+ */
+export const CONCEPT_GROUNDED_SAMPLE_CAP = 10;
+
+/** Claim-text length in the compact block; the full text is in `sfi.interpret`. */
+export const COMPACT_CLAIM_TEXT_CAP = 280;
+
+/**
+ * Sample a claim's grounding ids to `cap`, naming the true total when cut.
+ * Shared by the composed block and `sfi.interpret` so both cut the same way.
+ */
+export const sampleGroundedIn = (
+  ids: readonly ComponentId[],
+  cap: number,
+): { readonly groundedIn: readonly ComponentId[]; readonly groundedInTotal?: number } =>
+  ids.length <= cap
+    ? { groundedIn: ids }
+    : { groundedIn: ids.slice(0, Math.max(0, cap)), groundedInTotal: ids.length };
+
 /** Rank for the deterministic claim cut: strongest confidence first. */
 const CONFIDENCE_SCORE: Readonly<Record<ConfidenceLevel | 'unknown', number>> = {
   declared: 3,
@@ -205,7 +232,58 @@ export interface ConceptReasoningEnvelope extends EvidenceEnvelopeV2 {
    * another.
    */
   readonly resolvedFrom?: ReasonAboutComponentResult['resolvedFrom'];
+  /**
+   * Present when the composing tool scoped the block to its question
+   * ({@link ConceptRelevance}): claims that fired but are about another topic,
+   * counted by concept kind. `sfi.interpret` returns them in full.
+   */
+  readonly offTopicClaimsOmitted?: {
+    readonly count: number;
+    readonly byKind: Readonly<Partial<Record<ConceptKind, number>>>;
+  };
 }
+
+/**
+ * Which claims a composing tool's answer is ABOUT (eval A01: a save-order
+ * answer carried three sharing / CRUD claims). Claims whose concept kind is
+ * not in `kinds` (and whose concept is not in `concepts`) are left out of
+ * `claims`, counted in `offTopicClaimsOmitted`, and pointed at `sfi.interpret`.
+ * Rule counts in `completeness` stay exact for the whole run.
+ */
+export interface ConceptRelevance {
+  /** Short noun phrase for the disclosure, e.g. 'save order'. */
+  readonly topic: string;
+  readonly kinds: readonly ConceptKind[];
+  /** Individual concepts relevant even though their kind is not. */
+  readonly concepts?: readonly string[];
+}
+
+const conceptKindOf = (concept: string): ConceptKind | undefined =>
+  (CONCEPTS as Readonly<Record<string, { readonly kind: ConceptKind } | undefined>>)[concept]?.kind;
+
+/** Partition interpretations into the on-topic ones and an off-topic census. */
+const partitionByRelevance = <T extends { readonly concept: string }>(
+  rows: readonly T[],
+  relevance: ConceptRelevance | undefined,
+): { readonly kept: readonly T[]; readonly offTopic?: ConceptReasoningEnvelope['offTopicClaimsOmitted'] } => {
+  if (relevance === undefined) return { kept: rows };
+  const kinds = new Set<string>(relevance.kinds);
+  const concepts = new Set(relevance.concepts ?? []);
+  const kept: T[] = [];
+  const byKind: Partial<Record<ConceptKind, number>> = {};
+  let count = 0;
+  for (const row of rows) {
+    const kind = conceptKindOf(row.concept);
+    // A concept the model cannot classify is kept: never hide what we cannot sort.
+    if (kind === undefined || kinds.has(kind) || concepts.has(row.concept)) {
+      kept.push(row);
+      continue;
+    }
+    count += 1;
+    byKind[kind] = (byKind[kind] ?? 0) + 1;
+  }
+  return count === 0 ? { kept } : { kept, offTopic: { count, byKind } };
+};
 
 const sampleOf = <T>(
   rows: readonly T[],
@@ -288,7 +366,7 @@ const noCoverageNote = (digest: ConceptCompletenessDigest, rootType: string): st
   'this is silence, NOT a finding that the component is clean.';
 
 /** Appended when rules applied but none fired. */
-const NONE_FIRED_NOTE =
+export const NONE_FIRED_NOTE =
   ' No concept rule fired for this component. That is not a claim that nothing depends on it — only that no curated ' +
   'reasoning rule matched the graph slice assembled for it.';
 
@@ -362,12 +440,28 @@ const absenceFor = (digest: ConceptCompletenessDigest): EvidenceAbsenceV2 => {
 export const projectConceptReasoning = (
   ctx: ReasonContext,
   reasoned: ReasonAboutComponentResult,
-  opts: { readonly maxClaims?: number; readonly listCap?: number } = {},
+  opts: {
+    readonly maxClaims?: number;
+    readonly listCap?: number;
+    /** Per-claim grounding-id sample size; unlimited when omitted. */
+    readonly groundedInCap?: number;
+    /**
+     * Compact form for a block with nothing (or little) to show: no
+     * enumerations, no duplicated coverage list, a short disclosure that points
+     * at `sfi.interpret`. Every count, the summary, absence and the
+     * noRuleCovers/none-fired warnings survive.
+     */
+    readonly compact?: boolean;
+    /** Shorten each claim's text to this many characters (ending in '…'). */
+    readonly claimTextCap?: number;
+    /** Keep only claims about the composing tool's question. */
+    readonly relevance?: ConceptRelevance;
+  } = {},
 ): ConceptReasoningEnvelope => {
   const {
     componentId,
     componentType,
-    interpretations,
+    interpretations: allInterpretations,
     unionCoverageTypes,
     aggSummary,
     aggCoverage,
@@ -378,7 +472,12 @@ export const projectConceptReasoning = (
     resolvedFrom,
   } = reasoned;
 
-  const digest = toCompletenessDigest(coverageReport, opts.listCap ?? CONCEPT_LIST_SAMPLE_CAP);
+  const { kept: interpretations, offTopic } = partitionByRelevance(allInterpretations, opts.relevance);
+  const compact = opts.compact === true;
+  const digest = toCompletenessDigest(
+    coverageReport,
+    compact ? 0 : (opts.listCap ?? CONCEPT_LIST_SAMPLE_CAP),
+  );
 
   // Deterministic cap: strongest confidence first, ties by rule id then claim
   // text, so the same vault always yields the same cut.
@@ -395,9 +494,12 @@ export const projectConceptReasoning = (
       ? { returned: kept.length, total: interpretations.length }
       : undefined;
 
+  const groundedInCap = opts.groundedInCap ?? Number.MAX_SAFE_INTEGER;
+  const textCap = opts.claimTextCap ?? Number.MAX_SAFE_INTEGER;
+  const claimTextShortened = kept.some((row) => row.claim.length > textCap);
   const claims: EvidenceClaimV2[] = kept.map((row) => ({
-    claim: row.claim,
-    groundedIn: row.groundedIn,
+    claim: row.claim.length > textCap ? `${row.claim.slice(0, textCap - 1)}…` : row.claim,
+    ...sampleGroundedIn(row.groundedIn, groundedInCap),
     confidence: row.confidence,
     coverageCaveat: row.coverageCaveat,
     ruleId: row.ruleId,
@@ -408,7 +510,7 @@ export const projectConceptReasoning = (
   const seen = new Set<string>();
   evidence.push({ componentId, role: 'anchor' });
   seen.add(componentId);
-  for (const row of kept) {
+  for (const row of claims) {
     for (const id of row.groundedIn) {
       if (seen.has(id)) continue;
       seen.add(id);
@@ -428,19 +530,25 @@ export const projectConceptReasoning = (
     freshness: buildMixedFreshness(ctx.manifest, unionCoverageTypes),
     completeness: {
       status: completenessStatus,
-      ...(aggSummary.missingCoverage.length > 0
+      // Compact form: the list already travels in `coverage.missingCoverage`.
+      ...(!compact && aggSummary.missingCoverage.length > 0
         ? { missingCoverage: aggSummary.missingCoverage }
         : {}),
     },
-    limitations: [
-      'Deterministic concept-rule reasoning over the offline vault snapshot — not a live read, no LLM.',
-      // `completeness.summary` is NOT repeated here: it already travels in this
-      // same payload, and duplicating a ~380-byte sentence into every block was
-      // pure weight with no added honesty.
-      'What was and was not checked is in `completeness` (exact counts) and `completeness.summary`.',
-      ...(aggCoverage.caveat !== null ? [aggCoverage.caveat] : []),
-      ...(junctionMissNote !== null ? [junctionMissNote] : []),
-    ],
+    limitations: compact
+      ? [
+          'Deterministic concept-rule reasoning over the offline vault snapshot — not a live read, no LLM.',
+          ...(junctionMissNote !== null ? [junctionMissNote] : []),
+        ]
+      : [
+          'Deterministic concept-rule reasoning over the offline vault snapshot — not a live read, no LLM.',
+          // `completeness.summary` is NOT repeated here: it already travels in this
+          // same payload, and duplicating a ~380-byte sentence into every block was
+          // pure weight with no added honesty.
+          'What was and was not checked is in `completeness` (exact counts) and `completeness.summary`.',
+          ...(aggCoverage.caveat !== null ? [aggCoverage.caveat] : []),
+          ...(junctionMissNote !== null ? [junctionMissNote] : []),
+        ],
   };
 
   const coverage: EvidenceCoverageV2 = {
@@ -454,14 +562,47 @@ export const projectConceptReasoning = (
   const vaultGap = digest.rulesNotEvaluableByReason['vault-coverage-missing'];
   const notProvable = digest.rulesNotEvaluableByReason['shape-not-provable'];
 
-  const disclosure =
-    BASE_DISCLOSURE +
+  const sampledGrounding = claims.some((c) => c.groundedInTotal !== undefined);
+  const resolvedNote =
+    resolvedFrom !== undefined
+      ? ` You named '${resolvedFrom.identifier}', which is not a canonical component id; it was resolved to ` +
+        `${componentId} via the shared resolver. Every claim here is about THAT component.`
+      : '';
+  const interpretPointer =
+    ` Full claims and per-rule detail: sfi.run_analysis { name: 'sfi.interpret', args: { componentId: '${componentId}' } }.`;
+  const offTopicNote =
+    offTopic !== undefined && opts.relevance !== undefined
+      ? ` ${offTopic.count} fired claim(s) about other topics (${Object.entries(offTopic.byKind)
+          .map(([k, n]) => `${k} ×${String(n)}`)
+          .join(', ')}) are left out as not about ${opts.relevance.topic} (\`offTopicClaimsOmitted\`).`
+      : '';
+  // Nothing on-topic fired, but something did: say that, never "none fired".
+  const emptyNote =
+    interpretations.length === 0 && offTopic !== undefined ? '' : NONE_FIRED_NOTE.trimStart();
+
+  const disclosure = compact
+    ? (digest.noRuleCoversComponentType
+        ? noCoverageNote(digest, componentType).trimStart()
+        : interpretations.length === 0
+          ? emptyNote
+          : '') +
+      offTopicNote +
+      (claimsTruncated !== undefined
+        ? ` Showing ${claimsTruncated.returned} of ${claimsTruncated.total} claims to fit the response budget.`
+        : '') +
+      (sampledGrounding ? ' `groundedIn` is sampled where `groundedInTotal` is set.' : '') +
+      (claimTextShortened ? " Claims ending in '…' are shortened." : '') +
+      ' Exact rule counts are in `completeness`.' +
+      interpretPointer +
+      resolvedNote
+    : BASE_DISCLOSURE +
     (digest.noRuleCoversComponentType
       ? noCoverageNote(digest, componentType)
-      : interpretations.length === 0
+      : interpretations.length === 0 && offTopic === undefined
         ? NONE_FIRED_NOTE
         : '') +
     (vaultGap > 0 ? vaultGapNote(vaultGap) : '') +
+    (offTopic !== undefined ? offTopicNote + interpretPointer : '') +
     (notProvable > 0 ? notProvableNote(notProvable) : '') +
     (claimsTruncated !== undefined
       ? ` Showing the ${claimsTruncated.returned} highest-confidence of ${claimsTruncated.total} claims to fit the response budget; ` +
@@ -471,10 +612,10 @@ export const projectConceptReasoning = (
       ? ' The per-concept lists in `completeness` are SAMPLES — every count beside them is exact, and ' +
         '`completeness.sampled` names how many were withheld.'
       : '') +
-    (resolvedFrom !== undefined
-      ? ` You named '${resolvedFrom.identifier}', which is not a canonical component id; it was resolved to ` +
-        `${componentId} via the shared resolver. Every claim here is about THAT component.`
-      : '');
+    (sampledGrounding
+      ? ' A claim whose `groundedInTotal` is set cites a SAMPLE of its grounding ids; `sfi.interpret` pages the full list.'
+      : '') +
+    resolvedNote;
 
   const envelope: ConceptReasoningEnvelope = {
     envelopeVersion: 2,
@@ -488,6 +629,7 @@ export const projectConceptReasoning = (
     completeness: digest,
     ...(claimsTruncated !== undefined ? { claimsTruncated } : {}),
     ...(resolvedFrom !== undefined ? { resolvedFrom } : {}),
+    ...(offTopic !== undefined ? { offTopicClaimsOmitted: offTopic } : {}),
   };
   assertEvidenceEnvelopeV2(envelope);
   return envelope;
@@ -556,12 +698,79 @@ export interface ReservedConceptReasoning {
 }
 
 /**
+ * PERF-3: graphs the server opened read-only for its whole life. Only these are
+ * cached — a test (or any caller) that mutates a graph between calls never
+ * registers it, so it can never read a stale result.
+ */
+const immutableGraphs = new WeakSet<GraphStore>();
+const reasoningCache = new WeakMap<GraphStore, Map<string, ReasonAboutComponentResult>>();
+/** Per-graph LRU size. A session touches a handful of components. */
+const REASONING_CACHE_MAX = 32;
+
+/**
+ * Declare `graph` immutable for its lifetime (the server's read-only serving
+ * handle), so composed reasoning over it is computed once per component.
+ */
+export const markGraphImmutableForReasoning = (graph: GraphStore): void => {
+  immutableGraphs.add(graph);
+};
+
+/** Test seam: how many results are cached for `graph`. */
+export const cachedReasoningCount = (graph: GraphStore): number =>
+  reasoningCache.get(graph)?.size ?? 0;
+
+const reasonCached = async (
+  ctx: ReasonContext,
+  componentId: ComponentId,
+  opts: { readonly rootNode?: Node; readonly resolveIdentifier?: boolean },
+): ReturnType<typeof reasonAboutComponent> => {
+  const run = (): ReturnType<typeof reasonAboutComponent> =>
+    reasonAboutComponent(ctx, componentId, {
+      ...(opts.rootNode !== undefined ? { rootNode: opts.rootNode } : {}),
+      ...(opts.resolveIdentifier !== undefined
+        ? { resolveIdentifier: opts.resolveIdentifier }
+        : {}),
+    });
+  if (!immutableGraphs.has(ctx.graph)) return run();
+  const key = [
+    ctx.manifest.refreshedAt,
+    ctx.manifest.sourceTreeHash,
+    componentId,
+    String(opts.resolveIdentifier ?? ''),
+  ].join('|');
+  let perGraph = reasoningCache.get(ctx.graph);
+  if (perGraph === undefined) {
+    perGraph = new Map();
+    reasoningCache.set(ctx.graph, perGraph);
+  }
+  const hit = perGraph.get(key);
+  if (hit !== undefined) {
+    // Refresh LRU position.
+    perGraph.delete(key);
+    perGraph.set(key, hit);
+    return { ok: true, value: hit };
+  }
+  const result = await run();
+  // Only successes are cached; a failed read is retried next time.
+  if (result.ok) {
+    perGraph.set(key, result.value);
+    if (perGraph.size > REASONING_CACHE_MAX) {
+      const oldest = perGraph.keys().next().value;
+      if (oldest !== undefined) perGraph.delete(oldest);
+    }
+  }
+  return result;
+};
+
+/**
  * Build a concept-reasoning block FITTED to a byte ceiling.
  *
- * The engine runs ONCE; fitting is a pure re-projection of that single result at
- * successively tighter ENUMERATION caps. Claims are preserved — they are the
- * product, and they were never the size problem. Coverage, absence, trust, the
- * bucket counts and the summary are never trimmed.
+ * The engine runs ONCE (and once per component per process on the server's
+ * read-only graph); fitting is a pure re-projection of that single result.
+ * Order (PERF-3 / ADM-6): enumerations and per-claim citation lists are cut
+ * first, then the honesty PROSE is compacted, and claims are trimmed only last.
+ * A block with no claim to show is always compact (~1 KB, a pointer to
+ * `sfi.interpret`), never 4-5 KB of prose around nothing.
  *
  * Returns `null` (never a throw) when the component cannot be resolved or the
  * graph read fails, so a composing tool omits the block — and, per the honesty
@@ -574,67 +783,78 @@ export const buildReservedConceptReasoning = async (
     readonly rootNode?: Node;
     readonly maxBytes?: number;
     readonly resolveIdentifier?: boolean;
+    /** Scope the claims to the composing tool's question (see {@link ConceptRelevance}). */
+    readonly relevance?: ConceptRelevance;
   } = {},
 ): Promise<ReservedConceptReasoning | null> => {
   const ceiling = opts.maxBytes ?? CONCEPT_RESERVATION_MAX_BYTES;
+  const relevance = opts.relevance !== undefined ? { relevance: opts.relevance } : {};
 
   // ONE traversal. Everything below re-projects this same result.
-  const reasoned = await reasonAboutComponent(ctx, componentId, {
-    ...(opts.rootNode !== undefined ? { rootNode: opts.rootNode } : {}),
-    ...(opts.resolveIdentifier !== undefined
-      ? { resolveIdentifier: opts.resolveIdentifier }
-      : {}),
-  });
+  const reasoned = await reasonCached(ctx, componentId, opts);
   if (!reasoned.ok) return null;
 
   const sizeOf = (e: ConceptReasoningEnvelope): number =>
     Buffer.byteLength(JSON.stringify(e), 'utf8');
+  const fitted = (
+    envelope: ConceptReasoningEnvelope,
+    reservationCapped: boolean,
+  ): ReservedConceptReasoning => ({ envelope, reservedBytes: sizeOf(envelope), reservationCapped });
 
-  let envelope = projectConceptReasoning(ctx, reasoned.value);
+  // Nothing (on-topic) fired: the compact block says so in ~1 KB instead of ~4 KB.
+  if (partitionByRelevance(reasoned.value.interpretations, opts.relevance).kept.length === 0) {
+    return fitted(projectConceptReasoning(ctx, reasoned.value, { compact: true, ...relevance }), false);
+  }
+
+  const g = CONCEPT_GROUNDED_SAMPLE_CAP;
+  let envelope = projectConceptReasoning(ctx, reasoned.value, { groundedInCap: g, ...relevance });
   let bytes = sizeOf(envelope);
   if (bytes <= ceiling) {
     return { envelope, reservedBytes: bytes, reservationCapped: false };
   }
 
-  // Tighten the ENUMERATIONS first — that is where the bytes are. Counts and
-  // summary survive every step, so the honesty axis is never what gets cut.
-  for (const listCap of [3, 1, 0]) {
-    envelope = projectConceptReasoning(ctx, reasoned.value, { listCap });
+  // Tighten the ENUMERATIONS and citation samples first — that is where the
+  // bytes are. Counts and summary survive every step.
+  for (const [listCap, groundedInCap] of [
+    [3, 5],
+    [1, 3],
+    [0, 3],
+  ] as const) {
+    envelope = projectConceptReasoning(ctx, reasoned.value, { listCap, groundedInCap, ...relevance });
     bytes = sizeOf(envelope);
     if (bytes <= ceiling) return { envelope, reservedBytes: bytes, reservationCapped: true };
   }
 
-  // Past this point the enumerations are EMPTY, so whatever remains is either
-  // irreducible honesty prose (~2.5 KB measured, floor with ZERO claims and ZERO
-  // rows) or genuinely enormous claims.
-  //
-  // A modest overshoot is ACCEPTED rather than paid for with claims. The guard
-  // is load-bearing: the earlier revision halved claims to chase a round number
-  // and, measured across 75 components, ended with zero claims while still
-  // exceeding the ceiling by 89% — it destroyed the answer and did not even buy
-  // the budget. Only a block past the hard stop is dominated by its claims.
+  // A modest overshoot is ACCEPTED rather than paid for with claims — the
+  // earlier revision halved claims to chase a round number and ended with zero
+  // claims on most hub components.
   const hardMax = Math.max(ceiling, CONCEPT_BLOCK_HARD_MAX_BYTES);
   if (bytes <= hardMax) {
     return { envelope, reservedBytes: bytes, reservationCapped: true };
   }
 
-  // CONCEPT-BLOCK-HARD-MAX-NOT-HARD: the halving loop used to stop at
-  // `claimCap > 1`, so a SINGLE claim larger than `hardMax` on its own (measured
-  // 7,819 B against the 6,000 B stop, on a real object) fell straight through
-  // the loop body untouched and was returned oversized — the "hard" max was not
-  // hard. `claimCap > 0` lets the halving reach zero: `maxClaims: 0` reuses the
-  // SAME `claimsTruncated` honesty machinery {@link projectConceptReasoning}
-  // already emits for every smaller cap ("Showing the 0 highest-confidence of N
-  // claims to fit the response budget; call `sfi.interpret` … for the complete,
-  // uncapped list") — never a silently oversized block, and never a claim cut
-  // without saying so. Zero claims is provably within `hardMax`: the
-  // zero-claims/zero-row floor is ~2.5 KB (see the module doc), well under
-  // `CONCEPT_BLOCK_HARD_MAX_BYTES` (6,000), so this loop is guaranteed to
-  // terminate with `bytes <= hardMax` — no oversized return is possible.
+  // Compact the prose and shorten long claim texts before dropping a claim:
+  // measured on a standard object, single claims run 1.5-3.6 KB because they
+  // enumerate grant holders in prose, so the old halving kept 0-1 of 15.
+  const compactAt = (maxClaims?: number): ConceptReasoningEnvelope =>
+    projectConceptReasoning(ctx, reasoned.value, {
+      compact: true,
+      groundedInCap: 3,
+      claimTextCap: COMPACT_CLAIM_TEXT_CAP,
+      ...relevance,
+      ...(maxClaims !== undefined ? { maxClaims } : {}),
+    });
+  envelope = compactAt();
+  bytes = sizeOf(envelope);
+
+  // CONCEPT-BLOCK-HARD-MAX-NOT-HARD: keep the LARGEST ranked prefix of claims
+  // that fits; the search reaches zero, so even one claim larger than `hardMax`
+  // is cut (and disclosed through `claimsTruncated`), never returned oversized.
+  // The compact zero-claim floor is ~1 KB, so this always ends within `hardMax`.
   let claimCap = envelope.claims.length;
   while (bytes > hardMax && claimCap > 0) {
-    claimCap = Math.floor(claimCap / 2);
-    envelope = projectConceptReasoning(ctx, reasoned.value, { listCap: 0, maxClaims: claimCap });
+    claimCap -= 1;
+    envelope = compactAt(claimCap);
     bytes = sizeOf(envelope);
   }
   return { envelope, reservedBytes: bytes, reservationCapped: true };

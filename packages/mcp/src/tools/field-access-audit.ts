@@ -25,11 +25,8 @@
  *     two differ; two vault fields differing only by case are an
  *     `invalid-query`, never a silent pick.
  *   - `permissionType` (optional `'read' | 'edit' | 'all'`, default
- *     `'all'`): narrow to grants whose level matches. `'all'` reports
- *     every grant; `'edit'` filters to grants where `properties.edit`
- *     is true; `'read'` filters to grants where `properties.read` is
- *     true (NOTE: edit implies read; a grant with `edit: true` AND
- *     `read: true` is returned for both filters).
+ *     `'all'`): narrow to grants whose EFFECTIVE `permission` matches
+ *     (edit implies read); an `unconfirmed` grant matches on its FLS level.
  *
  * Output cross-walk:
  *
@@ -111,6 +108,11 @@ import {
   resolveFieldAlias,
   toCustomObjectId,
 } from './input-aliases.js';
+import {
+  objectCapabilitiesFromGrant,
+  objectCapabilitiesFromSystemPermissions,
+  type ObjectCapability,
+} from './object-capabilities.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 
@@ -194,10 +196,16 @@ export type FieldAccessAuditInput = z.infer<
 
 /**
  * One Profile or PermissionSet that grants access to the field.
- * `permission` reports the highest-level access the grant carries:
- * `'edit'` if the edge declares `properties.edit === true`, otherwise
- * `'read'` if `properties.read === true`, otherwise `'unknown'` (an
- * older extractor that did not yet populate the per-flag axis).
+ *
+ * `permission` is what the container ALONE lets its holder do with the field:
+ * field-level security intersected with the container's object permission on
+ * the parent object (ModifyAllData / ViewAllData count as object Edit / Read),
+ * and a derived field (formula, roll-up, auto-number) is never `edit`. FLS
+ * Edit on a profile whose object row says Read is `read`, not `edit`.
+ * `flsPermission` is the declared field-level grant on its own: `'edit'` if the
+ * edge declares `properties.edit === true`, `'read'` if `properties.read ===
+ * true`, otherwise `'unknown'` (an older extractor that did not yet populate
+ * the per-flag axis).
  */
 export interface AccessGrant {
   /** The id of the Profile or PermissionSet that owns the grant. */
@@ -206,8 +214,32 @@ export interface AccessGrant {
   readonly grantorType: 'Profile' | 'PermissionSet';
   /** Human-readable name of the grantor. */
   readonly grantorName: string;
-  /** Resolved permission level from the edge's properties. */
-  readonly permission: 'read' | 'edit' | 'unknown';
+  /**
+   * Effective level for this container on its own: `edit` / `read`; `none`
+   * when its object row denies Read; `unconfirmed` when it has NO object row
+   * for the parent in this vault (not checked, not denied); `unknown` when the
+   * FLS level itself was not extracted.
+   */
+  readonly permission: EffectiveFieldAccess;
+  /** The declared field-level-security level, before object access is applied. */
+  readonly flsPermission: 'read' | 'edit' | 'unknown';
+  /** Why `permission` is lower than `flsPermission` (absent when they agree). */
+  readonly note?: string;
+}
+
+/** Effective per-container field access (FLS ∩ object CRUD ∩ field type). */
+export type EffectiveFieldAccess = 'edit' | 'read' | 'none' | 'unconfirmed' | 'unknown';
+
+/** Disjoint effective buckets for one container kind. */
+export interface EffectiveAccessCounts {
+  readonly canEdit: number;
+  readonly readOnly: number;
+  /** No object row for the parent object in this vault — object access not checked. */
+  readonly unconfirmed: number;
+  /** FLS granted, but the object row denies Read. */
+  readonly noObjectAccess: number;
+  /** FLS level not extracted. */
+  readonly unknownLevel: number;
 }
 
 /**
@@ -228,7 +260,19 @@ export interface ApexAccessRoute {
  * callers see the true permission topology even when they asked only
  * for one permission level.
  */
+/**
+ * `profiles` / `permissionSets` are EFFECTIVE, DISJOINT counts (FLS ∩ object
+ * CRUD per container — they add up to the grant count). `declaredFls` keeps
+ * the raw field-level counts, where read INCLUDES edit.
+ */
 export interface FieldAccessAuditSummary {
+  readonly profiles: EffectiveAccessCounts;
+  readonly permissionSets: EffectiveAccessCounts;
+  readonly declaredFls: DeclaredFlsCounts;
+}
+
+/** Declared field-level-security counts (read includes edit; not object-aware). */
+export interface DeclaredFlsCounts {
   readonly profilesWithRead: number;
   readonly profilesWithEdit: number;
   /** Profiles that grant the field but whose read/edit level the extractor did
@@ -349,18 +393,21 @@ const resolvePermissionLevel = (
 };
 
 /**
- * Predicate for the `permissionType` filter. `'all'` always matches.
- * `'edit'` matches grants whose level is `'edit'`. `'read'` matches
- * grants whose level is `'read'` OR `'edit'` (edit implies read), but
- * NOT `'unknown'`.
+ * Predicate for the `permissionType` filter, on the grant's EFFECTIVE
+ * `permission` (the same value the headline counts use), so "who can edit"
+ * never lists a container whose object row says Read. `'all'` always
+ * matches; `'read'` includes `'edit'` (edit implies read). An `'unconfirmed'`
+ * grant (no object row in the vault) matches on its declared FLS level — it
+ * is kept, labelled, never dropped as a denial.
  */
 const permissionMatches = (
   filter: 'read' | 'edit' | 'all',
-  level: 'read' | 'edit' | 'unknown',
+  permission: EffectiveFieldAccess,
+  flsLevel: 'read' | 'edit' | 'unknown',
 ): boolean => {
   if (filter === 'all') return true;
+  const level = permission === 'unconfirmed' ? flsLevel : permission;
   if (filter === 'edit') return level === 'edit';
-  // filter === 'read': edit implies read; unknown does NOT match read.
   return level === 'read' || level === 'edit';
 };
 
@@ -407,7 +454,14 @@ const compareApexAccess = (a: ApexAccessRoute, b: ApexAccessRoute): number =>
 const BOUNDARY_NOTE_BASE =
   'Permission-grant level ONLY: sharing rules (criteria-based, owner-based, manual, ' +
   'account teams) are NOT walked here — "could this user see this field on THAT record" ' +
-  'is `sfi.why_cant_user_see_record`. `summary` counts the FULL grant set on six axes: ' +
+  'is `sfi.why_cant_user_see_record`. `summary.profiles` / `summary.permissionSets` are ' +
+  'EFFECTIVE, disjoint counts per container (canEdit, readOnly, unconfirmed, noObjectAccess, ' +
+  'unknownLevel): FLS intersected with that container\'s object permission, so FLS Edit with ' +
+  'object Read is readOnly, and unconfirmed means no object row in this vault (not checked). ' +
+  'Each grant\'s `permission` is that effective level and `flsPermission` the declared one. ' +
+  'A user holding SEVERAL containers can combine FLS from one with object Edit from another — ' +
+  'per-container levels do not show that; use sfi.effective_permissions for a user\'s set. ' +
+  '`summary.declaredFls` keeps the raw FLS counts (read INCLUDES edit): ' +
   'profilesWithRead, profilesWithEdit, profilesWithUnknown, permSetsWithRead, ' +
   'permSetsWithEdit, permSetsWithUnknown — the two `*WithUnknown` counts are REAL grants ' +
   'whose read/edit level this vault\'s extractor did not populate, so an all-zero ' +
@@ -427,12 +481,23 @@ const BOUNDARY_NOTE_BASE =
  * not merely the key name.
  */
 const buildBoundaryNote = (
-  summary: FieldAccessAuditSummary,
+  verifiedEditDowngrades: number,
+  summary: DeclaredFlsCounts,
   update: FieldUpdateAccess,
   caseCorrection: { readonly fieldId: ComponentId; readonly resolvedFrom: string } | null,
 ): string => {
   const unknownGrants = summary.profilesWithUnknown + summary.permSetsWithUnknown;
   const parts = [BOUNDARY_NOTE_BASE];
+  // Only VERIFIED downgrades: an `unconfirmed` FLS-edit grant (no object row in
+  // this vault) was not checked, so it is reported by the flsEditWithoutObjectRow
+  // sentence below as "not checked" — never counted here as "cannot edit".
+  if (verifiedEditDowngrades > 0) {
+    parts.push(
+      `ON THIS FIELD: ${verifiedEditDowngrades} container(s) declare FLS Edit but cannot edit on ` +
+        'their own (object permission Read only or no Read, or a derived field) — see each ' +
+        'grant\'s `note`.',
+    );
+  }
   if (caseCorrection !== null) {
     parts.push(
       `ON THIS FIELD: the id you passed (\`${caseCorrection.resolvedFrom}\`) differs only in ` +
@@ -696,7 +761,11 @@ export const fieldAccessAuditHandler = async (
   let permSetsWithRead = 0;
   let permSetsWithEdit = 0;
   let permSetsWithUnknown = 0;
-  const grants: AccessGrant[] = [];
+  const rawGrants: {
+    readonly grantor: Node;
+    readonly grantorType: 'Profile' | 'PermissionSet';
+    readonly level: 'read' | 'edit' | 'unknown';
+  }[] = [];
   // Grantors with FLS-edit on the field — the candidates for "can update" once
   // intersected with object-edit below.
   const editGrantors: UpdateGrantor[] = [];
@@ -757,13 +826,7 @@ export const fieldAccessAuditHandler = async (
       });
     }
 
-    if (!permissionMatches(permissionFilter, level)) continue;
-    grants.push({
-      grantorId: grantor.id,
-      grantorType,
-      grantorName: grantor.label ?? grantor.apiName,
-      permission: level,
-    });
+    rawGrants.push({ grantor, grantorType, level });
   }
 
   // Build the via-Apex list from the all-incoming-edges scan.
@@ -797,21 +860,28 @@ export const fieldAccessAuditHandler = async (
   let canUpdate: UpdateGrantor[] = [];
   let flsEditWithoutObjectRow = 0;
   let parentObjectApiNameForNote = '';
+  const parentObjectApiName = parseFieldParentObjectApiName(fieldId);
+  const parentObjectId =
+    (typeof effectiveField.parentId === 'string' ? (effectiveField.parentId as ComponentId) : null) ??
+    (parentObjectApiName === null
+      ? null
+      : (toCustomObjectId(parentObjectApiName) as ComponentId));
+  // The parent object's grant rows, loaded ONCE: they decide both `canUpdate`
+  // and every grant's effective `permission`.
+  let parentObjectGrants: readonly Edge[] | null = null;
+  if (parentObjectId !== null && rawGrants.length > 0) {
+    const objEdgesResult = await listEdges(ctx.graph, parentObjectId, {
+      direction: 'in',
+      edgeType: 'grantedBy',
+    });
+    if (!objEdgesResult.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${objEdgesResult.error.message}` });
+    }
+    parentObjectGrants = objEdgesResult.value;
+  }
   if (fieldUpdatable && editGrantors.length > 0) {
-    const parentObjectApiName = parseFieldParentObjectApiName(fieldId);
-    const parentObjectId =
-      (typeof effectiveField.parentId === 'string' ? (effectiveField.parentId as ComponentId) : null) ??
-      (parentObjectApiName === null
-        ? null
-        : (toCustomObjectId(parentObjectApiName) as ComponentId));
-    if (parentObjectId !== null) {
-      const objEdgesResult = await listEdges(ctx.graph, parentObjectId, {
-        direction: 'in',
-        edgeType: 'grantedBy',
-      });
-      if (!objEdgesResult.ok) {
-        return err({ kind: 'internal', message: `graph query failed: ${objEdgesResult.error.message}` });
-      }
+    if (parentObjectId !== null && parentObjectGrants !== null) {
+      const objEdgesResult = { value: parentObjectGrants };
       const objectEditGrantors = new Set<string>();
       // Grantors that declare ANY objectPermissions row on the parent — the
       // complement is "not checked", not "denied" (see flsEditWithoutObjectRow).
@@ -846,6 +916,69 @@ export const fieldAccessAuditHandler = async (
       parentObjectApiNameForNote = parentObjectApiName ?? parentObjectId;
     }
   }
+  // ADM-7: each grant's EFFECTIVE level for its container alone — FLS ∩ the
+  // container's object row on the parent (shared capability rules) ∩ field
+  // type. The headline counts are built from this, so "who can edit" no longer
+  // counts a profile whose object row says Read.
+  const objectCapsByGrantor = new Map<string, Set<ObjectCapability>>();
+  for (const e of parentObjectGrants ?? []) {
+    objectCapsByGrantor.set(e.fromId, objectCapabilitiesFromGrant(e.properties));
+  }
+  const objectLabel = parentObjectApiName ?? parentObjectId ?? 'the parent object';
+  const grants: AccessGrant[] = [];
+  const emptyCounts = (): { -readonly [K in keyof EffectiveAccessCounts]: number } => ({
+    canEdit: 0,
+    readOnly: 0,
+    unconfirmed: 0,
+    noObjectAccess: 0,
+    unknownLevel: 0,
+  });
+  const profileCounts = emptyCounts();
+  const permSetCounts = emptyCounts();
+  let verifiedEditDowngrades = 0;
+  for (const { grantor, grantorType, level } of rawGrants) {
+    const row = objectCapsByGrantor.get(grantor.id);
+    const systemCaps = objectCapabilitiesFromSystemPermissions(grantor.properties['userPermissions']);
+    const caps = new Set<ObjectCapability>([...(row ?? []), ...systemCaps]);
+    let permission: EffectiveFieldAccess;
+    let note: string | undefined;
+    if (level === 'unknown') {
+      permission = 'unknown';
+    } else if (row === undefined && systemCaps.size === 0) {
+      permission = 'unconfirmed';
+      note = `no object permission row for ${objectLabel} in this vault — object access not checked`;
+    } else if (!caps.has('read')) {
+      permission = 'none';
+      note = `object permission on ${objectLabel} grants no Read`;
+    } else if (level === 'edit' && !caps.has('edit')) {
+      permission = 'read';
+      note = `FLS Edit, but object permission on ${objectLabel} is Read only — cannot edit`;
+    } else if (level === 'edit' && !fieldUpdatable) {
+      permission = 'read';
+      note = 'FLS Edit, but the field is derived (formula / roll-up / auto-number) — not writable';
+    } else {
+      permission = level;
+    }
+    const counts = grantorType === 'Profile' ? profileCounts : permSetCounts;
+    if (level === 'edit' && (permission === 'read' || permission === 'none')) {
+      verifiedEditDowngrades += 1;
+    }
+    if (permission === 'edit') counts.canEdit += 1;
+    else if (permission === 'read') counts.readOnly += 1;
+    else if (permission === 'unconfirmed') counts.unconfirmed += 1;
+    else if (permission === 'none') counts.noObjectAccess += 1;
+    else counts.unknownLevel += 1;
+    if (!permissionMatches(permissionFilter, permission, level)) continue;
+    grants.push({
+      grantorId: grantor.id,
+      grantorType,
+      grantorName: grantor.label ?? grantor.apiName,
+      permission,
+      flsPermission: level,
+      ...(note !== undefined ? { note } : {}),
+    });
+  }
+
   const update: FieldUpdateAccess = {
     fieldUpdatable,
     ...(fieldUpdatableNote !== undefined ? { fieldUpdatableNote } : {}),
@@ -884,16 +1017,21 @@ export const fieldAccessAuditHandler = async (
       piiCategory: detection.piiCategory,
       grants: [...grants].sort(compareGrants),
       summary: {
-        profilesWithRead,
-        profilesWithEdit,
-        profilesWithUnknown,
-        permSetsWithRead,
-        permSetsWithEdit,
-        permSetsWithUnknown,
+        profiles: profileCounts,
+        permissionSets: permSetCounts,
+        declaredFls: {
+          profilesWithRead,
+          profilesWithEdit,
+          profilesWithUnknown,
+          permSetsWithRead,
+          permSetsWithEdit,
+          permSetsWithUnknown,
+        },
       },
       viaApexAccess: [...viaApex].sort(compareApexAccess),
       update,
       boundaryNote: buildBoundaryNote(
+        verifiedEditDowngrades,
         {
           profilesWithRead,
           profilesWithEdit,

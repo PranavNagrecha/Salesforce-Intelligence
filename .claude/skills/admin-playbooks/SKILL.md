@@ -53,6 +53,11 @@ Cite canonical component IDs throughout, and stamp each finding's provenance
 The gate before a release. Run in order, then give a go / no-go with the blockers
 named:
 
+0. If the user has a SPECIFIC change set (a package.xml, a destructiveChanges.xml, a
+   list of changed force-app files, or component names), review it first with
+   `sfi.run_analysis` `{ "name": "sfi.review_change", "args": { … } }`, passing
+   `packageXml` / `destructiveChangesXml` / `sourcePaths` / `components`. Its `deployDecision` is the change-scoped go / no-go; relay
+   `inputResolution` (what was NOT reviewed) before the verdict.
 1. `sfi.coverage_report` — is the vault complete enough to trust the verdicts? Surface any `coverageCaveat` first.
 2. `sfi.org_risk_report` with `gate: true` — the composite deploy gate (emits `ready` + `blockers`).
 3. `sfi.test_coverage_gaps` — untested classes that will block deploy.

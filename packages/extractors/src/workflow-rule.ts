@@ -7,7 +7,7 @@ import type {
   Node,
   Result,
 } from '@sf-intelligence/contracts';
-import { err, ok } from '@sf-intelligence/core';
+import { err, foldWriteValueEdges, ok } from '@sf-intelligence/core';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 import {
@@ -246,7 +246,39 @@ export interface FieldUpdateTarget {
    * skips every cross-object dotted path for the same reason.
    */
   readonly targetObject: string | null;
+  /** The `<literalValue>` / `<lookupValue>` / `<formula>` it sets, when the XML names one. */
+  readonly value: string | null;
 }
+
+/**
+ * The written-value properties a field update's `writesTo` edge carries (see
+ * `@sf-intelligence/core` write-values): a Literal / LookupValue update writes
+ * a `literal`, a Formula update a `formula`, Null blanks the field, and
+ * NextValue / PreviousValue move a picklist relative to its current value.
+ * One reader for the workflow AND approval-process extractors.
+ */
+export const fieldUpdateValueProperties = (
+  target: FieldUpdateTarget,
+): Record<string, unknown> => {
+  switch (target.operation) {
+    case 'Literal':
+    case 'LookupValue':
+      return target.value === null
+        ? { assignedValueKind: 'null' }
+        : { assignedValue: target.value, assignedValueKind: 'literal' };
+    case 'Formula':
+      return target.value === null
+        ? {}
+        : { assignedValue: target.value, assignedValueKind: 'formula' };
+    case 'Null':
+      return { assignedValueKind: 'null' };
+    case 'NextValue':
+    case 'PreviousValue':
+      return { assignedValue: target.operation, assignedValueKind: 'relative' };
+    default:
+      return {};
+  }
+};
 
 /**
  * Build a name -> target lookup from the file's `<fieldUpdates>`
@@ -280,6 +312,10 @@ export const buildFieldUpdateTargetMap = (
       field: optionalString(fu, 'field'),
       operation: optionalString(fu, 'operation'),
       targetObject: optionalString(fu, 'targetObject'),
+      value:
+        optionalString(fu, 'formula') ??
+        optionalString(fu, 'literalValue') ??
+        optionalString(fu, 'lookupValue'),
     });
   }
   return result;
@@ -629,6 +665,7 @@ const edgesForAction = (
   alertTemplateMap: Readonly<Map<string, string | null>>,
   fieldUpdateMap: Readonly<Map<string, FieldUpdateTarget>>,
   seen: Set<string>,
+  extraProperties: Readonly<Record<string, unknown>> = {},
 ): readonly Edge[] => {
   // `Send` is the deprecated variant: silently ignored.
   if (action.type === 'Send') return [];
@@ -662,7 +699,7 @@ const edgesForAction = (
         edgeType: 'references',
         confidence: 'declared',
         source: EXTRACTOR_SOURCE,
-        properties: { actionType: action.type },
+        properties: { actionType: action.type, ...extraProperties },
       });
     }
   }
@@ -703,18 +740,21 @@ const edgesForAction = (
       const fieldTargetId = target.field.includes('.')
         ? `CustomField:${target.field}`
         : `CustomField:${objectApiName}.${target.field}`;
-      const writesToDedupKey = `writesTo|${fieldTargetId}`;
-      if (!seen.has(writesToDedupKey)) {
-        seen.add(writesToDedupKey);
-        out.push({
-          fromId: ruleId,
-          toId: fieldTargetId,
-          edgeType: 'writesTo',
-          confidence: 'parsed',
-          source: EXTRACTOR_SOURCE,
-          properties: { operation: target.operation },
-        });
-      }
+      // A second update of the same field (immediate + time-triggered) is
+      // still emitted; the rule folds it into the first (`foldWriteValueEdges`)
+      // so neither written value is lost.
+      out.push({
+        fromId: ruleId,
+        toId: fieldTargetId,
+        edgeType: 'writesTo',
+        confidence: 'parsed',
+        source: EXTRACTOR_SOURCE,
+        properties: {
+          operation: target.operation,
+          ...fieldUpdateValueProperties(target),
+          ...extraProperties,
+        },
+      });
     }
   }
 
@@ -799,8 +839,8 @@ interface TimeTrigger {
  * so it MUST be read off the `rule` record, never off the root. Each
  * trigger carries `<timeLength>`, `<workflowTimeTriggerUnit>`, an
  * optional `<offsetFromField>`, and a nested repeatable `<actions>`
- * block whose count we surface (the action chain itself stays
- * record-level and is deliberately not modeled — see the extractor doc).
+ * block whose count we surface (when a trigger fires stays record-level
+ * and is not modeled; its FieldUpdate actions still mint writer edges).
  */
 const parseTimeTriggers = (
   rule: Record<string, unknown>,
@@ -821,6 +861,19 @@ const parseTimeTriggers = (
   }
   return out;
 };
+
+/**
+ * The raw `<actions>` nested in a rule's `<workflowTimeTriggers>`. Only their
+ * FieldUpdate actions become edges (a scheduled field update is still a writer
+ * of its field); both the extractor and {@link listWorkflowFieldUpdates} read
+ * them through this one helper.
+ */
+const timeTriggerActions = (rule: Record<string, unknown>): readonly unknown[] =>
+  toArray(rule['workflowTimeTriggers']).flatMap((raw) =>
+    typeof raw === 'object' && raw !== null
+      ? toArray((raw as Record<string, unknown>)['actions'])
+      : [],
+  );
 
 /**
  * Build the per-rule list of `ConditionSource` entries per the v2.0a
@@ -979,8 +1032,23 @@ const buildRule = (
       ),
     );
   }
+  // A FieldUpdate inside a time trigger is a SCHEDULED writer of its field:
+  // emit the same edges, marked `timeTriggered`. Other time-trigger action
+  // types stay counted only (`timeTriggers[].actionCount`). A malformed
+  // nested action is skipped, never fatal to the rule.
+  for (const raw of timeTriggerActions(rule)) {
+    const resolved = resolveAction(raw, path);
+    if (!resolved.ok || resolved.value.type !== 'FieldUpdate') continue;
+    edges.push(
+      ...edgesForAction(resolved.value, ruleId, objectApiName, alertTemplateMap, fieldUpdateMap, seen, {
+        timeTriggered: true,
+      }),
+    );
+  }
   edges.push(...firesWhenEdges, ...conditionFieldEdges);
-  return ok({ node, edges, conditionNodes });
+  // One writesTo per rule → field, carrying every value the rule writes
+  // (an immediate and a time-triggered update of the same field).
+  return ok({ node, edges: foldWriteValueEdges(edges), conditionNodes });
 };
 
 /**
@@ -1020,7 +1088,10 @@ const buildRule = (
  * model whether or when a trigger fires: the firing condition and the
  * scheduled-action queue are record-level (the `offsetFromField` offset
  * is measured from a record's field value the offline vault cannot read),
- * and the nested action chain is surfaced only as a count.
+ * and the nested action chain is surfaced as a count, except that a nested
+ * FieldUpdate action mints the same `references` + `writesTo` edges as an
+ * immediate one, stamped `timeTriggered: true` (a scheduled update is still a
+ * writer of its field).
  *
  * CR-CAP-11b: each rule also carries three per-rule action-type counts —
  * `fieldUpdateCount`, `outboundMessageCount`, `taskCreationCount` —
@@ -1144,4 +1215,81 @@ export const extractWorkflowRule = async (
   nodes.push(...om.nodes);
   edges.push(...om.edges);
   return ok({ nodes, edges });
+};
+
+/** One `<fieldUpdates>` definition in a workflow file (A03 / C04). */
+export interface WorkflowFieldUpdateDefinition {
+  /** The `<fullName>` a rule's (or approval process's) action names. */
+  readonly name: string;
+  readonly field: string | null;
+  readonly operation: string | null;
+  /** Present only on a cross-object update: the relationship it writes through. */
+  readonly targetObject: string | null;
+  /** The `<formula>` / `<literalValue>` / `<lookupValue>` it sets, when the XML names one. */
+  readonly value: string | null;
+  /** True when a `<rules>` action (immediate or time-triggered) in the SAME file names this update. */
+  readonly referencedByWorkflowRule: boolean;
+  /**
+   * `<reevaluateOnChange>`: when true and the update changes the field's value,
+   * Salesforce re-evaluates every workflow rule on the object. False when the
+   * element is absent (the platform default).
+   */
+  readonly reevaluateOnChange: boolean;
+}
+
+/**
+ * Every field update a workflow file DEFINES, flagged with whether any rule in
+ * that file uses it. A field update fires only from a rule or an approval
+ * process action; one no rule names is a writer on paper only, and the
+ * extractor emits no edge for it (no rule node to hang it on). Tools read this
+ * to disclose such definitions instead of calling the family "not retrieved".
+ * Returns `[]` for unparseable XML.
+ */
+export const listWorkflowFieldUpdates = (xml: string): readonly WorkflowFieldUpdateDefinition[] => {
+  if (XMLValidator.validate(xml) !== true) return [];
+  const parser = new XMLParser({
+    ignoreAttributes: true,
+    parseTagValue: false,
+    trimValues: true,
+    processEntities: { maxTotalExpansions: 10000 },
+  });
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = parser.parse(xml) as Record<string, unknown>;
+  } catch {
+    return [];
+  }
+  const root = unwrapSingle(parsed['Workflow']);
+  if (typeof root !== 'object' || root === null) return [];
+  const rootObj = root as Record<string, unknown>;
+  const used = new Set<string>();
+  for (const rule of toArray(rootObj['rules'])) {
+    if (typeof rule !== 'object' || rule === null) continue;
+    const r = rule as Record<string, unknown>;
+    for (const action of [...toArray(r['actions']), ...timeTriggerActions(r)]) {
+      if (typeof action !== 'object' || action === null) continue;
+      const a = action as Record<string, unknown>;
+      if (optionalString(a, 'type') === 'FieldUpdate') {
+        const name = optionalString(a, 'name');
+        if (name !== null) used.add(name);
+      }
+    }
+  }
+  const reevaluate = new Set<string>();
+  for (const raw of toArray(rootObj['fieldUpdates'])) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const fu = raw as Record<string, unknown>;
+    const name = optionalString(fu, 'fullName');
+    if (name === null) continue;
+    if (optionalString(fu, 'reevaluateOnChange')?.toLowerCase() === 'true') reevaluate.add(name);
+  }
+  return [...buildFieldUpdateTargetMap(rootObj)].map(([name, t]) => ({
+    name,
+    field: t.field,
+    operation: t.operation,
+    targetObject: t.targetObject,
+    value: t.value,
+    referencedByWorkflowRule: used.has(name),
+    reevaluateOnChange: reevaluate.has(name),
+  }));
 };

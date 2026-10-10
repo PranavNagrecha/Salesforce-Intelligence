@@ -13,7 +13,10 @@
  * Composes five categories:
  *
  *   1. **Inbound APIs** — `exposes` edges from ApexClass to
- *      synthetic `ExternalApi:{kind}/{path}` targets (v1.5 R3). The
+ *      synthetic `ExternalApi:{kind}/{path}` targets (v1.5 R3). Only
+ *      `rest` is an integration entry point; `aura` / `invocable` go to
+ *      `uiEntryPoints` (ARCH-08). Apex `setEndpoint` call sites are read
+ *      from source into `apexCallouts` (see `apex-callouts.ts`). The
  *      `path` is the URL fragment the org listens to (e.g.,
  *      `/Account/*` for `@RestResource(urlMapping='/Account/*')`).
  *
@@ -101,12 +104,19 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { listEdges, listEdgesForNodes } from '@sf-intelligence/graph';
+import { listEdgesForNodes } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  type ApexCallout,
+  attachCredentialCandidates,
+  attachVaultRecordCredentialCandidates,
+  scanApexCallouts,
+} from './apex-callouts.js';
 import { firstNonEmpty } from './input-aliases.js';
+import { namedCredentialReferences } from './named-credential-references.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { clampedNodeScanLimit, fullScanTruncationNote } from './scan-cap.js';
 
@@ -194,6 +204,22 @@ export interface EndpointEntry {
    */
   readonly orphaned?: boolean;
   /**
+   * For `named-credential` entries only: the components wired to it — the
+   * graph referrers, OmniStudio IP Rest Actions declaring it, plus, when Apex builds `'callout:' + name` at runtime,
+   * the Apex files / custom-metadata records that name it as a literal
+   * (`via: 'name-literal'`, heuristic). Capped; `referenceCount` counts all.
+   */
+  readonly referencedBy?: readonly {
+    readonly componentId: string;
+    readonly via: 'graph' | 'omni-rest' | 'name-literal';
+  }[];
+  /**
+   * For a `named-credential` entry with no reference found while some Apex
+   * builds its callout endpoint at runtime: why `orphaned: true` is only as
+   * strong as the modeled references (the name may live in data).
+   */
+  readonly orphanedCaveat?: string;
+  /**
    * For the allowlist kinds (`remote-site` / `csp-trusted-site`) only: the
    * node's declared `isActive`. An INACTIVE allowlist entry is still LISTED —
    * silently dropping it would repeat the omission this field exists to
@@ -205,7 +231,30 @@ export interface EndpointEntry {
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface EndpointCatalogOutput {
+  /** Integration entry points other systems call: `@RestResource` / SOAP (`rest`). */
   readonly inboundApis: readonly EndpointEntry[];
+  /**
+   * ARCH-08. `@AuraEnabled` (`aura`) and `@InvocableMethod` (`invocable`)
+   * entry points: called by the org's own UI and flows, not an integration
+   * surface. Not counted in `summary.totalEndpoints`.
+   */
+  readonly uiEntryPoints: readonly EndpointEntry[];
+  /**
+   * ARCH-08. Apex `setEndpoint(...)` call sites, read from Apex source:
+   * `named-credential` (alias named), `literal-host` (host named, joined to the
+   * active RemoteSiteSetting that authorizes it in `authorizedBy`, null when
+   * none does), `partially-resolved` (eval B01: the literal / constant prefix
+   * names a credential or host and the rest is runtime — `nameMayContinue`
+   * when the runtime part could extend that name; the parts are
+   * in `resolution.dynamicParts` with their custom metadata / label source and
+   * vault values) or `dynamic` (nothing named statically; `resolution` still
+   * carries what is known). Constant-only arguments resolve to the first two.
+   * A `dynamic` site building `'callout:' + name` carries `credentialCandidates`
+   * (heuristic name-literal join, or `vault-record` when the name is a custom
+   * metadata / label value); async sites carry `asyncContext`. Not counted in
+   * `summary.totalEndpoints` (call sites, not declarations).
+   */
+  readonly apexCallouts: readonly ApexCallout[];
   readonly outboundMessages: readonly EndpointEntry[];
   readonly externalDataSources: readonly EndpointEntry[];
   readonly namedCredentials: readonly EndpointEntry[];
@@ -249,6 +298,18 @@ export interface EndpointCatalogOutput {
     readonly totalEndpoints: number;
     readonly inboundCount: number;
     readonly outboundCount: number;
+    /** ARCH-08. Rows in `uiEntryPoints` (not in `totalEndpoints`). */
+    readonly uiEntryPointCount: number;
+    /** ARCH-08. Rows in `apexCallouts` (not in `totalEndpoints`). */
+    readonly apexCalloutCount: number;
+    /**
+     * ARCH-08. Literal callout hosts (a `literal-host` site, or the host a
+     * `partially-resolved` prefix names, hedged or not) no ACTIVE
+     * RemoteSiteSetting authorizes — such a callout throws at runtime unless
+     * authorized outside the vault. A host named only with `nameMayContinue`
+     * is listed AND named in `boundaries[]`.
+     */
+    readonly unauthorizedCalloutHosts: readonly string[];
     /**
      * `endpointKind` → count. Present so an allowlist AUTHORIZATION
      * (`remote-site` / `csp-trusted-site`) can never be read as a callsite,
@@ -299,11 +360,14 @@ const ENDPOINT_CATALOG_DISCLOSURE =
  * shrug.
  */
 const UNCOVERED_URL_SURFACES: readonly string[] = [
-  'Hardcoded URL literals inside Apex — `HttpRequest.setEndpoint(\'https://…\')` / `Http.request` to a literal host. The CALLSITE is not modeled as a URL-bearing node, so these URLs are absent from every count here; the RemoteSiteSetting that authorizes them usually is present, in `remoteSiteSettings`. Enumerate the callsites with `sfi.search_apex_source(\'setEndpoint\')` or `sfi.find_code_usages` on `HttpRequest`.',
+  'Apex callout targets computed at runtime: string literals and constants in the `setEndpoint(` argument are folded into `resolution.literalPrefix` and each custom metadata / custom label / custom setting part is named (with the values the vault holds), but a part read from a variable, parameter or method call stays `unresolved`, a host or credential running to the end of the literal part is named with `nameMayContinue` (the runtime part could extend it), and a site whose literal part is cut off mid-name (`\'https://api.\' + x`) stays `dynamic` with no host; `Http.send` to an endpoint set elsewhere is not traced. Read the call site with `sfi.search_apex_source(\'setEndpoint\')`.',
   'URLs embedded in LWC / Aura / Visualforce markup, and in static resources — not parsed for URLs.',
   'ConnectedApp OAuth callback URLs and WebLink / custom-button targets — modeled as node properties but NOT part of this URL axis; `sfi.integration_map` returns ConnectedApps as first-class rows.',
   'URLs stored as DATA rather than metadata — Custom Setting / Custom Metadata rows, environment config resolved at runtime. An offline vault holds the metadata, not the row values.',
 ];
+
+/** ARCH-08: row cap on `apexCallouts` (the count and host flags stay complete). */
+const APEX_CALLOUT_ROWS_MAX = 200;
 
 /**
  * The boundary that is ALWAYS emitted. It exists because the previous contract
@@ -460,18 +524,15 @@ const collectNamedCredentials = async (
 ): Promise<Result<CollectedCategory, string>> => {
   const nodesResult = await scanAllNodesOfTypes(ctx.graph, ['NamedCredential']);
   if (!nodesResult.ok) return err(nodesResult.error.message);
+  const nodes = nodesResult.value.nodes as readonly Node[];
+  // Shared with `sfi.integration_map` so both tools grade a credential the
+  // same way (graph referrers + dynamic-callout name literals).
+  const refsResult = await namedCredentialReferences(ctx, nodes);
+  if (!refsResult.ok) return err(refsResult.error);
   const entries: EndpointEntry[] = [];
-  for (const node of nodesResult.value.nodes as readonly Node[]) {
-    // Inbound `references` edges = anything in the retrieved metadata
-    // wired to this credential. A zero count is the grounded basis for
-    // `orphaned: true` — so the catalog reports an unreferenced
-    // credential as orphaned instead of implying it is in use.
-    const inboundResult = await listEdges(ctx.graph, node.id, {
-      direction: 'in',
-      edgeType: 'references',
-    });
-    if (!inboundResult.ok) return err(inboundResult.error.message);
-    const referenceCount = inboundResult.value.length;
+  for (const node of nodes) {
+    const refs = refsResult.value.get(node.id);
+    const referenceCount = refs?.referenceCount ?? 0;
     entries.push({
       endpointKind: 'named-credential' as const,
       direction: 'outbound' as const,
@@ -481,6 +542,8 @@ const collectNamedCredentials = async (
         readOptionalString(node.properties, 'endpoint'),
       referenceCount,
       orphaned: referenceCount === 0,
+      ...(refs !== undefined && refs.referencedBy.length > 0 ? { referencedBy: refs.referencedBy } : {}),
+      ...(refs?.orphanedCaveat !== undefined ? { orphanedCaveat: refs.orphanedCaveat } : {}),
     });
   }
   return ok({ entries, incompleteTypes: nodesResult.value.incompleteTypes });
@@ -710,7 +773,11 @@ export const endpointCatalogHandler = async (
     });
   }
 
-  const inbound = [...inboundResult.value.entries].sort(compareEntries);
+  // ARCH-08: Lightning controllers and invocable actions are the org's own UI /
+  // flow surface, not integration entry points.
+  const allInbound = [...inboundResult.value.entries].sort(compareEntries);
+  const inbound = allInbound.filter((e) => e.endpointKind === 'rest');
+  const uiEntryPoints = allInbound.filter((e) => e.endpointKind !== 'rest');
   const outboundMsg = [...outboundMsgResult.value.entries].sort(compareEntries);
   const externalDS = [...externalDSResult.value.entries].sort(compareEntries);
   const namedCred = [...namedCredResult.value.entries].sort(compareEntries);
@@ -750,6 +817,41 @@ export const endpointCatalogHandler = async (
     ),
   ].sort();
 
+  const calloutScan = await scanApexCallouts(
+    ctx,
+    remoteSites
+      .filter((e) => e.isActive !== false && typeof e.url === 'string')
+      .map((e) => e.url as string),
+  );
+  if (calloutScan.truncated || calloutScan.unreadablePaths.length > 0) {
+    boundaries.push(
+      `apexCallouts is a FLOOR: ${calloutScan.truncated ? 'the setEndpoint scan hit its row limit' : ''}${calloutScan.truncated && calloutScan.unreadablePaths.length > 0 ? '; ' : ''}${calloutScan.unreadablePaths.length > 0 ? `${calloutScan.unreadablePaths.length} Apex source file(s) could not be read` : ''}.`,
+    );
+  }
+  // Eval A09: a `dynamic` helper callout joined to the credentials its callers
+  // name. Eval B01: a `'callout:' + <custom metadata field / label>` endpoint
+  // joined to the credentials the vault's record / label values name.
+  const credentialNames = namedCred.map((e) => e.sourceComponentId.replace(/^NamedCredential:/, ''));
+  const apexCallouts = attachVaultRecordCredentialCandidates(
+    await attachCredentialCandidates(ctx, calloutScan.callouts, credentialNames),
+    credentialNames,
+  );
+  // A host read off a literal prefix with no visible end (`'https://h.com' + x`)
+  // stays in unauthorizedCalloutHosts (the classifier always listed it), but
+  // the list says which entries rest on such a hedged name.
+  const hedgedOnly = calloutScan.unauthorizedHosts.filter((h) =>
+    calloutScan.callouts.filter((c) => c.host === h && c.authorizedBy === null).every((c) => c.nameMayContinue === true),
+  );
+  if (hedgedOnly.length > 0) {
+    boundaries.push(
+      `unauthorizedCalloutHosts ${hedgedOnly.join(', ')}: read from a literal prefix the runtime part of the endpoint may extend (apexCallouts[].nameMayContinue), so the host called may be longer than the one named.`,
+    );
+  }
+  if (calloutScan.callouts.length > APEX_CALLOUT_ROWS_MAX) {
+    boundaries.push(
+      `apexCallouts lists the first ${APEX_CALLOUT_ROWS_MAX} of ${calloutScan.callouts.length} call sites (by class); summary.apexCalloutCount and unauthorizedCalloutHosts cover all of them.`,
+    );
+  }
   const inboundCount = inbound.length;
   const outboundCount =
     outboundMsg.length +
@@ -777,6 +879,8 @@ export const endpointCatalogHandler = async (
   return ok({
     data: {
       inboundApis: inbound,
+      uiEntryPoints,
+      apexCallouts: apexCallouts.slice(0, APEX_CALLOUT_ROWS_MAX),
       outboundMessages: outboundMsg,
       externalDataSources: externalDS,
       namedCredentials: namedCred,
@@ -788,6 +892,9 @@ export const endpointCatalogHandler = async (
         totalEndpoints: inboundCount + outboundCount,
         inboundCount,
         outboundCount,
+        uiEntryPointCount: uiEntryPoints.length,
+        apexCalloutCount: calloutScan.callouts.length,
+        unauthorizedCalloutHosts: calloutScan.unauthorizedHosts,
         byKind,
       },
       disclosure: ENDPOINT_CATALOG_DISCLOSURE,

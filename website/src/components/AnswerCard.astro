@@ -1,0 +1,93 @@
+---
+/**
+ * AnswerCard — one real answer: question → verdict → cited components → next
+ * step. The raw tool call (and, when present, the verbatim output) sits one
+ * level down in a <details>, for developers who want to check it.
+ */
+import type { DemoAnswer } from "../data/demo-answers.ts";
+import CiteChip from "./CiteChip.astro";
+
+interface Props {
+  answer: DemoAnswer;
+  /** Heading level for the question (h2 on /demo, h3 inside a home section). */
+  level?: 2 | 3;
+  /** Show the tool call + raw output disclosure. */
+  showTool?: boolean;
+  /** Show the raw canonical id on each chip. */
+  showIds?: boolean;
+}
+const { answer, level = 3, showTool = true, showIds = true } = Astro.props;
+const show = showIds ? "id" : "none";
+const Q = level === 2 ? "h2" : "h3";
+const pillClass = `pill pill-${answer.verdict.tone}`;
+const toolJson = JSON.stringify({ name: answer.tool.name, arguments: answer.tool.args }, null, 2);
+---
+
+<article class="answer-card">
+  <div class="answer-q">
+    <span class="label">Question</span>
+    <Q class="q">“{answer.question}”</Q>
+    <p class="short"><span class={pillClass}>{answer.verdict.pill}</span> {answer.verdict.text}</p>
+    <p class="next"><b>Next:</b> {answer.next.charAt(0).toUpperCase() + answer.next.slice(1)}</p>
+  </div>
+  <div class="answer-d">
+    {answer.groups.map((g) => (
+      <>
+        <span class="label">{g.label}</span>
+        {g.items.length === 0 ? (
+          <p class="note">{g.empty ?? "None found."}</p>
+        ) : g.ordered ? (
+          <ol class="order-list">
+            {g.items.map((item) => (
+              <li>
+                <CiteChip cite={item.cite} show={show} />
+                {(item.lead || item.text) && <p>{item.lead && <strong>{item.lead}</strong>} {item.text}</p>}
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <ul class="cites">
+            {g.items.map((item) => (
+              <li>
+                <CiteChip cite={item.cite} show={show} />
+                {(item.lead || item.text) && <p>{item.lead && <strong>{item.lead}</strong>} {item.text}</p>}
+                {item.related && (
+                  <ul class="cites" aria-label="Depends on it">
+                    {item.related.map((r) => <li><CiteChip cite={r} show={show} /></li>)}
+                  </ul>
+                )}
+              </li>
+            ))}
+          </ul>
+        )}
+      </>
+    ))}
+
+    {answer.checked && (
+      <div class="checked-block">
+        <span class="label">What it checked</span>
+        <ul class="checked-list">
+          <li><span class="pill pill-no">Found</span> {answer.checked.found.join(", ")}</li>
+          <li><span class="pill pill-ok">Nothing in</span> {answer.checked.none.join(", ")}</li>
+          <li><span class="pill pill-warn">Not checked</span> {answer.checked.notChecked.join(", ")}</li>
+        </ul>
+      </div>
+    )}
+
+    {answer.notes.map((n) => <p class="note">{n}</p>)}
+
+    {showTool && (
+      <details class="tool-call">
+        <summary>For developers: the tool call</summary>
+        <p>Your assistant made this call to the sf-intelligence MCP server:</p>
+        <pre>{toolJson}</pre>
+        {answer.raw && (
+          <details class="tool-call">
+            <summary>{answer.raw.label}</summary>
+            <pre>{answer.raw.text}</pre>
+          </details>
+        )}
+      </details>
+    )}
+  </div>
+</article>

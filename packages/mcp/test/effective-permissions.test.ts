@@ -216,7 +216,7 @@ describe('CustomPermission access surface — effective_permissions union', () =
   // RT parity, older-vault path: NEITHER seeded container carries a
   // recordTypeVisibilities property (pre-extraction vault) — the union must
   // not throw, contributes nothing, and discloses the re-refresh remedy.
-  it('an absent recordTypeVisibilities property yields an empty RT union plus a re-refresh disclosure, never a throw', async () => {
+  it('an absent recordTypeVisibilities property yields an empty RT union, a null count and a re-refresh disclosure, never a throw', async () => {
     const r = await effectivePermissionsHandler(ctx, {
       profileId: 'Profile:CampusAdmin',
       permissionSetIds: ['PermissionSet:AdvisorAccess'],
@@ -224,7 +224,8 @@ describe('CustomPermission access surface — effective_permissions union', () =
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.recordTypeVisibilities).toEqual([]);
-    expect(r.value.data.summary.recordTypeVisibilities).toBe(0);
+    // ADM-11: never extracted is NOT CHECKED — `null`, not a verified 0.
+    expect(r.value.data.summary.recordTypeVisibilities).toBeNull();
     expect(
       r.value.data.disclosures.some(
         (d) =>

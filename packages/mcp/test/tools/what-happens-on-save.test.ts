@@ -1898,7 +1898,7 @@ describe('whatHappensOnSaveHandler', () => {
     // Not one byte of the mandated text may change; the assertion below pins
     // the rider that follows it on this fixture.
     expect(result.value.data.disclosure.startsWith(
-      "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Duplicate rules are modeled as their own `duplicate-rules` phase, running after before-triggers and validation but BEFORE the save — evaluated on insert/update only, with the effective Block/Allow/Alert/Report operations surfaced per rule. Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once and does not expand that re-entrancy. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Parent Summary (roll-up) fields that aggregate this object recalculate in the `post-save-rollup-recalc` phase, capped to ONE level — a grandparent's own rollup on that recalculated parent is NOT walked — and the parent's own triggers/flows/workflows that its recalculated save would fire are NOT expanded (no re-entrancy). Entitlement-process and milestone-type METADATA is modeled elsewhere in the vault (R6-18: `EntitlementProcess`/`MilestoneType` nodes, queryable via `sfi.get_component` / `sfi.get_edges`, including each milestone's declared target `minutesToComplete` as of R7-C7) — but this composition does NOT simulate entitlement milestones as an order-of-execution phase: whether a specific record is currently on-track or breached against those target minutes is live, per-record timer data this offline vault cannot hold. Criteria-based sharing recalculation — the FINAL step in Salesforce's documented order-of-execution, evaluated after every phase modeled here (including post-save-async) — is also NOT modeled: a save that causes a record to newly match or stop matching a criteria-based sharing rule's criteria triggers a sharing recalculation this composition does not surface. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.",
+      "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Duplicate rules are modeled as their own `duplicate-rules` phase, running after before-triggers and validation but BEFORE the save — evaluated on insert/update only, with the effective Block/Allow/Alert/Report operations surfaced per rule. Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once; `reentry` names the steps that write back to this object, what the documented second pass re-runs, and any visible recursion guard. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Parent Summary (roll-up) fields that aggregate this object recalculate in the `post-save-rollup-recalc` phase, capped to ONE level — a grandparent's own rollup on that recalculated parent is NOT walked — and the parent's own triggers/flows/workflows that its recalculated save would fire are NOT expanded (no re-entrancy). Entitlement-process and milestone-type METADATA is modeled elsewhere in the vault (R6-18: `EntitlementProcess`/`MilestoneType` nodes, queryable via `sfi.get_component` / `sfi.get_edges`, including each milestone's declared target `minutesToComplete` as of R7-C7) — but this composition does NOT simulate entitlement milestones as an order-of-execution phase: whether a specific record is currently on-track or breached against those target minutes is live, per-record timer data this offline vault cannot hold. Criteria-based sharing recalculation — the FINAL step in Salesforce's documented order-of-execution, evaluated after every phase modeled here (including post-save-async) — is also NOT modeled: a save that causes a record to newly match or stop matching a criteria-based sharing rule's criteria triggers a sharing recalculation this composition does not surface. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.",
       ),
     ).toBe(true);
     // CHECKED-and-nothing-demoted: this fixture's object has no Apex
@@ -2452,10 +2452,9 @@ describe('whatHappensOnSaveHandler — phase filter + phase-omission honesty (WH
     // EVERY non-zero phase, its steps are either fully present in `soe` OR the
     // shortfall is named in `phasesOmitted` with the true declared/present
     // counts — so a truncated payload can NEVER silently contradict
-    // `phaseCounts`. Today what_happens_on_save uses allowStepDrop:false, so
-    // every phase stays fully present and `phasesOmitted` is absent; this
-    // assertion still holds AND would catch a regression that started dropping
-    // steps without disclosing them.
+    // `phaseCounts`. This fixture fits once action lists are trimmed, so every
+    // phase stays fully present and `phasesOmitted` is absent; the assertion
+    // would still catch a regression that dropped steps without disclosing them.
     const present = tallyPhaseCounts(d.soe) as Record<string, number>;
     const omittedByPhase = new Map((d.phasesOmitted ?? []).map((o) => [o.phase, o]));
     for (const [phase, declared] of Object.entries(pc)) {
@@ -2476,36 +2475,25 @@ describe('whatHappensOnSaveHandler — phase filter + phase-omission honesty (WH
     const dupPresent = present['duplicate-rules']! > 0;
     const dupDisclosed = omittedByPhase.has('duplicate-rules');
     expect(dupPresent || dupDisclosed).toBe(true);
-    // Today (allowStepDrop:false) the stronger guarantee holds: nothing dropped.
+    // Here (fits after action trimming) the stronger guarantee holds: nothing dropped.
     expect(d.phasesOmitted).toBeUndefined();
     expect(dupPresent).toBe(true);
   });
 
-  it('GLOBAL responseBudget trim of a large SOE attaches phasesOmitted naming every dropped non-zero phase (incl duplicate-rules)', async () => {
-    // W5.1 GLOBAL residual (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES).
-    // The tool-local `enforceSoeByteBudget` runs with `allowStepDrop:false`, so
-    // on a many-step object it drops NOTHING (every step's action list is under
-    // the keep-all floor) and hands back a payload STILL over budget. The global
-    // `jsonResult` responseBudget guard then tail-truncates `data.soe`, shedding
-    // the LATER phases — the honesty hole the tool-local guard cannot reach.
-
-    // Precondition — the handler alone SURVIVES the tool-local trim: it never
-    // drops a STEP (allowStepDrop:false), so every phase phaseCounts claims is
-    // fully present in `soe` and `phasesOmitted` is absent. (It may set
-    // `truncated` because the tool-local pass trims per-step ACTION edges — that
-    // is orthogonal; what matters is no step, hence no PHASE, was shed here.)
-    // So whatever phase-omission the wire shows below was done by the GLOBAL
-    // budget path, not the tool-local one.
+  it('ARCH-11: an over-budget SOE sheds the crowded validation phase, never the code-bearing tail', async () => {
+    // FAIL-BEFORE/PASS-AFTER (ARCH-11, what_happens_on_save half). The handler
+    // used to run `allowStepDrop: false`, hand the GLOBAL reducer an oversize
+    // payload, and let it tail-cut `soe` — on a real Contact that dropped every
+    // duplicate rule, after-trigger, after-save flow and async step while 22 of
+    // 35 validation rules stayed. The handler now sheds from the most crowded
+    // phase itself (`largest-phase-first`, as order_of_execution does), so the
+    // later phases survive and only the validation shortfall is named.
     const handlerOnly = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'SaveHeavyObj',
       event: 'insert',
     });
     expect(handlerOnly.ok).toBe(true);
     if (!handlerOnly.ok) return;
-    expect(handlerOnly.value.data.soe.length).toBe(
-      handlerOnly.value.data.summary.totalSteps,
-    );
-    expect(handlerOnly.value.data.phasesOmitted).toBeUndefined();
     const declared = handlerOnly.value.data.summary.phaseCounts;
     // The witness shape: later phases the counts claim are non-zero.
     expect(declared['pre-save-validation']).toBe(SAVE_HEAVY_VR_COUNT);
@@ -2513,12 +2501,6 @@ describe('whatHappensOnSaveHandler — phase filter + phase-omission honesty (WH
     expect(declared['after-triggers']).toBe(1);
     expect(declared['post-save-flows']).toBe(1);
     expect(declared['post-save-async']).toBe(1);
-    // The handler payload really is over the global budget (so the guard bites).
-    const handlerBytes = Buffer.byteLength(
-      JSON.stringify(handlerOnly.value.data),
-      'utf8',
-    );
-    expect(handlerBytes).toBeGreaterThan(40_000);
 
     // Drive the PRODUCTION dispatch path (parse → handle → stamp → jsonResult).
     const wire = await runTool(
@@ -2538,46 +2520,29 @@ describe('whatHappensOnSaveHandler — phase filter + phase-omission honesty (WH
           readonly present: number;
         }[];
       };
-      readonly responseBudget?: {
-        readonly truncated?: boolean;
-        readonly droppedCount?: number;
-      };
+      readonly responseBudget?: { readonly truncated?: boolean };
     };
-
-    // The GLOBAL guard truncated `data.soe` (this is the path under test).
-    expect(parsed.responseBudget?.truncated).toBe(true);
-    expect(parsed.responseBudget?.droppedCount ?? 0).toBeGreaterThan(0);
-    expect(parsed.data.soe.length).toBeLessThan(
-      parsed.data.summary.phaseCounts['pre-save-validation']! +
-        parsed.data.summary.phaseCounts['duplicate-rules']!,
-    );
-
-    // Acceptance — the truncated-on-the-wire payload names EVERY dropped
-    // non-zero phase in `phasesOmitted`; a host can NEVER read it as "no
-    // duplicate rules / no after-triggers / no post-save flows / no async".
     const pc = parsed.data.summary.phaseCounts;
     const present = tallyPhaseCounts(
       parsed.data.soe as readonly { readonly phase: never }[],
     ) as Record<string, number>;
-    const omittedByPhase = new Map(
-      (parsed.data.phasesOmitted ?? []).map((o) => [o.phase, o]),
+    // Steps really were shed (otherwise this proves nothing)…
+    expect(parsed.data.soe.length).toBeLessThan(
+      Object.values(pc).reduce((a, b) => a + b, 0),
     );
-    for (const [phase, count] of Object.entries(pc)) {
-      if (count === 0) continue;
-      if (present[phase]! >= count) continue; // fully present ⇒ no omission needed
-      const omission = omittedByPhase.get(phase);
-      expect(omission).toBeDefined();
-      expect(omission?.declared).toBe(count);
-      expect(omission?.present).toBe(present[phase]);
+    // …but ONLY from the crowded validation phase: every later phase is whole.
+    for (const phase of ['duplicate-rules', 'after-triggers', 'post-save-flows', 'post-save-async']) {
+      expect(present[phase]).toBe(pc[phase]);
     }
-    // Concretely: duplicate-rules was shed and is NAMED, not silently dropped.
-    expect(present['duplicate-rules'] ?? 0).toBe(0);
-    expect(omittedByPhase.get('duplicate-rules')).toEqual({
-      phase: 'duplicate-rules',
-      declared: 3,
-      present: 0,
-    });
-    // …and the envelope stayed under the wire budget (no opaque rejection).
+    expect(parsed.data.phasesOmitted).toEqual([
+      {
+        phase: 'pre-save-validation',
+        declared: SAVE_HEAVY_VR_COUNT,
+        present: present['pre-save-validation'],
+      },
+    ]);
+    // The handler fitted its own envelope: the global tail-cut never ran.
+    expect(parsed.responseBudget?.truncated ?? false).toBe(false);
     expect(Buffer.byteLength(text, 'utf8')).toBeLessThanOrEqual(45_000);
   });
 });
@@ -3043,7 +3008,7 @@ describe('whatHappensOnSaveHandler — FIX 3: give the budget back to the answer
     expect(bare.ok && asked.ok).toBe(true);
     if (!bare.ok || !asked.ok) return;
     expect(bare.value.data.inactiveSummary.note).toContain(
-      'The roster is omitted by default so the byte budget goes to the automation that actually runs — re-query with includeInactive: true for the full list.',
+      "The full roster is omitted by default so the byte budget goes to the automation that actually runs; `names` lists them — re-query with includeInactive: true for the full list with each one's detail.",
     );
     expect(bare.value.data.inactiveSummary.included).toBe(false);
     expect(asked.value.data.inactiveSummary.note).toContain(
@@ -3347,14 +3312,16 @@ const deliveredStepsWithAndWithout = async (
 };
 
 describe('whatHappensOnSaveHandler — the disclosure never pays for itself in steps', () => {
-  it('sits in the band: NearCapObj is over this tool’s cap and under the reducer’s', async () => {
+  it('sits at the cliff: NearCapObj is within 10% of this tool’s cap and under the reducer’s', async () => {
     // The precondition every test in this describe rests on. Without it they
     // would all pass vacuously on a payload that was never near the cliff.
+    // (ARCH-11: an unfiltered answer now sheds its crowded phase to fit THIS
+    // tool's cap itself, so it no longer lands above it.)
     const { composedBytes } = await deliveredStepsWithAndWithout({
       objectApiName: 'NearCapObj',
       event: 'insert',
     });
-    expect(composedBytes).toBeGreaterThan(toolLocalPayloadBudgetBytes());
+    expect(composedBytes).toBeGreaterThan(toolLocalPayloadBudgetBytes() * 0.9);
     expect(composedBytes).toBeLessThanOrEqual(responseReductionCap());
   });
 
@@ -3549,11 +3516,11 @@ describe('whatHappensOnSaveHandler — a truncated answer names a recovery path 
     if (!r.ok) return;
     const d = r.value.data;
 
-    // Precondition: this answer really is over the reducer's cap, so it is the
-    // over-budget case and not a light object dodging the block by accident.
-    expect(Buffer.byteLength(JSON.stringify(d), 'utf8')).toBeGreaterThan(
-      responseReductionCap(),
-    );
+    // Precondition: this answer really is over budget — the handler had to
+    // shed steps (ARCH-11: from the crowded phase, named in phasesOmitted) —
+    // so it is not a light object dodging the block by accident.
+    expect(d.truncated).toBe(true);
+    expect(d.phasesOmitted?.length ?? 0).toBeGreaterThan(0);
     expect(d.appliedPhaseFilter).toBeUndefined();
 
     // No block. The exit this answer already offers — `crossPhaseShortfallNote`'s

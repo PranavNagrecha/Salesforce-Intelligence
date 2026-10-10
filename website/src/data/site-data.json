@@ -1,7 +1,9 @@
 {
-  "generatedAt": "2026-10-03T18:18:42.266Z",
-  "version": "0.3.3",
+  "generatedAt": "2026-10-10T19:00:52.719Z",
+  "version": "0.4.0",
   "toolCount": 231,
+  "coreToolCount": 25,
+  "listedToolCount": 226,
   "skillCount": 26,
   "agentCount": 4,
   "commandCount": 5,
@@ -13,33 +15,33 @@
     "packages": [
       {
         "name": "mcp",
-        "files": 328,
-        "cases": 7638
+        "files": 365,
+        "cases": 7997
       },
       {
         "name": "extractors",
-        "files": 94,
-        "cases": 1260
+        "files": 102,
+        "cases": 1306
       },
       {
         "name": "cli",
-        "files": 48,
-        "cases": 539
+        "files": 55,
+        "cases": 590
       },
       {
         "name": "graph",
-        "files": 29,
-        "cases": 397
+        "files": 30,
+        "cases": 399
       },
       {
         "name": "parsers",
-        "files": 10,
-        "cases": 247
+        "files": 12,
+        "cases": 258
       },
       {
         "name": "patterns",
         "files": 3,
-        "cases": 181
+        "cases": 196
       },
       {
         "name": "vault",
@@ -49,23 +51,23 @@
       {
         "name": "renderers",
         "files": 10,
-        "cases": 154
+        "cases": 155
+      },
+      {
+        "name": "core",
+        "files": 5,
+        "cases": 89
       },
       {
         "name": "tooling-api",
         "files": 6,
         "cases": 86
-      },
-      {
-        "name": "core",
-        "files": 4,
-        "cases": 81
       }
     ],
-    "totalCases": 10742,
-    "totalFiles": 544,
+    "totalCases": 11235,
+    "totalFiles": 600,
     "packageCount": 10,
-    "approx": 10700
+    "approx": 11200
   },
   "integrationSuiteCount": 5,
   "gates": [
@@ -90,38 +92,38 @@
   "packageDescriptions": [
     {
       "name": "mcp",
-      "files": 328,
-      "cases": 7638,
+      "files": 365,
+      "cases": 7997,
       "description": "The 231 read-only tools + router + grounding layer"
     },
     {
       "name": "extractors",
-      "files": 94,
-      "cases": 1260,
+      "files": 102,
+      "cases": 1306,
       "description": "Metadata parsing for every Salesforce component type"
     },
     {
       "name": "cli",
-      "files": 48,
-      "cases": 539,
+      "files": 55,
+      "cases": 590,
       "description": "The sfi command-line tool"
     },
     {
       "name": "graph",
-      "files": 29,
-      "cases": 397,
+      "files": 30,
+      "cases": 399,
       "description": "The DuckDB dependency-graph engine"
     },
     {
       "name": "parsers",
-      "files": 10,
-      "cases": 247,
+      "files": 12,
+      "cases": 258,
       "description": "Formula / SOQL / source tokenizers"
     },
     {
       "name": "patterns",
       "files": 3,
-      "cases": 181,
+      "cases": 196,
       "description": "Heuristic recognizers (PII, naming, code quality)"
     },
     {
@@ -133,20 +135,20 @@
     {
       "name": "renderers",
       "files": 10,
-      "cases": 154,
+      "cases": 155,
       "description": "Markdown vault rendering"
+    },
+    {
+      "name": "core",
+      "files": 5,
+      "cases": 89,
+      "description": "core package tests"
     },
     {
       "name": "tooling-api",
       "files": 6,
       "cases": 86,
       "description": "Optional Tooling-API enrichment"
-    },
-    {
-      "name": "core",
-      "files": 4,
-      "cases": 81,
-      "description": "core package tests"
     }
   ]
 }

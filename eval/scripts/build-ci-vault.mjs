@@ -4,7 +4,7 @@
  * Run after graph package changes: pnpm eval:build-ci-vault
  */
 
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -13,6 +13,7 @@ import {
   importExtractionResults,
   openGraph,
 } from '../../packages/graph/dist/src/index.js';
+import { usageSourceFamiliesFor } from '../../packages/mcp/dist/src/tools/coverage-trust.js';
 import { vaultPaths } from '../../packages/vault/dist/src/index.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -53,13 +54,37 @@ const COVERAGE_TYPES = [
   'CustomObject',
 ];
 
-const coverage = COVERAGE_TYPES.map((type) => ({
-  type,
-  requested: true,
-  retrieved: 1,
-  errored: false,
-  neverModeled: false,
-}));
+// The builder version a real `sfi refresh` stamps: the published CLI's version.
+// Read it instead of hand-typing it, so freshness checks never see a fake "old builder".
+const CLI_VERSION = JSON.parse(
+  readFileSync(join(here, '..', '..', 'packages', 'cli', 'package.json'), 'utf8'),
+).version;
+
+// Every metadata family a field's referrers can live in, as the product itself
+// defines it. Families the fixture has no components for are recorded as
+// retrieved and confirmed empty (what a real retrieve of an org without them
+// produces), so delete-safety can treat "none found" as checked, not unknown.
+const CONFIRMED_EMPTY_TYPES = usageSourceFamiliesFor('CustomField').filter(
+  (type) => !COVERAGE_TYPES.includes(type),
+);
+
+const coverage = [
+  ...COVERAGE_TYPES.map((type) => ({
+    type,
+    requested: true,
+    retrieved: 1,
+    errored: false,
+    neverModeled: false,
+  })),
+  ...CONFIRMED_EMPTY_TYPES.map((type) => ({
+    type,
+    requested: true,
+    retrieveConfirmed: true,
+    retrieved: 0,
+    errored: false,
+    neverModeled: false,
+  })),
+];
 
 const node = (overrides) => ({
   label: null,
@@ -175,7 +200,7 @@ writeFileSync(
     {
       targetOrg: 'ci-eval',
       vaultRoot,
-      version: '0.1.0',
+      version: CLI_VERSION,
       createdAt: '2026-05-29T00:00:00.000Z',
     },
     null,
@@ -187,7 +212,7 @@ writeFileSync(
   join(p.meta, 'manifest.json'),
   JSON.stringify(
     {
-      version: '0.1.0',
+      version: CLI_VERSION,
       refreshedAt: '2026-05-29T00:00:00.000Z',
       sourceOrg: 'ci-eval',
       components: {

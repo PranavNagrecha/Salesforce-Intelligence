@@ -78,6 +78,7 @@ export {
   listNodeIdentities,
   listNodesByIds,
   listNodesByType,
+  parsePropertiesJson,
   searchNodes,
   searchNodesPage,
 } from './queries.js';

@@ -27,7 +27,7 @@ import { existsSync, mkdirSync, copyFileSync } from 'node:fs';
 import { dirname, join, resolve, isAbsolute } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { publicSnapshotFiles, scan } from './release-guard.mjs';
+import { blocklistProblem, publicSnapshotFiles, scan } from './release-guard.mjs';
 
 const repoRoot = resolve(fileURLToPath(import.meta.url), '..', '..');
 
@@ -35,6 +35,10 @@ function fail(msg) {
   console.error(`\nrelease-snapshot: ${msg}`);
   process.exit(1);
 }
+
+// A broken org blocklist (or a missing one under CI) must not certify a snapshot.
+const blocklistIssue = blocklistProblem();
+if (blocklistIssue) fail(blocklistIssue);
 
 function resolveTarget(arg) {
   const raw = arg ?? '../sf-intelligence-public';

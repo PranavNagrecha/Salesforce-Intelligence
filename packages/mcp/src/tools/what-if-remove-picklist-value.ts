@@ -14,15 +14,21 @@
  *     index AND an existing `readsFrom` / `writesTo` edge to the field
  *     (per the v0.3 scanner) — the conjunction narrows the recognition
  *     to heuristic-confident matches.
- *   - **Flow decisions** routed through `firesWhen` ConditionalContexts
- *     whose expression references the field + the value (v2.0a
- *     foundation) — Flow walker-extracted, so `declared` confidence for
- *     XML-declared conditions.
- *   - **Workflow rules** with criteria items referencing the value —
- *     declarative metadata that will refuse to deploy.
- *   - **Conditional contexts** at field-level (any ConditionalContext
- *     node whose properties.fieldRefs contains the field and whose
- *     expression mentions the value).
+ *   - **Flow / workflow conditions** — every ConditionalContext that tests
+ *     the field, matched on its structured `conditionItems` (Flow and
+ *     workflow criteria render UNQUOTED, so a quoted needle never matched
+ *     them) and attributed to the FIRER with a `where` line per use.
+ *     Inactive Flows go to `informational` (they do not run).
+ *   - **Flow formula resources** — `ISPICKVAL({!$Record.F}, 'X')` read from the
+ *     Flow node's `formulaValueRefs` (no edge reaches the field).
+ *   - **Field-write and filter edges** — literal writes (`assignedValue` /
+ *     `literalValues`: Flow, workflow and approval field updates) and Flow
+ *     Get/Update/Delete Records filters (`filterValue`).
+ *   - **Record types, criteria sharing rules, list view filters, Lightning
+ *     page visibility rules** — read from graph properties / source. Record
+ *     types only LIST the value (it is dropped from them), so they go to
+ *     `informational` and never move compatibility or verdict.
+ *   - `notChecked` names what is NOT read (reports, path assistants, …).
  *
  * **Compatibility classification.** Always `breaking` when impacts
  * exist, `review` when no static references match (the value may still
@@ -44,7 +50,8 @@
  *   | (other)                        | configuration-only |
  *
  * **Aggregate verdict.** Same rules as the field-type tool:
- *   - `safe`: no findings (no static match — review dynamic Apex).
+ *   - `safe`: never returned while `notChecked` names a family (it always
+ *     does) — an empty scan is `review`.
  *   - `risky`: only code-needs-update.
  *   - `blocking`: any metadata-blocker.
  *
@@ -52,6 +59,9 @@
  * variable-based picklist comparisons are invisible to the static
  * recognizer — only string-literal patterns in source code are detected.
  */
+
+import { readFile } from 'node:fs/promises';
+import { join } from 'node:path';
 
 import type {
   ComponentId,
@@ -70,30 +80,26 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import {
+  conditionItemsTestingValue,
+  edgeLiteralValues,
+  expressionNamesValue,
+  literalNamesValue,
+  splitCompoundValue,
+} from './condition-value-literals.js';
+import {
   buildCoverageCaveat,
   VALUE_LITERAL_READER_COVERAGE,
   type CoverageCaveat,
   type Verdict,
 } from './coverage-trust.js';
-import { readFieldDataType } from './field-properties.js';
+import { PICKLIST_DATA_TYPES, readFieldDataType } from './field-properties.js';
+import { checkDeclaredPicklistValue } from './field-value-filter.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
-import { detectPicklistLiteralMismatch } from './picklist-literal-check.js';
-import {
-  normalizePicklistValues,
-  resolveGlobalValueSetValues,
-} from './picklist-values.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 
 /** Canonical id prefix for the CustomField node type. */
 const CUSTOM_FIELD_PREFIX = 'CustomField:';
 
-/**
- * The picklist field types accepted by this tool. Other types surface
- * as `invalid-query` at the handler boundary.
- */
-const PICKLIST_TYPES = new Set<string>([
-  'Picklist',
-  'MultiselectPicklist',
-]);
 
 /** Compatibility verdicts the tool emits. */
 type Compatibility = 'breaking' | 'review';
@@ -115,6 +121,14 @@ export interface WhatIfImpactItem {
   readonly apiName: string;
   readonly confidence: ConfidenceLevel;
   readonly explanation: string;
+  /**
+   * Every place this component uses the value (`entry criteria: Status__c
+   * EqualTo X`, `writes X`, `Get Records filter`, …). Absent for a match found
+   * only by the formula / literal text scan.
+   */
+  readonly where?: readonly string[];
+  /** Flow status when not Active — an inactive flow does not run. */
+  readonly status?: string;
 }
 
 /** Payload wrapped in the `McpResponse` envelope on success. */
@@ -124,6 +138,12 @@ export interface WhatIfRemovePicklistValueOutput {
   readonly fieldType: string;
   readonly compatibility: Compatibility;
   readonly impacts: readonly WhatIfImpactItem[];
+  /**
+   * Components that hold the value but do NOT break and never move
+   * `compatibility` / `verdict`: record types that list it (the value is just
+   * dropped from them) and Flows that use it but do not run (Draft/Obsolete).
+   */
+  readonly informational: readonly WhatIfImpactItem[];
   readonly verdict: Verdict;
   readonly coverageCaveat?: CoverageCaveat;
   readonly trust: TrustSummary;
@@ -140,6 +160,13 @@ export interface WhatIfRemovePicklistValueOutput {
   readonly declaredValues: readonly string[] | null;
   /** Verbatim `valueState`-driven disclosures. Absent when `active`. */
   readonly boundaries?: readonly string[];
+  /** The field is a restricted picklist: a write of the removed value FAILS. */
+  readonly restricted: boolean | null;
+  /**
+   * Places a literal can live that this answer did NOT check — absence there
+   * is "not checked", never "none".
+   */
+  readonly notChecked: readonly string[];
 }
 
 /**
@@ -149,13 +176,6 @@ export interface WhatIfRemovePicklistValueOutput {
  */
 const inactiveValueBoundary = (value: string): string =>
   `\`${value}\` is already INACTIVE on this field: it cannot be selected on new records, but existing records may still hold it. Removing it from the value set is a metadata delete, not a deactivation — the impact below is the impact of the DELETE.`;
-
-/**
- * The field's api name for the refusal message. Falls back to the canonical id
- * so the sentence never contains an empty backtick pair.
- */
-const readFieldApiName = (node: Node, fieldId: ComponentId): string =>
-  node.apiName.length > 0 ? node.apiName : fieldId;
 
 /** Verbatim boundary when the vault cannot resolve the value set at all. */
 const notCheckedBoundary = (value: string): string =>
@@ -167,7 +187,16 @@ const notCheckedBoundary = (value: string): string =>
  * string literals; dynamic Apex and variable-based comparisons are invisible.
  */
 const DISCLOSURE =
-  "Apex code referencing the picklist value as a string literal is recognized only for static literals. Variable-based picklist comparisons (`if (account.Industry__c == myVar)`), dynamic SOQL strings, and reflective field access via `obj.get('FieldName')` are invisible to the recognizer; review dynamic comparisons separately before removing the value. Flow record-create/update steps that assign this value to the field as a literal (e.g. `<stringValue>Completed</stringValue>`) ARE detected; Flow steps that assign the value indirectly via a variable, formula, or merge field (`<elementReference>`) are NOT statically resolvable and are not matched — review those flows manually.";
+  "Checked: formulas, validation rules, workflow/approval criteria, Flow entry criteria, decisions, Get/Update/Delete Records filters, formula resources, literal field writes (Flow `<stringValue>`, incl. record-variable and before-save assignments; workflow and approval field updates), Apex string literals, record types, criteria sharing rules, list view filters and Lightning page visibility rules / related-list filters. Invisible: Flow values set through a variable or formula (`<elementReference>`), Flow formulas reaching the field through a relationship or an unresolved variable, Variable-based picklist comparisons in Apex, dynamic SOQL, and reflective access via `obj.get('FieldName')` — review those manually.";
+
+/** Families that can embed a picklist literal but are not read by this tool. */
+const NOT_CHECKED_FAMILIES: readonly string[] = [
+  'report and dashboard filters',
+  'path assistants',
+  'Flow screen-component visibility rules and text templates',
+  'dependent-picklist (controlling value) matrices',
+  'Apex/LWC comparisons against variables, dynamic SOQL',
+];
 
 /**
  * Zod schema for the `sfi.what_if_remove_picklist_value` tool input.
@@ -258,30 +287,6 @@ const extractHaystackTexts = (node: Node): readonly string[] => {
 };
 
 /**
- * R2-1: detect whether a `writesTo` edge assigns the removed value to the
- * field as a LITERAL. The flow extractor stamps `properties.assignedValue`
- * (the unwrapped scalar) and `properties.assignedValueKind`
- * (`'literal' | 'reference'`) on each field-level `writesTo` edge.
- *
- * A match requires BOTH:
- *   - `assignedValueKind === 'literal'` — an `<elementReference>`
- *     assignment (kind `'reference'`) is a variable/formula/merge field
- *     and is NOT statically comparable to the removed value, so it is
- *     deliberately NOT a match (avoids a false positive: the edu vault
- *     carries hundreds of `$Record.*` reference assignments).
- *   - `assignedValue === value` — exact, case-sensitive match (picklist
- *     API names are case-sensitive, mirroring the formula/Apex needle).
- *
- * Edges without `assignedValue` (e.g. object-level write edges, or
- * pre-R2-1 vaults) never match here.
- */
-const edgeAssignsValueLiterally = (edge: Edge, value: string): boolean => {
-  if (edge.edgeType !== 'writesTo') return false;
-  if (edge.properties['assignedValueKind'] !== 'literal') return false;
-  return edge.properties['assignedValue'] === value;
-};
-
-/**
  * Classify the source node + edge into a finding category.
  */
 const classifyCategory = (edge: Edge, fromNode: Node): Category => {
@@ -321,37 +326,55 @@ const buildExplanation = (
   return `${fromNode.type} '${fromNode.apiName}' references the literal '${value}'; removing the picklist value will break this reference.`;
 };
 
-/**
- * Walk the firer's outgoing `firesWhen` edges to surface any
- * ConditionalContext whose expression text references the value. Used
- * to catch Flow / WorkflowRule decisions keyed on the value that the
- * extractor stored in the synthetic ConditionalContext node rather
- * than the parent firer's own properties.
- *
- * Returns the list of matching ConditionalContext nodes (typically
- * empty or a single match per firer in the v2.0a model).
- */
-const findValueInConditionalContexts = async (
-  ctx: Context,
-  firerId: ComponentId,
-  value: string,
-): Promise<Result<readonly Node[], string>> => {
-  const edgesResult = await listEdges(ctx.graph, firerId, {
-    direction: 'out',
-    edgeType: 'firesWhen',
-  });
-  if (!edgesResult.ok) return err(edgesResult.error.message);
-  const matches: Node[] = [];
-  const needles = buildValueNeedles(value);
-  for (const edge of edgesResult.value) {
-    const ccResult = await getNodeById(ctx.graph, edge.toId);
-    if (!ccResult.ok) return err(ccResult.error.message);
-    const cc = ccResult.value;
-    if (cc === null) continue;
-    const texts = extractHaystackTexts(cc);
-    if (containsAnyNeedle(texts, needles)) matches.push(cc);
+/** Human label for where a ConditionalContext sits in its firer. */
+const conditionLabel = (cc: Node): string => {
+  const kind = cc.properties['kind'];
+  if (kind === 'flow-recordtrigger') {
+    return cc.properties['entryRequiresRecordChange'] === true
+      ? 'entry criteria (fires only when a save changes the record to meet them)'
+      : 'entry criteria';
   }
-  return ok(matches);
+  if (kind === 'flow-decision') {
+    const name = cc.properties['sourceName'];
+    return typeof name === 'string' ? `decision ${name}` : 'decision';
+  }
+  return 'criteria';
+};
+
+/**
+ * The ways one ConditionalContext compares `fieldId` to `value`, rendered for
+ * the answer — empty when it does not. Structured `conditionItems` first; the
+ * prose expression only on a vault built before those existed.
+ */
+const conditionUsages = (
+  cc: Node,
+  fieldId: string,
+  fieldApiName: string,
+  value: string,
+): readonly string[] => {
+  const items = conditionItemsTestingValue(cc, fieldId, value);
+  const label = conditionLabel(cc);
+  if (items !== null) {
+    return items.map((i) => `${label}: ${i.field} ${i.operator} '${i.value ?? ''}'`);
+  }
+  const expr = cc.properties['expression'];
+  return typeof expr === 'string' && expressionNamesValue(expr, fieldApiName, value)
+    ? [`${label}: ${expr.replace(/\s+/g, ' ').slice(0, 160)}`]
+    : [];
+};
+
+/** Rendered usage for a field write / Flow filter edge that carries `value` as a literal. */
+const edgeUsage = (edge: Edge, restricted: boolean | null): string | null => {
+  const op = edge.properties['operation'];
+  if (edge.edgeType === 'readsFrom' && op === 'recordFilter') {
+    return `${String(edge.properties['element'] ?? 'record')} filter: ${String(edge.properties['filterOperator'] ?? '')} this value`;
+  }
+  if (edge.edgeType === 'writesTo') {
+    return restricted === true
+      ? `writes this value (${String(op ?? 'write')}) — on this RESTRICTED picklist the save fails once the value is removed`
+      : `writes this value (${String(op ?? 'write')}) — keeps saving a value no longer in the list`;
+  }
+  return null;
 };
 
 /**
@@ -365,6 +388,282 @@ const aggregateVerdict = (
     if (i.category === 'metadata-blocker') return 'blocking';
   }
   return 'risky';
+};
+
+/** One metadata component that embeds the value without a value-level edge. */
+interface ValueBearingHit {
+  readonly node: Node;
+  readonly category: Category;
+  readonly usage: string;
+  /** What actually happens to this component when the value is removed. */
+  readonly explanation: string;
+  /** Holds the value but does not break: never moves compatibility/verdict. */
+  readonly informational?: true;
+}
+
+const safeDecode = (v: string): string => {
+  try {
+    return decodeURIComponent(v);
+  } catch {
+    return v;
+  }
+};
+
+const sameName = (a: unknown, b: string): boolean =>
+  typeof a === 'string' && a.toLowerCase() === b.toLowerCase();
+
+/**
+ * `<criteria>` blocks of a Lightning page visibility rule that compare
+ * `{!Record.Field}` to the value. A page bound to ANOTHER object
+ * (`<sobjectType>`) is skipped: its `Record.Field` is that object's field.
+ */
+const flexiPageVisibilityMatches = (
+  xml: string,
+  objectApiName: string,
+  fieldApiName: string,
+  value: string,
+): boolean => {
+  const pageObject = /<sobjectType>([^<]*)<\/sobjectType>/.exec(xml)?.[1];
+  if (pageObject !== undefined && pageObject.toLowerCase() !== objectApiName.toLowerCase()) return false;
+  const blocks = xml.match(/<criteria>[\s\S]*?<\/criteria>/g) ?? [];
+  return blocks.some((block) => {
+    const left = /<leftValue>([^<]*)<\/leftValue>/.exec(block)?.[1] ?? '';
+    const right = /<rightValue>([^<]*)<\/rightValue>/.exec(block)?.[1] ?? '';
+    return (
+      new RegExp(`Record\\.${fieldApiName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\}`, 'i').test(left) &&
+      splitCompoundValue(right, ',').includes(value)
+    );
+  });
+};
+
+const decodeXmlEntities = (v: string): string =>
+  v.replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+
+/**
+ * Lightning page related lists (`adminFilters` = `Field|OP|["v1","v2"]`) that
+ * filter on the value. Counted only when the list's `relatedListApiName` is a
+ * child relationship of the field's object, so a same-named field on another
+ * object never matches.
+ */
+const flexiPageRelatedListFilterMatches = (
+  xml: string,
+  childRelationships: ReadonlySet<string>,
+  fieldApiName: string,
+  value: string,
+): boolean => {
+  const instances = xml.match(/<componentInstance>[\s\S]*?<\/componentInstance>/g) ?? [];
+  return instances.some((block) => {
+    const rel = /<name>relatedListApiName<\/name>\s*<value>([^<]*)<\/value>/.exec(block)?.[1];
+    if (rel === undefined || !childRelationships.has(rel.toLowerCase())) return false;
+    const filters = /<name>adminFilters<\/name>([\s\S]*?)<\/componentInstanceProperties>/.exec(block)?.[1] ?? '';
+    const values = [...filters.matchAll(/<value>([^<]*)<\/value>/g)].map((m) => decodeXmlEntities(m[1] ?? ''));
+    return values.some((f) => {
+      const [field, , raw] = f.split('|');
+      if (field === undefined || raw === undefined || field.toLowerCase() !== fieldApiName.toLowerCase()) return false;
+      try {
+        const parsed: unknown = JSON.parse(raw);
+        return Array.isArray(parsed) && parsed.some((v) => v === value);
+      } catch {
+        return splitCompoundValue(raw, ',').includes(value);
+      }
+    });
+  });
+};
+
+/** `<filters>` of a list view that compare the field to the value. */
+const listViewFilterMatches = (xml: string, fieldApiName: string, value: string): boolean => {
+  const blocks = xml.match(/<filters>[\s\S]*?<\/filters>/g) ?? [];
+  return blocks.some((block) => {
+    const field = /<field>([^<]*)<\/field>/.exec(block)?.[1] ?? '';
+    const v = /<value>([^<]*)<\/value>/.exec(block)?.[1] ?? '';
+    return field.split('.').pop()?.toLowerCase() === fieldApiName.toLowerCase() &&
+      splitCompoundValue(v, ',').includes(value);
+  });
+};
+
+/**
+ * Record types (their per-field value lists) and criteria sharing rules are
+ * read from the graph; list view filters and Lightning page visibility rules
+ * from the source of the list views / pages already linked to the field.
+ * `unreadable` names any family whose source could not be opened.
+ */
+const scanValueBearingMetadata = async (
+  ctx: Context,
+  objectApiName: string,
+  fieldApiName: string,
+  value: string,
+  incoming: readonly Edge[],
+): Promise<Result<{ hits: ValueBearingHit[]; unreadable: string[] }, McpError>> => {
+  const hits: ValueBearingHit[] = [];
+  const unreadable = new Set<string>();
+  const children = await scanAllNodesOfTypes(ctx.graph, ['RecordType', 'SharingRule'], {
+    parentId: `CustomObject:${objectApiName}` as ComponentId,
+  });
+  if (!children.ok) return err({ kind: 'internal', message: children.error.message });
+  if (children.value.scanIncomplete) unreadable.add('some record types / sharing rules (scan cap)');
+  for (const node of children.value.nodes) {
+    if (node.type === 'RecordType') {
+      const picklists = node.properties['picklists'];
+      if (!Array.isArray(picklists)) continue;
+      const listed = picklists.some(
+        (p) =>
+          typeof p === 'object' && p !== null &&
+          sameName((p as Record<string, unknown>)['field'], fieldApiName) &&
+          Array.isArray((p as Record<string, unknown>)['values']) &&
+          ((p as Record<string, unknown>)['values'] as unknown[]).some(
+            (v) => typeof v === 'string' && safeDecode(v) === value,
+          ),
+      );
+      if (listed) {
+        hits.push({
+          node,
+          category: 'configuration-only',
+          usage: 'record type lists this value',
+          explanation: `RecordType '${node.apiName}' lists this value; removing it only drops the value from this record type — nothing breaks.`,
+          informational: true,
+        });
+      }
+    } else {
+      const items = node.properties['criteriaItems'];
+      if (!Array.isArray(items)) continue;
+      const matches = items.some((i) => {
+        if (typeof i !== 'object' || i === null) return false;
+        const r = i as Record<string, unknown>;
+        const field = typeof r['field'] === 'string' ? r['field'].split('.').pop() ?? '' : '';
+        return sameName(field, fieldApiName) && typeof r['value'] === 'string' &&
+          splitCompoundValue(r['value'], ',').includes(value);
+      });
+      if (matches) {
+        hits.push({
+          node,
+          category: 'invisible-risk',
+          usage: 'sharing-rule criteria match this value — records holding it stop being shared',
+          explanation: `SharingRule '${node.apiName}' shares records that hold this value; records that no longer hold it stop being shared by this rule.`,
+        });
+      }
+    }
+  }
+  const readSource = async (node: Node, family: string): Promise<string | null> => {
+    try {
+      return await readFile(join(ctx.vaultRoot, node.sourcePath), 'utf-8');
+    } catch {
+      unreadable.add(`${family} (source not readable)`);
+      return null;
+    }
+  };
+  // List views: the ones already linked to the field.
+  const seen = new Set<string>();
+  for (const edge of incoming) {
+    if (!edge.fromId.startsWith('ListView:') || seen.has(edge.fromId)) continue;
+    seen.add(edge.fromId);
+    const nodeResult = await getNodeById(ctx.graph, edge.fromId);
+    if (!nodeResult.ok) return err({ kind: 'internal', message: nodeResult.error.message });
+    const node = nodeResult.value;
+    if (node === null) continue;
+    const xml = await readSource(node, 'list view filters');
+    if (xml !== null && listViewFilterMatches(xml, fieldApiName, value)) {
+      hits.push({
+        node,
+        category: 'configuration-only',
+        usage: 'list view filter',
+        explanation: `ListView '${node.apiName}' filters on this value; that filter term matches nothing once the value is removed.`,
+      });
+    }
+  }
+  // Lightning pages: EVERY page, because neither a visibility rule on
+  // `{!Record.Field}` nor a related-list filter mints an edge to the field.
+  const fields = await scanAllNodesOfTypes(ctx.graph, ['CustomField'], {
+    parentId: `CustomObject:${objectApiName}` as ComponentId,
+  });
+  if (!fields.ok) return err({ kind: 'internal', message: fields.error.message });
+  const childRelationships = new Set<string>();
+  for (const f of fields.value.nodes) {
+    const rn = f.properties['relationshipName'];
+    if (typeof rn === 'string' && rn.length > 0) childRelationships.add(`${rn}__r`.toLowerCase());
+  }
+  const pages = await scanAllNodesOfTypes(ctx.graph, ['FlexiPage']);
+  if (!pages.ok) return err({ kind: 'internal', message: pages.error.message });
+  if (pages.value.scanIncomplete) unreadable.add('some Lightning pages (scan cap)');
+  for (const node of pages.value.nodes) {
+    const xml = await readSource(node, 'Lightning pages');
+    if (xml === null || !xml.toLowerCase().includes(fieldApiName.toLowerCase())) continue;
+    if (flexiPageVisibilityMatches(xml, objectApiName, fieldApiName, value)) {
+      hits.push({
+        node,
+        category: 'configuration-only',
+        usage: 'Lightning page component visibility rule',
+        explanation: `FlexiPage '${node.apiName}' shows or hides a component on this value; that rule stops matching once the value is removed.`,
+      });
+    } else if (flexiPageRelatedListFilterMatches(xml, childRelationships, fieldApiName, value)) {
+      hits.push({
+        node,
+        category: 'configuration-only',
+        usage: 'Lightning page related-list filter',
+        explanation: `FlexiPage '${node.apiName}' filters a related list on this value; that filter term matches nothing once the value is removed.`,
+      });
+    }
+  }
+  return ok({ hits, unreadable: [...unreadable] });
+};
+
+/** One Flow formula resource that uses the value, as rendered in `where`. */
+interface FlowFormulaHit {
+  readonly node: Node;
+  readonly usages: readonly string[];
+}
+
+/**
+ * Flow `<formulas>` resources that test the field against the value. These
+ * carry no edge to the field (a formula's reads reach the graph only through a
+ * DML element that consumes it), so they are read from the Flow node's
+ * `formulaValueRefs` / `formulaComparisons`. `legacyFlows` counts Flow nodes built before that
+ * property existed — their formulas were NOT checked.
+ */
+const scanFlowFormulaResources = async (
+  ctx: Context,
+  qualifiedField: string,
+  value: string,
+): Promise<Result<{ hits: FlowFormulaHit[]; legacyFlows: number; capped: boolean }, McpError>> => {
+  const flows = await scanAllNodesOfTypes(ctx.graph, ['Flow']);
+  if (!flows.ok) return err({ kind: 'internal', message: flows.error.message });
+  const target = qualifiedField.toLowerCase();
+  const hits: FlowFormulaHit[] = [];
+  let legacyFlows = 0;
+  const strings = (v: unknown): string[] =>
+    Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : [];
+  for (const node of flows.value.nodes) {
+    const refs = node.properties['formulaValueRefs'];
+    if (!Array.isArray(refs)) {
+      legacyFlows += 1;
+      continue;
+    }
+    const pairs = node.properties['formulaComparisons'];
+    const comparedIn = new Set(
+      (Array.isArray(pairs) ? pairs : []).flatMap((c) => {
+        if (typeof c !== 'object' || c === null) return [];
+        const cc = c as Record<string, unknown>;
+        return sameName(cc['field'], target) && cc['value'] === value && typeof cc['formula'] === 'string'
+          ? [cc['formula']]
+          : [];
+      }),
+    );
+    const usages: string[] = [];
+    for (const raw of refs) {
+      if (typeof raw !== 'object' || raw === null) continue;
+      const r = raw as Record<string, unknown>;
+      const name = typeof r['name'] === 'string' ? r['name'] : '?';
+      if (comparedIn.has(name)) {
+        usages.push(`formula resource ${name}: compares this field to '${value}'`);
+      } else if (
+        strings(r['fields']).some((f) => f.toLowerCase() === target) &&
+        strings(r['literals']).includes(value)
+      ) {
+        usages.push(`formula resource ${name}: names this field and '${value}' (comparison not proven)`);
+      }
+    }
+    if (usages.length > 0) hits.push({ node, usages });
+  }
+  return ok({ hits, legacyFlows, capped: flows.value.scanIncomplete });
 };
 
 /**
@@ -411,7 +710,7 @@ export const whatIfRemovePicklistValueHandler = async (
   // `properties.dataType` (see field-properties.ts); a missing/legacy
   // value resolves to 'Unknown', which fails the picklist guard below.
   const fieldType = readFieldDataType(nodeResult.value);
-  if (!PICKLIST_TYPES.has(fieldType)) {
+  if (!PICKLIST_DATA_TYPES.has(fieldType)) {
     return err({
       kind: 'invalid-query',
       message: `field ${fieldId} has type '${fieldType}'; expected Picklist or MultiselectPicklist`,
@@ -425,56 +724,38 @@ export const whatIfRemovePicklistValueHandler = async (
   // used to return a `review` verdict byte-identical to a real value's, and
   // the caller's next action is a metadata delete. Resolve the DECLARED value
   // set first — inline, else the field's GlobalValueSet edge.
-  const inlineValues = normalizePicklistValues(
-    nodeResult.value.properties['picklistValues'],
-  );
-  const resolvedValues =
-    inlineValues ?? (await resolveGlobalValueSetValues(ctx, fieldId))?.values ?? null;
+  const check = await checkDeclaredPicklistValue(ctx, nodeResult.value, fieldId, value);
 
   let valueState: 'active' | 'inactive' | 'not-checked';
   let declaredValues: readonly string[] | null;
   const boundaries: string[] = [];
-  if (resolvedValues === null) {
+  if (check.state === 'not-checked') {
     // NOT resolvable. Proceed, but never as though the value was checked.
     valueState = 'not-checked';
     declaredValues = null;
     boundaries.push(notCheckedBoundary(value));
+  } else if (check.state === 'unknown') {
+    // Resolved and NOT present (an empty-but-present value set lands here too,
+    // `Declared values: (none)` — different from `not-checked`). Refuse.
+    return err({
+      kind: 'invalid-query',
+      message: `${check.message} No impact scan was run.`,
+      path: 'value',
+    });
   } else {
-    const match = resolvedValues.find(
-      (v) => v.value.trim().toLowerCase() === value.trim().toLowerCase(),
-    );
-    if (match === undefined) {
-      // Resolved and NOT present. Refuse — and reuse the sibling's matching +
-      // "did you mean" logic rather than writing a second one. Note that an
-      // empty-but-present value set lands here too (`Declared values: (none)`),
-      // which is correct and different from `not-checked`.
-      const mismatch = detectPicklistLiteralMismatch(
-        readFieldApiName(nodeResult.value, fieldId),
-        [value],
-        resolvedValues,
-      );
-      const declaredList =
-        (mismatch?.definedValues ?? resolvedValues)
-          .map((v) => v.value)
-          .join(', ') || '(none)';
-      const didYouMean =
-        mismatch !== null && mismatch.suggestions.length > 0
-          ? ` Did you mean ${mismatch.suggestions
-              .map((sug) => `'${sug}'`)
-              .join(' / ')}?`
-          : '';
-      return err({
-        kind: 'invalid-query',
-        message: `\`${value}\` is not a declared value on \`${fieldId}\`. Declared values: ${declaredList}.${didYouMean} Pass a declared value, or call \`sfi.explain_field\` on this field to list the value set. No impact scan was run.`,
-        path: 'value',
-      });
-    }
-    valueState = match.isActive ? 'active' : 'inactive';
-    declaredValues = resolvedValues.map((v) => v.value);
-    if (!match.isActive) boundaries.push(inactiveValueBoundary(value));
+    valueState = check.match.isActive ? 'active' : 'inactive';
+    declaredValues = check.declared;
+    if (!check.match.isActive) boundaries.push(inactiveValueBoundary(value));
   }
 
   const needles = buildValueNeedles(value);
+  const fieldNode = nodeResult.value;
+  const fieldApiName = fieldId.slice(fieldId.indexOf('.') + 1);
+  const objectApiName = fieldId.slice(CUSTOM_FIELD_PREFIX.length, fieldId.indexOf('.'));
+  const restricted =
+    typeof fieldNode.properties['restricted'] === 'boolean'
+      ? (fieldNode.properties['restricted'] as boolean)
+      : null;
 
   // Walk every incoming edge; for each source node, check whether its
   // searchable text fields contain the value literal.
@@ -488,84 +769,130 @@ export const whatIfRemovePicklistValueHandler = async (
     });
   }
 
-  // Track impacts by componentId so multiple edges from the same source
-  // (e.g., an Apex class with both `readsFrom` and `writesTo`) produce a
-  // single finding.
+  // One finding per component; every usage it makes of the value is listed.
   const impactsById = new Map<ComponentId, WhatIfImpactItem>();
+  const nodeCache = new Map<string, Node | null>();
+  const loadNode = async (id: string): Promise<Result<Node | null, McpError>> => {
+    if (nodeCache.has(id)) return ok(nodeCache.get(id) ?? null);
+    const r = await getNodeById(ctx.graph, id as ComponentId);
+    if (!r.ok) return err({ kind: 'internal', message: `graph query failed: ${r.error.message}` });
+    nodeCache.set(id, r.value);
+    return ok(r.value);
+  };
+  // Components that hold the value but do not break (record types, Flows that
+  // do not run) — reported in `informational`, never in the verdict.
+  const informationalIds = new Set<ComponentId>();
+  const addImpact = (
+    node: Node,
+    category: Category,
+    confidence: ConfidenceLevel,
+    usages: readonly string[],
+    hit?: Pick<ValueBearingHit, 'explanation' | 'informational'>,
+  ): void => {
+    const prior = impactsById.get(node.id);
+    const status = typeof node.properties['status'] === 'string' ? node.properties['status'] : null;
+    const inactiveFlow = node.type === 'Flow' && status !== null && status !== 'Active';
+    if (inactiveFlow || hit?.informational === true) informationalIds.add(node.id);
+    const where = [...(prior?.where ?? []), ...usages.filter((u) => !(prior?.where ?? []).includes(u))];
+    impactsById.set(node.id, {
+      category: inactiveFlow ? 'configuration-only' : (prior?.category ?? category),
+      componentId: node.id,
+      componentType: node.type,
+      apiName: node.apiName,
+      confidence: prior?.confidence ?? confidence,
+      explanation: inactiveFlow
+        ? `Flow '${node.apiName}' uses this value but is ${status} and does not run; update it before reactivating.`
+        : (prior?.explanation ?? hit?.explanation ?? buildExplanation(node, value)),
+      ...(where.length > 0 ? { where } : {}),
+      ...(inactiveFlow && status !== null ? { status } : {}),
+    });
+  };
+
   for (const edge of edgesResult.value) {
     if (edge.edgeType === 'parentOf') continue;
-    const fromResult = await getNodeById(ctx.graph, edge.fromId);
-    if (!fromResult.ok) {
-      return err({
-        kind: 'internal',
-        message: `graph query failed: ${fromResult.error.message}`,
-      });
-    }
-    const fromNode = fromResult.value;
+    const fromLoaded = await loadNode(edge.fromId);
+    if (!fromLoaded.ok) return fromLoaded;
+    const fromNode = fromLoaded.value;
     if (fromNode === null) continue;
+
+    // A condition that tests the field: attribute the use to its FIRER (the
+    // Flow / rule that runs), naming where and how it compares the value.
+    if (fromNode.type === 'ConditionalContext') {
+      const usages = conditionUsages(fromNode, fieldId, fieldApiName, value);
+      if (usages.length === 0) continue;
+      const firerId = fromNode.parentId ?? (edge.properties['firerId'] as string | undefined) ?? null;
+      const firer = firerId === null ? null : await loadNode(firerId);
+      if (firer !== null && !firer.ok) return firer;
+      const owner = firer?.value ?? fromNode;
+      addImpact(owner, classifyCategory(edge, owner), edge.confidence, usages);
+      continue;
+    }
+
+    // A field write (Flow / workflow / approval) or Flow record filter carrying the value as a literal.
+    if (edgeLiteralValues(edge).some((v) => literalNamesValue(v, value))) {
+      const usage = edgeUsage(edge, restricted);
+      addImpact(fromNode, classifyCategory(edge, fromNode), edge.confidence, usage === null ? [] : [usage]);
+      continue;
+    }
+
     if (impactsById.has(fromNode.id)) continue;
-    const texts = extractHaystackTexts(fromNode);
-    const directMatch = containsAnyNeedle(texts, needles);
+    if (containsAnyNeedle(extractHaystackTexts(fromNode), needles)) {
+      addImpact(fromNode, classifyCategory(edge, fromNode), edge.confidence, []);
+      continue;
+    }
 
-    // R2-1: a Flow record-create/update step that assigns this exact value
-    // to the field as a LITERAL (`<stringValue>…</stringValue>`) is a
-    // destructive blocker the text-haystack scan would miss — the
-    // assignment value lives on the `writesTo` edge, not in any of the
-    // node's scanned text properties. An `<elementReference>` assignment
-    // (kind 'reference') is NOT a literal and is intentionally skipped.
-    const assignMatch = edgeAssignsValueLiterally(edge, value);
-
-    // For Flow / WorkflowRule / etc. that route their condition through
-    // a v2.0a ConditionalContext, the value match may live on the CC
-    // rather than the firer itself. Check the CC for these firers.
-    let conditionalMatch = false;
+    // Firers whose own edge reached the field: their conditions may still
+    // carry the value (older vaults route every Flow condition this way).
     if (
       fromNode.type === 'Flow' ||
       fromNode.type === 'WorkflowRule' ||
       fromNode.type === 'ValidationRule' ||
       fromNode.type === 'ApprovalProcess'
     ) {
-      const ccResult = await findValueInConditionalContexts(
-        ctx,
-        fromNode.id,
-        value,
-      );
-      if (!ccResult.ok) {
-        return err({ kind: 'internal', message: ccResult.error });
+      const ccEdges = await listEdges(ctx.graph, fromNode.id, { direction: 'out', edgeType: 'firesWhen' });
+      if (!ccEdges.ok) return err({ kind: 'internal', message: ccEdges.error.message });
+      const usages: string[] = [];
+      for (const ccEdge of ccEdges.value) {
+        const cc = await loadNode(ccEdge.toId);
+        if (!cc.ok) return cc;
+        if (cc.value !== null) usages.push(...conditionUsages(cc.value, fieldId, fieldApiName, value));
       }
-      if (ccResult.value.length > 0) conditionalMatch = true;
+      if (usages.length > 0) addImpact(fromNode, classifyCategory(edge, fromNode), edge.confidence, usages);
     }
-
-    if (!directMatch && !conditionalMatch && !assignMatch) continue;
-
-    const category = classifyCategory(edge, fromNode);
-    impactsById.set(fromNode.id, {
-      category,
-      componentId: fromNode.id,
-      componentType: fromNode.type,
-      apiName: fromNode.apiName,
-      confidence: edge.confidence,
-      explanation: buildExplanation(fromNode, value),
-    });
   }
 
-  // Also walk ConditionalContext nodes directly: a CC whose
-  // `properties.fieldRefs` includes this field and whose expression
-  // mentions the value belongs in the impact list even if the firer's
-  // own edge type didn't surface above.
-  // We get there via the field's incoming firesWhen edges (the field is
-  // never the firesWhen target — that's the CC — so this is a no-op for
-  // the standard topology) and via direct property scan on each
-  // CC referenced by an incoming edge: the loop above already covers
-  // them because every ConditionalContext that references the field
-  // emits an edge to the firer, which emits an edge back to the field.
+  // Flow formula resources: no edge reaches the field, read from the node.
+  const notChecked = [...NOT_CHECKED_FAMILIES];
+  const formulaScan = await scanFlowFormulaResources(ctx, `${objectApiName}.${fieldApiName}`, value);
+  if (!formulaScan.ok) return formulaScan;
+  for (const hit of formulaScan.value.hits) {
+    addImpact(hit.node, 'metadata-blocker', 'heuristic', hit.usages);
+  }
+  if (formulaScan.value.legacyFlows > 0) {
+    notChecked.push(
+      `Flow formula resources in ${formulaScan.value.legacyFlows} Flow(s) built before they were extracted (re-run refresh)`,
+    );
+  }
+  if (formulaScan.value.capped) notChecked.push('Flow formula resources past the scan cap');
 
-  // Deterministic ordering.
-  const sortedImpacts = [...impactsById.values()].sort((a, b) =>
+  // Metadata that embeds the literal but carries no value-level edge: record
+  // types (graph property), criteria sharing rules, list view filters and
+  // Lightning page visibility rules (source scan).
+  const extra = await scanValueBearingMetadata(ctx, objectApiName, fieldApiName, value, edgesResult.value);
+  if (!extra.ok) return extra;
+  for (const hit of extra.value.hits) {
+    addImpact(hit.node, hit.category, 'heuristic', [hit.usage], hit);
+  }
+  notChecked.push(...extra.value.unreadable);
+
+  // Deterministic ordering; informational entries never reach the verdict.
+  const sorted = [...impactsById.values()].sort((a, b) =>
     a.componentId < b.componentId ? -1
       : a.componentId > b.componentId ? 1
       : 0,
   );
+  const sortedImpacts = sorted.filter((i) => !informationalIds.has(i.componentId));
+  const informational = sorted.filter((i) => informationalIds.has(i.componentId));
 
   const compatibility: Compatibility =
     sortedImpacts.length === 0 ? 'review' : 'breaking';
@@ -578,7 +905,9 @@ export const whatIfRemovePicklistValueHandler = async (
     'Picklist-value removal impact',
   );
   const rawVerdict = aggregateVerdict(sortedImpacts);
-  const verdict = rawVerdict === 'safe' && coverageCaveat !== undefined
+  // `safe` would claim more than was read: `notChecked` always names families
+  // (report filters, path assistants, …) that can still hold the value.
+  const verdict = rawVerdict === 'safe' && (coverageCaveat !== undefined || notChecked.length > 0)
     ? 'review'
     : rawVerdict;
 
@@ -589,9 +918,12 @@ export const whatIfRemovePicklistValueHandler = async (
       fieldType,
       compatibility,
       impacts: sortedImpacts,
+      informational,
       verdict,
       valueState,
       declaredValues,
+      restricted,
+      notChecked,
       ...(boundaries.length > 0 ? { boundaries } : {}),
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
       trust: {
@@ -608,6 +940,7 @@ export const whatIfRemovePicklistValueHandler = async (
         },
         limitations: [
           DISCLOSURE,
+          `Not checked (absence there is not "none"): ${notChecked.join('; ')}.`,
           ...(coverageCaveat !== undefined ? [coverageCaveat.message] : []),
         ],
       },

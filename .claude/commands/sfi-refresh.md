@@ -5,6 +5,15 @@ argument-hint: "[--target-org ALIAS] [--no-pull] [--types TYPE,TYPE,...]"
 
 You are about to refresh the SfIntelligence vault.
 
+## Running the CLI
+
+The plugin installs the MCP server, not the `sfi` command. Before the first
+command, run `command -v sfi` via the Bash tool. If it prints a path, run the
+commands below as written. If it prints nothing, run every `sfi …` command
+below as `npx -y sf-intelligence@0.4.0 …` instead, with the same arguments.
+The Bash tool has no terminal, so the CLI cannot prompt: always pass the
+flags it would otherwise ask for.
+
 ## What to do
 
 1. Load `.claude/skills/refreshing-the-org-vault/SKILL.md` — it owns
@@ -25,11 +34,11 @@ You are about to refresh the SfIntelligence vault.
 - `--target-org <alias>` — override the `targetOrg` stored in
   `org-kb/meta/config.json` for this run only. The skill explains
   when to also offer to update the persisted config.
-- `--no-pull` — skip `sf project retrieve` and re-extract from the
-  existing `org-kb/source/` tree. Only forward this when the user
-  explicitly says the source is already populated.
+- `--no-pull` — offline rebuild: re-extract from the existing
+  `org-kb/source/` tree without contacting the org. Only forward this
+  when the user explicitly says the source is already populated.
 - `--types <CSV>` — restrict the refresh to a comma-separated subset
-  of the nine v0.1 metadata types (e.g.
+  of metadata types (e.g.
   `--types CustomObject,CustomField,ValidationRule`). The filter is
   by type, not by individual component.
 
@@ -46,9 +55,12 @@ Stop and report cleanly to the user when:
 
 - `org-kb/meta/config.json` is missing — the user has not run
   `/sfi-init`. Tell them to run it first.
-- `sf org list --json` shows the target alias is not `Connected`,
-  or `sf` itself is not on `PATH`. Surface the skill's
-  re-authentication message; do not retry.
+- The target alias (or username) is absent from
+  `sf org list --skip-connection-status --json`, or `sf` itself is not
+  on `PATH`. That list is local and carries no connection status, so
+  gate on presence only — an expired login surfaces as the retrieve's
+  auth error. Surface the skill's re-authentication message; do not
+  retry.
 - The refresh exits with `status: 'failed'`. Surface the `Fatal:`
   line verbatim per the skill's failure-modes table.
 - The refresh exits with `status: 'partial'`. List the per-file

@@ -87,7 +87,6 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { USAGE_EDGE_TYPES, walkUpstreamUsage } from './apex-reachability.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
 import {
   buildUnscannedNodesNote,
@@ -96,6 +95,12 @@ import {
 } from './quality-scan-coverage.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { fullScanTruncationNote } from './scan-cap.js';
+import {
+  findCoveringTests,
+  TEST_REACH_EDGE_TYPES,
+  TRIGGER_HOP_EDGE_TYPES,
+  type CoverageVia,
+} from './test-coverage-reach.js';
 
 /** Inclusive upper bound on `classFilter` array length. */
 const CLASS_FILTER_MAX_SIZE = 500;
@@ -119,6 +124,9 @@ const TEST_COVERAGE_GAPS_PAYLOAD_BUDGET_BYTES = 38_000;
  */
 const MAX_COVERAGE_DEPTH = 3;
 
+/** Edge types the shared coverage walk follows (see test-coverage-reach.ts). */
+const WALKED_EDGE_TYPES: readonly EdgeType[] = [...TEST_REACH_EDGE_TYPES, ...TRIGGER_HOP_EDGE_TYPES];
+
 /** Verbatim test-coverage honesty disclosures. */
 const MEANINGFUL_ASSERTION_DISCLOSURE =
   'the meaningful-assertion heuristic recognizes System.assertEquals(expected, actual) patterns with distinct expected/actual tokens, plus System.assert(condition) with a non-literal condition. Assertions via helper methods or framework wrappers are invisible. A class flagged fake-coverage may actually have meaningful tests via a custom assertion helper.';
@@ -133,7 +141,7 @@ const DYNAMIC_DISPATCH_DISCLOSURE =
  */
 const UNCOVERED_RECOMMENDATION =
   `No test class reaches this class through any usage edge within depth ${MAX_COVERAGE_DEPTH} ` +
-  `(walked: ${USAGE_EDGE_TYPES.join(', ')}). Coverage via dynamic dispatch (Type.forName) or a ` +
+  `(walked: ${TEST_REACH_EDGE_TYPES.join(', ')}, plus test DML on an object whose trigger reaches it). Coverage via dynamic dispatch (Type.forName) or a ` +
   `chain longer than ${MAX_COVERAGE_DEPTH} hops is still invisible — confirm against a real test ` +
   'run before writing a new test.';
 
@@ -197,6 +205,8 @@ export interface CoveringTestClass {
   readonly confidence: ConfidenceLevel;
   /** The edge types traversed on that path, de-duplicated and sorted. */
   readonly viaEdgeTypes: readonly EdgeType[];
+  /** `via-trigger`: the test writes the object whose trigger reaches this class (heuristic). */
+  readonly via: CoverageVia;
 }
 
 export interface TestCoverageGapEntry {
@@ -319,26 +329,24 @@ const collectCoveringTestClasses = async (
   targetId: ComponentId,
   testClassIds: ReadonlySet<ComponentId>,
 ): Promise<Result<readonly CoveringTestClass[], string>> => {
-  // The shared usage walk (D-1): every edge type EXCEPT `parentOf` and
-  // `grantedBy`, not `callsApex` alone. Measured on this org, 20 of the 46
-  // classes reported `uncovered` had an incoming edge from an @isTest class,
-  // 11 of them a `declared` `dispatchesAsync` — a batch class enqueued by its
-  // own test. It also replaces the per-frontier-node `listEdges` N+1 with one
-  // query per DEPTH LEVEL.
-  const walk = await walkUpstreamUsage(ctx, targetId, {
+  // DEV-05 / ARCH-04: the ONE shared coverage walk (test-coverage-reach.ts) —
+  // call/async/reference/inheritance in-edges from Apex, tests as sinks, plus
+  // the trigger hop (a test that writes an object whose trigger reaches this
+  // class). `testClassIds` is kept as a guard: only roster tests count.
+  const walk = await findCoveringTests(ctx.graph, targetId, {
     maxDepth: MAX_COVERAGE_DEPTH,
-    edgeTypes: USAGE_EDGE_TYPES,
+    vaultRoot: ctx.vaultRoot,
   });
   if (!walk.ok) return err(walk.error);
   const covering: CoveringTestClass[] = [];
-  for (const [id, hit] of walk.value) {
-    if (id === targetId) continue;
-    if (!testClassIds.has(id)) continue;
+  for (const hit of walk.value.values()) {
+    if (!testClassIds.has(hit.testId)) continue;
     covering.push({
-      id,
+      id: hit.testId,
       depth: hit.depth,
       confidence: hit.confidence,
       viaEdgeTypes: hit.viaEdgeTypes,
+      via: hit.via,
     });
   }
   covering.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
@@ -476,7 +484,7 @@ export const testCoverageGapsHandler = async (
         coverageStatus: 'uncovered',
         coveringTestClassIds: [],
         coveringTestClasses: [],
-        walkedEdgeTypes: USAGE_EDGE_TYPES,
+        walkedEdgeTypes: WALKED_EDGE_TYPES,
         fakeAssertions: [],
         recommendedAction: recommendationFor('uncovered', 0),
       });
@@ -525,7 +533,7 @@ export const testCoverageGapsHandler = async (
       coverageStatus: status,
       coveringTestClassIds: covering.map((t) => t.id),
       coveringTestClasses: covering,
-      walkedEdgeTypes: USAGE_EDGE_TYPES,
+      walkedEdgeTypes: WALKED_EDGE_TYPES,
       fakeAssertions,
       recommendedAction: recommendationFor(status, covering.length),
     });

@@ -28,7 +28,7 @@ import type { Plane } from './intent-router.js';
 import { fuseScoresRrf, staticEmbedRanking, staticIndexAvailable } from './static-embed.js';
 import { CATEGORIES } from './tools/capabilities.js';
 import { stripCorpusBoilerplate } from './tools/corpus-boilerplate.js';
-import { V01_TOOLS } from './tools/index.js';
+import { V01_TOOLS, retrievalDocument } from './tools/index.js';
 
 /** Funnel-local confidence in the shortlist itself (I2a-calibrated band). */
 export type FunnelConfidence = 'high' | 'medium' | 'low';
@@ -66,6 +66,12 @@ export interface ToolCandidate {
   readonly suggestedArgs?: Readonly<Record<string, unknown>>;
   /** True when this row was promoted from the deterministic regex route hint. */
   readonly fromRoute?: boolean;
+  /**
+   * Required args of this tool that route_question could NOT bind (no resolved
+   * component, or no declared key fits it). Present only when non-empty: the
+   * call is not executable as-is — resolve / ask for these first.
+   */
+  readonly missingArgs?: readonly string[];
   /**
    * Raw PRE-FUSION cosine similarity (router-v2 P2 §4). For a funnel-scored row
    * this equals `score` at scoring time; when route_question fuses the regex
@@ -673,7 +679,9 @@ export const buildToolDocs = (): Map<string, string> => {
     // clean HEAD the surviving legitimate prose still shifted 14 terms' df and
     // moved 137 top-8 orderings. The pinned suites do not observe that; they
     // are a sample, not a stability metric.
-    const indexedDescription = stripCorpusBoilerplate(tool.description);
+    // The long-form `reference` (when a tool has one) is the retrieval
+    // document; the short advertised `description` is the host contract only.
+    const indexedDescription = stripCorpusBoilerplate(retrievalDocument(tool));
     docs.set(tool.name, `${nameWords} ${nameWords} ${indexedDescription} ${keywords} ${utterances}`);
   }
   for (const cat of CATEGORIES) {

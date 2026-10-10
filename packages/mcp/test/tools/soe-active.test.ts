@@ -3,6 +3,8 @@
 import type { Node } from '@sf-intelligence/contracts';
 
 import {
+  buildInactiveSummary,
+  INACTIVE_NAMES_CAP,
   isActiveSoeFirer,
   recordInactiveSoeFirer,
   skipInactiveSoeFirer,
@@ -187,5 +189,44 @@ describe('inactive collector', () => {
         inactiveReason: 'isActive: false',
       },
     ]);
+  });
+});
+
+describe('buildInactiveSummary names', () => {
+  // FAIL-BEFORE/PASS-AFTER: the default (roster omitted) summary carried only
+  // counts, so "which automations on this object look relevant but do not run"
+  // could not be answered without a second call the host rarely makes.
+  it('names each inactive component even when the roster is omitted', () => {
+    const collector = new Map();
+    recordInactiveSoeFirer(
+      collector,
+      makeNode({ id: 'Flow:Invoice_Draft_Flow', type: 'Flow', apiName: 'Invoice_Draft_Flow', properties: { status: 'Draft' } }),
+    );
+    recordInactiveSoeFirer(
+      collector,
+      makeNode({ id: 'WorkflowRule:Invoice__c.Old_Rule', type: 'WorkflowRule', apiName: 'Invoice__c.Old_Rule', properties: { active: false } }),
+    );
+    const summary = buildInactiveSummary(sortedInactiveConfigured(collector), false, false);
+    expect(summary.included).toBe(false);
+    expect(summary.names).toEqual([
+      'Flow:Invoice_Draft_Flow (status: Draft)',
+      'WorkflowRule:Invoice__c.Old_Rule (active: false)',
+    ]);
+    expect(summary.namesTruncated).toBe(false);
+  });
+
+  it('caps the names list and says so', () => {
+    const collector = new Map();
+    for (let i = 0; i < INACTIVE_NAMES_CAP + 3; i += 1) {
+      const name = `Flow_${String(i).padStart(2, '0')}`;
+      recordInactiveSoeFirer(
+        collector,
+        makeNode({ id: `Flow:${name}`, type: 'Flow', apiName: name, properties: { status: 'Obsolete' } }),
+      );
+    }
+    const summary = buildInactiveSummary(sortedInactiveConfigured(collector), false, false);
+    expect(summary.total).toBe(INACTIVE_NAMES_CAP + 3);
+    expect(summary.names).toHaveLength(INACTIVE_NAMES_CAP);
+    expect(summary.namesTruncated).toBe(true);
   });
 });

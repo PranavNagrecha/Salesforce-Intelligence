@@ -266,6 +266,158 @@ export const buildApexDmlIndex = (
   return built;
 };
 
+/** What reading one Apex node for DML produced. */
+type NodeDmlOutcome =
+  | { readonly kind: 'unreadable' }
+  | { readonly kind: 'skipped' }
+  | { readonly kind: 'unparsed' }
+  | { readonly kind: 'parsed'; readonly facts: readonly ApexDmlFact[] };
+
+/**
+ * The DML facts of ONE Apex node — the per-file body shared by the vault-wide
+ * index and {@link apexDmlFactsFor}, so a scoped read attributes exactly like
+ * the full index does.
+ */
+const factsForNode = async (
+  ctx: Context,
+  node: Node,
+  objectByLower: ReadonlyMap<string, string>,
+  wanted: ReadonlySet<string>,
+  prefilter: RegExp,
+): Promise<NodeDmlOutcome> => {
+  if (node.sourcePath === null || node.sourcePath.length === 0) return { kind: 'unreadable' };
+  let source: string;
+  try {
+    source = await readFile(resolveVaultSourcePath(ctx.vaultRoot, node.sourcePath), 'utf-8');
+  } catch {
+    return { kind: 'unreadable' };
+  }
+  if (!prefilter.test(source)) return { kind: 'skipped' };
+  const kind = node.type === 'ApexTrigger' ? 'trigger' : 'class';
+  const result = await parseApexStructure(source, { kind });
+  if (!result.parsed || result.structure === null) {
+    return { kind: 'unparsed' };
+  }
+  const structure = result.structure;
+  const facts: ApexDmlFact[] = [];
+  // A class whose own declaration says @isTest is a test even when the node
+  // property was not recorded.
+  if (structure.annotations.some((a) => /^@istest\b/i.test(a))) return { kind: 'parsed', facts };
+  const code = stripApexComments(source);
+  const lines = code.split('\n');
+  const rawLines = source.split('\n');
+  const namesIn = (text: string): string[] => {
+    const found = new Set<string>();
+    for (const m of text.matchAll(IDENT)) {
+      const hitName = objectByLower.get(m[0].toLowerCase());
+      if (hitName !== undefined) found.add(hitName);
+    }
+    return [...found].sort();
+  };
+  // `EventBus.publish(…)` publishes a platform event: an insert of that event type.
+  const publishSites: typeof structure.dmlSites = wanted.has('insert')
+    ? [...code.matchAll(/\bEventBus\s*\.\s*publish\s*\(/gi)].map((m) => {
+        const line = code.slice(0, m.index ?? 0).split('\n').length;
+        const owner = structure.methods.find((x) => x.line <= line && x.endLine >= line && x.hasBody !== false) ?? null;
+        return {
+          line,
+          operation: 'insert' as const,
+          form: 'database-method' as const,
+          resultDiscarded: null,
+          allOrNone: null,
+          accessLevel: null,
+          inMethod: owner?.name ?? null,
+          inLoopBody: false,
+          loopLine: null,
+        };
+      })
+    : [];
+  const publishSet = new Set<object>(publishSites);
+  for (const site of [...structure.dmlSites, ...publishSites]) {
+    if (!wanted.has(site.operation)) continue;
+    const isPublish = publishSet.has(site);
+    const method = enclosingMethod(structure.methods, site.inMethod, site.line);
+    const scopeText = method === null ? code : lines.slice(method.line - 1, method.endLine).join('\n');
+    const objectsNamed = namesIn(scopeText);
+    const objectsQueried = [
+      ...new Set(
+        structure.soqlSites
+          .filter((q) => (method === null ? q.inMethod === null : q.line >= method.line && q.line <= method.endLine))
+          .flatMap((q) => q.objects)
+          .map((o) => objectByLower.get(o.toLowerCase()) ?? o),
+      ),
+    ].sort();
+    const statement = statementAt(lines, site.line);
+    const operand = isPublish ? publishOperand(statement) : dmlOperand(statement, site.form);
+    const typeNames = operand === null ? [] : operandTypeNames(operand, scopeText, code);
+    const operandGeneric = typeNames.some((t) => /^sobject$/i.test(t));
+    const objectsTyped = [
+      ...new Set(typeNames.map((t) => objectByLower.get(t.toLowerCase())).filter((t): t is string => t !== undefined)),
+    ].sort();
+    facts.push({
+      componentId: node.id,
+      componentType: node.type === 'ApexTrigger' ? 'ApexTrigger' : 'ApexClass',
+      sourcePath: node.sourcePath,
+      line: site.line,
+      operation: site.operation,
+      form: isPublish ? 'event-publish' : site.form,
+      method: site.inMethod,
+      methodAnnotations: method?.annotations ?? [],
+      methodVisibility: method?.visibility ?? null,
+      sharing: structure.sharing,
+      statement: (statementAt(rawLines, site.line) || statement).slice(0, 160),
+      objectsNamed,
+      objectsQueried,
+      objectsTyped,
+      operandGeneric,
+      generic:
+        operandGeneric ||
+        (objectsTyped.length === 0 && objectsNamed.length === 0 && objectsQueried.length === 0 && GENERIC_MARKERS.test(scopeText)),
+      accessLevel: site.accessLevel,
+      triggerObject: structure.trigger?.object ?? null,
+      attributionScope: method === null ? 'file' : 'method',
+    });
+  }
+  return { kind: 'parsed', facts };
+};
+
+const prefilterFor = (ops: readonly ApexDmlOperation[]): RegExp =>
+  new RegExp(`\\b(${ops.map((o) => OPERATION_WORDS[o]).join('|')})\\b${ops.includes('insert') ? '|EventBus\\s*\\.\\s*publish' : ''}`, 'i');
+
+/**
+ * DML facts for a FEW named Apex nodes (a trigger and the handler classes it
+ * calls), without building the vault-wide index. Same attribution as
+ * {@link buildApexDmlIndex}; test classes are skipped.
+ */
+export const apexDmlFactsFor = async (
+  ctx: Context,
+  nodes: readonly Node[],
+  operations: readonly ApexDmlOperation[],
+): Promise<
+  Result<
+    { facts: readonly ApexDmlFact[]; unreadable: readonly string[]; unparsed: readonly string[] },
+    { message: string }
+  >
+> => {
+  const scan = await scanAllNodesOfTypes(ctx.graph, ['CustomObject']);
+  if (!scan.ok) return scan;
+  const objectByLower = new Map(scan.value.nodes.map((n) => [n.apiName.toLowerCase(), n.apiName] as const));
+  const ops = [...new Set(operations)].sort();
+  const wanted = new Set<string>(ops);
+  const prefilter = prefilterFor(ops);
+  const facts: ApexDmlFact[] = [];
+  const unreadable: string[] = [];
+  const unparsed: string[] = [];
+  for (const node of nodes) {
+    if (node.properties['isTest'] === true) continue;
+    const outcome = await factsForNode(ctx, node, objectByLower, wanted, prefilter);
+    if (outcome.kind === 'unreadable') unreadable.push(node.id);
+    else if (outcome.kind === 'unparsed') unparsed.push(node.id);
+    else if (outcome.kind === 'parsed') facts.push(...outcome.facts);
+  }
+  return ok({ facts, unreadable: unreadable.sort(), unparsed: unparsed.sort() });
+};
+
 const build = async (
   ctx: Context,
   ops: readonly ApexDmlOperation[],
@@ -280,110 +432,19 @@ const build = async (
   }
   apex.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
   const wanted = new Set<string>(ops);
-  const prefilter = new RegExp(`\\b(${ops.map((o) => OPERATION_WORDS[o]).join('|')})\\b${ops.includes('insert') ? '|EventBus\\s*\\.\\s*publish' : ''}`, 'i');
+  const prefilter = prefilterFor(ops);
 
   const facts: ApexDmlFact[] = [];
   const unreadable: string[] = [];
   const unparsed: string[] = [];
   let parsed = 0;
   for (const node of apex) {
-    if (node.sourcePath === null || node.sourcePath.length === 0) {
-      unreadable.push(node.id);
-      continue;
-    }
-    let source: string;
-    try {
-      source = await readFile(resolveVaultSourcePath(ctx.vaultRoot, node.sourcePath), 'utf-8');
-    } catch {
-      unreadable.push(node.id);
-      continue;
-    }
-    if (!prefilter.test(source)) continue;
-    const kind = node.type === 'ApexTrigger' ? 'trigger' : 'class';
-    const result = await parseApexStructure(source, { kind });
-    if (!result.parsed || result.structure === null) {
-      unparsed.push(node.id);
-      continue;
-    }
-    parsed += 1;
-    const structure = result.structure;
-    // A class whose own declaration says @isTest is a test even when the node
-    // property was not recorded.
-    if (structure.annotations.some((a) => /^@istest\b/i.test(a))) continue;
-    const code = stripApexComments(source);
-    const lines = code.split('\n');
-    const rawLines = source.split('\n');
-    const namesIn = (text: string): string[] => {
-      const found = new Set<string>();
-      for (const m of text.matchAll(IDENT)) {
-        const hitName = objectByLower.get(m[0].toLowerCase());
-        if (hitName !== undefined) found.add(hitName);
-      }
-      return [...found].sort();
-    };
-    // `EventBus.publish(…)` publishes a platform event: an insert of that event type.
-    const publishSites: typeof structure.dmlSites = wanted.has('insert')
-      ? [...code.matchAll(/\bEventBus\s*\.\s*publish\s*\(/gi)].map((m) => {
-          const line = code.slice(0, m.index ?? 0).split('\n').length;
-          const owner = structure.methods.find((x) => x.line <= line && x.endLine >= line && x.hasBody !== false) ?? null;
-          return {
-            line,
-            operation: 'insert' as const,
-            form: 'database-method' as const,
-            resultDiscarded: null,
-            allOrNone: null,
-            accessLevel: null,
-            inMethod: owner?.name ?? null,
-            inLoopBody: false,
-            loopLine: null,
-          };
-        })
-      : [];
-    const publishSet = new Set<object>(publishSites);
-    for (const site of [...structure.dmlSites, ...publishSites]) {
-      if (!wanted.has(site.operation)) continue;
-      const isPublish = publishSet.has(site);
-      const method = enclosingMethod(structure.methods, site.inMethod, site.line);
-      const scopeText = method === null ? code : lines.slice(method.line - 1, method.endLine).join('\n');
-      const objectsNamed = namesIn(scopeText);
-      const objectsQueried = [
-        ...new Set(
-          structure.soqlSites
-            .filter((q) => (method === null ? q.inMethod === null : q.line >= method.line && q.line <= method.endLine))
-            .flatMap((q) => q.objects)
-            .map((o) => objectByLower.get(o.toLowerCase()) ?? o),
-        ),
-      ].sort();
-      const statement = statementAt(lines, site.line);
-      const operand = isPublish ? publishOperand(statement) : dmlOperand(statement, site.form);
-      const typeNames = operand === null ? [] : operandTypeNames(operand, scopeText, code);
-      const operandGeneric = typeNames.some((t) => /^sobject$/i.test(t));
-      const objectsTyped = [
-        ...new Set(typeNames.map((t) => objectByLower.get(t.toLowerCase())).filter((t): t is string => t !== undefined)),
-      ].sort();
-      facts.push({
-        componentId: node.id,
-        componentType: node.type === 'ApexTrigger' ? 'ApexTrigger' : 'ApexClass',
-        sourcePath: node.sourcePath,
-        line: site.line,
-        operation: site.operation,
-        form: isPublish ? 'event-publish' : site.form,
-        method: site.inMethod,
-        methodAnnotations: method?.annotations ?? [],
-        methodVisibility: method?.visibility ?? null,
-        sharing: structure.sharing,
-        statement: (statementAt(rawLines, site.line) || statement).slice(0, 160),
-        objectsNamed,
-        objectsQueried,
-        objectsTyped,
-        operandGeneric,
-        generic:
-          operandGeneric ||
-          (objectsTyped.length === 0 && objectsNamed.length === 0 && objectsQueried.length === 0 && GENERIC_MARKERS.test(scopeText)),
-        accessLevel: site.accessLevel,
-        triggerObject: structure.trigger?.object ?? null,
-        attributionScope: method === null ? 'file' : 'method',
-      });
+    const outcome = await factsForNode(ctx, node, objectByLower, wanted, prefilter);
+    if (outcome.kind === 'unreadable') unreadable.push(node.id);
+    else if (outcome.kind === 'unparsed') unparsed.push(node.id);
+    else if (outcome.kind === 'parsed') {
+      parsed += 1;
+      facts.push(...outcome.facts);
     }
   }
   facts.sort((a, b) => (a.componentId < b.componentId ? -1 : a.componentId > b.componentId ? 1 : a.line - b.line));

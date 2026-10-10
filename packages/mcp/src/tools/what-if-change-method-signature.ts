@@ -157,6 +157,7 @@ import {
 } from './coverage-trust.js';
 import { firstNonEmpty } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
+import { unmodeledReferrerKinds, verdictHedgingReferrerKinds } from './referrer-coverage.js';
 
 
 /** Canonical id prefix for the ApexClass node type. */
@@ -406,7 +407,7 @@ export interface WhatIfChangeMethodSignatureOutput {
  * dispatch) so the test suite can lock the phrasing.
  */
 const DISCLOSURE =
-  "the method name is CHECKED against the class's own source before any caller is enumerated: a name the parsed class does not declare (and cannot inherit) is REFUSED, not answered, and when the source could not be read or parsed `methodVerification.verified` is false and the headline is `unknown` rather than `safe` - so an empty caller list never doubles as \"that method does not exist\". caller confidence varies by source: Apex and Visualforce callers come from the heuristic apex-scanner (regex/token, no AST) and are reported at heuristic confidence (may include false positives); Flow callers are parsed out of the Flow XML <actionCalls> (confidence: parsed); LWC/Aura callers come from the declarative @salesforce/apex import (confidence: declared). Dynamic dispatch via Type.forName + invoke is invisible to all of them. Test classes are identified in ONE way that actually works: an incoming `callsApex` edge from a class whose `properties.isTest` is true. The `coversTest` edge this tool ALSO walks is declared in the contract but is emitted by NO extractor, graph-build mint, or enricher in this product (see `UNPRODUCED_EDGE_TYPES`), so on a real vault that walk ALWAYS returns nothing - Salesforce does not declare test-to-class coverage anywhere in the metadata source format (coverage is a RUNTIME artifact of a test run). Read an empty `testClassesNeedingUpdate` as \"test-coverage mapping UNAVAILABLE for this class\", never as \"no tests cover this class\": a test class that exercises the target only indirectly - through a helper, a trigger, or dynamic dispatch - has no `callsApex` edge to it and is invisible here. When an Apex caller's edge was AST-extracted, `callerMethods` names which method(s) of that caller hold a call-site to THIS specific method (enrichment only — overloaded callers collapse to one NAME, so every caller is still flagged for human review at class granularity and the verdict is unchanged); absent callerMethods means the call-site method is unknown (heuristic scanner, Flow, or LWC/Aura caller).";
+  "the method name is CHECKED against the class's own source before any caller is enumerated: a name the parsed class does not declare (and cannot inherit) is REFUSED, not answered, and when the source could not be read or parsed `methodVerification.verified` is false and the headline is `unknown` rather than `safe` - so an empty caller list never doubles as \"that method does not exist\". caller confidence varies by source: Apex and Visualforce callers come from the heuristic apex-scanner (regex/token, no AST) and are reported at heuristic confidence (may include false positives); Flow callers are parsed out of the Flow XML <actionCalls> (confidence: parsed); LWC callers come from the declarative @salesforce/apex import (confidence: declared); Aura callers from the controller binding + component.get('c.method') (confidence: heuristic). Dynamic dispatch via Type.forName + invoke is invisible to all of them. Test classes are identified in ONE way that actually works: an incoming `callsApex` edge from a class whose `properties.isTest` is true. The `coversTest` edge this tool ALSO walks is declared in the contract but is emitted by NO extractor, graph-build mint, or enricher in this product (see `UNPRODUCED_EDGE_TYPES`), so on a real vault that walk ALWAYS returns nothing - Salesforce does not declare test-to-class coverage anywhere in the metadata source format (coverage is a RUNTIME artifact of a test run). Read an empty `testClassesNeedingUpdate` as \"test-coverage mapping UNAVAILABLE for this class\", never as \"no tests cover this class\": a test class that exercises the target only indirectly - through a helper, a trigger, or dynamic dispatch - has no `callsApex` edge to it and is invisible here. When an Apex caller's edge was AST-extracted, `callerMethods` names which method(s) of that caller hold a call-site to THIS specific method (enrichment only — overloaded callers collapse to one NAME, so every caller is still flagged for human review at class granularity and the verdict is unchanged); absent callerMethods means the call-site method is unknown (heuristic scanner, Flow, or LWC/Aura caller).";
 
 /**
  * Zod schema for the `sfi.what_if_change_method_signature` tool input.
@@ -951,19 +952,36 @@ export const whatIfChangeMethodSignatureHandler = async (
   // An unverified method is a hole in THIS answer, so the trust block has to
   // say so rather than reporting `completeness: complete` beside a headline
   // that exists because something was not checked.
-  const trust: TrustSummary = methodVerification.verified
-    ? coverage.trust
-    : {
-        ...coverage.trust,
-        completeness:
-          coverage.trust.completeness.status === 'complete'
-            ? { status: 'partial' }
-            : coverage.trust.completeness,
-        limitations: [
-          ...coverage.trust.limitations,
-          `method existence NOT verified (${methodVerification.reason}): ${methodVerification.note}`,
-        ],
-      };
+  // A04 / C02: callers the graph cannot see at method level (Aura controller
+  // JS, external API callers, reflection) come from the ONE shared
+  // referrer-coverage table, so "no callers" is never reported as complete.
+  const unmodeledCallers = unmodeledReferrerKinds('ApexClass', classNode, ctx.manifest?.version);
+  const hedgingCallers = verdictHedgingReferrerKinds('ApexClass', classNode, ctx.manifest?.version);
+  const extraLimitations = [
+    ...(methodVerification.verified
+      ? []
+      : [`method existence NOT verified (${methodVerification.reason}): ${methodVerification.note}`]),
+    ...(unmodeledCallers.length > 0
+      ? [`Callers not modeled at method level: ${unmodeledCallers.join('; ')}. Search the source before changing the signature.`]
+      : []),
+  ];
+  const trust: TrustSummary =
+    extraLimitations.length === 0
+      ? coverage.trust
+      : {
+          ...coverage.trust,
+          completeness:
+            coverage.trust.completeness.status === 'complete'
+              ? { status: 'partial' }
+              : coverage.trust.completeness,
+          limitations: [...coverage.trust.limitations, ...extraLimitations],
+        };
+  // An absence-based `safe` cannot stand while a caller surface specific to
+  // this class (e.g. @AuraEnabled methods) is unmodeled.
+  const verdict: Verdict =
+    coverage.verdict === 'safe' && hedgingCallers.length > 0
+      ? 'review'
+      : (coverage.verdict as Verdict);
 
   return ok({
     data: {
@@ -974,7 +992,7 @@ export const whatIfChangeMethodSignatureHandler = async (
       newSignature,
       callingClasses: sortedImpacts,
       testClassesNeedingUpdate: sortedTestIds,
-      verdict: coverage.verdict as Verdict,
+      verdict,
       ...(coverage.coverageCaveat !== undefined
         ? { coverageCaveat: coverage.coverageCaveat }
         : {}),

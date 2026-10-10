@@ -1,0 +1,10 @@
+Self-hosted web fonts (latin subset, variable woff2), downloaded from Google Fonts.
+
+figtree-latin.woff2
+  Figtree, Copyright 2022 The Figtree Project Authors (https://github.com/erikdkennedy/figtree)
+
+jetbrains-mono-latin.woff2
+  JetBrains Mono, Copyright 2020 The JetBrains Mono Project Authors (https://github.com/JetBrains/JetBrainsMono)
+
+Both are licensed under the SIL Open Font License, Version 1.1.
+Full text: https://openfontlicense.org/open-font-license-official-text/

@@ -67,10 +67,12 @@ import type { Context } from '../server.js';
 
 import {
   type ConceptCompletenessDigest,
+  sampleGroundedIn,
   toCompletenessDigest,
 } from './concept-reasoning.js';
 import { buildInterpretEvidenceEnvelope } from './evidence-envelope.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
+import { toolLocalPayloadBudgetBytes } from './response-budget.js';
 
 /**
  * Re-exported from the knowledge plane so the existing `sfi.interpret` import
@@ -92,7 +94,23 @@ export const interpretInputSchema = z.object({
   componentId: z.string().min(1),
   concepts: z.array(z.string()).optional(),
   ruleIds: z.array(z.string()).optional(),
+  /** Page of interpretations (default {@link INTERPRET_DEFAULT_LIMIT}). */
+  limit: z.number().int().min(1).max(100).optional(),
+  offset: z.number().int().min(0).optional(),
+  /** Grounding ids kept per claim (default {@link INTERPRET_DEFAULT_GROUNDED_LIMIT}). */
+  groundedInLimit: z.number().int().min(1).max(1000).optional(),
 });
+
+/**
+ * PERF-7: a hub object emits 15-25 claims of 1.5-3.6 KB each, and every claim
+ * was serialized three times (`interpretations`, `evidenceEnvelope`,
+ * `rendered`), so objects and profiles came back `oversize` after the whole
+ * ~160-210 KB payload was built. Claims are now paged and each claim's
+ * citation list sampled; the handler fits the page to the response budget
+ * itself, so the oversize guard is a last resort rather than the norm.
+ */
+export const INTERPRET_DEFAULT_LIMIT = 10;
+export const INTERPRET_DEFAULT_GROUNDED_LIMIT = 25;
 
 /** Parsed input shape. */
 export type InterpretInput = z.infer<typeof interpretInputSchema>;
@@ -178,6 +196,20 @@ export interface InterpretOutput {
    * (chain / compound / supersedes) rule that fired over them.
    */
   readonly rulesFired: number;
+  /**
+   * Which slice of the interpretations this response carries. `nextOffset` is
+   * null on the last page. `fittedToBudget` is set when the handler had to
+   * shrink the page (or the citation / completeness samples) to fit.
+   */
+  readonly page: {
+    readonly offset: number;
+    readonly limit: number;
+    readonly returned: number;
+    readonly total: number;
+    readonly nextOffset: number | null;
+    readonly groundedInLimit: number;
+    readonly fittedToBudget?: true;
+  };
   readonly sliceTruncated: boolean;
   readonly trust: TrustSummary;
   /** Present only when the aggregate coverage is not `complete`. */
@@ -448,51 +480,111 @@ export const interpretHandler = async (
 
   const disclosure = BASE_DISCLOSURE + emptyNote + resolvedNote;
 
-  const rendered = renderInterpretationsMarkdown({
-    componentId: anchorId,
-    componentType,
-    interpretations: interpretationsReconciled,
-    sliceTruncated,
-    ...(topCoverageCaveat !== null ? { coverageCaveat: topCoverageCaveat } : {}),
-    trust,
-  });
-
-  const data: InterpretOutput = {
-    componentId: anchorId,
-    ...(resolvedFrom !== undefined ? { resolvedFrom } : {}),
-    completeness,
-    componentType,
-    interpretations: interpretationsReconciled,
-    ...(proactiveRisks.length > 0 ? { proactiveRisks } : {}),
-    ...(ruleFilterApplied
-      ? {
-          ruleSelection: {
-            ...(input.concepts !== undefined ? { concepts: input.concepts } : {}),
-            ...(input.ruleIds !== undefined ? { ruleIds: input.ruleIds } : {}),
-            rulesSelected: selectedRules.length,
-            rulesInModel: CONCEPT_RULES.length,
-          },
-        }
-      : {}),
-    // ONE authoritative counter — the same number `completeness.rulesConsidered`
-    // publishes, read from the same report. `selectedRules.length` is that
-    // number; the second-pass rules get their own field rather than inflating
-    // this one into a count of nothing in particular.
-    rulesConsidered: completeness.rulesConsidered,
-    secondPassRules: SECOND_PASS_RULE_COUNT,
-    rulesFired,
-    sliceTruncated,
-    trust,
-    ...(topCoverageCaveat !== null ? { coverageCaveat: topCoverageCaveat } : {}),
-    disclosure,
-    rendered,
-    evidenceEnvelope: buildInterpretEvidenceEnvelope({
-      interpretations: interpretationsReconciled,
+  const total = interpretationsReconciled.length;
+  const offset = Math.min(input.offset ?? 0, total);
+  const build = (
+    limit: number,
+    groundedInLimit: number,
+    listCap: number,
+    fittedToBudget: boolean,
+  ): InterpretOutput => {
+    const pageRows: Interpretation[] = interpretationsReconciled
+      .slice(offset, offset + limit)
+      .map((row) => {
+        const sampled = sampleGroundedIn(row.groundedIn, groundedInLimit);
+        return sampled.groundedInTotal === undefined ? row : { ...row, ...sampled };
+      });
+    const nextOffset = offset + pageRows.length < total ? offset + pageRows.length : null;
+    const pageCompleteness =
+      listCap === Number.MAX_SAFE_INTEGER
+        ? completeness
+        : { ...toCompletenessDigest(coverageReport, listCap), summary: completeness.summary };
+    const pageNote =
+      (pageRows.length === 0 && total > 0
+        ? ` No claims on this page: offset ${input.offset ?? 0} is past the last of ${total} that fired.`
+        : nextOffset !== null || offset > 0
+        ? ` Showing interpretations ${offset + 1}-${offset + pageRows.length} of ${total}` +
+          (nextOffset !== null ? `; pass offset: ${nextOffset} for the next page.` : '.')
+        : '') +
+      (pageRows.some((r) => r.groundedInTotal !== undefined)
+        ? ' A claim with `groundedInTotal` cites a sample of its grounding ids (raise groundedInLimit for more).'
+        : '') +
+      (fittedToBudget ? ' The page was shrunk to fit the response budget.' : '');
+    const pageDisclosure = disclosure + pageNote;
+    const rendered = renderInterpretationsMarkdown({
+      componentId: anchorId,
+      componentType,
+      interpretations: pageRows,
+      sliceTruncated,
+      ...(topCoverageCaveat !== null ? { coverageCaveat: topCoverageCaveat } : {}),
+      trust,
+      page: { offset, returned: pageRows.length, total },
+    });
+    return {
+      componentId: anchorId,
+      ...(resolvedFrom !== undefined ? { resolvedFrom } : {}),
+      completeness: pageCompleteness,
+      componentType,
+      interpretations: pageRows,
+      ...(proactiveRisks.length > 0 ? { proactiveRisks } : {}),
+      ...(ruleFilterApplied
+        ? {
+            ruleSelection: {
+              ...(input.concepts !== undefined ? { concepts: input.concepts } : {}),
+              ...(input.ruleIds !== undefined ? { ruleIds: input.ruleIds } : {}),
+              rulesSelected: selectedRules.length,
+              rulesInModel: CONCEPT_RULES.length,
+            },
+          }
+        : {}),
+      // ONE authoritative counter — the same number `completeness.rulesConsidered`
+      // publishes, read from the same report.
+      rulesConsidered: completeness.rulesConsidered,
+      secondPassRules: SECOND_PASS_RULE_COUNT,
+      rulesFired,
+      page: {
+        offset,
+        limit,
+        returned: pageRows.length,
+        total,
+        nextOffset,
+        groundedInLimit,
+        ...(fittedToBudget ? { fittedToBudget: true as const } : {}),
+      },
+      sliceTruncated,
       trust,
       ...(topCoverageCaveat !== null ? { coverageCaveat: topCoverageCaveat } : {}),
-      disclosure,
-    }),
+      disclosure: pageDisclosure,
+      rendered,
+      evidenceEnvelope: buildInterpretEvidenceEnvelope({
+        interpretations: pageRows,
+        trust,
+        ...(topCoverageCaveat !== null ? { coverageCaveat: topCoverageCaveat } : {}),
+        disclosure: pageDisclosure,
+        totalFired: total,
+      }),
+    };
   };
+
+  // Fit INSIDE the handler, claims last: sample the completeness enumerations
+  // (counts stay exact), then the citation lists, and only then shrink the
+  // page — each step a pure re-projection of one result.
+  const budget = toolLocalPayloadBudgetBytes();
+  const sizeOf = (v: InterpretOutput): number => Buffer.byteLength(JSON.stringify(v), 'utf8');
+  let limit = input.limit ?? INTERPRET_DEFAULT_LIMIT;
+  let groundedInLimit = input.groundedInLimit ?? INTERPRET_DEFAULT_GROUNDED_LIMIT;
+  let listCap = Number.MAX_SAFE_INTEGER;
+  let data = build(limit, groundedInLimit, listCap, false);
+  while (sizeOf(data) > budget) {
+    if (listCap > 25) listCap = 25;
+    else if (groundedInLimit > 10) groundedInLimit = 10;
+    else if (limit > 1 && data.page.returned > 1) {
+      limit = data.page.returned - 1;
+    } else if (groundedInLimit > 5) groundedInLimit = 5;
+    else if (listCap > 5) listCap = 5;
+    else break; // the shared oversize guard reports what is left
+    data = build(limit, groundedInLimit, listCap, true);
+  }
 
   return ok({
     data,

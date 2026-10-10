@@ -1,0 +1,173 @@
+---
+/**
+ * CompareLayout — one "sf-intelligence vs X" page: a short answer, a table,
+ * when to pick each, when not to use sf-intelligence, a real answer from the
+ * demo org, the sources checked and the date they were last verified.
+ *
+ * Competitor facts must come from the sources listed in `sources`, checked on
+ * `verified`. Where a vendor publishes no figure, say so; never estimate one.
+ */
+import Base from "./Base.astro";
+import AnswerCard from "../components/AnswerCard.astro";
+import CtaBlock from "../components/CtaBlock.astro";
+import FaqBlock, { type Faq } from "../components/FaqBlock.astro";
+import type { DemoAnswer } from "../data/demo-answers.ts";
+import site from "../data/site.ts";
+import "../styles/pages.css";
+
+interface Row { label: string; sfi: string; them: string }
+interface Props {
+  /** Competitor name as shown in headings, e.g. "Elements.cloud". */
+  name: string;
+  title: string;
+  description: string;
+  path: string;
+  heading: string;
+  lede: string;
+  short: string;
+  rows: Row[];
+  chooseSfi: string[];
+  chooseThem: string[];
+  notSfi: string[];
+  example?: DemoAnswer;
+  exampleIntro?: string;
+  sources: { label: string; href: string }[];
+  /** ISO date the competitor facts were last checked against `sources`. */
+  verified: string;
+  faqs: Faq[];
+  related?: { href: string; label: string }[];
+}
+
+const {
+  name, title, description, path, heading, lede, short, rows, chooseSfi, chooseThem, notSfi,
+  example, exampleIntro, sources, verified, faqs, related = [],
+} = Astro.props;
+
+const url = new URL(path, site.url).href;
+/** "Clientell’s", but "Salesforce’s MCP servers’" (no double possessive). */
+const possessive = name.endsWith("s") ? `${name}’` : `${name}’s`;
+const fmt = (iso: string): string =>
+  new Date(iso + "T00:00:00Z").toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", timeZone: "UTC" });
+const jsonld = [
+  {
+    "@type": "Article",
+    "@id": `${url}#article`,
+    headline: heading,
+    description,
+    dateModified: verified,
+    inLanguage: "en",
+    author: { "@id": `${site.url}/#author` },
+    publisher: { "@id": `${site.url}/#org` },
+    mainEntityOfPage: { "@id": `${url}#webpage` },
+  },
+];
+const others = [
+  { href: "/compare/salesforce-dx-mcp", label: "Salesforce’s MCP servers" },
+  { href: "/compare/elements-cloud", label: "Elements.cloud" },
+  { href: "/compare/clientell", label: "Clientell" },
+  { href: "/compare/dx0", label: "dx0" },
+  { href: "/compare/hubbl", label: "Hubbl" },
+  { href: "/compare/metazoa", label: "Metazoa Snapshot" },
+  { href: "/compare/sweep", label: "Sweep" },
+].filter((o) => o.href !== path);
+const hasProse = Astro.slots.has("default");
+---
+
+<Base
+  title={title}
+  description={description}
+  path={path}
+  breadcrumbs={[{ name: "Compare", path: "/compare" }, { name: `vs ${name}`, path }]}
+  jsonld={jsonld}
+  dateModified={verified}
+>
+  <section class="page-hero">
+    <div class="wrap">
+      <nav class="crumbs" aria-label="Breadcrumb">
+        <a href="/">Home</a><span class="sep" aria-hidden="true">/</span><a href="/compare">Compare</a>
+      </nav>
+      <h1>{heading}</h1>
+      <p class="lede" set:html={lede} />
+      <p class="page-meta">Last verified <time datetime={verified}>{fmt(verified)}</time> against {possessive} public pages.</p>
+    </div>
+  </section>
+
+  <div class="page-body">
+    <div class="wrap">
+      <div class="answer-first narrow">
+        <span class="label">Short answer</span>
+        <p set:html={short} />
+      </div>
+
+      <section class="block" aria-labelledby="glance">
+        <h2 id="glance">At a glance</h2>
+        <table class="doc-table">
+          <thead><tr><th scope="col"><span class="sr-only">Topic</span></th><th scope="col">sf-intelligence</th><th scope="col">{name}</th></tr></thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr><th scope="row">{r.label}</th><td set:html={r.sfi} /><td set:html={r.them} /></tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+
+      <section class="block" aria-labelledby="choose">
+        <h2 id="choose">Which one when</h2>
+        <div class="split">
+          <div class="panel accent">
+            <h3>Choose sf-intelligence when you want</h3>
+            <ul class="ticks">{chooseSfi.map((c) => <li set:html={c} />)}</ul>
+          </div>
+          <div class="panel">
+            <h3>Choose {name} when you want</h3>
+            <ul class="ticks">{chooseThem.map((c) => <li set:html={c} />)}</ul>
+          </div>
+        </div>
+      </section>
+
+      {hasProse && (
+        <div class="prose">
+          <slot />
+        </div>
+      )}
+
+      <section class="block" aria-labelledby="not">
+        <h2 id="not">When sf-intelligence is the wrong tool</h2>
+        <ul class="ticks minus narrow">{notSfi.map((c) => <li set:html={c} />)}</ul>
+      </section>
+
+      {example && (
+        <section class="block" aria-labelledby="example">
+          <h2 id="example">What an answer looks like</h2>
+          <p>{exampleIntro ?? "A real answer from Verdant, the demo org that ships inside sf-intelligence. Judge it before you point anything at production."}</p>
+          <AnswerCard answer={example} level={3} />
+        </section>
+      )}
+
+      <section class="block" aria-labelledby="faq">
+        <h2 id="faq">Questions</h2>
+        <FaqBlock faqs={faqs} />
+      </section>
+
+      <section class="block narrow" aria-labelledby="sources">
+        <h2 id="sources">Sources</h2>
+        <p>{name} facts on this page were checked on {fmt(verified)} against:</p>
+        <ul class="link-list">
+          {sources.map((s) => <li><a href={s.href} rel="noopener">{s.label}</a></li>)}
+        </ul>
+        <p class="meta-line">Plans, prices and features change. {possessive} own site is the authority on its product. sf-intelligence is an independent project, not affiliated with {name} or Salesforce. Spotted something out of date? <a href={`${site.github}/issues`} rel="noopener">Open an issue</a>.</p>
+      </section>
+
+      <nav class="block narrow" aria-labelledby="more">
+        <h2 id="more">More comparisons</h2>
+        <ul class="link-list">
+          <li><a href="/compare">All comparisons</a></li>
+          {others.map((o) => <li><a href={o.href}>sf-intelligence vs {o.label}</a></li>)}
+          {related.map((r) => <li><a href={r.href}>{r.label}</a></li>)}
+        </ul>
+      </nav>
+
+      <CtaBlock title="Judge it on the demo org" />
+    </div>
+  </div>
+</Base>

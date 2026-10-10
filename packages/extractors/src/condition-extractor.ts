@@ -54,6 +54,21 @@ export interface CriteriaItem {
    * source-XML shape so the synthesized expression is reversible.
    */
   readonly value: string | null;
+  /**
+   * Whether {@link value} is a LITERAL the source states verbatim
+   * (`<stringValue>Closed</stringValue>`) or a REFERENCE to a variable /
+   * formula / record field (`<elementReference>`). Only Flow triplets carry
+   * the distinction; omitted when the source cannot tell (workflow criteria
+   * values are always literals and leave it unset).
+   */
+  readonly valueKind?: 'literal' | 'reference';
+  /**
+   * The `{Object}.{Field}` the {@link field} path resolves to when the caller
+   * resolved it with context this helper lacks (e.g. a Flow record variable
+   * or Get Records output `Get_Acct.Status__c` → `Account.Status__c`). When
+   * set it wins over the helper's own `$Record` / dotted-path resolution.
+   */
+  readonly fieldRef?: string;
 }
 
 /**
@@ -109,6 +124,13 @@ export type ConditionSource =
       readonly filters: readonly CriteriaItem[];
       readonly filterLogic: string | null;
       readonly filterFormula: string | null;
+      /**
+       * `<start><doesRequireRecordChangedToMeetCriteria>`: `true` = the flow
+       * fires only when a save CHANGES the record to meet the entry criteria,
+       * `false` = every save that meets them, `null` = not declared. Omitted
+       * by callers that do not read it.
+       */
+      readonly entryRequiresRecordChange?: boolean | null;
     };
 
 /**
@@ -440,7 +462,10 @@ const fieldRefsFromCriteria = (
   const seen = new Set<ComponentId>();
   const out: ComponentId[] = [];
   for (const item of items) {
-    const id = resolveFieldRefFromCriteria(item.field, defaultObjectApiName);
+    const id =
+      item.fieldRef !== undefined
+        ? (`CustomField:${item.fieldRef}` as ComponentId)
+        : resolveFieldRefFromCriteria(item.field, defaultObjectApiName);
     if (id === null) continue;
     if (seen.has(id)) continue;
     seen.add(id);
@@ -448,6 +473,40 @@ const fieldRefsFromCriteria = (
   }
   return out;
 };
+
+/**
+ * One criteria triplet in STRUCTURED form, stamped on the ConditionalContext
+ * node as `properties.conditionItems`. The rendered `expression` is prose for a
+ * reader (`Status__c EqualTo Closed`) and cannot tell a literal `Closed` from a
+ * variable named `Closed`, nor where a value ends; consumers that must compare
+ * a VALUE (e.g. "which conditions test picklist value X?") read these instead
+ * of re-parsing the prose.
+ */
+export interface ConditionItemRecord {
+  /** The field path verbatim from the source (`$Record.Status__c`, `Account.Type`). */
+  readonly field: string;
+  /** The resolved `CustomField:` id, or null when the path names no field. */
+  readonly fieldId: ComponentId | null;
+  readonly operator: string;
+  readonly value: string | null;
+  /** Present only when the source distinguishes literal from reference (Flow). */
+  readonly valueKind?: 'literal' | 'reference';
+}
+
+const toConditionItemRecords = (
+  items: readonly CriteriaItem[],
+  defaultObjectApiName: string | null,
+): readonly ConditionItemRecord[] =>
+  items.map((item) => ({
+    field: item.field,
+    fieldId:
+      item.fieldRef !== undefined
+        ? (`CustomField:${item.fieldRef}` as ComponentId)
+        : resolveFieldRefFromCriteria(item.field, defaultObjectApiName),
+    operator: item.operation,
+    value: item.value,
+    ...(item.valueKind !== undefined ? { valueKind: item.valueKind } : {}),
+  }));
 
 /**
  * FIX 15 (1) — is this ref a RELATIONSHIP TRAVERSAL rather than an
@@ -666,6 +725,12 @@ const buildConditionTriple = (
   return { node, edge, fieldEdges, mirror };
 };
 
+/** `entryRequiresRecordChange` only when the caller read it (absent key = not extracted). */
+const entryChangeProperty = (
+  value: boolean | null | undefined,
+): Readonly<Record<string, unknown>> =>
+  value === undefined ? {} : { entryRequiresRecordChange: value };
+
 /**
  * Options accepted by `extractConditions`. The `parentId` and
  * `sources` are required; `parentSourcePath`, `parentApiVersion`, and
@@ -780,6 +845,7 @@ export const extractConditions = (
         extraProperties = {
           itemCount: source.items.length,
           booleanFilter: source.booleanFilter,
+          conditionItems: toConditionItemRecords(source.items, parentObjectApiName),
         };
         break;
       }
@@ -807,6 +873,7 @@ export const extractConditions = (
         extraProperties = {
           itemCount: source.conditions.length,
           conditionLogic: source.conditionLogic,
+          conditionItems: toConditionItemRecords(source.conditions, parentObjectApiName),
         };
         sourceName = source.sourceName;
         break;
@@ -834,6 +901,7 @@ export const extractConditions = (
           extraProperties = {
             mode: 'formula',
             filterFormula: source.filterFormula,
+            ...entryChangeProperty(source.entryRequiresRecordChange),
           };
         } else {
           expression = joinCriteriaItems(source.filters, source.filterLogic);
@@ -846,6 +914,8 @@ export const extractConditions = (
             mode: 'criteria',
             itemCount: source.filters.length,
             filterLogic: source.filterLogic,
+            conditionItems: toConditionItemRecords(source.filters, parentObjectApiName),
+            ...entryChangeProperty(source.entryRequiresRecordChange),
           };
         }
         break;

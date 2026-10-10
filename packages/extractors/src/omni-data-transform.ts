@@ -380,6 +380,8 @@ interface FieldEdgeBuild {
 }
 
 const FIELD_NAME = /^[A-Za-z][A-Za-z0-9_]*$/;
+/** `alias:Field` (optionally `alias:Rel__r.Field`) inside a DataMapper formula. */
+const FORMULA_ALIAS_PATH = /\b([A-Za-z][A-Za-z0-9_]*):([A-Za-z][A-Za-z0-9_]*(?:\.[A-Za-z][A-Za-z0-9_]*)*)/g;
 const MAX_SAMPLE_KEYS = 5;
 
 /**
@@ -430,6 +432,17 @@ const buildFieldEdges = (
     const inField = optionalString(item, 'inputFieldName')?.trim() ?? '';
     const inObject = optionalString(item, 'inputObjectName')?.trim() ?? '';
     if (kind.isExtract) {
+      // DATAMAPPER-FORMULA-FIELD-REFS: an Extract formula row reads fields
+      // through the same `alias:Field__c` paths its mapping rows use
+      // (`IF(Acct:Is_Active__c == false, ...)`), but only `inputFieldName`
+      // was walked, so a field used only in a formula had no reader. Aliases
+      // resolve through the same map; an unknown alias mints nothing.
+      const formula = optionalString(item, 'formulaExpression') ?? '';
+      for (const match of formula.matchAll(FORMULA_ALIAS_PATH)) {
+        const object = aliases.get(match[1] ?? '');
+        const path = match[2] ?? '';
+        if (object !== undefined && path.length > 0) addRead(object, path, 'formula', match[0]);
+      }
       if (inObject.length > 0 && !NON_SOBJECT_OBJECT_NAMES.has(inObject)) {
         // A query row: its inputFieldName is the filtered field on that object.
         if (inField.length > 0 && !inField.includes(':')) addRead(inObject, inField, 'filter', null);

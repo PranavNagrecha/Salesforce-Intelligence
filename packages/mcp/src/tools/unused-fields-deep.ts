@@ -168,6 +168,7 @@ import {
   reportDashboardUsageDetail,
   type ReportDashboardUsageDetail,
 } from './report-dashboard-usage.js';
+import { reportTypesWithColumn, scanReportTypeColumns } from './report-type-columns.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { FULL_SCAN_MAX_NODES, nodeScanLimit } from './scan-cap.js';
 
@@ -1338,6 +1339,8 @@ interface SupplementalUsageScan {
   readonly hits: ReadonlyMap<string, readonly string[]>;
   /** Verbatim disclosures to append to the response `boundaries`. */
   readonly disclosures: readonly string[];
+  /** ADM-5: fields whose only supplemental hit is a custom ReportType column. */
+  readonly reportTypeColumnHits: ReadonlySet<string>;
 }
 
 /** Bare `<field>` / `<assignToReference>` tokens in a Flow XML — a PREFILTER. */
@@ -1352,38 +1355,6 @@ const flowFieldTokens = (xml: string): ReadonlySet<string> => {
 };
 
 /**
- * One ReportType file's columns, keyed `Table.Field`.
- *
- * A `<table>` holding a DOT is a relationship PATH out of the base object
- * (`Base.Children__r`), whose last segment is a relationship api name, not an
- * object api name — it cannot be resolved to a `CustomObject` from the report
- * type alone. Those columns are COUNTED (so the residual can be disclosed) but
- * never used to suppress a field: matching on the bare field name would delete-
- * protect an unrelated same-named field on another object, which is a different
- * lie in the other direction.
- */
-const reportTypeColumnKeys = (
-  xml: string,
-): { readonly keys: readonly string[]; readonly unattributed: number } => {
-  const keys: string[] = [];
-  let unattributed = 0;
-  const columnBlock = /<columns>([\s\S]*?)<\/columns>/g;
-  let block: RegExpExecArray | null;
-  while ((block = columnBlock.exec(xml)) !== null) {
-    const body = block[1] ?? '';
-    const field = /<field>([^<]+)<\/field>/.exec(body)?.[1];
-    const table = /<table>([^<]+)<\/table>/.exec(body)?.[1];
-    if (field === undefined || table === undefined) continue;
-    if (table.includes('.')) {
-      unattributed += 1;
-      continue;
-    }
-    keys.push(`${table}.${field}`);
-  }
-  return { keys, unattributed };
-};
-
-/**
  * Cross-check the fields that survived all eight graph tiers against the two
  * source-only usage planes. Returns the disqualifying evidence plus the
  * verbatim disclosures the response must carry.
@@ -1394,7 +1365,8 @@ const scanSupplementalUsagePlanes = async (
 ): Promise<SupplementalUsageScan> => {
   const hits = new Map<string, string[]>();
   const disclosures: string[] = [];
-  if (candidates.length === 0) return { hits, disclosures };
+  const reportTypeColumnHits = new Set<string>();
+  if (candidates.length === 0) return { hits, disclosures, reportTypeColumnHits };
   const addHit = (fieldId: string, reason: string): void => {
     const existing = hits.get(fieldId);
     if (existing === undefined) hits.set(fieldId, [reason]);
@@ -1451,62 +1423,38 @@ const scanSupplementalUsagePlanes = async (
   }
 
   // --- PLANE 2: ReportType columns (retrieved, deliberately not modelled) ---
-  const reportTypes = await scanAllNodesOfTypes(
-    ctx.graph,
-    ['ReportType'],
-    FULL_SCAN_MAX_NODES,
-  );
-  if (!reportTypes.ok) {
+  // Shared with safe_to_delete_field and field_360 (ADM-5).
+  const rtScan = await scanReportTypeColumns(ctx);
+  if (rtScan.status === 'failed') {
     disclosures.push(
       'the supplemental ReportType column cross-check could NOT run on this call (the ReportType node walk failed). Every ReportType node carries `columnsModeled: false` — the extractor does not model per-column `<field>`/`<table>` identity — so a field used only as a custom report-type column has ZERO inbound edges and may be listed here as unused.',
     );
-  } else if (reportTypes.value.nodes.length === 0) {
+  } else if (rtScan.status === 'no-report-types') {
     disclosures.push(
       'no `ReportType` was found in this vault, so custom report-type columns were NOT checked. A field used only as a report-type column has zero inbound edges and would be listed here as unused — refresh with the `ReportType` family to close this plane.',
     );
   } else {
-    const columnKeys = new Set<string>();
-    let rtRead = 0;
-    let rtUnreadable = 0;
-    let unattributedColumns = 0;
-    for (const rt of reportTypes.value.nodes) {
-      if (typeof rt.sourcePath !== 'string' || rt.sourcePath.length === 0) {
-        rtUnreadable += 1;
-        continue;
-      }
-      let xml: string;
-      try {
-        xml = await readFile(join(ctx.vaultRoot, rt.sourcePath), 'utf-8');
-      } catch {
-        rtUnreadable += 1;
-        continue;
-      }
-      rtRead += 1;
-      const parsed = reportTypeColumnKeys(xml);
-      unattributedColumns += parsed.unattributed;
-      for (const key of parsed.keys) columnKeys.add(key);
-    }
     for (const candidate of candidates) {
-      const key = `${candidate.parentObjectApiName}.${candidate.apiName}`;
-      if (!columnKeys.has(key)) continue;
+      if (reportTypesWithColumn(rtScan, candidate.parentObjectApiName, candidate.apiName).length === 0) continue;
+      reportTypeColumnHits.add(candidate.id);
       addHit(
         candidate.id,
-        `${candidate.id} — an explicit COLUMN of a custom ReportType (read from the retrieved report-type source; every ReportType node carries \`columnsModeled: false\`, so this usage exists in no edge). Deleting the field breaks that report type and every saved report built on it.`,
+        `${candidate.id} — an explicit COLUMN of a custom ReportType (read from the retrieved report-type source; every ReportType node carries \`columnsModeled: false\`, so this usage exists in no edge). Deleting the field removes that column from the report type and from every saved report that shows, filters or groups on it.`,
       );
     }
-    if (reportTypes.value.scanIncomplete || rtUnreadable > 0) {
+    if (rtScan.incomplete) {
       disclosures.push(
-        `the supplemental ReportType column cross-check read ${rtRead} of ${reportTypes.value.nodes.length + rtUnreadable} ReportType(s); columns in the un-read tail were NOT CHECKED.`,
+        `the supplemental ReportType column cross-check read ${rtScan.read} of ${rtScan.total} ReportType(s); columns in the un-read tail were NOT CHECKED.`,
       );
     }
-    if (unattributedColumns > 0) {
+    if (rtScan.unattributedColumns > 0) {
       disclosures.push(
-        `${unattributedColumns} ReportType column(s) sit under a RELATIONSHIP-PATH \`<table>\` (\`Base.Children__r\`) whose last segment is a relationship api name, not an object — those columns could not be attributed to an object and were NOT used to hold a field back. A field used only through such a column can still appear in this list.`,
+        `${rtScan.unattributedColumns} ReportType column(s) sit under a RELATIONSHIP-PATH \`<table>\` (\`Base.Children__r\`) whose last segment is a relationship api name, not an object — those columns could not be attributed to an object and were NOT used to hold a field back. A field used only through such a column can still appear in this list.`,
       );
     }
   }
 
-  return { hits, disclosures };
+  return { hits, disclosures, reportTypeColumnHits };
 };
 
 // ---------------------------------------------------------------------------
@@ -1839,10 +1787,27 @@ export const unusedFieldsDeepHandler = async (
   const supplementalExcluded: { readonly fieldId: string; readonly reasons: readonly string[] }[] =
     [];
   const survivors: UnusedFieldDeepEntry[] = [];
+  // ADM-5: a report-type COLUMN is not a code or automation reference — the
+  // platform drops the column when the field is deleted — but saved reports
+  // built on it lose it. Such a field is returned (not held out as "used") at
+  // most `medium`, so this list, safe_to_delete_field ('review') and field_360
+  // tell the same story. A Flow write is real usage and still holds a field out.
+  let reportTypeColumnOnly = 0;
   for (const entry of entries) {
     const reasons = supplemental.hits.get(entry.id);
     if (reasons !== undefined && reasons.length > 0) {
-      supplementalExcluded.push({ fieldId: entry.id, reasons });
+      const flowHit = reasons.length > (supplemental.reportTypeColumnHits.has(entry.id) ? 1 : 0);
+      if (flowHit) {
+        supplementalExcluded.push({ fieldId: entry.id, reasons });
+        continue;
+      }
+      reportTypeColumnOnly += 1;
+      survivors.push({
+        ...entry,
+        confidence: entry.confidence === 'high' ? 'medium' : entry.confidence,
+        recommendedAction:
+          `REPORT-TYPE COLUMN ONLY: no code, automation, layout or permission references; it is a column of a custom ReportType, so saved reports on that type lose it if it is deleted. Review those reports first. ${entry.recommendedAction}`,
+      });
       continue;
     }
     survivors.push(entry);
@@ -1935,9 +1900,14 @@ export const unusedFieldsDeepHandler = async (
   // so the trim never understates how many unused fields exist.
   const supplementalBoundaries: string[] = [
     ...supplemental.disclosures,
+    ...(reportTypeColumnOnly > 0
+      ? [
+          `${reportTypeColumnOnly} field(s) are listed at confidence at most 'medium' because their only use is as a column of a custom ReportType (recommendedAction starts 'REPORT-TYPE COLUMN ONLY'). A report-type column is not a code or automation reference, but saved reports on that type lose the column if the field is deleted.`,
+        ]
+      : []),
     ...(supplementalExcluded.length > 0
       ? [
-          `${supplementalExcluded.length} field(s) that passed all eight GRAPH tiers were HELD OUT of this list by the supplemental source-file cross-check — they are written by a Flow through a path that mints no \`writesTo\` edge (reconstructed by \`flow-field-writers-scan\`, the same scan \`sfi.safe_to_delete_field\` runs per field), or are explicit columns of a custom ReportType (a family whose per-column identity the extractor does not model, \`columnsModeled: false\`). \`totalCount\` and \`byConfidence\` are AFTER that exclusion.`,
+          `${supplementalExcluded.length} field(s) that passed all eight GRAPH tiers were HELD OUT of this list by the supplemental source-file cross-check — they are written by a Flow through a path that mints no \`writesTo\` edge (reconstructed by \`flow-field-writers-scan\`, the same scan \`sfi.safe_to_delete_field\` runs per field). \`totalCount\` and \`byConfidence\` are AFTER that exclusion.`,
         ]
       : []),
   ];

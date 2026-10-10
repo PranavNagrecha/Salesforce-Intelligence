@@ -1,0 +1,137 @@
+---
+/**
+ * ArticleLayout — blog posts, how-to pages and error pages.
+ *
+ * Answer-first: a short direct answer box sits above the body, the body is
+ * wrapped in section > container > prose (so nothing renders full-bleed), then
+ * an optional FAQ, related links and the demo CTA. Emits Article (or HowTo /
+ * TechArticle) JSON-LD with dateModified.
+ *
+ *   <ArticleLayout title=… description=… path="/how-to/x" heading=…
+ *       answer="40-60 word direct answer" datePublished="2026-10-10"
+ *       section={{ name: "How-to", path: "/how-to" }} schemaType="HowTo"
+ *       steps={[{ name, text }]} faqs={[…]} related={[…]}>
+ *     <h2>…</h2><p>…</p>
+ *   </ArticleLayout>
+ */
+import Base from "./Base.astro";
+import CtaBlock from "../components/CtaBlock.astro";
+import FaqBlock, { type Faq } from "../components/FaqBlock.astro";
+import site from "../data/site.ts";
+
+interface Props {
+  title: string;
+  description: string;
+  path: string;
+  /** Visible H1. Match the target query for how-to and error pages. */
+  heading: string;
+  intro?: string;
+  /** The answer-first box (HTML). Keep it to 40-60 words. */
+  answer?: string;
+  /** Parent section for breadcrumbs, e.g. { name: "Guides", path: "/blog" }. */
+  section: { name: string; path: string };
+  /** Short name for the breadcrumb leaf. Defaults to heading. */
+  crumb?: string;
+  datePublished: string;
+  dateModified?: string;
+  schemaType?: "Article" | "TechArticle" | "HowTo";
+  /** HowTo steps (schemaType "HowTo"). */
+  steps?: { name: string; text: string }[];
+  faqs?: Faq[];
+  related?: { href: string; label: string }[];
+  /** End-of-page CTA. Pass false to omit. */
+  cta?: false | { question?: string; related?: { href: string; label: string } };
+  ogImage?: string;
+}
+
+const {
+  title, description, path, heading, intro, answer, section, crumb,
+  datePublished, dateModified = datePublished, schemaType = "Article",
+  steps, faqs, related, cta = {}, ogImage,
+} = Astro.props;
+
+const url = new URL(path, site.url).href;
+const image = new URL(ogImage ?? "/assets/img/og-image.png", site.url).href;
+const article: Record<string, unknown> = {
+  "@type": schemaType === "HowTo" ? "HowTo" : schemaType,
+  "@id": `${url}#article`,
+  ...(schemaType === "HowTo" ? { name: heading } : { headline: heading }),
+  description,
+  datePublished,
+  dateModified,
+  inLanguage: "en",
+  image,
+  mainEntityOfPage: { "@id": `${url}#webpage` },
+  isPartOf: { "@id": `${site.url}/#website` },
+  ...(schemaType === "HowTo"
+    ? {}
+    : { author: { "@id": `${site.url}/#author` }, publisher: { "@id": `${site.url}/#org` } }),
+  ...(schemaType === "HowTo" && steps
+    ? { step: steps.map((s, i) => ({ "@type": "HowToStep", position: i + 1, name: s.name, text: s.text })) }
+    : {}),
+};
+const leaf = crumb ?? heading;
+const fmt = (iso: string): string =>
+  new Date(iso + (iso.length === 10 ? "T00:00:00Z" : "")).toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric", timeZone: "UTC" });
+---
+
+<Base
+  title={title}
+  description={description}
+  path={path}
+  breadcrumbs={[section, { name: leaf, path }]}
+  jsonld={[article]}
+  ogType="article"
+  ogImage={ogImage}
+  datePublished={datePublished}
+  dateModified={dateModified}
+>
+  <section class="page-hero">
+    <div class="container">
+      <nav class="crumbs" aria-label="Breadcrumb">
+        <a href="/">Home</a><span class="sep" aria-hidden="true">/</span><a href={section.path}>{section.name}</a>
+      </nav>
+      <h1>{heading}</h1>
+      {intro && <p class="lede" set:html={intro} />}
+      <p class="page-meta">
+        {dateModified !== datePublished ? <>Updated <time datetime={dateModified}>{fmt(dateModified)}</time></> : <>Published <time datetime={datePublished}>{fmt(datePublished)}</time></>}
+      </p>
+    </div>
+  </section>
+
+  <section>
+    <div class="container">
+      <div class="prose">
+        {answer && (
+          <div class="answer-first">
+            <span class="label">Short answer</span>
+            <p set:html={answer} />
+          </div>
+        )}
+        <slot />
+      </div>
+
+      {faqs && faqs.length > 0 && (
+        <div class="article-aside">
+          <h2 id="faq">Questions</h2>
+          <FaqBlock faqs={faqs} />
+        </div>
+      )}
+
+      {related && related.length > 0 && (
+        <nav class="related article-aside" aria-label="Related">
+          <p class="label">Related</p>
+          <ul>
+            {related.map((r) => <li><a href={r.href}>{r.label}</a></li>)}
+          </ul>
+        </nav>
+      )}
+
+      {cta !== false && (
+        <div class="article-aside">
+          <CtaBlock question={cta.question} related={cta.related} />
+        </div>
+      )}
+    </div>
+  </section>
+</Base>

@@ -1,0 +1,68 @@
+---
+import Base from "../layouts/Base.astro";
+import AnswerTabs from "../components/AnswerTabs.astro";
+import InstallTabs from "../components/InstallTabs.astro";
+import { demoAnswers } from "../data/demo-answers.ts";
+import siteData from "../data/site-data.json";
+
+const version = siteData.version;
+const words = ["Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten"];
+const count = words[demoAnswers.length] ?? String(demoAnswers.length);
+const title = "Salesforce AI Assistant Demo: Real Answers | sf-intelligence";
+const description =
+  "Real answers from the built-in demo org: can I delete a field, who can edit, what runs on save, what sets a value, deployment risk, and an object brief.";
+---
+
+<Base
+  title={title}
+  description={description}
+  path="/demo"
+  breadcrumbs={[{ name: "Demo", path: "/demo" }]}
+>
+  <section class="page-hero">
+    <div class="wrap">
+      <nav class="crumbs" aria-label="Breadcrumb">
+        <a href="/">Home</a><span class="sep" aria-hidden="true">/</span><a href="/demo">Demo</a>
+      </nav>
+      <h1>Real answers from a demo Salesforce org</h1>
+      <p class="lede">{count} questions asked of Verdant, a made-up solar-installation company that ships inside sf-intelligence. These are the tool’s real answers in plain words, with every component it cited. You can ask the same questions yourself in a couple of minutes.</p>
+      <p class="page-meta">Recorded with sf-intelligence {version}. Pick a question below.</p>
+    </div>
+  </section>
+
+  <section class="section" aria-label="Answers" style="padding-top:48px">
+    <div class="wrap">
+      <AnswerTabs answers={demoAnswers} idPrefix="demo" label="Questions by role" level={2} />
+    </div>
+  </section>
+
+  <section class="section band" id="try-it" aria-labelledby="try-title">
+    <div class="wrap install-grid">
+      <div class="install-aside">
+        <span class="kicker">Try it yourself</span>
+        <h2 id="try-title">Ask the demo org in your own assistant.</h2>
+        <p>The demo org is built in, so there is nothing to log in to. Add it to your assistant, restart it, and ask any of the questions above.</p>
+        <ol>
+          <li>Copy the snippet for your assistant.</li>
+          <li>Restart the assistant (or reload its MCP servers).</li>
+          <li>Ask: “Can I delete the Amount field on Invoice?”</li>
+        </ol>
+        <p>The first run builds the demo in a few seconds. Nothing leaves your computer.</p>
+      </div>
+      <div>
+        <InstallTabs mode="demo" idPrefix="demo-host" />
+      </div>
+    </div>
+  </section>
+
+  <section class="section" aria-labelledby="about-title">
+    <div class="wrap">
+      <div class="section-head">
+        <span class="kicker">About the demo org</span>
+        <h2 id="about-title">A small org set up like a real one.</h2>
+        <p>Verdant has custom objects such as Project, Invoice, Payment and Permit, with Apex, flows, validation rules, an approval process, profiles and permission sets. None of it is a real company’s data.</p>
+      </div>
+      <p class="more"><a class="text-link" href="/getting-started">Ready for your own org? Connect it in three steps <span aria-hidden="true">&rarr;</span></a></p>
+    </div>
+  </section>
+</Base>

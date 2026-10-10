@@ -45,6 +45,7 @@ import { buildFlowDataflowIndex } from './flow-dataflow.js';
 import {
   asRecord,
   FLOW_XML_PARSER_OPTIONS,
+  readEntryRequiresRecordChange,
   resolveInputReferenceObject,
   toArray,
   toNonEmptyString,
@@ -59,7 +60,7 @@ const ROOT_ELEMENT = 'Flow';
  * the `<start>` element. Flow's `<start>` carries no `<name>`, and a real
  * element name can never begin with `$`, so this can never collide with one.
  */
-const START_SENTINEL = '$start';
+export const START_SENTINEL = '$start';
 
 // ---------------------------------------------------------------------------
 // §4.1 Projection types
@@ -953,9 +954,7 @@ export const parseFlowGraph = (
       ? toNonEmptyString(startObj['recordTriggerType'])
       : null,
     object: triggerObject,
-    doesRequireRecordChangedToMeetCriteria: startObj
-      ? toNullableBoolean(startObj['doesRequireRecordChangedToMeetCriteria'])
-      : null,
+    doesRequireRecordChangedToMeetCriteria: readEntryRequiresRecordChange(startObj ?? null),
     filterLogic: startObj ? toNullableString(startObj['filterLogic']) : null,
     filters: startFilters,
     // The formula-shaped entry gate (mirrors flow.ts's ConditionalContext read).

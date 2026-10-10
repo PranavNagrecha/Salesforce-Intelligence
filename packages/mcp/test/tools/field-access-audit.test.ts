@@ -369,11 +369,11 @@ describe('fieldAccessAuditHandler', () => {
     if (!result.ok) return;
     // The grantedBy edge carries editable:true (Salesforce <editable>), so the
     // grant MUST resolve to 'edit', not 'unknown'.
-    expect(result.value.data.grants.some((g) => g.permission === 'edit')).toBe(
+    expect(result.value.data.grants.some((g) => g.flsPermission === 'edit')).toBe(
       true,
     );
-    expect(result.value.data.summary.profilesWithEdit).toBe(1);
-    expect(result.value.data.summary.profilesWithUnknown).toBe(0);
+    expect(result.value.data.summary.declaredFls.profilesWithEdit).toBe(1);
+    expect(result.value.data.summary.declaredFls.profilesWithUnknown).toBe(0);
   });
 
   it("filters grants to edit-only when permissionType='edit'", async () => {
@@ -387,7 +387,7 @@ describe('fieldAccessAuditHandler', () => {
     // Only the System Administrator profile + HIPAA permset grant edit.
     expect(grants.length).toBe(2);
     for (const g of grants) {
-      expect(g.permission).toBe('edit');
+      expect(g.flsPermission).toBe('edit');
     }
   });
 
@@ -404,7 +404,7 @@ describe('fieldAccessAuditHandler', () => {
     // this field; they're on UNKNOWN_FIELD seeded separately.
     expect(grants.length).toBe(4);
     for (const g of grants) {
-      expect(g.permission === 'read' || g.permission === 'edit').toBe(true);
+      expect(g.flsPermission === 'read' || g.flsPermission === 'edit').toBe(true);
     }
   });
 
@@ -418,10 +418,10 @@ describe('fieldAccessAuditHandler', () => {
     const { summary } = result.value.data;
     // Summary is unfiltered — even though the response filtered to edit
     // grants, summary still reports both read AND edit counts.
-    expect(summary.profilesWithRead).toBe(2);
-    expect(summary.profilesWithEdit).toBe(1);
-    expect(summary.permSetsWithRead).toBe(2);
-    expect(summary.permSetsWithEdit).toBe(1);
+    expect(summary.declaredFls.profilesWithRead).toBe(2);
+    expect(summary.declaredFls.profilesWithEdit).toBe(1);
+    expect(summary.declaredFls.permSetsWithRead).toBe(2);
+    expect(summary.declaredFls.permSetsWithEdit).toBe(1);
   });
 
   it("classifies the field's PII context alongside the grants (SSN__c -> pii/identifier)", async () => {
@@ -454,10 +454,10 @@ describe('fieldAccessAuditHandler', () => {
       result.value.data;
     expect(grants).toEqual([]);
     expect(viaApexAccess).toEqual([]);
-    expect(summary.profilesWithRead).toBe(0);
-    expect(summary.profilesWithEdit).toBe(0);
-    expect(summary.permSetsWithRead).toBe(0);
-    expect(summary.permSetsWithEdit).toBe(0);
+    expect(summary.declaredFls.profilesWithRead).toBe(0);
+    expect(summary.declaredFls.profilesWithEdit).toBe(0);
+    expect(summary.declaredFls.permSetsWithRead).toBe(0);
+    expect(summary.declaredFls.permSetsWithEdit).toBe(0);
     expect(piiClassification).toBe('public');
   });
 
@@ -471,13 +471,13 @@ describe('fieldAccessAuditHandler', () => {
     expect(grants.length).toBe(1);
     expect(grants[0]?.permission).toBe('unknown');
     // Unknown levels do NOT count in profilesWith{Read,Edit}.
-    expect(summary.profilesWithRead).toBe(0);
-    expect(summary.profilesWithEdit).toBe(0);
+    expect(summary.declaredFls.profilesWithRead).toBe(0);
+    expect(summary.declaredFls.profilesWithEdit).toBe(0);
     // ...but the grant IS counted in profilesWithUnknown, so an all-zero
     // read/edit summary cannot be misread as "no access" — the field is in
     // fact granted to 1 profile (at an extractor-unpopulated level).
-    expect(summary.profilesWithUnknown).toBe(1);
-    expect(summary.permSetsWithUnknown).toBe(0);
+    expect(summary.declaredFls.profilesWithUnknown).toBe(1);
+    expect(summary.declaredFls.permSetsWithUnknown).toBe(0);
   });
 
   it("orders grants by grantorType ASC (PermissionSet before Profile) then by id", async () => {
@@ -561,7 +561,7 @@ describe('fieldAccessAuditHandler', () => {
     // The grant is read straight from the edge.
     expect(d.grants.length).toBe(1);
     expect(d.grants[0]?.grantorId).toBe('PermissionSet:Sales');
-    expect(d.summary.permSetsWithRead).toBe(1);
+    expect(d.summary.declaredFls.permSetsWithRead).toBe(1);
     // PII is inferred from the field NAME (Email) even without the definition.
     expect(d.piiClassification).toBe('pii');
     await closeGraph(localStore);
@@ -672,7 +672,7 @@ describe('fieldAccessAuditHandler — componentId ↔ fieldId alias', () => {
 // BRIEF 086 / R1 — SENTINEL-KEY DISCOVERABILITY.
 //
 // This tool emits four keys whose ONLY job is to stop a zero being read as a
-// verified negative: `summary.profilesWithUnknown` / `summary.permSetsWithUnknown`
+// verified negative: `summary.declaredFls.profilesWithUnknown` / `summary.declaredFls.permSetsWithUnknown`
 // (an all-zero read/edit split is not "no access" when a grant's level is merely
 // unpopulated) and `update.flsEditWithoutObjectRow` / `update.objectRowNote` (an
 // empty `canUpdate` is not a proven denial when object-edit went unchecked).
@@ -711,13 +711,18 @@ describe('sfi.field_access_audit — every emitted sentinel key is named on a su
     const result = await fieldAccessAuditHandler(ctx, { fieldId: UNKNOWN_FIELD });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const summaryKeys = Object.keys(result.value.data.summary);
+    const { summary: s } = result.value.data;
+    const summaryKeys = [
+      ...Object.keys(s),
+      ...Object.keys(s.declaredFls),
+      ...Object.keys(s.profiles),
+    ];
     // Vacuity guard: the fixture must actually produce the sentinel keys.
     expect(summaryKeys).toContain('profilesWithUnknown');
     expect(summaryKeys).toContain('permSetsWithUnknown');
     expect(
-      result.value.data.summary.profilesWithUnknown +
-        result.value.data.summary.permSetsWithUnknown,
+      result.value.data.summary.declaredFls.profilesWithUnknown +
+        result.value.data.summary.declaredFls.permSetsWithUnknown,
     ).toBeGreaterThan(0);
 
     const surfaces = honestySurfaces(result.value.data.boundaryNote);

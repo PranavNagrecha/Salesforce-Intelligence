@@ -45,6 +45,16 @@ export interface ManifestError {
 export interface ExtendedVaultManifest extends VaultManifest {
   readonly skippedDirectories?: Readonly<Record<string, number>>;
   /**
+   * CH-2 — DERIVED IN MEMORY, never persisted: component types the manifest
+   * certifies as confirmed-empty while the vault's own non-heuristic edges
+   * name members of them (REFERENCED-BUT-ABSENT). The MCP server computes it
+   * once from the graph when it binds the vault, so every `summarizeCoverage`
+   * consumer (health_check, coverage_report.summary, every coverage caveat)
+   * reads the same verdict instead of only the few tools that queried the
+   * graph themselves. Such a type is `partial`, never `covered`.
+   */
+  readonly referencedButAbsentTypes?: readonly string[];
+  /**
    * Present only while a staged refresh (`sfi refresh --staged`,
    * P13-STAGED-tiers) is mid-build: which tier last completed, how many
    * tiers the plan has, and which metadata types are still queued. The
@@ -142,6 +152,70 @@ export interface ExtendedVaultManifest extends VaultManifest {
     readonly distinctPhantoms: number;
     readonly buckets: Readonly<Partial<Record<PhantomClassification, number>>>;
   };
+  /**
+   * WOW-12: written when the last refresh had NO org describe for some core
+   * standard objects (an offline `--no-pull` without a cached snapshot, or a
+   * describe that failed). Their describe-only standard fields are missing.
+   */
+  readonly standardFieldDescribe?: StandardFieldDescribeSummary;
+}
+
+/**
+ * WOW-12: the reader-facing disclosure for a vault whose last refresh had no
+ * org describe for some core standard objects, or null when every object had
+ * one. Standard fields that exist only in the org describe (no
+ * `.field-meta.xml`) are absent for those objects, so "field not found" there
+ * is not evidence the field does not exist.
+ */
+export const standardFieldDescribeDisclosure = (
+  manifest: Pick<ExtendedVaultManifest, 'standardFieldDescribe'>,
+): string | null => {
+  const sfd = manifest.standardFieldDescribe;
+  if (sfd === undefined || sfd.skipped.length === 0) return null;
+  const why = sfd.offline
+    ? 'the last refresh was offline (--no-pull) and had no cached describe'
+    : 'the org describe failed on the last refresh';
+  return (
+    `standard fields for ${sfd.skipped.join(', ')} are incomplete: ${why}, so fields known only from the org describe ` +
+    '(no .field-meta.xml) are missing — a field not found on those objects may still exist. ' +
+    'Run `sfi refresh` (or `sfi refresh --no-pull --with-describe`) to restore them.'
+  );
+};
+
+/**
+ * WOW-12, per object: the disclosure for ONE object when its describe-only
+ * standard fields are missing from this vault (it is in
+ * `standardFieldDescribe.skipped`), or null. For answers that say a field was
+ * not found on that object, or count its fields.
+ */
+export const standardFieldDescribeGapFor = (
+  manifest: Pick<ExtendedVaultManifest, 'standardFieldDescribe'>,
+  objectApiName: string,
+): string | null => {
+  const sfd = manifest.standardFieldDescribe;
+  if (sfd === undefined) return null;
+  const folded = objectApiName.toLowerCase();
+  if (!sfd.skipped.some((o) => o.toLowerCase() === folded)) return null;
+  const why = sfd.offline
+    ? 'the last refresh was offline (--no-pull) and had no cached describe'
+    : 'the org describe failed on the last refresh';
+  return (
+    `${objectApiName}'s standard fields are incomplete in this vault: ${why}, so fields known only from the ` +
+    'org describe (no .field-meta.xml) are missing — a standard field not found here may still exist, and its ' +
+    'field count is a lower bound. Run `sfi refresh` (or `sfi refresh --no-pull --with-describe`) to restore them.'
+  );
+};
+
+/** Where each core standard object's describe-only fields came from on a refresh. */
+export interface StandardFieldDescribeSummary {
+  /** Objects described live against the org this run (snapshot cached to `meta/describe-cache/`). */
+  readonly fromLive: readonly string[];
+  /** Objects whose fields came from the cached snapshot of an earlier live describe. */
+  readonly fromCache: readonly string[];
+  /** Objects with no describe this run — their standard fields are source-only (may be incomplete). */
+  readonly skipped: readonly string[];
+  /** True when the run was offline (`--no-pull` without `--with-describe`). */
+  readonly offline: boolean;
 }
 
 /** Mid-build progress marker for a staged refresh (P13-STAGED-tiers). */
@@ -536,6 +610,21 @@ export const summarizeCoverage = (
     .filter((entry) => confirmedEmpty(entry) && unparsedContainerTypes.has(entry.type))
     .map((entry) => entry.type);
   const retrievedNotParsedSet = new Set(retrievedNotParsed);
+  // CH-2 REFERENCED-BUT-ABSENT: a confirmed-clean zero the vault's own graph
+  // contradicts (see ExtendedVaultManifest.referencedButAbsentTypes). Moves
+  // from covered to partial. The shared-container reason wins when both apply.
+  const referencedButAbsentSet = new Set(
+    (manifest as ExtendedVaultManifest | undefined)?.referencedButAbsentTypes ?? [],
+  );
+  const referencedButAbsent = filtered
+    .filter(
+      (entry) =>
+        confirmedEmpty(entry) &&
+        referencedButAbsentSet.has(entry.type) &&
+        !retrievedNotParsedSet.has(entry.type),
+    )
+    .map((entry) => entry.type);
+  const referencedButAbsentFiltered = new Set(referencedButAbsent);
   const coveredTypes = filtered
     .filter(
       (entry) =>
@@ -547,7 +636,8 @@ export const summarizeCoverage = (
         // FIX-2: a `capped` row is real, attempted, ATTEMPTED-BUT-PARTIAL
         // evidence — never `covered`, same as `pending`. See CoverageEntry.capped.
         entry.capped !== true &&
-        !retrievedNotParsedSet.has(entry.type),
+        !retrievedNotParsedSet.has(entry.type) &&
+        !referencedButAbsentFiltered.has(entry.type),
     )
     .map((entry) => entry.type);
   // Requested, non-errored, non-pending, modeled types that retrieved ZERO
@@ -590,6 +680,7 @@ export const summarizeCoverage = (
       )
       .map((entry) => entry.type),
     ...emptyTypes,
+    ...referencedButAbsent,
   ];
   const notModeledTypes = filtered
     .filter((entry) => entry.neverModeled)
@@ -642,6 +733,40 @@ export const summarizeCoverage = (
       ? { retrievedNotParsedTypes: [...retrievedNotParsed].sort() }
       : {}),
   };
+};
+
+/** Why a type sits in {@link CoverageSummary.partialTypes}. */
+export type PartialCoverageReason = 'errored' | 'pending' | 'capped' | 'empty-unconfirmed';
+
+/**
+ * ARCH-05. Split `summarizeCoverage(manifest).partialTypes` by WHY each type is
+ * partial, reading the same coverage rows' own flags — so a report can say
+ * "retrieve failed" only for a type whose retrieve actually ERRORED, instead of
+ * for a still-pending, capped, or requested-but-returned-nothing type.
+ */
+export const partialCoverageReasons = (
+  manifest: VaultManifest | ExtendedVaultManifest | undefined,
+): Readonly<Record<PartialCoverageReason, readonly string[]>> => {
+  const byType = new Map(buildCoverageEntries(manifest).map((e) => [e.type, e]));
+  const out: Record<PartialCoverageReason, string[]> = {
+    errored: [],
+    pending: [],
+    capped: [],
+    'empty-unconfirmed': [],
+  };
+  for (const type of summarizeCoverage(manifest).partialTypes) {
+    const e = byType.get(type);
+    const reason: PartialCoverageReason =
+      e?.errored === true
+        ? 'errored'
+        : e?.pending === true
+          ? 'pending'
+          : e?.capped === true
+            ? 'capped'
+            : 'empty-unconfirmed';
+    out[reason].push(type);
+  }
+  return out;
 };
 
 /** Suffix used for the temporary file in `saveManifest`'s atomic write. */

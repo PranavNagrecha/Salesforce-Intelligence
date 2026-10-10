@@ -15,12 +15,12 @@
  *      than failing the whole batch.
  *   2. `getNodeById` the target — a well-formed Apex id absent from the
  *      vault lands in `notFoundChanges` (again, no batch-wide failure).
- *   3. BFS upstream over INCOMING `callsApex` AND `dispatchesAsync` edges,
- *      depth-3 capped (matching `sfi.test_coverage_for_method`). Every
- *      reached node with `properties.isTest === true` is a covering test.
- *      Following `dispatchesAsync` catches tests that exercise a
- *      batch/queueable/schedulable class via async dispatch
- *      (`Database.executeBatch(new XBatch())`).
+ *   3. The shared walk (`findCoveringTests`, test-coverage-reach.ts): BFS
+ *      upstream over INCOMING `TEST_REACH_EDGE_TYPES` (callsApex /
+ *      dispatchesAsync / inheritsFrom / references) from Apex, depth-3
+ *      capped, plus a heuristic trigger hop (a test that writes the object a
+ *      reached trigger fires on). Every reached `isTest === true` node is a
+ *      covering test; a test is a sink, never relayed through.
  *   4. A changed component that is ITSELF a test class is added to the
  *      selected set directly at depth 0 — you changed the test, so run it —
  *      and is never counted as "uncovered".
@@ -42,31 +42,22 @@
 
 import type {
   ComponentId,
-  EdgeType,
   McpError,
   McpResponse,
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdgesForNodes } from '@sf-intelligence/graph';
+import { getNodeById } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
 import { coercePrefix } from './coerce-id.js';
 import { firstNonEmpty } from './input-aliases.js';
+import { type CoverageVia, findCoveringTests } from './test-coverage-reach.js';
 
 /** BFS depth cap. Matches `sfi.test_coverage_for_method` / `sfi.method_reachability`. */
 const TESTS_FOR_CHANGE_BFS_DEPTH = 3;
-
-/**
- * Incoming edge types the upstream coverage walk follows — identical to
- * `sfi.test_coverage_for_method`. `callsApex` is direct invocation;
- * `dispatchesAsync` captures async dispatch a batch/queueable/schedulable
- * test exercises (`Database.executeBatch`, `System.enqueueJob`,
- * `System.schedule`), which links through `dispatchesAsync`, not `callsApex`.
- */
-const COVERAGE_EDGE_TYPES: readonly EdgeType[] = ['callsApex', 'dispatchesAsync'];
 
 /** Canonical id prefixes the tool analyses. */
 const APEX_CLASS_PREFIX = 'ApexClass:';
@@ -77,7 +68,7 @@ const MAX_CHANGED_ITEMS = 500;
 
 /** Verbatim honesty disclosure surfaced on every response. */
 const TESTS_FOR_CHANGE_DISCLOSURE =
-  'tests_for_change selects at CLASS granularity (a changed method on a covered class still selects that class’s tests; method-level resolution promised in v2.7.1). The upstream walk follows both callsApex and dispatchesAsync incoming edges, so coverage via async dispatch (Database.executeBatch, System.enqueueJob, System.schedule) is included. A test class is a coverage SINK: it is recorded as a covering test but the walk never traverses THROUGH it, so a test is never credited with covering a class its own production code never references. Dynamic dispatch (Type.forName) and reflective invocation are invisible — a test reaching the change only via reflection is missed. Managed-package test classes are invisible. BFS is capped at depth 3; coverage chains longer than 3 hops surface as uncovered even when they exist. SELECTION ≠ VALIDATION: a selected test that merely runs the changed code does NOT prove the change is correct. In particular, Apex tests run with FULL system-context FLS unless the method wraps the path in System.runAs with a restricted user, so .size()/row-count assertions will NOT detect a WITH SECURITY_ENFORCED / stripInaccessible field-access regression — no field is filtered in the test runtime. A changed component in uncoveredChanges is UNGUARDED — running the selected set will NOT exercise it; run the full suite when any change is uncovered or you suspect a deep chain.';
+  'tests_for_change selects at CLASS granularity (a changed method on a covered class still selects that class’s tests; method-level resolution promised in v2.7.1). The upstream walk (shared with test_coverage_gaps and apex_test_coverage) follows callsApex, dispatchesAsync, inheritsFrom and references incoming edges from Apex, so async dispatch, instantiation and static references count; it also credits a test that writes an object whose trigger reaches the change (`via: via-trigger`, heuristic); when the test’s own source shows DML but none of that trigger’s events it is still credited, marked `eventMismatch` (code it calls can still fire the trigger). A test class is a coverage SINK: it is recorded as a covering test but the walk never traverses THROUGH it, so a test is never credited with covering a class its own production code never references. Dynamic dispatch (Type.forName) and reflective invocation are invisible — a test reaching the change only via reflection is missed. Managed-package test classes are invisible. BFS is capped at depth 3; coverage chains longer than 3 hops surface as uncovered even when they exist. SELECTION ≠ VALIDATION: a selected test that merely runs the changed code does NOT prove the change is correct. In particular, Apex tests run with FULL system-context FLS unless the method wraps the path in System.runAs with a restricted user, so .size()/row-count assertions will NOT detect a WITH SECURITY_ENFORCED / stripInaccessible field-access regression — no field is filtered in the test runtime. A changed component in uncoveredChanges is UNGUARDED — running the selected set will NOT exercise it; run the full suite when any change is uncovered or you suspect a deep chain.';
 
 /**
  * Normalize a `review_change`-shaped component selector object to its canonical
@@ -198,6 +189,12 @@ export interface SelectedTest {
   readonly minDepth: number;
   /** Which changed components this test exercises (sorted ASC). */
   readonly coversChanges: readonly ComponentId[];
+  /**
+   * The changes this test reaches ONLY through an `eventMismatch` trigger hop
+   * (its own DML shows none of the trigger's events): weaker evidence, so a
+   * host reading only the selection still sees it. Omitted when none.
+   */
+  readonly eventMismatchFor?: readonly ComponentId[];
 }
 
 /** A single covering-test reference under a per-change entry. */
@@ -205,6 +202,10 @@ export interface CoveringTestRef {
   readonly id: ComponentId;
   readonly apiName: string;
   readonly depth: number;
+  /** How the test reaches the change; `via-trigger` = it writes the object whose trigger does (heuristic). */
+  readonly via?: CoverageVia;
+  /** `via-trigger` only: its own DML shows none of the trigger's events — weaker evidence, still selected. */
+  readonly eventMismatch?: true;
 }
 
 /** Coverage outcome for one analysed (existing, Apex) changed component. */
@@ -257,68 +258,6 @@ const isApexCallable = (id: string): boolean =>
 
 const isTestClass = (node: Node): boolean =>
   node.properties['isTest'] === true;
-
-/**
- * BFS upstream from `targetId` over INCOMING coverage edges (`callsApex`
- * AND `dispatchesAsync`). Returns the depth at which each upstream id was
- * first discovered. Visited set is global to the walk; a node reachable via
- * both edge types is recorded once at its shortest depth.
- *
- * **Test classes are coverage SINKS, not relays.** A discovered test class is
- * recorded as a covering test but is NOT expanded further upstream: nothing
- * legitimately *calls* a test, so following an incoming edge into a test node
- * would attribute whatever sits on the far side of that (spurious) edge as
- * "exercises the target" even though no real call path from that node to the
- * target passes through the target's code. That over-attribution is the
- * fabricated-dependency bug (e.g. crediting `XControllerTest` with covering a
- * selector its controller never references). The `isTest` check is loaded via
- * `loadNode` (cached by the caller); only non-test relays grow the frontier.
- */
-const upstreamWalk = async (
-  ctx: Context,
-  targetId: ComponentId,
-  maxDepth: number,
-  loadNode: (id: ComponentId) => Promise<Result<Node | null, McpError>>,
-): Promise<Result<Map<ComponentId, number>, McpError>> => {
-  const discovered = new Map<ComponentId, number>();
-  let frontier: ComponentId[] = [targetId];
-  const visited = new Set<ComponentId>([targetId]);
-  for (let depth = 0; depth < maxDepth && frontier.length > 0; depth += 1) {
-    const next: ComponentId[] = [];
-    // ONE batched fetch of the WHOLE frontier's incoming coverage edges (both
-    // COVERAGE_EDGE_TYPES at once), replacing the per-frontier-node × per-edge-
-    // type `listEdges` N+1. Each per-node bucket is sorted by the FULL (to_id,
-    // edge_type, from_id, source) order; since to_id is fixed per bucket, that
-    // reduces to (edge_type, from_id, source). COVERAGE_EDGE_TYPES is
-    // edge_type-ASCENDING ('callsApex' < 'dispatchesAsync'), so the bucket lists
-    // all callsApex edges (by from_id, source) THEN all dispatchesAsync edges —
-    // EXACTLY the old `for edgeType { for edge }` visitation order. The test-sink
-    // rule (don't expand through a test node) and the visited-set dedup are thus
-    // reproduced identically. Query count is now one per DEPTH LEVEL, not one per
-    // (frontier node × edge type).
-    const edgeBatch = await listEdgesForNodes(ctx.graph, frontier, {
-      direction: 'in',
-      edgeTypes: COVERAGE_EDGE_TYPES,
-    });
-    if (!edgeBatch.ok) return err({ kind: 'internal', message: edgeBatch.error.message });
-    for (const id of frontier) {
-      for (const edge of edgeBatch.value.get(id) ?? []) {
-        if (visited.has(edge.fromId)) continue;
-        visited.add(edge.fromId);
-        discovered.set(edge.fromId, depth + 1);
-        // Only non-test relays expand the frontier. A test class is a sink:
-        // record it, but never walk THROUGH it (a test has no real callers).
-        const nodeRes = await loadNode(edge.fromId);
-        if (!nodeRes.ok) return nodeRes;
-        const node = nodeRes.value;
-        if (node !== null && isTestClass(node)) continue;
-        next.push(edge.fromId);
-      }
-    }
-    frontier = next;
-  }
-  return ok(discovered);
-};
 
 const sortIds = (ids: readonly ComponentId[]): ComponentId[] =>
   [...ids].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
@@ -376,14 +315,15 @@ export const testsForChangeHandler = async (
   // testId -> { apiName, minDepth, coversChanges:Set }
   const selected = new Map<
     ComponentId,
-    { apiName: string; minDepth: number; covers: Set<ComponentId> }
+    { apiName: string; minDepth: number; covers: Set<ComponentId>; mismatched: Set<ComponentId> }
   >();
   const uncovered: ComponentId[] = [];
 
   const recordSelected = (
-    test: Node,
+    test: Pick<Node, 'id' | 'apiName'>,
     changeId: ComponentId,
     depth: number,
+    eventMismatch = false,
   ): void => {
     const existing = selected.get(test.id);
     if (existing === undefined) {
@@ -391,13 +331,17 @@ export const testsForChangeHandler = async (
         apiName: test.apiName,
         minDepth: depth,
         covers: new Set([changeId]),
+        mismatched: new Set(eventMismatch ? [changeId] : []),
       });
       return;
     }
     existing.covers.add(changeId);
+    if (eventMismatch) existing.mismatched.add(changeId);
     if (depth < existing.minDepth) existing.minDepth = depth;
   };
 
+  // One read of each candidate test's source per request (trigger-hop event filter).
+  const verbCache = new Map<ComponentId, ReadonlySet<string> | null>();
   for (const [targetId] of apexTargets) {
     const targetRes = await loadNode(targetId);
     if (!targetRes.ok) return targetRes;
@@ -421,17 +365,26 @@ export const testsForChangeHandler = async (
       continue;
     }
 
-    const walkRes = await upstreamWalk(ctx, targetId, TESTS_FOR_CHANGE_BFS_DEPTH, loadNode);
-    if (!walkRes.ok) return walkRes;
+    // DEV-05 / ARCH-04: the ONE shared coverage walk (test-coverage-reach.ts),
+    // so this selection agrees with test_coverage_gaps / apex_test_coverage —
+    // including tests that reach the change through a trigger's DML.
+    const walkRes = await findCoveringTests(ctx.graph, targetId, {
+      maxDepth: TESTS_FOR_CHANGE_BFS_DEPTH,
+      vaultRoot: ctx.vaultRoot,
+      verbCache,
+    });
+    if (!walkRes.ok) return err({ kind: 'internal', message: walkRes.error });
 
     const coveringTests: CoveringTestRef[] = [];
-    for (const [id, depth] of walkRes.value) {
-      const r = await loadNode(id);
-      if (!r.ok) return r;
-      const node = r.value;
-      if (node === null || !isTestClass(node)) continue;
-      coveringTests.push({ id: node.id, apiName: node.apiName, depth });
-      recordSelected(node, targetId, depth);
+    for (const hit of walkRes.value.values()) {
+      coveringTests.push({
+        id: hit.testId,
+        apiName: hit.apiName,
+        depth: hit.depth,
+        via: hit.via,
+        ...(hit.eventMismatch === true ? { eventMismatch: true as const } : {}),
+      });
+      recordSelected({ id: hit.testId, apiName: hit.apiName }, targetId, hit.depth, hit.eventMismatch === true);
     }
     coveringTests.sort((a, b) =>
       a.depth !== b.depth ? a.depth - b.depth : a.id < b.id ? -1 : a.id > b.id ? 1 : 0,
@@ -454,6 +407,7 @@ export const testsForChangeHandler = async (
       apiName: v.apiName,
       minDepth: v.minDepth,
       coversChanges: sortIds([...v.covers]),
+      ...(v.mismatched.size > 0 ? { eventMismatchFor: sortIds([...v.mismatched]) } : {}),
     }),
   );
   selectedTests.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));

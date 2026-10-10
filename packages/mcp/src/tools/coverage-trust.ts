@@ -7,6 +7,11 @@ import { buildMixedFreshness, summarizeCoverage } from '@sf-intelligence/vault';
 
 import type { Context } from '../server.js';
 
+import {
+  DELETE_CATEGORY_FAMILIES,
+  FIELD_REFERRER_FAMILIES_WITHOUT_CATEGORY,
+} from './delete-safety-tiers.js';
+
 export interface CoverageCaveat {
   readonly status: 'partial' | 'unknown';
   readonly missingCoverage: readonly string[];
@@ -268,6 +273,19 @@ export const applyCoverageToVerdict = <V extends string>(
 // ---------------------------------------------------------------------------
 
 /**
+ * Every family that can hold a reference to a CustomField: the union of the
+ * families behind `safe_to_delete_field`'s delete categories (which include the
+ * Apex + OmniStudio families its source name scan reads), plus the referrer
+ * families with no named category (EmailTemplate merge fields).
+ */
+const CUSTOM_FIELD_REFERRER_FAMILIES: readonly string[] = [
+  ...new Set([
+    ...Object.values(DELETE_CATEGORY_FAMILIES).flat(),
+    ...FIELD_REFERRER_FAMILIES_WITHOUT_CATEGORY,
+  ]),
+];
+
+/**
  * The families whose metadata can hold an INBOUND USAGE edge to a component of
  * a given type — the "who could reference / place / use me" set. A destructive
  * verdict that rests on "this component has 0 inbound usage edges" is only as
@@ -297,38 +315,10 @@ export const applyCoverageToVerdict = <V extends string>(
  */
 export const USAGE_SOURCE_FAMILIES: Readonly<Record<string, readonly string[]>> =
   Object.freeze({
-    // A CustomField's producers — the vetted field-deletion referrer set (the
-    // same list `safe_to_delete_field` uses; keeping it here makes that tool and
-    // review_change share ONE contract instead of two copies).
-    CustomField: [
-      'CustomField',
-      'ValidationRule',
-      'Flow',
-      'ApexClass',
-      'ApexTrigger',
-      'Layout',
-      'LightningComponentBundle',
-      'AuraDefinitionBundle',
-      'VisualforcePage',
-      'VisualforceComponent',
-      'QuickAction',
-      'WorkflowRule',
-      // The remaining condition firers wired to extractConditions. Their
-      // ConditionalContext nodes now emit `readsFrom` edges to the fields their
-      // criteria TEST, so a field can carry a `condition` blocker hiding behind
-      // any of these families — and without them listed, buildCoverageCaveat
-      // stayed silent on an unretrieved family while the verdict read clean.
-      'ApprovalProcess',
-      'AssignmentRule',
-      'AutoResponseRule',
-      'EscalationRule',
-      'SharingRule',
-      'Report',
-      'Dashboard',
-      'ListView',
-      'ReportType',
-      'FlexiPage',
-    ],
+    // A CustomField's producers — DERIVED from the delete categories
+    // `safe_to_delete_field` checks, so a family a category reads can never be
+    // missing from the coverage caveat (and vice versa).
+    CustomField: CUSTOM_FIELD_REFERRER_FAMILIES,
     // Screen flows are EMBEDDED (FlexiPage / Layout / quick action / LWC-Aura),
     // and any flow can be invoked from Apex or a parent flow. FlexiPage is the
     // plane whose omission a real-org favicon/index cluster proved blind.

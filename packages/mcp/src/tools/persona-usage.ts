@@ -315,6 +315,9 @@ export const computePersonaUsage = async (
   }
 
   // --- mentions: objects named by reachable Apex source ------------------------------
+  // CH-8: an unreadable class is counted and disclosed, never silently skipped —
+  // its object mentions would otherwise read as "this persona does not touch it".
+  const unreadableSources: string[] = [];
   for (const id of reachable.keys()) {
     const node = byId.get(id);
     if (node === undefined || node.sourcePath === null || node.sourcePath.length === 0) continue;
@@ -322,12 +325,19 @@ export const computePersonaUsage = async (
     try {
       text = await readFile(resolveVaultSourcePath(ctx.vaultRoot, node.sourcePath), 'utf-8');
     } catch {
+      unreadableSources.push(id);
       continue;
     }
     for (const m of stripApexComments(text).matchAll(IDENT)) {
       const hit = objectByLower.get(m[0].toLowerCase());
       if (hit !== undefined) mentioned.add(hit.toLowerCase());
     }
+  }
+
+  if (unreadableSources.length > 0) {
+    limitations.push(
+      `${unreadableSources.length} reachable Apex source file(s) could not be read (e.g. ${unreadableSources.slice(0, 3).join(', ')}); objects they name are not counted as mentions.`,
+    );
   }
 
   // --- direct UI references and other flows ---------------------------------------------

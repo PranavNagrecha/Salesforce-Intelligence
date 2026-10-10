@@ -79,6 +79,20 @@ edgeSemantics:
       category: formula
       verdict: blocking
 
+    # A DLRS (Declarative Lookup Rollup Summaries) rollup definition — a
+    # custom metadata record — writes its target field and reads the child
+    # fields it aggregates. Same consequence as a native roll-up: the rollup
+    # stops working when either field goes. The tool demotes an INACTIVE
+    # definition (edge property `active: false`) to `review`.
+    - source: dlrs-rollup
+      edgeType: writesTo
+      category: rollup
+      verdict: blocking
+    - source: dlrs-rollup
+      edgeType: readsFrom
+      category: rollup
+      verdict: blocking
+
   # 2/3. Per-edge-type classification. Each entry:
   #   bySourceType - referrer ComponentType -> {category, verdict}
   #   default      - fallback for a source ComponentType not listed above
@@ -109,6 +123,21 @@ edgeSemantics:
         AuraDefinitionBundle:
           category: frontend
           verdict: risky
+        # OmniStudio names fields as strings (DataMapper rows, element JSON):
+        # Salesforce does NOT refuse the delete, the component breaks at runtime.
+        # The tool demotes an INACTIVE component to `review`.
+        OmniDataTransform:
+          category: omnistudio
+          verdict: blocking
+        OmniIntegrationProcedure:
+          category: omnistudio
+          verdict: blocking
+        OmniScript:
+          category: omnistudio
+          verdict: blocking
+        OmniUiCard:
+          category: omnistudio
+          verdict: blocking
       default:
         category: unknown
         verdict: risky
@@ -132,6 +161,18 @@ edgeSemantics:
         AuraDefinitionBundle:
           category: frontend
           verdict: risky
+        OmniDataTransform:
+          category: omnistudio
+          verdict: blocking
+        OmniIntegrationProcedure:
+          category: omnistudio
+          verdict: blocking
+        OmniScript:
+          category: omnistudio
+          verdict: blocking
+        OmniUiCard:
+          category: omnistudio
+          verdict: blocking
       default:
         category: unknown
         verdict: blocking
@@ -181,6 +222,23 @@ edgeSemantics:
           verdict: blocking
         ScopingRule:
           category: sharing
+          verdict: blocking
+        # A criteria-based sharing rule whose criteria test this field
+        # (`referenceKind: sharingCriteria`). Salesforce refuses the delete.
+        SharingRule:
+          category: sharing
+          verdict: blocking
+        OmniDataTransform:
+          category: omnistudio
+          verdict: blocking
+        OmniIntegrationProcedure:
+          category: omnistudio
+          verdict: blocking
+        OmniScript:
+          category: omnistudio
+          verdict: blocking
+        OmniUiCard:
+          category: omnistudio
           verdict: blocking
       default:
         category: unknown

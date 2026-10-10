@@ -19,7 +19,7 @@ import {
   listNodesByIds,
   listNodesByType,
 } from '@sf-intelligence/graph';
-import { summarizeCoverage } from '@sf-intelligence/vault';
+import { partialCoverageReasons, summarizeCoverage } from '@sf-intelligence/vault';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -35,8 +35,10 @@ import {
   governorLimitRisksHandler,
   type GovernorLimitRisksOutput,
 } from './governor-limit-risks.js';
+import { guestExposureReportHandler } from './guest-exposure-report.js';
 import { healthCheckHandler } from './health-check.js';
 import { resolveExistingObjectScope } from './input-aliases.js';
+import { grantorAudience, type GrantorAudience } from './licence-audience.js';
 import { namingConventionReportHandler } from './naming-convention-report.js';
 import { expandPermissionSetGroup } from './permission-set-group.js';
 import { collectPiiInventoryFields } from './pii-inventory.js';
@@ -153,6 +155,11 @@ export interface RankedFinding {
   readonly summary: string;
   readonly evidence: readonly string[];
   readonly confidence: TrustSummary['confidence'];
+  /**
+   * Over-privilege findings only: who can HOLD the grant, from the container's
+   * licence. An external or guest audience escalates the finding to critical.
+   */
+  readonly audience?: GrantorAudience;
 }
 
 interface SynthesisBase {
@@ -275,32 +282,51 @@ export const orgRiskReportHandler = async (
     findings.push({
       rank: 0,
       severity:
-        techDebt.scoreBand === 'critical-debt'
-          ? 'critical'
-          : techDebt.scoreBand === 'high-debt'
-            ? 'high'
-            : 'medium',
+        techDebt.scoreBand === 'insufficient-evidence'
+          ? 'low'
+          : techDebt.scoreBand === 'critical-debt'
+            ? 'critical'
+            : techDebt.scoreBand === 'high-debt'
+              ? 'high'
+              : 'medium',
       category: 'tech-debt',
-      summary: `Org tech debt score ${techDebt.overallScore} (${techDebt.scoreBand})`,
+      summary:
+        techDebt.scoreBand === 'insufficient-evidence'
+          ? `Org tech debt not banded: only ${techDebt.scoredAxes.length} of 6 axes scored (${techDebt.scoredAxes.join(', ') || 'none'})`
+          : `Org tech debt score ${techDebt.overallScore} (${techDebt.scoreBand})`,
       evidence: techDebt.excludedCategories.map((c) => `excluded:${c.category}`),
       confidence: 'heuristic',
     });
   }
 
   const coverage = summarizeCoverage(ctx.manifest);
+  // ARCH-05. A coverage gap is a caveat on THIS REPORT, not a risk in the org,
+  // so it is never ranked above real org findings (at most `medium`), and it
+  // says "retrieve failed" only for types whose retrieve actually ERRORED —
+  // `partialTypes` also holds pending, capped and requested-but-empty rows.
+  const partialWhy = partialCoverageReasons(ctx.manifest);
   if (coverage.status !== 'complete') {
     const coverageEvidence = [
       ...coverage.missingCoverage,
       ...coverage.partialTypes.map((t) => `partial:${t}`),
     ];
+    const parts: string[] = [];
+    if (partialWhy.errored.length > 0) parts.push(`retrieve errored for: ${partialWhy.errored.join(', ')}`);
+    const inFlight = [...partialWhy.pending, ...partialWhy.capped];
+    if (inFlight.length > 0) parts.push(`still pending or capped: ${inFlight.join(', ')}`);
+    if (partialWhy['empty-unconfirmed'].length > 0) {
+      parts.push(
+        `requested but returned nothing, so absence is unconfirmed: ${partialWhy['empty-unconfirmed'].join(', ')}`,
+      );
+    }
     findings.push({
       rank: 0,
-      severity: coverage.partialTypes.length > 0 ? 'critical' : 'high',
+      severity: partialWhy.errored.length > 0 ? 'medium' : 'low',
       category: 'coverage',
       summary:
-        coverage.partialTypes.length > 0
-          ? `Vault coverage is ${coverage.status} — retrieve failed for: ${coverage.partialTypes.join(', ')}`
-          : `Vault coverage is ${coverage.status}`,
+        parts.length > 0
+          ? `Vault coverage is ${coverage.status} (a caveat on this report, not an org risk) — ${parts.join('; ')}`
+          : `Vault coverage is ${coverage.status} (a caveat on this report, not an org risk)`,
       evidence: coverageEvidence,
       confidence: 'declared',
     });
@@ -335,6 +361,29 @@ export const orgRiskReportHandler = async (
           ...privilege.viewAllDataGrantors.slice(0, 5),
         ],
         confidence: 'declared',
+      });
+    }
+  }
+
+  // ARCH-05: guest (unauthenticated) exposure is a headline org risk; the
+  // report used to omit it entirely. One rolled-up finding at the worst
+  // guest severity, citing the top findings' nodes.
+  const guest = await guestExposureReportHandler(ctx, { limit: 25 });
+  if (guest.ok) {
+    const g = guest.value.data;
+    const worstGuest: RankedFinding['severity'] | null =
+      g.summary.critical > 0 ? 'critical' : g.summary.high > 0 ? 'high' : g.summary.medium > 0 ? 'medium' : g.summary.low > 0 ? 'low' : null;
+    if (worstGuest !== null) {
+      findings.push({
+        rank: 0,
+        severity: worstGuest,
+        category: 'guest-exposure',
+        summary:
+          `${g.summary.totalFindings} guest-user exposure finding(s) across ${g.summary.communities} site(s) — ` +
+          `${g.summary.critical} critical, ${g.summary.high} high; run sfi.guest_exposure_report for the list`,
+        // DISTINCT nodes: several findings often cite the same object.
+        evidence: [...new Set(g.findings.map((f) => f.nodeId))].slice(0, 5),
+        confidence: 'heuristic',
       });
     }
   }
@@ -413,9 +462,9 @@ export const orgRiskReportHandler = async (
     for (const finding of sortedFindings) {
       if (finding.severity === 'critical') blockers.push(finding.summary);
     }
-    if (coverage.partialTypes.length > 0) {
+    if (partialWhy.errored.length > 0) {
       blockers.push(
-        `Incomplete vault coverage — requested metadata failed retrieve: ${coverage.partialTypes.join(', ')}. Re-run /sfi-refresh.`,
+        `Incomplete vault coverage — requested metadata failed retrieve: ${partialWhy.errored.join(', ')}. Re-run /sfi-refresh.`,
       );
     }
     gate = { ready: blockers.length === 0, blockers };
@@ -1216,6 +1265,33 @@ export interface PrivilegeSummary {
   readonly scanBoundaryNote: string | null;
 }
 
+/**
+ * WOW-5: record-reach grants (View / Modify All on an object, View / Modify All
+ * Data) held through an external or guest licence. One rule for a container's
+ * own finding and for a permission set group's aggregate.
+ */
+const exposedRecordReach = (
+  audience: GrantorAudience,
+  perms: ReadonlySet<string> | readonly string[],
+  modifyAllObjects: number,
+  viewAllObjects: number,
+): boolean => {
+  const has = (p: string): boolean =>
+    Array.isArray(perms) ? perms.includes(p) : (perms as ReadonlySet<string>).has(p);
+  return (
+    (audience === 'external' || audience === 'guest') &&
+    (modifyAllObjects > 0 || viewAllObjects > 0 || has('ModifyAllData') || has('ViewAllData'))
+  );
+};
+
+/** The most outside-facing audience of a group's members (guest > external > internal > unknown). */
+const mostExposedAudience = (audiences: readonly GrantorAudience[]): GrantorAudience => {
+  if (audiences.includes('guest')) return 'guest';
+  if (audiences.includes('external')) return 'external';
+  if (audiences.length > 0 && audiences.every((a) => a === 'internal')) return 'internal';
+  return 'unknown';
+};
+
 /** Build the aggregated over-privilege finding for one grantor, or null. */
 const grantorFinding = (
   node: Node,
@@ -1229,6 +1305,15 @@ const grantorFinding = (
   if (riskyPerms.length === 0 && modifyAllObjects === 0 && viewAllObjects === 0) {
     return null;
   }
+  // WOW-5: severity used to ignore WHO holds the grant. A permission set
+  // licensed to external community users with Modify All on an object lets
+  // every portal user edit every other customer's records — that outranks an
+  // internal admin profile holding admin perms, which is expected.
+  const { audience, licence } = grantorAudience(node);
+  const exposed = audience === 'external' || audience === 'guest';
+  // Record-reach grants held by outsiders are critical; any other flagged perm
+  // keeps its severity.
+  const escalate = exposedRecordReach(audience, riskyPerms, modifyAllObjects, viewAllObjects);
   const parts: string[] = [];
   if (riskyPerms.length > 0) {
     parts.push(`system perms: ${[...riskyPerms].sort().join(', ')}`);
@@ -1239,15 +1324,46 @@ const grantorFinding = (
   if (viewAllObjects > 0) {
     parts.push(`View All on ${viewAllObjects} object(s)`);
   }
+  // ARCH-05: a STANDARD profile (`<custom>false</custom>`, Salesforce-defined,
+  // e.g. the system administrator or a packaged integration user) carries these
+  // permissions by design and cannot be edited down. It stays listed but ranks
+  // below custom grantors: at most `medium`.
+  const standardProfile = type === 'Profile' && node.properties['custom'] === false;
+  const severity: RankedFinding['severity'] = standardProfile
+    ? worst === 'critical' || worst === 'high'
+      ? 'medium'
+      : 'low'
+    : (worst ?? 'medium');
   return {
     rank: 0,
-    severity: worst ?? 'medium',
+    // External/guest holders escalate (perms); stock Salesforce profiles are demoted (toolquality).
+    severity: escalate ? 'critical' : severity,
     category: 'over-privilege',
-    summary: `${type} ${node.apiName} grants ${parts.join('; ')}`,
+    summary: exposed
+      ? `${audience === 'guest' ? 'GUEST' : 'EXTERNAL'}-licence ${type} ${node.apiName} (${licence ?? ''}) grants ${parts.join('; ')} — held by users outside the company`
+      : standardProfile
+      ? `Standard Profile ${node.apiName} grants ${parts.join('; ')} (Salesforce-defined; review who holds it)`
+      : `${type} ${node.apiName} grants ${parts.join('; ')}`,
     evidence: [node.id, ...examples],
     confidence: 'declared',
+    audience,
   };
 };
+
+/**
+ * Within one severity, exposure to people outside the company ranks first.
+ * `unknown` (a permission set with no licence) is NOT promoted: it is not
+ * known exposure, and promoting it reordered every licence-less set ahead of
+ * internal findings of the same severity.
+ */
+const AUDIENCE_RANK: Readonly<Record<GrantorAudience, number>> = {
+  guest: 2,
+  external: 1,
+  unknown: 0,
+  internal: 0,
+};
+const audienceRank = (f: RankedFinding): number =>
+  f.audience === undefined ? 0 : AUDIENCE_RANK[f.audience];
 
 /**
  * Scan every Profile and PermissionSet for over-privilege from the extracted
@@ -1276,6 +1392,7 @@ const analyzeOverPrivilege = async (
       readonly perms: readonly string[];
       readonly modAll: number;
       readonly viewAll: number;
+      readonly audience: GrantorAudience;
     }
   >();
 
@@ -1378,6 +1495,7 @@ const analyzeOverPrivilege = async (
         perms: riskyPerms,
         modAll: modifyAllObjects,
         viewAll: viewAllObjects,
+        audience: grantorAudience(node).audience,
       });
     }
 
@@ -1410,6 +1528,7 @@ const analyzeOverPrivilege = async (
     let aggModAll = 0;
     let aggViewAll = 0;
     const riskyMembers: string[] = [];
+    const memberAudiences: GrantorAudience[] = [];
     for (const memberId of expanded.value.memberPermissionSetIds) {
       const risk = permsetRisk.get(memberId);
       if (risk === undefined) continue;
@@ -1417,6 +1536,7 @@ const analyzeOverPrivilege = async (
         continue;
       }
       for (const perm of risk.perms) conferred.add(perm);
+      memberAudiences.push(risk.audience);
       aggModAll += risk.modAll;
       aggViewAll += risk.viewAll;
       if (riskyMembers.length < ESCALATION_EXAMPLE_CAP) {
@@ -1460,11 +1580,16 @@ const analyzeOverPrivilege = async (
     if (aggViewAll > 0) {
       parts.push(`View All on ${aggViewAll} object(s) (aggregate)`);
     }
+    // WOW-5 for groups: the group is held by whoever its risky members'
+    // licences admit, so an external member set makes the group external.
+    const psgAudience = mostExposedAudience(memberAudiences);
+    const psgExposed = psgAudience === 'external' || psgAudience === 'guest';
     findings.push({
       rank: 0,
-      severity: worst,
+      severity: exposedRecordReach(psgAudience, conferred, aggModAll, aggViewAll) ? 'critical' : worst,
       category: 'over-privilege',
       summary:
+        (psgExposed ? `${psgAudience === 'guest' ? 'GUEST' : 'EXTERNAL'}-licence member set(s): ` : '') +
         `PermissionSetGroup ${psg.apiName} confers via member permission ` +
         `set(s) ${parts.join('; ')}` +
         (hasMuting
@@ -1472,11 +1597,14 @@ const analyzeOverPrivilege = async (
           : ''),
       evidence: [psg.id, ...riskyMembers],
       confidence: 'declared',
+      audience: psgAudience,
     });
   }
 
   const ranked = [...findings].sort(
-    (a, b) => rankSeverity(b.severity) - rankSeverity(a.severity),
+    (a, b) =>
+      rankSeverity(b.severity) - rankSeverity(a.severity) ||
+      audienceRank(b) - audienceRank(a),
   );
   return ok({
     findings: ranked.slice(0, limit),

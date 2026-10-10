@@ -1903,6 +1903,78 @@ describe('unused_fields_deep — real-org regressions', () => {
     );
   });
 
+  it('FAIL-BEFORE/PASS-AFTER (ADM-5): a report-type-column-only field is listed at medium, not hidden as used', async () => {
+    await withVault(
+      async (dir) => {
+        const rtRel = 'source/reportTypes/RT_C.reportType-meta.xml';
+        mkdirSync(join(dir, 'source', 'reportTypes'), { recursive: true });
+        writeFileSync(
+          join(dir, rtRel),
+          `<?xml version="1.0" encoding="UTF-8"?>
+<ReportType>
+  <baseObject>Obj_A__c</baseObject>
+  <sections>
+    <columns>
+      <field>ReportTypeColumn__c</field>
+      <table>Obj_A__c</table>
+    </columns>
+    <columns>
+      <field>SameNameOtherObject__c</field>
+      <table>Obj_Z__c</table>
+    </columns>
+  </sections>
+</ReportType>`,
+          'utf-8',
+        );
+        return {
+          nodes: [
+            makeNode({ id: OBJ, type: 'CustomObject', apiName: 'Obj_A__c' }),
+            makeNode({
+              id: 'ReportType:RT_C',
+              type: 'ReportType',
+              apiName: 'RT_C',
+              sourcePath: rtRel,
+              // The extractor stamps this on EVERY ReportType: the per-column
+              // identity graph is a deferred follow-up, so "0 inbound edges"
+              // from this family is NOT CHECKED, never proven none.
+              properties: { columnsModeled: false, columnCount: 2 },
+            }),
+            makeNode({
+              id: 'CustomField:Obj_A__c.ReportTypeColumn__c',
+              apiName: 'ReportTypeColumn__c',
+              parentId: OBJ,
+              properties: { dataType: 'Text' },
+            }),
+            // Same api name, DIFFERENT object — must NOT be suppressed by the
+            // other object's column (no name-only matching).
+            makeNode({
+              id: 'CustomField:Obj_A__c.SameNameOtherObject__c',
+              apiName: 'SameNameOtherObject__c',
+              parentId: OBJ,
+              properties: { dataType: 'Text' },
+            }),
+          ],
+          edges: [
+            makeEdge({ fromId: OBJ, toId: 'CustomField:Obj_A__c.ReportTypeColumn__c', edgeType: 'parentOf' }),
+            makeEdge({ fromId: OBJ, toId: 'CustomField:Obj_A__c.SameNameOtherObject__c', edgeType: 'parentOf' }),
+          ],
+        };
+      },
+      async (localCtx) => {
+        const r = await unusedFieldsDeepHandler(localCtx, { objectApiName: 'Obj_A__c' });
+        if (!r.ok) throw new Error(r.error.message);
+        const entry = r.value.data.fields.find(
+          (f) => f.id === 'CustomField:Obj_A__c.ReportTypeColumn__c',
+        );
+        expect(entry).toBeDefined();
+        expect(entry?.confidence).toBe('medium');
+        expect(entry?.recommendedAction).toMatch(/^REPORT-TYPE COLUMN ONLY/);
+        expect(r.value.data.boundaries.join(' ')).toMatch(/only use is as a column of a custom ReportType/);
+      },
+    );
+  });
+
+
   // --- D3: the certification the tool did not earn --------------------------
 
   it('D3: trust.limitations carries every boundary the same envelope discloses', async () => {

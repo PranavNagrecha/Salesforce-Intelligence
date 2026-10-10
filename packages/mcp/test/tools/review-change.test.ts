@@ -98,6 +98,17 @@ const FAMILIES = [
   'ListView',
   'ReportType',
   'FlexiPage',
+  'EmailTemplate',
+  // Families behind the omnistudio / rollup (DLRS) / layout (WebLink) /
+  // sharing delete categories.
+  'OmniDataTransform',
+  'OmniIntegrationProcedure',
+  'OmniScript',
+  'OmniUiCard',
+  'CustomMetadataRecord',
+  'WebLink',
+  'RestrictionRule',
+  'ScopingRule',
   'CustomSite',
   'CustomTab',
   'CustomApplication',
@@ -209,6 +220,17 @@ const SEED: ExtractionResult = {
     makeNode({ id: 'ApexClass:Mixed_Target_C', apiName: 'Mixed_Target_C', properties: { isTest: false } }),
     makeNode({ id: 'ApexClass:Mixed_Helper_C', apiName: 'Mixed_Helper_C', properties: { isTest: false } }),
     makeNode({ id: 'ApexClass:Mixed_Helper_C_Test', apiName: 'Mixed_Helper_C_Test', properties: { isTest: true } }),
+    // The same three shapes over an edge the shared walk does NOT follow
+    // (`dependsOnFromApi`, Tooling-API sourced). Since the walk widened to
+    // `references`, these are what keep the "unknown, not uncovered" rule live.
+    makeNode({ id: 'ApexClass:Api_Direct_C', apiName: 'Api_Direct_C', properties: { isTest: false } }),
+    makeNode({ id: 'ApexClass:Api_Direct_C_Test', apiName: 'Api_Direct_C_Test', properties: { isTest: true } }),
+    makeNode({ id: 'ApexClass:Api_Deep_C', apiName: 'Api_Deep_C', properties: { isTest: false } }),
+    makeNode({ id: 'ApexClass:Api_Deep_Sched_C', apiName: 'Api_Deep_Sched_C', properties: { isTest: false } }),
+    makeNode({ id: 'ApexClass:Api_Deep_C_Test', apiName: 'Api_Deep_C_Test', properties: { isTest: true } }),
+    makeNode({ id: 'ApexClass:Api_Mixed_Target_C', apiName: 'Api_Mixed_Target_C', properties: { isTest: false } }),
+    makeNode({ id: 'ApexClass:Api_Mixed_Helper_C', apiName: 'Api_Mixed_Helper_C', properties: { isTest: false } }),
+    makeNode({ id: 'ApexClass:Api_Mixed_Helper_C_Test', apiName: 'Api_Mixed_Helper_C_Test', properties: { isTest: true } }),
     // CONTROL: a production instantiation referrer that has NO test of its own
     // anywhere upstream. Nothing in this component's whole inbound Apex closure
     // is a test, so its zero really is a zero over the extracted edges and the
@@ -318,6 +340,12 @@ const SEED: ExtractionResult = {
     // TWO-HOP MIRROR: walked edge FIRST, unwalked edge second.
     makeEdge({ fromId: 'ApexClass:Mixed_Helper_C', toId: 'ApexClass:Mixed_Target_C', edgeType: 'callsApex' }),
     makeEdge({ fromId: 'ApexClass:Mixed_Helper_C_Test', toId: 'ApexClass:Mixed_Helper_C', edgeType: 'references', confidence: 'heuristic', source: 'apex-scanner', properties: { mechanism: 'instantiation' } }),
+    // Unwalked-edge shapes (`dependsOnFromApi` is outside TEST_REACH_EDGE_TYPES).
+    makeEdge({ fromId: 'ApexClass:Api_Direct_C_Test', toId: 'ApexClass:Api_Direct_C', edgeType: 'dependsOnFromApi' }),
+    makeEdge({ fromId: 'ApexClass:Api_Deep_Sched_C', toId: 'ApexClass:Api_Deep_C', edgeType: 'dependsOnFromApi' }),
+    makeEdge({ fromId: 'ApexClass:Api_Deep_C_Test', toId: 'ApexClass:Api_Deep_Sched_C', edgeType: 'dispatchesAsync' }),
+    makeEdge({ fromId: 'ApexClass:Api_Mixed_Helper_C', toId: 'ApexClass:Api_Mixed_Target_C', edgeType: 'callsApex' }),
+    makeEdge({ fromId: 'ApexClass:Api_Mixed_Helper_C_Test', toId: 'ApexClass:Api_Mixed_Helper_C', edgeType: 'dependsOnFromApi' }),
     // LWC → controller (outbound callsApex) + permission wire; test covers controller.
     makeEdge({ fromId: 'ApexClass:PromoControllerTest', toId: 'ApexClass:PromoController', edgeType: 'callsApex' }),
     makeEdge({ fromId: 'LightningComponentBundle:promoPanel', toId: 'ApexClass:PromoController', edgeType: 'callsApex' }),
@@ -1280,7 +1308,7 @@ describe('reviewChangeHandler — per-component covering-test truncation honesty
 describe('reviewChangeHandler — an unwalked test referrer makes the zero UNKNOWN, not "uncovered"', () => {
   it('does not certify `uncovered` when a test class reaches the change through an unwalked edge', async () => {
     const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
-      components: [{ type: 'ApexClass', apiName: 'Silent_Batch_C', changeKind: 'modified' }],
+      components: [{ type: 'ApexClass', apiName: 'Api_Direct_C', changeKind: 'modified' }],
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -1291,7 +1319,7 @@ describe('reviewChangeHandler — an unwalked test referrer makes the zero UNKNO
     // …but the STATUS must not be an affirmative "no test covers this".
     expect(c?.testCoverage).toBe('unknown');
     // The blind spot is in a TYPED field a machine consumer cannot skip.
-    expect(c?.uncheckedTestReferrers).toEqual(['ApexClass:Silent_Batch_C_Test']);
+    expect(c?.uncheckedTestReferrers).toEqual(['ApexClass:Api_Direct_C_Test']);
     // It is NOT counted as proven-unguarded Apex.
     expect(r.value.data.summary.uncoveredApex).toBe(0);
     expect(r.value.data.summary.unknownTestCoverage).toBe(1);
@@ -1299,7 +1327,7 @@ describe('reviewChangeHandler — an unwalked test referrer makes the zero UNKNO
 
   it('a payload that cannot decide test coverage does not report completeness `complete` with zero limitations', async () => {
     const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
-      components: [{ type: 'ApexClass', apiName: 'Silent_Batch_C', changeKind: 'modified' }],
+      components: [{ type: 'ApexClass', apiName: 'Api_Direct_C', changeKind: 'modified' }],
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -1309,7 +1337,7 @@ describe('reviewChangeHandler — an unwalked test referrer makes the zero UNKNO
     // A host reads the recommendation aloud — the gap must be in the prose too.
     expect(r.value.data.recommendation).toMatch(/test coverage could not be determined/i);
     // …and the row's own reason names it.
-    expect(r.value.data.reviewed[0]?.reason).toMatch(/instantiation|covering-test walk/i);
+    expect(r.value.data.reviewed[0]?.reason).toMatch(/covering-test walk/i);
   });
 
   it('R1: a referrer whose `isTest` was NEVER EXTRACTED is unknown, not "known not a test"', async () => {
@@ -1325,18 +1353,18 @@ describe('reviewChangeHandler — an unwalked test referrer makes the zero UNKNO
 
   it('TWO HOPS: a test that reaches the change THROUGH a production class still makes the zero unknown', async () => {
     const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
-      components: [{ type: 'ApexClass', apiName: 'Deep_Batch_C', changeKind: 'modified' }],
+      components: [{ type: 'ApexClass', apiName: 'Api_Deep_C', changeKind: 'modified' }],
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const c = r.value.data.reviewed[0];
     // NO direct referrer of this class is a test — a depth-1 detector sees
-    // only the production instantiator and certifies `uncovered`.
-    expect(c?.dependents).toEqual(['ApexClass:Deep_Sched_C']);
+    // only the production referrer and certifies `uncovered`.
+    expect(c?.dependents).toEqual(['ApexClass:Api_Deep_Sched_C']);
     expect(c?.selectedTests).toEqual([]);
     expect(c?.testCoverage).toBe('unknown');
     // The class NAMED is the test to run, not the production class in between.
-    expect(c?.uncheckedTestReferrers).toEqual(['ApexClass:Deep_Batch_C_Test']);
+    expect(c?.uncheckedTestReferrers).toEqual(['ApexClass:Api_Deep_C_Test']);
     expect(r.value.data.summary.uncoveredApex).toBe(0);
     expect(r.value.data.summary.unknownTestCoverage).toBe(1);
     expect(r.value.data.trust.completeness.status).not.toBe('complete');
@@ -1345,14 +1373,14 @@ describe('reviewChangeHandler — an unwalked test referrer makes the zero UNKNO
 
   it('TWO HOPS, mirrored: the unwalked edge is the SECOND hop and the zero is still unknown', async () => {
     const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
-      components: [{ type: 'ApexClass', apiName: 'Mixed_Target_C', changeKind: 'modified' }],
+      components: [{ type: 'ApexClass', apiName: 'Api_Mixed_Target_C', changeKind: 'modified' }],
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const c = r.value.data.reviewed[0];
     expect(c?.selectedTests).toEqual([]);
     expect(c?.testCoverage).toBe('unknown');
-    expect(c?.uncheckedTestReferrers).toEqual(['ApexClass:Mixed_Helper_C_Test']);
+    expect(c?.uncheckedTestReferrers).toEqual(['ApexClass:Api_Mixed_Helper_C_Test']);
     expect(r.value.data.summary.uncoveredApex).toBe(0);
     expect(r.value.data.trust.limitations.length).toBeGreaterThan(0);
   });
@@ -1382,5 +1410,57 @@ describe('reviewChangeHandler — an unwalked test referrer makes the zero UNKNO
     expect(r.value.data.reviewed[0]?.uncheckedTestReferrers).toBeUndefined();
     expect(r.value.data.summary.unknownTestCoverage).toBe(0);
     expect(r.value.data.trust.limitations).toEqual([]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// The gate's "walked edge" set is DERIVED from the shared covering-test walk.
+// FAIL-BEFORE/PASS-AFTER: review_change kept a hand copy of an older two-edge
+// list (`callsApex`/`dispatchesAsync`) after `tests_for_change` moved to the
+// shared walk (which also follows `references` / `inheritsFrom` and a trigger
+// hop). The copy made the gate report a test the walk HAD selected as an
+// "unchecked referrer", and the disclosure claimed `new X()` was invisible.
+// ---------------------------------------------------------------------------
+describe('reviewChangeHandler — `new X()` / async-through-instantiation shapes are COVERED by the shared walk', () => {
+  it('a test that instantiates the class directly selects it: covered, no unchecked referrers', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'ApexClass', apiName: 'Silent_Batch_C', changeKind: 'modified' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.reviewed[0];
+    expect(c?.testCoverage).toBe('covered');
+    expect(c?.selectedTests).toEqual(['ApexClass:Silent_Batch_C_Test']);
+    expect(c?.uncheckedTestReferrers).toBeUndefined();
+    expect(r.value.data.summary.unknownTestCoverage).toBe(0);
+    expect(r.value.data.trust.limitations).toEqual([]);
+  });
+
+  it('two-hop references shapes (either hop) are covered too', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [
+        { type: 'ApexClass', apiName: 'Deep_Batch_C', changeKind: 'modified' },
+        { type: 'ApexClass', apiName: 'Mixed_Target_C', changeKind: 'modified' },
+      ],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const byId = new Map(r.value.data.reviewed.map((c) => [c.id, c]));
+    expect(byId.get('ApexClass:Deep_Batch_C')?.testCoverage).toBe('covered');
+    expect(byId.get('ApexClass:Deep_Batch_C')?.selectedTests).toEqual(['ApexClass:Deep_Batch_C_Test']);
+    expect(byId.get('ApexClass:Mixed_Target_C')?.testCoverage).toBe('covered');
+    expect(byId.get('ApexClass:Mixed_Target_C')?.selectedTests).toEqual(['ApexClass:Mixed_Helper_C_Test']);
+    expect(r.value.data.summary.unknownTestCoverage).toBe(0);
+  });
+
+  it('the description no longer claims `new X()` is invisible to the walk', async () => {
+    const r = await reviewChangeHandler(ctxWith(COMPLETE_COVERAGE), {
+      components: [{ type: 'ApexClass', apiName: 'OrderService', changeKind: 'modified' }],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const text = [r.value.data.disclosure, ...r.value.data.boundaries].join(' ');
+    expect(text).not.toMatch(/follows only `callsApex`|traverses only `callsApex`/);
+    expect(text).toMatch(/references/);
   });
 });

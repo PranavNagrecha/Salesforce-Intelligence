@@ -31,7 +31,7 @@
  */
 
 import type { ComponentId, ComponentType, EdgeType } from '@sf-intelligence/contracts';
-import type { GraphStore } from '@sf-intelligence/graph';
+import { type GraphStore, parsePropertiesJson } from '@sf-intelligence/graph';
 import { loadManifest } from '@sf-intelligence/vault';
 
 /**
@@ -103,19 +103,6 @@ interface EdgeRow {
   readonly properties_json: string;
 }
 
-const parseEdgePropertiesJson = (
-  raw: string | null | undefined,
-): Readonly<Record<string, unknown>> => {
-  if (typeof raw !== 'string' || raw.length === 0) return {};
-  try {
-    const parsed = JSON.parse(raw) as unknown;
-    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed))
-      return {};
-    return parsed as Readonly<Record<string, unknown>>;
-  } catch {
-    return {};
-  }
-};
 
 /**
  * Load every edge in `store` and group by `from_id`, normalizing each row to
@@ -136,7 +123,7 @@ export const loadEdgesByFrom = async (
   const rows = reader.getRowObjectsJS() as unknown as readonly EdgeRow[];
   const map = new Map<ComponentId, EdgeDiffEntry[]>();
   for (const row of rows) {
-    const props = parseEdgePropertiesJson(row.properties_json);
+    const props = parsePropertiesJson(row.properties_json);
     const rawKind = props['referenceKind'];
     const referenceKind = typeof rawKind === 'string' ? rawKind : undefined;
     const entry: EdgeDiffEntry = {

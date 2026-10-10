@@ -38,6 +38,7 @@
 import type { ComponentType, McpError } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import { countNodesByType, danglingTargetSummary } from '@sf-intelligence/graph';
+import { buildCoverageEntries, type ExtendedVaultManifest } from '@sf-intelligence/vault';
 
 import type { Context } from '../server.js';
 
@@ -121,4 +122,44 @@ export const referencedButAbsentFamilies = async (
     });
   }
   return ok(out);
+};
+
+/**
+ * CH-2 — the ONE coverage verdict. Compute the referenced-but-absent families
+ * among the manifest's confirmed-clean-zero rows and return the manifest with
+ * the derived `referencedButAbsentTypes` set, so `summarizeCoverage` (and every
+ * caveat built on it, health_check, coverage_report.summary) folds them into
+ * `partial` from the same fact. Candidates are only confirmed-clean zeros, so
+ * a vault without one never touches the graph. The returned map carries the
+ * per-family tallies for callers that disclose them.
+ */
+export const withReferencedButAbsent = async (
+  ctx: Pick<Context, 'manifest' | 'graph'>,
+  onlyType?: string,
+): Promise<
+  Result<
+    {
+      readonly manifest: ExtendedVaultManifest;
+      readonly families: ReadonlyMap<string, ReferencedButAbsentFamily>;
+    },
+    McpError
+  >
+> => {
+  const candidates = buildCoverageEntries(ctx.manifest)
+    .filter((entry) => onlyType === undefined || entry.type === onlyType)
+    .filter((entry) => entry.retrieved === 0 && entry.retrieveConfirmed === true)
+    .map((entry) => entry.type);
+  const families = await referencedButAbsentFamilies(ctx as Context, candidates);
+  if (!families.ok) return families;
+  const types = [...families.value.keys()].sort();
+  const manifest =
+    types.length === 0 && ctx.manifest.referencedButAbsentTypes === undefined
+      ? ctx.manifest
+      : {
+          ...ctx.manifest,
+          referencedButAbsentTypes: [
+            ...new Set([...(ctx.manifest.referencedButAbsentTypes ?? []), ...types]),
+          ].sort(),
+        };
+  return ok({ manifest, families: families.value });
 };

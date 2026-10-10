@@ -1,6 +1,6 @@
 import type { DuckDBConnection } from '@duckdb/node-api';
 import type { ComponentType, Edge, ExtractionResult, Node } from '@sf-intelligence/contracts';
-import { err, ok, type Result } from '@sf-intelligence/core';
+import { err, mergeWriteValueEdges, ok, type Result } from '@sf-intelligence/core';
 
 import {
   buildMultiRowUpsertSql,
@@ -303,6 +303,9 @@ export const computeChangeSet = async (
   // exactly as a cold rebuild does. Run before the PK dedupe so minted edges
   // join the same first-writer-wins collapse.
   mintRelationshipTraversalEdges([...desiredNodes.values()], desiredEdgeList);
+  // Mirror cold import — fold every value a writer writes into the edge that
+  // survives the PK dedupe below.
+  mergeWriteValueEdges(desiredEdgeList);
   const desiredEdges = new Map<string, Edge>();
   for (const edge of desiredEdgeList) {
     const pk = edgePk(edge.fromId, edge.toId, edge.edgeType, edge.source);

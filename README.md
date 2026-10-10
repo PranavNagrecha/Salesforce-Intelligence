@@ -8,9 +8,15 @@
   <a href="https://github.com/PranavNagrecha/Salesforce-Intelligence/actions/workflows/ci.yml"><img src="https://github.com/PranavNagrecha/Salesforce-Intelligence/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/node-%E2%89%A520-339933.svg" alt="Node.js >= 20">
   <img src="https://img.shields.io/badge/status-read--only%20%26%20offline-2ea44f.svg" alt="Read-only and offline-first">
+  <a href="https://sfi.auditforce.cloud"><img src="https://img.shields.io/badge/docs-sfi.auditforce.cloud-0B6B6A.svg" alt="Website and docs: sfi.auditforce.cloud"></a>
 </p>
 
 # sf-intelligence
+
+Ask your AI what breaks before you change Salesforce. Offline, read-only, cited answers.
+**Website, demo and docs: [sfi.auditforce.cloud](https://sfi.auditforce.cloud)**
+
+[![Add the demo to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/install-mcp?name=sf-intelligence-demo&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsInNmLWludGVsbGlnZW5jZSIsImRlbW8iXX0%3D) Try the built-in demo org in Cursor in one click (no Salesforce login). AI agents installing this server: see [llms-install.md](llms-install.md).
 
 **A grounded, fail-closed backend for AI assistants working in one Salesforce
 org.** Your AI host (Claude, or any MCP client) asks it questions in plain
@@ -423,8 +429,9 @@ into your org repo to wire it up. It never runs `sfi refresh` and never calls th
 
 ## Try it now — no Salesforce org needed
 
-Want to see it work before pointing it at your own org? One command serves a
-built-in **synthetic demo org** ("Verdant Energy," a fictional solar installer)
+Want to see it work before pointing it at your own org? (Or read real answers
+from it first, on [sfi.auditforce.cloud/demo](https://sfi.auditforce.cloud/demo).)
+One command serves a built-in **synthetic demo org** ("Verdant Energy," a fictional solar installer)
 over MCP — fully offline, no auth, no `sf` CLI:
 
 ```bash
@@ -439,11 +446,16 @@ Then ask it things like:
 > - *Why can't an Installer see an Invoice?*
 > - *Which Apex has governor-limit risk?*
 
-The first run builds the demo vault in a few seconds (cached under
-`~/.sf-intelligence/demo`); every run after is instant. Nothing leaves your
-machine. When you're ready for your real org, follow **Install** below.
+The first run builds the demo vault (cached under `~/.sf-intelligence/demo`)
+before the server answers, on top of `npx` downloading the package, so the
+first start can take 10-20 seconds; every run after is instant. If your client
+gives up at startup (Codex allows about 10 seconds by default), raise its
+startup timeout (`startup_timeout_sec` in Codex, `MCP_TIMEOUT` in Claude Code)
+or start it a second time. Nothing leaves your machine. When you're ready for your real org, follow **Install** below.
 
 ## Install
+
+Step-by-step setup for each AI assistant, with copy-paste config: [sfi.auditforce.cloud/getting-started](https://sfi.auditforce.cloud/getting-started).
 
 `sf-intelligence` is distributed on npm as `sf-intelligence` — an MCP
 server plus the `sfi` command-line tool. Register the server with your MCP
@@ -531,8 +543,9 @@ for the live tool map.
 
 ### Optional: full roster vs compact core
 
-**Default is the 25-tool core roster** (AUDIT-F6; includes `sfi.live_consent`)
-so MCP hosts don't pay a ~250 KB `tools/list` tax. Non-core tools stay
+**Default is the 25-tool core roster** (includes `sfi.live_consent`). Its
+`tools/list` is about 33 KB (a test keeps it under 40 KB); the full roster is
+about 525 KB, which a host pays before the first question. Non-core tools stay
 reachable via `sfi.run_analysis` (byte-identical) and are not directly
 invokable under core. Set `SFI_TOOL_PROFILE=full` (or add
 `"env": { "SFI_TOOL_PROFILE": "full" }` in the config block above) to advertise
@@ -714,6 +727,7 @@ For a commercial ("Sell") license, contact **pranav.sfintelligence@gmail.com**. 
 
 ## Documentation
 
+- [sfi.auditforce.cloud](https://sfi.auditforce.cloud) — website: [demo answers](https://sfi.auditforce.cloud/demo), [getting started](https://sfi.auditforce.cloud/getting-started), [all tools](https://sfi.auditforce.cloud/tools), [FAQ](https://sfi.auditforce.cloud/faq)
 - [Documentation index](./docs/README.md) — guides, architecture, configuration
 - [Contributing](./CONTRIBUTING.md) · [Security](./SECURITY.md)
 

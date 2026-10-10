@@ -11,6 +11,7 @@ import { err, ok } from '@sf-intelligence/core';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 import { deriveComponentApiName, deriveEntityVariant } from './path-utils.js';
+import { collectRecordPageOverrides } from './record-page-overrides.js';
 
 const OBJECT_FILE_SUFFIX = '.object-meta.xml';
 const ROOT_ELEMENT = 'CustomObject';
@@ -603,6 +604,8 @@ export const extractCustomObject = async (
       enableHistory: coerceBoolean(unwrapSingle(rootObj['enableHistory'])),
       enableReports: coerceBoolean(unwrapSingle(rootObj['enableReports'])),
       enableSearch: coerceBoolean(unwrapSingle(rootObj['enableSearch'])),
+      // ADM-3: the object's org-default Lightning record page activation.
+      recordPageOverrides: collectRecordPageOverrides(rootObj, 'actionOverrides', apiName),
       ...platformEventFacts,
     },
   };

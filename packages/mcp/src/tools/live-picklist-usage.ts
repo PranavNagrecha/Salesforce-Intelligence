@@ -45,14 +45,13 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import { readFieldDataType } from './field-properties.js';
+import { PICKLIST_DATA_TYPES, readFieldDataType } from './field-properties.js';
 import { hybridTrust, type HybridStaleness } from './hybrid-trust.js';
 import { assertSoqlIdentifier, checkVaultStaleness, probeLiveAccess } from './live-plane.js';
 import { runLiveQuery } from './live-session.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import { normalizePicklistValues } from './picklist-values.js';
 
-const PICKLIST_TYPES = new Set<string>(['Picklist', 'MultiselectPicklist']);
 const CUSTOM_FIELD_PREFIX = 'CustomField:';
 /** Distinct value-groups returned when the caller names no `limit`. */
 const DEFAULT_VALUE_LIMIT = 50;
@@ -194,7 +193,7 @@ export const livePicklistUsageHandler = async (
   }
   const fieldNode = nodeResult.value;
   const fieldType = readFieldDataType(fieldNode);
-  if (!PICKLIST_TYPES.has(fieldType)) {
+  if (!PICKLIST_DATA_TYPES.has(fieldType)) {
     return err({
       kind: 'invalid-query',
       message: `field ${fieldId} has type '${fieldType}'; expected Picklist or MultiselectPicklist`,

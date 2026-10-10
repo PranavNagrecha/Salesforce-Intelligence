@@ -382,7 +382,7 @@ const CONFIDENCE_RANK: Readonly<Record<ConfidenceLevel, number>> = {
 };
 
 /** D-2: the weaker of two per-edge confidences. */
-const weakerConfidence = (
+export const weakerConfidence = (
   a: ConfidenceLevel,
   b: ConfidenceLevel,
 ): ConfidenceLevel => (CONFIDENCE_RANK[b] > CONFIDENCE_RANK[a] ? b : a);

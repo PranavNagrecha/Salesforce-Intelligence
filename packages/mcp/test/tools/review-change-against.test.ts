@@ -258,6 +258,8 @@ describe('reviewChangeHandler — default path is byte-identical to R6-16', () =
     expect(keys).toEqual(
       [
         'boundaries',
+        // WOW-6: the derived go / no-go call is on every response.
+        'deployDecision',
         'disclosure',
         'overallVerdict',
         'recommendation',

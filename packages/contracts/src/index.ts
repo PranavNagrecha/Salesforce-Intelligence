@@ -1219,6 +1219,16 @@ export interface McpResponse<T> {
      * from a code bug.
      */
     readonly builderVersion?: string;
+    /**
+     * Present only when the vault is stale: `ageBand` when older than a week,
+     * `builderStale` when built by an older sf-intelligence than the one
+     * running, plus a one-line `warning`. Stamped centrally at dispatch.
+     */
+    readonly freshness?: Readonly<{
+      readonly ageBand?: '>7d' | '>30d' | '>90d';
+      readonly builderStale?: Readonly<{ readonly builtBy: string; readonly running: string }>;
+      readonly warning: string;
+    }>;
   }>;
 }
 
@@ -1416,6 +1426,11 @@ export type EvidenceAbsenceStatusV2 = 'proven-none' | 'not-checked' | 'unknown';
 export interface EvidenceClaimV2 {
   readonly claim: string;
   readonly groundedIn: readonly ComponentId[];
+  /**
+   * Present ONLY when `groundedIn` is a SAMPLE: how many ids the claim is
+   * actually grounded in. Absent means `groundedIn` is the full list.
+   */
+  readonly groundedInTotal?: number;
   readonly confidence: ConfidenceLevel | 'unknown';
   /** Optional per-claim coverage honesty (string form — tools vary). */
   readonly coverageCaveat?: string | null;
@@ -2559,6 +2574,11 @@ export interface Interpretation {
   readonly concept: ConceptId;
   readonly claim: string;
   readonly groundedIn: readonly ComponentId[];
+  /**
+   * Present ONLY when a presentation layer sampled `groundedIn` to fit a
+   * response: the full grounding count. The engine never sets it.
+   */
+  readonly groundedInTotal?: number;
   readonly confidence: ConfidenceLevel | 'unknown';
   readonly coverageCaveat: string | null;
   readonly modelVersion: string;

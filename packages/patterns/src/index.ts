@@ -30,10 +30,15 @@ export type {
 export {
   countAssertions,
   detectCodeQualityIssues,
+  detectRecursionGuard,
   isKnownSalesforceIdLiteral,
   KNOWN_KEY_PREFIXES,
+  OMITTED_SHARING_RULE,
+  omittedSharingVerdict,
 } from './code-quality-patterns.js';
 export type {
   CodeQualityMetadata,
+  OmittedSharingSurface,
   QualityIssue,
+  RecursionGuardKind,
 } from './code-quality-patterns.js';
