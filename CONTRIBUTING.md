@@ -207,7 +207,12 @@ for a complete example.
 External contributors do not need to publish; maintainers handle tagging and the
 npm publish.
 
-Before `npm publish` from `packages/cli`, the **`prepublishOnly`** hook runs
+**Follow [RELEASING.md](RELEASING.md)**: the release cadence (a minor on the first
+Tuesday of each month), the exact order of steps, and the known traps. Run
+`pnpm release:check` before tagging; it runs every CI step locally. Releases are
+published only by pushing a `vX.Y.Z` tag, never by `npm publish` from a laptop.
+
+As a last line of defence, before any publish of `packages/cli` the **`prepublishOnly`** hook runs
 `scripts/prepublish-check.mjs` (`pnpm scan:leaks` + `pnpm guard` +
 `pnpm check:version-consistency`). Publish aborts if any check fails — fix
 leaks, complete Phase 1 SCRUB work, or reconcile versions first.

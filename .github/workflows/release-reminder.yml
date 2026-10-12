@@ -1,0 +1,83 @@
+name: Release reminder
+
+# Opens a "Release vX.Y.0 due" issue on the first Tuesday of every month, the
+# minor-release day in RELEASING.md. The release cadence lives here and in
+# RELEASING.md, not in anyone's memory: whoever picks up the issue (a person or
+# an AI agent) follows RELEASING.md from step 1.
+#
+# GitHub cron ORs day-of-month with day-of-week, so "first Tuesday" cannot be
+# expressed in cron alone: the schedule fires every Tuesday and the job exits
+# unless the date is the 1st-7th.
+
+on:
+  schedule:
+    - cron: '0 13 * * 2'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  remind:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Open the release issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = "schedule" ] && [ "$(date -u +%-d)" -gt 7 ]; then
+            echo "Not the first Tuesday of the month; nothing to do."
+            exit 0
+          fi
+
+          current=$(node -p "require('./packages/cli/package.json').version")
+          next=$(node -p "const [a,b]='$current'.split('.').map(Number); a+'.'+(b+1)+'.0'")
+          title="Release v$next due"
+
+          gh label create release --color 0E8A16 --description "Scheduled release" 2>/dev/null || true
+          open=$(gh issue list --label release --state open --json number --jq 'length')
+          if [ "$open" != "0" ]; then
+            echo "A release issue is already open; not opening another."
+            exit 0
+          fi
+
+          last_tag=$(git describe --tags --abbrev=0 --match 'v*' 2>/dev/null || echo "")
+          if [ -n "$last_tag" ]; then
+            count=$(git rev-list --count "$last_tag"..HEAD)
+            commits=$(git log --no-merges --format='- %s (%h)' "$last_tag"..HEAD | head -50)
+          else
+            count=0
+            commits=""
+          fi
+
+          {
+            echo "Monthly minor release (first Tuesday). Current published version: \`$current\`."
+            echo
+            echo "**Follow [RELEASING.md]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/blob/main/RELEASING.md) from step 1.** Don't work from memory."
+            echo
+            echo "- [ ] Version bumped everywhere \`node scripts/check-version-consistency.mjs\` checks"
+            echo "- [ ] \`changelog.d\` folded into \`CHANGELOG.md\` (back up first)"
+            echo "- [ ] Derived files regenerated (product manifest/surface, website recalibrate)"
+            echo "- [ ] Release post written"
+            echo "- [ ] \`pnpm release:check\` prints PASS"
+            echo "- [ ] Squashed onto \`origin/main\`, CI green on \`release/$next\`"
+            echo "- [ ] Tag \`v$next\` pushed; npm, MCP Registry and GitHub release confirmed"
+            echo "- [ ] \`main\` fast-forwarded after npm serves \`$next\`; site checked"
+            echo "- [ ] Release announced; this issue closed with links"
+            echo
+            echo "Nothing user-facing to ship this month? Say so here and close the issue."
+            echo
+            if [ -n "$last_tag" ]; then
+              echo "### $count commit(s) on main since $last_tag"
+              echo
+              if [ -n "$commits" ]; then echo "$commits"; else echo "_None._"; fi
+            fi
+          } > body.md
+
+          gh issue create --title "$title" --label release --body-file body.md
