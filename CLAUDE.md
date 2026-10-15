@@ -17,8 +17,8 @@ confidence (the weakest of the concept rule's ceiling and its grounding
 edges); keep the two axes distinct (see Capability boundary). Do not
 answer org questions without it.
 
-**Tool profile:** default is `core` (25 directly invokable tools). That is the
-spine — orientation, resolve/route, the universal graph reads, the catalog
+**Tool profile:** default is `core` (16 directly invokable tools). That is the
+spine — resolve, search, `sfi.get_component`, `sfi.health_check`, the catalog
 gateway, `sfi.live_consent` — PLUS the tools that answer the questions the
 package page advertises, which the roster is DERIVED from
 (`ADVERTISED_QUESTION_TOOLS` in `packages/mcp/src/tools/tool-profile.ts`). For non-core analyses — including `sfi.interpret`,

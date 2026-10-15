@@ -2784,11 +2784,11 @@ describe('whatHappensOnSaveHandler — F4: the answer is fitted before the enric
     const on = await stepsInEnvelope({
       objectApiName: 'WidgetLead__c',
       event: 'update',
+      includeConceptReasoning: true,
     });
     const off = await stepsInEnvelope({
       objectApiName: 'WidgetLead__c',
       event: 'update',
-      includeConceptReasoning: false,
     });
     // The fixture is genuinely at the budget — otherwise this proves nothing.
     const full = await whatHappensOnSaveHandler(ctx, {
@@ -2800,10 +2800,11 @@ describe('whatHappensOnSaveHandler — F4: the answer is fitted before the enric
     expect(on).toBe(off);
   });
 
-  it('DROPS the reasoning block when the steps used the budget, and says so', async () => {
+  it('DROPS the reasoning block when opted in but the steps used the budget, and says so', async () => {
     const r = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'WidgetLead__c',
       event: 'update',
+      includeConceptReasoning: true,
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -2821,10 +2822,11 @@ describe('whatHappensOnSaveHandler — F4: the answer is fitted before the enric
     );
   });
 
-  it('a LIGHT object still gets its reasoning block, capped as before', async () => {
+  it('a LIGHT object still gets its reasoning block when opted in, capped as before', async () => {
     const r = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'FullObj',
       event: 'insert',
+      includeConceptReasoning: true,
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -2903,7 +2905,7 @@ describe('whatHappensOnSaveHandler — FIX 3: give the budget back to the answer
     expect(withRoster.value.data.inactiveSummary.total).toBe(roster.length);
   });
 
-  it('a phase-filtered query turns concept reasoning OFF by default and says why', async () => {
+  it('a phase-filtered query keeps concept reasoning OFF by default and still allows opt-in', async () => {
     const filtered = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'WidgetOrder__c',
       event: 'update',
@@ -2912,9 +2914,8 @@ describe('whatHappensOnSaveHandler — FIX 3: give the budget back to the answer
     expect(filtered.ok).toBe(true);
     if (!filtered.ok) return;
     expect(filtered.value.data.conceptReasoning).toBeUndefined();
-    expect(filtered.value.data.disclosure).toContain(
-      'Concept reasoning is off by default on a phase-filtered query so the whole budget goes to the requested phase; pass includeConceptReasoning: true to force it.',
-    );
+    expect(filtered.value.data.conceptReasoningAvailable).toBe(true);
+    expect(filtered.value.data.disclosure).toContain('includeConceptReasoning: true');
     // An explicit request still wins — the default is a default, not a veto.
     const forced = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'WidgetOrder__c',
@@ -2924,8 +2925,9 @@ describe('whatHappensOnSaveHandler — FIX 3: give the budget back to the answer
     });
     expect(forced.ok).toBe(true);
     if (!forced.ok) return;
+    expect(forced.value.data.conceptReasoningAvailable).toBeUndefined();
     expect(forced.value.data.disclosure).not.toContain(
-      'Concept reasoning is off by default on a phase-filtered query',
+      'Pass includeConceptReasoning: true to attach concept-rule claims.',
     );
   });
 
@@ -3254,12 +3256,12 @@ describe('whatHappensOnSaveHandler — FIX 15 (3): grounded vs ungrounded condit
 // cannot skip plus prose a host reads aloud — and hands back an EXECUTABLE,
 // resumable enumeration that does reach the full roster.
 //
-// Defect 2. `conceptReasoning` is documented DEFAULT ON, and it is absent on
-// exactly the objects whose answers are least complete. The reason was in the
-// prose and nowhere in the data, so a host reading `data` could only see a
-// missing key — and read it as "the reasoning engine found nothing", the one
-// reading the block's own `completeness` contract exists to prevent. Absence is
-// now carried by a property (R1), never inferred from a missing key.
+// Defect 2. When `conceptReasoning` is opted in and still absent (budget), the
+// reason was in the prose and nowhere in the data, so a host reading `data`
+// could only see a missing key — and read it as "the reasoning engine found
+// nothing", the one reading the block's own `completeness` contract exists to
+// prevent. Absence after opt-in is now carried by a property (R1), never
+// inferred from a missing key. Default-off uses `conceptReasoningAvailable`.
 // =============================================================================
 
 /**
@@ -3599,6 +3601,7 @@ describe('whatHappensOnSaveHandler — an absent conceptReasoning block says so 
     const r = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'WidgetLead__c',
       event: 'update',
+      includeConceptReasoning: true,
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -3608,7 +3611,7 @@ describe('whatHappensOnSaveHandler — an absent conceptReasoning block says so 
     // answer that is least complete.
     expect(d.conceptReasoning).toBeUndefined();
 
-    // R1: absence is carried by a property, not inferred from a missing key.
+    // R1: absence after opt-in is carried by a property, not inferred from a missing key.
     const omitted = d.conceptReasoningOmitted;
     expect(omitted).toBeDefined();
     if (omitted === undefined) return;
@@ -3624,55 +3627,37 @@ describe('whatHappensOnSaveHandler — an absent conceptReasoning block says so 
     expect(d.disclosure).toContain('Concept reasoning was NOT attached');
     expect(d.disclosure).toContain('that is "not checked", not "nothing found"');
     expect(omitted).not.toHaveProperty('note');
+    expect(d.conceptReasoningAvailable).toBeUndefined();
   });
 
-  it('the caller opting out and the phase-filter default are kept APART — one field, two reasons', async () => {
-    const explicit = await whatHappensOnSaveHandler(ctx, {
+  it('default-off (full view and phase-filtered) surfaces conceptReasoningAvailable, not an omission', async () => {
+    const byDefault = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'FullObj',
       event: 'insert',
-      includeConceptReasoning: false,
     });
-    expect(explicit.ok).toBe(true);
-    if (!explicit.ok) return;
-    expect(explicit.value.data.conceptReasoning).toBeUndefined();
-    expect(explicit.value.data.conceptReasoningOmitted?.checked).toBe(false);
-    expect(explicit.value.data.conceptReasoningOmitted?.reason).toBe('caller-opted-out');
+    expect(byDefault.ok).toBe(true);
+    if (!byDefault.ok) return;
+    expect(byDefault.value.data.conceptReasoning).toBeUndefined();
+    expect(byDefault.value.data.conceptReasoningAvailable).toBe(true);
+    expect(byDefault.value.data.conceptReasoningOmitted).toBeUndefined();
+    expect(byDefault.value.data.disclosure).toContain('includeConceptReasoning: true');
 
-    const byDefault = await whatHappensOnSaveHandler(ctx, {
+    const phased = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'FullObj',
       event: 'insert',
       phase: 'pre-save-validation',
     });
-    expect(byDefault.ok).toBe(true);
-    if (!byDefault.ok) return;
-    expect(byDefault.value.data.conceptReasoningOmitted?.reason).toBe('phase-filter-default');
+    expect(phased.ok).toBe(true);
+    if (!phased.ok) return;
+    expect(phased.value.data.conceptReasoningAvailable).toBe(true);
+    expect(phased.value.data.conceptReasoningOmitted).toBeUndefined();
   });
 
-  it('a path that never MEASURED a headroom reports none — a fabricated 0 is the shape this field exists to prevent', async () => {
-    for (const args of [
-      { objectApiName: 'FullObj', event: 'insert', includeConceptReasoning: false },
-      { objectApiName: 'FullObj', event: 'insert', phase: 'pre-save-validation' },
-    ]) {
-      const r = await whatHappensOnSaveHandler(ctx, args as never);
-      expect(r.ok).toBe(true);
-      if (!r.ok) return;
-      const omitted = r.value.data.conceptReasoningOmitted;
-      expect(omitted).toBeDefined();
-      if (omitted === undefined) return;
-      // The block was never attempted on either path, so there is no headroom
-      // to report. Emitting `headroomBytes: 0` beside `minimumHeadroomBytes:
-      // 2500` reads as a MEASUREMENT saying "no room was left" — a different,
-      // and false, claim from "no one looked". `reason` carries the whole truth.
-      expect(omitted).not.toHaveProperty('headroomBytes');
-      expect(omitted).not.toHaveProperty('minimumHeadroomBytes');
-      expect(omitted.checked).toBe(false);
-    }
-  });
-
-  it('the two keys are MUTUALLY EXCLUSIVE — a present block is never accompanied by an absence marker', async () => {
+  it('the three keys are MUTUALLY EXCLUSIVE — a present block is never accompanied by availability or omission', async () => {
     const r = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'FullObj',
       event: 'insert',
+      includeConceptReasoning: true,
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -3681,6 +3666,7 @@ describe('whatHappensOnSaveHandler — an absent conceptReasoning block says so 
     // which one to believe.
     expect(r.value.data.conceptReasoning).toBeDefined();
     expect(r.value.data.conceptReasoningOmitted).toBeUndefined();
+    expect(r.value.data.conceptReasoningAvailable).toBeUndefined();
   });
 });
 

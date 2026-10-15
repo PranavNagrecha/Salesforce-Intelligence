@@ -271,7 +271,7 @@ const derivePathParts = (
  *
  *   - `LightningComponent` -> `AuraDefinitionBundle:<lightningComponent>`
  *   - `LightningWebComponent` -> `LightningComponentBundle:<lightningWebComponent>`
- *   - `VisualforcePage` -> `ApexPage:<page>`
+ *   - `VisualforcePage` -> `VisualforcePage:<page>`
  *   - `Flow` -> `Flow:<flowDefinition>`
  *
  * Other types (`Create`, `Update`, `LogACall`, `SocialPost`,
@@ -317,7 +317,7 @@ const buildReferencesEdge = (
     if (name === null || name.length === 0) return null;
     return {
       fromId,
-      toId: `ApexPage:${name}`,
+      toId: `VisualforcePage:${name}`,
       edgeType: 'references',
       confidence: 'declared',
       source: EXTRACTOR_SOURCE,
@@ -361,7 +361,7 @@ const buildReferencesEdge = (
  *      `page` / `flowDefinition`) is non-empty. A `Flow` action
  *      points at `Flow:<flowDefinition>`. The target node may not
  *      exist (the AuraDefinitionBundle / LightningComponentBundle /
- *      ApexPage / Flow node can be outside the retrieve scope);
+ *      VisualforcePage / Flow node can be outside the retrieve scope);
  *      dangling edges are tolerated.
  *
  *   3. `references` (one per distinct `<quickActionLayout>` field) to

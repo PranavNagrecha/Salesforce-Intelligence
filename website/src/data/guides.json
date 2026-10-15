@@ -119,6 +119,15 @@
       "text": "Generate one from your org’s real metadata instead of a spreadsheet that goes stale."
     },
     {
+      "href": "/blog/sf-intelligence-0-5-0",
+      "section": "blog",
+      "kind": "release",
+      "date": "2026-10-15",
+      "home": false,
+      "title": "0.5.0: sixteen tools, shorter answers, MIT",
+      "text": "Your AI sees 16 tools instead of 25, every answer carries far less fixed text, two wrong verdicts found on a real org are fixed, and the license is plain MIT."
+    },
+    {
       "href": "/blog/sf-intelligence-0-4-0",
       "section": "blog",
       "kind": "release",

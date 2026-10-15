@@ -364,7 +364,7 @@ export interface EventSubscribersOutput {
 }
 
 const EVENT_SUB_HEURISTIC_DISCLOSURE =
-  'Subscribers are detected from modeled `listensTo` edges (Apex `Triggerable<X__e>` / Flow PlatformEvent triggers). Apex EventBus.subscribe is now recognized heuristically (static/resolvable channel args only); dynamically-built subscriptions (a computed/variable channel arg) and managed-package listeners remain invisible.';
+  'Subscribers are detected from modeled `listensTo` edges (Apex `Triggerable<X__e>` / Flow PlatformEvent triggers / `EventBus.subscribe` to a Platform Event `__e` with a static channel). `EventBus.subscribe` to a Change Event is parsed by the scanner but not yet minted as an edge; dynamically-built channel args and managed-package listeners remain invisible.';
 // CR-CAP-18: publish-side channel routing + declared per-member filters ARE now
 // extracted from `*.platformEventChannel(Member)-meta.xml` (declared XML text,
 // NOT runtime filter evaluation). Surfaced in `channels`.
@@ -383,7 +383,7 @@ const EVENT_SUB_CATALOG_SCOPE_DISCLOSURE =
   'CATALOG SCOPE: this lists the Platform Events RETRIEVED into this vault. It says NOTHING about Change Data Capture, about the event channels carrying either, or about events the org REFERENCES but the refresh never retrieved (whose subscribers are unknown, not zero) — so it is a FLOOR on the org\'s event surface, not an inventory of it. Call `sfi.event_topology` for the whole event plane with its retrieval coverage reported as data.';
 
 const EVENT_SUB_EMPTY_DISCLOSURE =
-  'No subscribers found for this event — NOT proof nothing subscribes. Apex `EventBus.subscribe(...)` is now recognized heuristically (static/resolvable channel args only); dynamically-built subscriptions and managed-package listeners remain invisible. Verify in Setup before assuming the event is unused.';
+  'No subscribers found for this event — NOT proof nothing subscribes. `EventBus.subscribe` to a Platform Event (`__e`) with a static channel is modeled as `listensTo`; a subscription to a Change Event is parsed but not yet minted as an edge; dynamically-built channel args and managed-package listeners remain invisible. Verify in Setup before assuming the event is unused.';
 // GROUP C: publish-side CODE (the publishers list).
 const EVENT_SUB_PUBLISHER_DISCLOSURE =
   'Publishers are detected from modeled `writesTo` edges. Coverage is ASYMMETRIC: a Flow `<recordCreates>` on the event IS modeled and appears here; Apex `EventBus.publish(...)` is NOT — no scanner in this codebase detects it, so an Apex publisher never appears (the renderer would surface such an edge if a future scanner minted one). Dynamically-built publishes and managed-package publishers are also NOT modeled. An empty publishers list means "no modeled Flow publisher", never "nothing publishes this event".';

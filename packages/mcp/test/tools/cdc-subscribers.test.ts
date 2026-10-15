@@ -459,8 +459,16 @@ describe('cdcSubscribersHandler', () => {
     const result = await cdcSubscribersHandler(ctx, {});
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value.data.disclosure).toContain('EventBus.subscribe');
-    expect(result.value.data.disclosure).toContain('platformEventChannelMember');
+    const disclosure = result.value.data.disclosure;
+    expect(disclosure).toContain('EventBus.subscribe');
+    expect(disclosure).toContain('platformEventChannelMember');
+    // Same scanner truth as event_subscribers: Platform Event subscribe is
+    // listensTo; Change Event subscribe is parsed but not yet an edge.
+    expect(disclosure).toMatch(/Platform Event|__e/);
+    expect(disclosure).toMatch(/listensTo/);
+    expect(disclosure).toMatch(/Change Event/);
+    expect(disclosure).not.toMatch(/EventBus\.subscribe\(\.\.\.\) registration is NOT modeled/);
+    expect(disclosure).not.toMatch(/subscribesToChange/);
   });
 
   it('carries vaultState from the manifest', async () => {

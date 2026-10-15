@@ -139,7 +139,11 @@ describe('vault freshness stamp via runTool', () => {
     } as unknown as Context;
     const env = await run(ctx);
     const data = env['data'] as {
-      soundness: { complete: boolean; staticCoverage: string; blindSpots: { kind: string }[] };
+      soundness: {
+        complete: boolean;
+        staticCoverage: string;
+        blindSpots: { kind: string; note?: string }[];
+      };
       trust: { completeness: { status: string }; limitations: string[]; freshness: Record<string, unknown> };
     };
     expect(data.soundness.complete).toBe(false);
@@ -148,29 +152,49 @@ describe('vault freshness stamp via runTool', () => {
     expect(data.trust.completeness.status).toBe('partial');
     expect(data.trust.limitations[0]).toContain('0.2.0');
     expect(data.trust.limitations[0]).toContain('sfi refresh');
-    // The edge families added since the builder are named.
-    expect(data.trust.limitations[0]).toContain('OmniStudio');
+    // ONE short sentence — no edge-family enumeration on every response.
+    expect(Buffer.byteLength(data.trust.limitations[0]!, 'utf8')).toBeLessThan(200);
+    expect(data.trust.limitations[0]).not.toContain('OmniStudio');
+    const blind = data.soundness.blindSpots.find((b) => b.kind === 'stale-builder');
+    expect(blind?.note).toBeDefined();
+    expect(Buffer.byteLength(blind!.note!, 'utf8')).toBeLessThan(200);
+    expect(blind!.note).not.toContain('OmniStudio');
     // An empty trust.freshness is filled from the manifest.
     expect(data.trust.freshness['snapshotRefreshedAt']).toBeDefined();
-    const vs = env['vaultState'] as { freshness?: { builderStale?: { builtBy: string; running: string } } };
-    expect(vs.freshness?.builderStale).toEqual({ builtBy: '0.2.0', running: '0.3.3' });
+    const vs = env['vaultState'] as {
+      freshness?: {
+        builtBy: string | null;
+        runningVersion: string | null;
+        ageDays: number | null;
+        stale: boolean;
+        warning: string;
+      };
+    };
+    expect(vs.freshness?.builtBy).toBe('0.2.0');
+    expect(vs.freshness?.runningVersion).toBe('0.3.3');
+    expect(vs.freshness?.stale).toBe(false);
+    expect(typeof vs.freshness?.ageDays).toBe('number');
+    expect(Buffer.byteLength(vs.freshness!.warning, 'utf8')).toBeLessThan(200);
   });
 
-  it('FAIL-BEFORE/PASS-AFTER: a 0.3.3 vault served by a newer build names the edge families added since', async () => {
+  it('FAIL-BEFORE/PASS-AFTER: a stale-builder warning is one sentence, not an edge-family list', async () => {
     process.env[PLUGIN_ENV] = '0.4.0';
     const ctx = {
       vaultRoot: '/some/abs/org-kb',
       manifest: { version: '0.3.3', refreshedAt: new Date().toISOString() },
     } as unknown as Context;
     const env = await run(ctx);
-    const lim = (env['data'] as { trust: { limitations: string[] } }).trust.limitations[0];
-    expect(lim).toContain('Apex Custom Label reference edges');
-    expect(lim).toContain('method-level LWC/Aura -> Apex caller edges');
-    // Families the 0.3.3 builder already extracted are not listed again.
+    const lim = (env['data'] as { trust: { limitations: string[] } }).trust.limitations[0]!;
+    expect(lim).toContain('0.3.3');
+    expect(lim).toContain('0.4.0');
+    expect(lim).toMatch(/sfi refresh/i);
+    expect(lim).not.toContain('Apex Custom Label reference edges');
+    expect(lim).not.toContain('method-level LWC/Aura');
     expect(lim).not.toContain('OmniStudio');
+    expect(Buffer.byteLength(lim, 'utf8')).toBeLessThan(200);
   });
 
-  it('reports an old vault by age band, without touching completeness', async () => {
+  it('reports an old vault by ageDays in one sentence, without touching completeness', async () => {
     process.env[PLUGIN_ENV] = '0.3.3';
     const ctx = {
       vaultRoot: '/some/abs/org-kb',
@@ -183,8 +207,15 @@ describe('vault freshness stamp via runTool', () => {
     };
     expect(data.soundness.complete).toBe(true);
     expect(data.trust.completeness.status).toBe('complete');
-    expect(data.trust.limitations[0]).toContain('>90d');
-    expect((env['vaultState'] as { freshness?: { ageBand?: string } }).freshness?.ageBand).toBe('>90d');
+    expect(data.trust.limitations[0]).toMatch(/age \d+ days/);
+    expect(data.trust.limitations[0]).toMatch(/sfi refresh/i);
+    expect(Buffer.byteLength(data.trust.limitations[0]!, 'utf8')).toBeLessThan(200);
+    const freshness = (env['vaultState'] as {
+      freshness?: { ageBand?: string; ageDays: number | null; stale: boolean };
+    }).freshness;
+    expect(freshness?.ageBand).toBe('>90d');
+    expect(freshness?.stale).toBe(true);
+    expect((freshness?.ageDays ?? 0) > 90).toBe(true);
   });
 
   it('leaves a fresh, current-builder answer untouched apart from naming its snapshot', async () => {

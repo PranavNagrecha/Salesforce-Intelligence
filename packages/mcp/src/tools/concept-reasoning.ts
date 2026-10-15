@@ -683,6 +683,25 @@ export const CONCEPT_REASONING_SKIPPED_NOTE =
   'Concept-rule reasoning was NOT run for this component (includeConceptReasoning: false), so no ' +
   'structural implication was checked. That is "not checked", not "nothing found".';
 
+/**
+ * One-line opt-in hint naming the flag. Emit alongside
+ * `conceptReasoningAvailable: true` (on disclosure / boundaries) so a host
+ * that sees the default-off response knows how to ask for the block.
+ */
+export const CONCEPT_REASONING_AVAILABLE_HINT =
+  'Pass includeConceptReasoning: true to attach concept-rule claims.';
+
+/**
+ * Discoverability when concept reasoning is OFF (the default on the four
+ * high-traffic tools). Spread onto `data`; put {@link CONCEPT_REASONING_AVAILABLE_HINT}
+ * on disclosure / boundaries.
+ */
+export const conceptReasoningOffFields = (): {
+  readonly conceptReasoningAvailable: true;
+} => ({
+  conceptReasoningAvailable: true,
+});
+
 /** A fitted reasoning block plus the bytes it occupies. */
 export interface ReservedConceptReasoning {
   readonly envelope: ConceptReasoningEnvelope;

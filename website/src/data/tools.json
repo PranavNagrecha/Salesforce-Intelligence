@@ -1,34 +1,25 @@
 {
-  "generatedAt": "2026-10-10T19:00:52.719Z",
-  "version": "0.4.0",
+  "generatedAt": "2026-10-15T12:55:21.224Z",
+  "version": "0.5.0",
   "toolCount": 231,
   "listedToolCount": 226,
-  "coreToolCount": 25,
+  "coreToolCount": 16,
   "core": [
     "sfi.resolve",
     "sfi.search_components",
     "sfi.get_component",
-    "sfi.list_components",
-    "sfi.get_edges",
-    "sfi.get_impact",
-    "sfi.effective_permissions",
-    "sfi.order_of_execution",
-    "sfi.org_history",
     "sfi.health_check",
-    "sfi.org_card",
-    "sfi.route_question",
-    "sfi.synthesize_answer",
-    "sfi.capabilities",
-    "sfi.guidance",
     "sfi.list_analyses",
     "sfi.describe_analysis",
     "sfi.run_analysis",
     "sfi.live_consent",
+    "sfi.find_component_usages",
     "sfi.safe_to_delete_field",
-    "sfi.why_cant_user_see_record",
-    "sfi.who_can_access_object",
-    "sfi.field_access_audit",
     "sfi.what_happens_on_save",
+    "sfi.find_dead_code",
+    "sfi.why_cant_user_see_record",
+    "sfi.effective_permissions",
+    "sfi.flow_graph",
     "sfi.org_overview"
   ],
   "sections": [
@@ -39,7 +30,7 @@
         {
           "name": "sfi.capabilities",
           "description": "What this server can answer: a capability map with example questions, persona question-paths (admin, developer, architect, release manager, support) naming the tools for each, the trust-tag glossary (confidence, provenance, completeness), and the recommended conversation pattern. No args.",
-          "core": true,
+          "core": false,
           "readOnly": true,
           "livePlane": "never"
         },
@@ -67,21 +58,21 @@
         {
           "name": "sfi.route_question",
           "description": "Advisory router for a vague, broad or compound question. It does not answer the question.",
-          "core": true,
+          "core": false,
           "readOnly": true,
           "livePlane": "never"
         },
         {
           "name": "sfi.org_card",
           "description": "Orientation snapshot of the org, precomputed at refresh (16KB max, one file read): name, edition, sandbox or production, org id, admin contact, last refresh time, coverage and blind spots, scale by type, top objects, automation density, permission posture, integration surface and naming conventions.",
-          "core": true,
+          "core": false,
           "readOnly": true,
           "livePlane": "never"
         },
         {
           "name": "sfi.guidance",
           "description": "General Salesforce best-practice guidance that is NOT about this org: Flow vs Apex, order of execution, governor limits, async Apex, trigger frameworks, bulkification, testing, OWD and sharing, profiles vs permission sets, packaging, sandboxes. Returns a curated summary with links to official docs.",
-          "core": true,
+          "core": false,
           "readOnly": true,
           "livePlane": "never"
         },
@@ -122,7 +113,7 @@
         {
           "name": "sfi.list_components",
           "description": "Inventory: lists components of one `type` (see enum), paged in id order. Narrow to one object with `objectApiName` (for example \"Contact\"; aliases object/objectId) or to any parent with `parentId` (for example \"CustomObject:Contact\"); the narrow applied is echoed in `appliedScope`.",
-          "core": true,
+          "core": false,
           "readOnly": true,
           "livePlane": "never"
         },
@@ -204,7 +195,7 @@
         },
         {
           "name": "sfi.what_happens_on_save",
-          "description": "What already runs when a record of one object is saved, in Salesforce order of execution for one DML event.",
+          "description": "What runs when a record of one object is saved, in Salesforce order of execution for one DML event.",
           "core": true,
           "readOnly": true,
           "livePlane": "never"
@@ -218,8 +209,8 @@
         },
         {
           "name": "sfi.flow_graph",
-          "description": "The FAITHFUL structural graph of a Flow, and - with `walkthrough: true` - the ORDERED, element-by-element walk of what runs when it runs.",
-          "core": false,
+          "description": "The structural graph of one Flow: every element with its real name, label and the author's own description, the element-to-element connectors, decision rules, assignments, record-op filters, screen fields, action parameters, formulas, variables, subflows and the start element.",
+          "core": true,
           "readOnly": true,
           "livePlane": "never"
         },
@@ -295,7 +286,7 @@
         {
           "name": "sfi.get_edges",
           "description": "Raw graph edges touching one node.",
-          "core": true,
+          "core": false,
           "readOnly": true,
           "livePlane": "never"
         },
@@ -309,7 +300,7 @@
         {
           "name": "sfi.get_impact",
           "description": "Answers 'what breaks if I change or delete this?' by walking incoming dependency edges from one component.",
-          "core": true,
+          "core": false,
           "readOnly": true,
           "livePlane": "never"
         },
@@ -462,8 +453,8 @@
         },
         {
           "name": "sfi.find_component_usages",
-          "description": "The universal \"where is this component used?\" answer for ANY canonical component type (`componentId`) - one entry point instead of fanning out across find_field_anywhere / find_code_usages / get_impact / grep.",
-          "core": false,
+          "description": "Where is this component used: everything that points to one canonical component (`componentId` of any type: field, class, flow, label, permission set, custom permission, static resource, page).",
+          "core": true,
           "readOnly": true,
           "livePlane": "never"
         }
@@ -476,7 +467,7 @@
         {
           "name": "sfi.synthesize_answer",
           "description": "Grounding check before you answer. Pass the JSON output of earlier sfi.* calls as `input` (any JSON; combine several results in one array or object), optionally the user's `question`, and optionally your `draft` answer.",
-          "core": true,
+          "core": false,
           "readOnly": true,
           "livePlane": "never"
         },
@@ -509,7 +500,7 @@
         },
         {
           "name": "sfi.effective_permissions",
-          "description": "What a profile plus permission-set bundle actually GRANTS, unioned, with each permission attributed to the container that grants it: object CRUD and View/Modify All, field-security count, system permissions, custom permissions, Apex class access, record-type visibility, Visualforce pages and tabs.",
+          "description": "What a profile plus permission sets actually grant, unioned (most permissive wins), each grant attributed to the container that gives it: object CRUD and View/Modify All, field security, system and custom permissions, Apex class access, record-type visibility, Visualforce pages and tabs.",
           "core": true,
           "readOnly": true,
           "livePlane": "never"
@@ -524,7 +515,7 @@
         {
           "name": "sfi.who_can_access_object",
           "description": "Reverse access lookup: which profiles, permission sets, roles and groups can reach records of one object, and how (org-wide default, object CRUD and View/Modify All, ViewAllData/ModifyAllData, sharing rules with groups expanded to members).",
-          "core": true,
+          "core": false,
           "readOnly": true,
           "livePlane": "never"
         },
@@ -544,7 +535,7 @@
         },
         {
           "name": "sfi.why_cant_user_see_record",
-          "description": "Explains whether a user can see, edit, delete or create records of an object, and why not.",
+          "description": "Whether a user can see, edit, delete or create records of an object, and why not. Walks the access cascade (object CRUD, View/Modify All, org-wide defaults, role hierarchy, sharing rules, restriction and scoping rules) and returns a step-by-step chain with a verdict: visible | restricted | unknown.",
           "core": true,
           "readOnly": true,
           "livePlane": "never"
@@ -615,7 +606,7 @@
         {
           "name": "sfi.field_access_audit",
           "description": "Who can read or edit one FIELD: every Profile and PermissionSet that grants field-level security on it, plus Apex classes that read or write it (an indirect path).",
-          "core": true,
+          "core": false,
           "readOnly": true,
           "livePlane": "never"
         },
@@ -733,7 +724,7 @@
         {
           "name": "sfi.order_of_execution",
           "description": "Full order-of-execution map for one object across every DML event (insert, update, delete, undelete): the same per-phase steps as sfi.what_happens_on_save, keyed by event in `byEvent`.",
-          "core": true,
+          "core": false,
           "readOnly": true,
           "livePlane": "never"
         },
@@ -872,8 +863,8 @@
         },
         {
           "name": "sfi.find_dead_code",
-          "description": "Cross-cutting dead-code surface - composes `method_reachability` verdict, entry-point taxonomy, and zero-usage detection into a single cascade verdict per candidate: `definitely_dead`, `likely_dead`, `uncertain`.",
-          "core": false,
+          "description": "Which Apex classes, triggers, flows and custom fields have no visible callers.",
+          "core": true,
           "readOnly": true,
           "livePlane": "never"
         }
@@ -1108,7 +1099,7 @@
         {
           "name": "sfi.org_history",
           "description": "Refresh timeline of this vault: per-refresh component and edge changes by type, most recent first, plus refreshCount, first and last refresh time and net component change. Use it for 'how has the org changed over time'.",
-          "core": true,
+          "core": false,
           "readOnly": true,
           "livePlane": "never"
         },

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Metadata extractors that produce graph nodes and edges from DX source.",
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/PranavNagrecha/Salesforce-Intelligence.git",

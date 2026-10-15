@@ -209,7 +209,7 @@ console.log('\n# refresh epoch');
 const ep = newClient(vaultParent);
 try {
   await ep.client.connect(ep.transport);
-  const before = await callText(ep.client, 'sfi.list_components', { type: 'CustomObject' });
+  const before = await callText(ep.client, 'sfi.run_analysis', { name: 'sfi.list_components', args: { type: 'CustomObject' } });
   check('epoch: server serves the original vault', before.includes('CustomObject:Account'), before.slice(0, 100));
 
   // Mirror the refresh's locked-fallback exactly: the server's read-only
@@ -232,7 +232,7 @@ try {
   renameSync(sidePath, vp.graphDb); // atomic — the open server keeps the old inode until reopen
   writeFileSync(join(vaultParent, 'org-kb', 'meta', 'refresh-epoch'), `${new Date().toISOString()}\n`);
 
-  const after = await callText(ep.client, 'sfi.list_components', { type: 'CustomObject' });
+  const after = await callText(ep.client, 'sfi.run_analysis', { name: 'sfi.list_components', args: { type: 'CustomObject' } });
   check(
     'epoch: the SAME open server serves the refreshed vault — no restart',
     after.includes('Epoch_Marker__c'),
@@ -322,7 +322,7 @@ if (!existsSync(join(demoVault, 'graph', 'graph.duckdb'))) {
   const demoClient = new Client({ name: 'e2e-demo', version: '1' }, { capabilities: {} });
   try {
     await demoClient.connect(demoTransport);
-    const list = await callText(demoClient, 'sfi.list_components', { type: 'CustomObject' });
+    const list = await callText(demoClient, 'sfi.run_analysis', { name: 'sfi.list_components', args: { type: 'CustomObject' } });
     check('demo vault serves the synthetic schema (Project__c)', list.includes('Project__c'), list.slice(0, 100));
     const res = await callText(demoClient, 'sfi.resolve', { query: 'paymnet' });
     check('demo vault resolves a typo (paymnet -> Payment__c)', res.includes('Payment__c'), res.slice(0, 100));

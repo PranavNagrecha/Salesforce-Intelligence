@@ -397,12 +397,27 @@ describe('buildConceptReasoningEnvelope — EvidenceEnvelopeV2 projection', () =
 // ---------------------------------------------------------------------------
 
 describe('composed tools surface concept claims', () => {
-  it('field_360 attaches conceptReasoning by DEFAULT and names it in boundaries', async () => {
+  it('field_360 is OFF by default and surfaces conceptReasoningAvailable', async () => {
     const r = await field360Handler(ctx, { fieldId: MD_FIELD });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
+    expect(r.value.data.conceptReasoning).toBeUndefined();
+    expect(r.value.data.conceptReasoningAvailable).toBe(true);
+    expect(
+      r.value.data.boundaries.some((b) => b.includes('includeConceptReasoning: true')),
+      'default-off must name the flag so a host can ask for it',
+    ).toBe(true);
+  });
+
+  it('field_360 with includeConceptReasoning:true attaches the block intact', async () => {
+    const r = await field360Handler(ctx, {
+      fieldId: MD_FIELD,
+      includeConceptReasoning: true,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
     const block = r.value.data.conceptReasoning;
-    expect(block, 'field_360 must run concept reasoning by default').toBeDefined();
+    expect(block, 'field_360 must run concept reasoning when opted in').toBeDefined();
     expect(block!.claims.length).toBeGreaterThan(0);
     expect(
       block!.claims.some((c) => c.ruleId === 'rule:relationship/master-detail-cascade'),
@@ -411,59 +426,61 @@ describe('composed tools surface concept claims', () => {
       r.value.data.boundaries.some((b) => b.startsWith('Concept reasoning:')),
       'the completeness summary must reach the caller-facing boundaries',
     ).toBe(true);
+    expect(r.value.data.conceptReasoningAvailable).toBeUndefined();
   });
 
-  it('field_360 with includeConceptReasoning:false omits the block AND says so', async () => {
-    const r = await field360Handler(ctx, {
-      fieldId: MD_FIELD,
-      includeConceptReasoning: false,
-    });
+  it('explain_apex_method is OFF by default and surfaces conceptReasoningAvailable', async () => {
+    const r = await explainApexMethodHandler(ctx, { classApiName: QUEUEABLE_CLASS });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.conceptReasoning).toBeUndefined();
-    expect(
-      r.value.data.boundaries.some((b) => b.includes('includeConceptReasoning: false')),
-      'skipping reasoning must be disclosed, not silent',
-    ).toBe(true);
+    expect(r.value.data.conceptReasoningAvailable).toBe(true);
+    expect(r.value.data.disclosure).toContain('includeConceptReasoning: true');
   });
 
-  it('explain_apex_method attaches conceptReasoning by DEFAULT', async () => {
-    const r = await explainApexMethodHandler(ctx, { classApiName: QUEUEABLE_CLASS });
+  it('explain_apex_method with includeConceptReasoning:true attaches the block intact', async () => {
+    const r = await explainApexMethodHandler(ctx, {
+      classApiName: QUEUEABLE_CLASS,
+      includeConceptReasoning: true,
+    });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const block = r.value.data.conceptReasoning;
     expect(block).toBeDefined();
     expect(block!.claims.length).toBeGreaterThan(0);
     expect(block!.completeness.noRuleCoversComponentType).toBe(false);
+    expect(r.value.data.conceptReasoningAvailable).toBeUndefined();
   });
 
-  it('explain_apex_method with includeConceptReasoning:false omits the block', async () => {
-    const r = await explainApexMethodHandler(ctx, {
-      classApiName: QUEUEABLE_CLASS,
-      includeConceptReasoning: false,
-    });
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    expect(r.value.data.conceptReasoning).toBeUndefined();
-  });
-
-  it('what_happens_on_save attaches conceptReasoning by DEFAULT (opt-OUT)', async () => {
-    const on = await whatHappensOnSaveHandler(ctx, {
-      objectApiName: 'Acme_Order__c',
-      event: 'update',
-    });
-    expect(on.ok).toBe(true);
-    if (!on.ok) return;
-    expect(on.value.data.conceptReasoning).toBeDefined();
-
+  it('what_happens_on_save is OFF by default and surfaces conceptReasoningAvailable', async () => {
     const off = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'Acme_Order__c',
       event: 'update',
-      includeConceptReasoning: false,
     });
     expect(off.ok).toBe(true);
     if (!off.ok) return;
     expect(off.value.data.conceptReasoning).toBeUndefined();
+    expect(off.value.data.conceptReasoningAvailable).toBe(true);
+    expect(off.value.data.disclosure).toContain('includeConceptReasoning: true');
+  });
+
+  it('what_happens_on_save with includeConceptReasoning:true attaches the block intact', async () => {
+    const on = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'Acme_Order__c',
+      event: 'update',
+      includeConceptReasoning: true,
+    });
+    expect(on.ok).toBe(true);
+    if (!on.ok) return;
+    expect(on.value.data.conceptReasoning).toBeDefined();
+    expect(on.value.data.conceptReasoningAvailable).toBeUndefined();
+
+    const off = await whatHappensOnSaveHandler(ctx, {
+      objectApiName: 'Acme_Order__c',
+      event: 'update',
+    });
+    expect(off.ok).toBe(true);
+    if (!off.ok) return;
     // The primary answer is not degraded by the reservation on a small object.
     expect(on.value.data.soe.length).toBe(off.value.data.soe.length);
   });
@@ -472,6 +489,7 @@ describe('composed tools surface concept claims', () => {
     const on = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'Acme_Order__c',
       event: 'update',
+      includeConceptReasoning: true,
     });
     expect(on.ok).toBe(true);
     if (!on.ok) return;
@@ -482,18 +500,6 @@ describe('composed tools surface concept claims', () => {
     expect(on.value.data.conceptReasoning).toBeDefined();
   });
 
-  it('what_happens_on_save DISCLOSES an opt-out instead of silently omitting', async () => {
-    const off = await whatHappensOnSaveHandler(ctx, {
-      objectApiName: 'Acme_Order__c',
-      event: 'update',
-      includeConceptReasoning: false,
-    });
-    expect(off.ok).toBe(true);
-    if (!off.ok) return;
-    expect(off.value.data.conceptReasoning).toBeUndefined();
-    expect(off.value.data.disclosure).toContain('includeConceptReasoning: false');
-  });
-
   it('R1 — turning reasoning ON must NOT strip the automation inventory', async () => {
     // The double-count regression: the block was attached AND subtracted from a
     // budget that already measured it, so the effective allowance became
@@ -502,11 +508,11 @@ describe('composed tools surface concept claims', () => {
     const on = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'Acme_Order__c',
       event: 'update',
+      includeConceptReasoning: true,
     });
     const off = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'Acme_Order__c',
       event: 'update',
-      includeConceptReasoning: false,
     });
     expect(on.ok && off.ok).toBe(true);
     if (!on.ok || !off.ok) return;
@@ -520,17 +526,25 @@ describe('composed tools surface concept claims', () => {
     expect(on.value.data.truncated).toBe(off.value.data.truncated);
   });
 
-  it('get_component attaches conceptReasoning by DEFAULT (any component type)', async () => {
-    const on = await getComponentHandler(ctx, { id: MD_FIELD });
-    const off = await getComponentHandler(ctx, {
+  it('get_component is OFF by default and surfaces conceptReasoningAvailable', async () => {
+    const off = await getComponentHandler(ctx, { id: MD_FIELD });
+    expect(off.ok).toBe(true);
+    if (!off.ok) return;
+    expect(off.value.data.conceptReasoning).toBeUndefined();
+    expect(off.value.data.conceptReasoningAvailable).toBe(true);
+    expect(off.value.data.disclosure).toContain('includeConceptReasoning: true');
+  });
+
+  it('get_component with includeConceptReasoning:true attaches the block intact', async () => {
+    const on = await getComponentHandler(ctx, {
       id: MD_FIELD,
-      includeConceptReasoning: false,
+      includeConceptReasoning: true,
     });
-    expect(on.ok && off.ok).toBe(true);
-    if (!on.ok || !off.ok) return;
+    expect(on.ok).toBe(true);
+    if (!on.ok) return;
     expect(on.value.data.conceptReasoning).toBeDefined();
     expect(on.value.data.conceptReasoning!.claims.length).toBeGreaterThan(0);
-    expect(off.value.data.conceptReasoning).toBeUndefined();
+    expect(on.value.data.conceptReasoningAvailable).toBeUndefined();
   });
 
   it('get_component metadata-probe IGNORES the flag in BOTH directions (correctness boundary)', async () => {
@@ -982,10 +996,19 @@ describe('question -> anchor bridge', () => {
 // ---------------------------------------------------------------------------
 
 describe('composed payloads keep their claims and their budget', () => {
-  it('every composed tool surfaces >=1 claim on a component known to have one', async () => {
-    const f = await field360Handler(ctx, { fieldId: MD_FIELD });
-    const a = await explainApexMethodHandler(ctx, { classApiName: QUEUEABLE_CLASS });
-    const g = await getComponentHandler(ctx, { id: MD_FIELD });
+  it('every composed tool surfaces >=1 claim when opted in on a component known to have one', async () => {
+    const f = await field360Handler(ctx, {
+      fieldId: MD_FIELD,
+      includeConceptReasoning: true,
+    });
+    const a = await explainApexMethodHandler(ctx, {
+      classApiName: QUEUEABLE_CLASS,
+      includeConceptReasoning: true,
+    });
+    const g = await getComponentHandler(ctx, {
+      id: MD_FIELD,
+      includeConceptReasoning: true,
+    });
     expect(f.ok && a.ok && g.ok).toBe(true);
     if (!f.ok || !a.ok || !g.ok) return;
     expect(f.value.data.conceptReasoning!.claims.length).toBeGreaterThan(0);
@@ -993,14 +1016,24 @@ describe('composed payloads keep their claims and their budget', () => {
     expect(g.value.data.conceptReasoning!.claims.length).toBeGreaterThan(0);
   });
 
-  it('every composed block stays inside the documented size envelope', async () => {
+  it('every opted-in composed block stays inside the documented size envelope', async () => {
     const bytes = (v: unknown): number => Buffer.byteLength(JSON.stringify(v), 'utf8');
-    const f = await field360Handler(ctx, { fieldId: MD_FIELD });
-    const a = await explainApexMethodHandler(ctx, { classApiName: QUEUEABLE_CLASS });
-    const g = await getComponentHandler(ctx, { id: MD_FIELD });
+    const f = await field360Handler(ctx, {
+      fieldId: MD_FIELD,
+      includeConceptReasoning: true,
+    });
+    const a = await explainApexMethodHandler(ctx, {
+      classApiName: QUEUEABLE_CLASS,
+      includeConceptReasoning: true,
+    });
+    const g = await getComponentHandler(ctx, {
+      id: MD_FIELD,
+      includeConceptReasoning: true,
+    });
     const w = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'Acme_Order__c',
       event: 'update',
+      includeConceptReasoning: true,
     });
     expect(f.ok && a.ok && g.ok && w.ok).toBe(true);
     if (!f.ok || !a.ok || !g.ok || !w.ok) return;
@@ -1010,29 +1043,22 @@ describe('composed payloads keep their claims and their budget', () => {
       ['get_component', g.value.data.conceptReasoning],
       ['what_happens_on_save', w.value.data.conceptReasoning],
     ] as const) {
-      expect(block, `${label} must attach a block by default`).toBeDefined();
+      expect(block, `${label} must attach a block when opted in`).toBeDefined();
       expect(bytes(block), `${label} block too large`).toBeLessThan(4_500);
     }
   });
 
-  it('R3 — a failed reasoning read is DISCLOSED, never silently omitted', async () => {
-    // A context whose graph cannot resolve the anchor: the block is absent, and
-    // the tool must say why rather than emit a block-less payload that reads as
-    // "nothing found".
+  it('R3 — default-off always names the flag, never silently omits', async () => {
     const r = await field360Handler(ctx, {
       fieldId: 'CustomField:Acme_Child__c.TEST_Ghost__c',
     });
-    // A missing field is a hard not-found for field_360; the reasoning-absent
-    // path is exercised through the explicit opt-out instead.
-    const off = await field360Handler(ctx, {
-      fieldId: MD_FIELD,
-      includeConceptReasoning: false,
-    });
+    const off = await field360Handler(ctx, { fieldId: MD_FIELD });
     expect(off.ok).toBe(true);
     if (!off.ok) return;
     expect(off.value.data.conceptReasoning).toBeUndefined();
+    expect(off.value.data.conceptReasoningAvailable).toBe(true);
     expect(
-      off.value.data.boundaries.some((b) => b.includes('not checked')),
+      off.value.data.boundaries.some((b) => b.includes('includeConceptReasoning: true')),
       'an absent block must always be explained',
     ).toBe(true);
     expect(r.ok).toBe(false);
@@ -1051,14 +1077,16 @@ describe('composed payloads keep their claims and their budget', () => {
   });
 
   it('R3 — explain_apex_method discloses the reasoning layer on every path', async () => {
-    const on = await explainApexMethodHandler(ctx, { classApiName: QUEUEABLE_CLASS });
+    const on = await explainApexMethodHandler(ctx, {
+      classApiName: QUEUEABLE_CLASS,
+      includeConceptReasoning: true,
+    });
     const off = await explainApexMethodHandler(ctx, {
       classApiName: QUEUEABLE_CLASS,
-      includeConceptReasoning: false,
     });
     expect(on.ok && off.ok).toBe(true);
     if (!on.ok || !off.ok) return;
     expect(on.value.data.disclosure).toContain('Concept reasoning:');
-    expect(off.value.data.disclosure).toContain('includeConceptReasoning: false');
+    expect(off.value.data.disclosure).toContain('includeConceptReasoning: true');
   });
 });

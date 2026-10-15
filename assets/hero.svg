@@ -78,5 +78,5 @@
   <text x="70" y="366" font-size="16"><tspan fill="#3DF07A">$</tspan><tspan fill="#8AA795"> sfi ask "what breaks if I delete Account.Industry?"</tspan></text>
 
   <!-- footer -->
-  <text x="70" y="400" fill="#5E7466" font-size="13.5">MIT + Commons Clause   ·   github.com/PranavNagrecha/Salesforce-Intelligence   ·   sfi.auditforce.cloud</text>
+  <text x="70" y="400" fill="#5E7466" font-size="13.5">MIT   ·   github.com/PranavNagrecha/Salesforce-Intelligence   ·   sfi.auditforce.cloud</text>
 </svg>

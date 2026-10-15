@@ -17,7 +17,7 @@
 
 <p align="center">
   <b>An offline, MCP-first knowledge base for one Salesforce org.</b><br>
-  202 tools (198 advertised) · 100+ component types · 23 edge types · MIT + Commons Clause
+  202 tools (198 advertised) · 100+ component types · 23 edge types · MIT
 </p>
 
 <p align="center">

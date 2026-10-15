@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Optional Salesforce Tooling API enrichment for vault refresh.",
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/PranavNagrecha/Salesforce-Intelligence.git",

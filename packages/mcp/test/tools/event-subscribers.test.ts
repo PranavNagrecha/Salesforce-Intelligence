@@ -817,19 +817,22 @@ describe('eventSubscribersHandler', () => {
     expect(dual?.subscriberCount).toBe(1);
   });
 
-  it('P3b: disclosure states EventBus.subscribe IS recognized heuristically (static channel only)', async () => {
+  it('P3b: disclosure states EventBus.subscribe to a Platform Event is modeled as listensTo', async () => {
     const result = await eventSubscribersHandler(ctx, { eventId: DUP_EVENT });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const text = result.value.data.boundaries.join(' ');
-    // Reworded: subscribe is recognized; dynamic args + managed pkgs invisible.
-    expect(text).toMatch(/EventBus\.subscribe is now recognized heuristically/i);
+    // Platform-event subscribe → listensTo; Change Event subscribe is parsed
+    // but not yet an edge — same truth the CDC sibling tool states.
+    expect(text).toMatch(/EventBus\.subscribe/);
+    expect(text).toMatch(/listensTo/);
+    expect(text).toMatch(/Platform Event|__e/);
+    expect(text).toMatch(/Change Event/);
     expect(text).toMatch(/dynamic/i);
-    // Must NOT still claim EventBus.subscribe is NOT modeled.
     expect(text).not.toMatch(/EventBus\.subscribe\([^)]*\)[^.]*are NOT modeled/i);
   });
 
-  it('P3b: empty-event disclosure also reflects the heuristic-subscribe rewording', async () => {
+  it('P3b: empty-event disclosure also reflects the platform-vs-change EventBus split', async () => {
     const result = await eventSubscribersHandler(ctx, { eventId: ORDER_EVENT });
     // Order_Placed__e has a subscriber, so use a truly-empty event instead:
     const empty = await eventSubscribersHandler(ctx, {
@@ -839,7 +842,9 @@ describe('eventSubscribersHandler', () => {
     if (!empty.ok) return;
     expect(result.ok).toBe(true);
     const text = empty.value.data.boundaries.join(' ');
-    expect(text).toMatch(/EventBus\.subscribe is now recognized heuristically/i);
+    expect(text).toMatch(/EventBus\.subscribe/);
+    expect(text).toMatch(/listensTo|Platform Event|__e/);
+    expect(text).toMatch(/Change Event/);
     expect(text).toMatch(/NOT proof nothing subscribes/i);
   });
 });

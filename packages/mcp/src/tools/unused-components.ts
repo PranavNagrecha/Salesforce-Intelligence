@@ -501,7 +501,7 @@ const INVISIBLE_REFERENCES_NOTES: Readonly<Record<string, string>> =
     CustomSettingRecord:
       'Runtime Apex reads via the parent type API (MySetting__c.getInstance) bypass the metadata graph and are invisible.',
     EmailTemplate:
-      'EmailAlert references in WorkflowRules or Apex Messaging.SingleEmailMessage calls in a separate file may be invisible; check email-alert metadata before deleting.',
+      'WorkflowRule, ApprovalProcess, AssignmentRule, EscalationRule and AutoResponseRule references are modeled as `sendsEmail` edges. Apex Messaging.SingleEmailMessage / dynamic template selection remain invisible; spot-check those before deleting.',
     ExternalDataSource:
       'Runtime callouts against the data source via Apex / LWC may not appear as metadata references.',
     Flow:
@@ -509,7 +509,7 @@ const INVISIBLE_REFERENCES_NOTES: Readonly<Record<string, string>> =
     GlobalValueSet:
       'Picklist field references the value set via `usesValueSet`; if the value set is unused here, no field declared it. Confirm before deleting.',
     Group:
-      'Group memberships are managed at runtime (Sales > Groups admin UI) and are NOT extracted by the v1.x sharing-rule extractor. A group with no metadata references may still have live members.',
+      'Memberships declared in Group metadata are modeled as `hasMember` edges (group → member). Those outbound edges do not count as inbound usage; a group with members but no inbound sharing/assignment references can still be live — spot-check Setup before deleting.',
     Letterhead:
       'EmailTemplate XML references the letterhead by name; templates extracted from a different file may reference this letterhead invisibly.',
     PermissionSet:
@@ -519,7 +519,7 @@ const INVISIBLE_REFERENCES_NOTES: Readonly<Record<string, string>> =
     Role:
       'Role assignments are user-level data not extracted in v1.x; a Role with no metadata references may still be the owning role for many records.',
     StaticResource:
-      'LWC and Aura bundles reference static resources via dynamic paths the v1.x scanners cannot fully resolve; spot-check the bundle source before deleting.',
+      'Declared static-resource references from LWC (`@salesforce/resourceUrl`), Aura, and Visualforce are modeled as graph edges. Only dynamically assembled resource paths (runtime concat, `{!$Resource[expr]}`) remain invisible; spot-check those before deleting.',
     ValidationRule:
       'Listed only because it is inactive (active=false) — active rules are excluded since they fire on every save regardless of incoming references. An inactive rule does not execute, but confirm it is not pending reactivation before deleting.',
     WorkflowRule:

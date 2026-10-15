@@ -30,7 +30,7 @@ SfIntelligence is read-only. Say this plainly before the refresh:
 The plugin installs the MCP server, not the `sfi` command. Before the first
 command, run `command -v sfi` via the Bash tool. If it prints a path, run the
 commands below as written. If it prints nothing, run every `sfi …` command
-below as `npx -y sf-intelligence@0.4.0 …` instead, with the same arguments.
+below as `npx -y sf-intelligence@0.5.0 …` instead, with the same arguments.
 The Bash tool has no terminal, so the CLI cannot prompt: always pass the
 flags it would otherwise ask for.
 
@@ -72,7 +72,7 @@ sf org list --skip-connection-status --json
 
 Stop and give a concrete fix when:
 
-- `sfi` is not on PATH and `npx -y sf-intelligence@0.4.0 doctor` also fails:
+- `sfi` is not on PATH and `npx -y sf-intelligence@0.5.0 doctor` also fails:
   tell the user Node.js 20+ (which provides `npx`) is required.
 - `sf` is not on PATH: tell the user to install Salesforce CLI.
 - the list holds no org alias or username at all: tell the user to run
@@ -139,8 +139,8 @@ sfi doctor
 Then use the MCP tools, if available:
 
 1. Call `sfi.health_check` with no arguments.
-2. Call `sfi.capabilities` with no arguments.
-3. Call `sfi.route_question` with:
+2. Call `sfi.run_analysis` with `{ "name": "sfi.capabilities", "args": { … } }` with no arguments.
+3. Call `sfi.run_analysis` with `{ "name": "sfi.route_question", "args": { … } }` with:
 
 ```json
 { "question": "what happens when Account is saved?" }
@@ -155,7 +155,7 @@ Ask one simple question through the normal route-first behavior:
 
 > Try: "What happens when Account is saved?"
 
-If the user asks you to run it now, call `sfi.route_question` first, then the
+If the user asks you to run it now, call `sfi.run_analysis` with `{ "name": "sfi.route_question", "args": { … } }` first, then the
 recommended tool chain. Keep the answer short and cite provenance/freshness.
 
 ### Step 6 - Ready message

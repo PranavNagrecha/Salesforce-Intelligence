@@ -1299,6 +1299,21 @@ describe('findDeadCodeHandler — static-type-usage re-check (DEAD-CODE-MISSES-S
           apiName: 'TestReferencedOnly',
           properties: { isTest: false },
         }),
+        // Graph-reachable ONLY from an @isTest class (would be likely_dead),
+        // but production Demo_Factory names it as `List<Demo_Other>` —
+        // static-type-usage re-check must downgrade to uncertain.
+        makeNode({
+          id: 'ApexClass:Demo_Other',
+          type: 'ApexClass',
+          apiName: 'Demo_Other',
+          properties: { isTest: false },
+        }),
+        makeNode({
+          id: 'ApexClass:Demo_OtherTest',
+          type: 'ApexClass',
+          apiName: 'Demo_OtherTest',
+          properties: { isTest: true },
+        }),
         // Production referrers — kept live by an entry-point trigger so they do
         // not themselves clutter the dead set.
         makeNode({
@@ -1311,6 +1326,12 @@ describe('findDeadCodeHandler — static-type-usage re-check (DEAD-CODE-MISSES-S
           id: 'ApexClass:IntegrationGateway',
           type: 'ApexClass',
           apiName: 'IntegrationGateway',
+          properties: { isTest: false },
+        }),
+        makeNode({
+          id: 'ApexClass:Demo_Factory',
+          type: 'ApexClass',
+          apiName: 'Demo_Factory',
           properties: { isTest: false },
         }),
         makeNode({
@@ -1337,6 +1358,17 @@ describe('findDeadCodeHandler — static-type-usage re-check (DEAD-CODE-MISSES-S
         makeEdge({
           fromId: 'ApexTrigger:AppTrigger',
           toId: 'ApexClass:IntegrationGateway',
+          edgeType: 'callsApex',
+        }),
+        makeEdge({
+          fromId: 'ApexTrigger:AppTrigger',
+          toId: 'ApexClass:Demo_Factory',
+          edgeType: 'callsApex',
+        }),
+        // Test-only graph reach → candidate starts as likely_dead before grep.
+        makeEdge({
+          fromId: 'ApexClass:Demo_OtherTest',
+          toId: 'ApexClass:Demo_Other',
           edgeType: 'callsApex',
         }),
       ],
@@ -1394,6 +1426,26 @@ describe('findDeadCodeHandler — static-type-usage re-check (DEAD-CODE-MISSES-S
       'LegacyScenarioTest',
       `@isTest\npublic class LegacyScenarioTest {\n` +
         `  @isTest static void t() { Integer n = TestReferencedOnly.x(); }\n}`,
+    );
+    writeCls(
+      classesDir,
+      'Demo_Other',
+      `public class Demo_Other {\n  public Id recordId;\n}`,
+    );
+    writeCls(
+      classesDir,
+      'Demo_OtherTest',
+      `@isTest\npublic class Demo_OtherTest {\n` +
+        `  @isTest static void t() { Demo_Other o = new Demo_Other(); }\n}`,
+    );
+    // Production type-name usage of Demo_Other — no graph edge, only source.
+    writeCls(
+      classesDir,
+      'Demo_Factory',
+      `public class Demo_Factory {\n` +
+        `  public List<Demo_Other> build() {\n` +
+        `    return new List<Demo_Other>();\n` +
+        `  }\n}`,
     );
 
     sCtx = { vaultRoot: sDir, manifest: MANIFEST, graph: sStore };
@@ -1456,6 +1508,21 @@ describe('findDeadCodeHandler — static-type-usage re-check (DEAD-CODE-MISSES-S
     );
     expect(c?.verdict).toBe('uncertain');
     expect(c?.reasoning).toContain('static-field or type-name');
+    expect(c?.reasoning).toContain('OrderService.cls');
+  });
+
+  it('downgrades likely_dead to uncertain when production source names the class as a type', async () => {
+    // Graph says test-only (would be likely_dead); source has `List<Demo_Other>`
+    // in Demo_Factory — must come back uncertain, not likely_dead.
+    const r = await findDeadCodeHandler(sCtx, { includeUncertain: true });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const c = r.value.data.candidates.find(
+      (x) => x.componentId === 'ApexClass:Demo_Other',
+    );
+    expect(c?.verdict).toBe('uncertain');
+    expect(c?.verdict).not.toBe('likely_dead');
+    expect(c?.reasoning).toContain('Demo_Factory.cls');
   });
 
   it('discloses the static-type-usage re-check in boundaries', async () => {
@@ -1465,6 +1532,7 @@ describe('findDeadCodeHandler — static-type-usage re-check (DEAD-CODE-MISSES-S
     expect(r.value.data.boundaries.join(' ')).toContain(
       'static-type-usage re-check',
     );
+    expect(r.value.data.boundaries.join(' ')).toContain('likely_dead');
   });
 });
 

@@ -18,7 +18,7 @@ Do this yourself, in this conversation. The scout output is the shared evidence 
    ```
    SFI_REPORTS_CAP=10000 sfi refresh
    ```
-   (A pulling refresh — `--no-pull` never fetches reports. If `command -v sfi` prints nothing, run it as `npx -y sf-intelligence@0.4.0 refresh`.)
+   (A pulling refresh — `--no-pull` never fetches reports. If `command -v sfi` prints nothing, run it as `npx -y sf-intelligence@0.5.0 refresh`.)
 3. **Orient.** `sfi.org_card`, then `sfi.resolve` on the object to fix its canonical id.
 4. **Enumerate** the object's custom fields, and build the **collision list** — which of those field API names also exist on other objects. Same-named fields on other objects are the norm; any number taken from the wrong object voids every conclusion drawn from it.
 5. **Calibrate.** Pick a field you can already prove is referenced, run the same tools against it, and confirm they return something. Record the control. A zero from an uncalibrated method is not a finding.

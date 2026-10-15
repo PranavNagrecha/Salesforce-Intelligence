@@ -75,7 +75,8 @@ import { annotationsBlockFor, type AnnotationsBlock } from './annotations.js';
 import { tryReadComponentDoc } from './component-doc-fallback.js';
 import {
   buildReservedConceptReasoning,
-  CONCEPT_REASONING_SKIPPED_NOTE,
+  CONCEPT_REASONING_AVAILABLE_HINT,
+  conceptReasoningOffFields,
   CONCEPT_REASONING_UNAVAILABLE_NOTE,
   type ConceptReasoningEnvelope,
 } from './concept-reasoning.js';
@@ -146,7 +147,7 @@ const getComponentInputBaseSchema = z.object({
     .min(0)
     .max(DEFAULT_COMPONENT_BODY_MAX_BYTES)
     .optional(),
-  // Concept-rule reasoning; DEFAULTS TRUE (opt-OUT). IGNORED on the
+  // Concept-rule reasoning; DEFAULTS FALSE (opt-IN). IGNORED on the
   // metadata-probe path — see `conceptReasoning` on the output.
   includeConceptReasoning: z.boolean().optional(),
 });
@@ -285,10 +286,11 @@ export interface GetComponentOutput {
    * REASONING-REACHABILITY — deterministic concept-rule claims about THIS
    * component, on the shared `EvidenceEnvelopeV2` contract plus a
    * `completeness` report that keeps "checked and found nothing" distinct from
-   * "never checked". Present ONLY when the caller passed
-   * DEFAULT ON. Absent only when the caller passed
-   * `includeConceptReasoning: false`, when the reasoning read failed, or on the
-   * metadata-probe path (see below).
+   * "never checked". DEFAULT OFF — present ONLY when the caller passed
+   * `includeConceptReasoning: true`. When off, the response carries
+   * `conceptReasoningAvailable: true` plus a one-line hint naming the flag.
+   * Also absent when the reasoning read failed, or on the metadata-probe path
+   * (see below).
    *
    * This is the UNIVERSAL anchor: `get_component` accepts any component type,
    * so it is the only surface through which concept rules bound on the long
@@ -309,6 +311,12 @@ export interface GetComponentOutput {
    * NOTHING WAS CHECKED — never "clean".
    */
   readonly conceptReasoning?: ConceptReasoningEnvelope;
+  /**
+   * Present when `conceptReasoning` was not attached because the flag is off
+   * (the default). Always `true` when present — pass `includeConceptReasoning:
+   * true` to attach the block (see disclosure for the one-line hint).
+   */
+  readonly conceptReasoningAvailable?: true;
   /** AUDIT-F8 — description / inlineHelpText from node properties, branded. */
   readonly descriptionOrgText?: UntrustedOrgText;
 }
@@ -625,19 +633,19 @@ export const getComponentHandler = async (
 
   // REASONING-REACHABILITY — opt-in concept-rule reasoning over ANY component
   // type. Never reached on the metadata-probe path above (that returns first),
-  // so the grounding probe keeps its minimal payload.
-  const conceptReasoning: ConceptReasoningEnvelope | null =
-    input.includeConceptReasoning === false
-      ? null
-      : ((await buildReservedConceptReasoning(ctx, node.id, { rootNode: node }))?.envelope ??
-        null);
+  // so the grounding probe keeps its minimal payload. DEFAULT OFF.
+  const wantConceptReasoning = input.includeConceptReasoning === true;
+  const conceptReasoning: ConceptReasoningEnvelope | null = wantConceptReasoning
+    ? ((await buildReservedConceptReasoning(ctx, node.id, { rootNode: node }))?.envelope ??
+      null)
+    : null;
   // R3 — an absent block is never silent on any path.
   const conceptNote =
     conceptReasoning !== null
       ? null
-      : input.includeConceptReasoning === false
-        ? CONCEPT_REASONING_SKIPPED_NOTE
-        : CONCEPT_REASONING_UNAVAILABLE_NOTE(node.id);
+      : wantConceptReasoning
+        ? CONCEPT_REASONING_UNAVAILABLE_NOTE(node.id)
+        : CONCEPT_REASONING_AVAILABLE_HINT;
 
   return ok({
     data: {
@@ -659,7 +667,11 @@ export const getComponentHandler = async (
       maxBodyBytes,
       ...sourceConflictField(node),
       ...(annotations !== undefined ? { annotations } : {}),
-      ...(conceptReasoning !== null ? { conceptReasoning } : {}),
+      ...(conceptReasoning !== null
+        ? { conceptReasoning }
+        : wantConceptReasoning
+          ? {}
+          : conceptReasoningOffFields()),
       ...(conceptNote !== null ? { disclosure: conceptNote } : {}),
       ...orgTextFields(node),
     },

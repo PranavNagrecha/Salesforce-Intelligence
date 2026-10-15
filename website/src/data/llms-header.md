@@ -1,6 +1,6 @@
 # sf-intelligence
 
-> sf-intelligence, a read-only Salesforce MCP server: ask the AI assistant you already use (Claude, Cursor, VS Code + Copilot, Codex) what breaks before you change Salesforce, and get offline, cited answers about your own org. Version {{version}}. It reads one metadata retrieve of the org into a local index and answers from it; it never deploys, edits or deletes anything in Salesforce. Free and source-available (MIT + Commons Clause), distributed on npm as `sf-intelligence`.
+> sf-intelligence, a read-only Salesforce MCP server: ask the AI assistant you already use (Claude, Cursor, VS Code + Copilot, Codex) what breaks before you change Salesforce, and get offline, cited answers about your own org. Version {{version}}. It reads one metadata retrieve of the org into a local index and answers from it; it never deploys, edits or deletes anything in Salesforce. Free and source-available (MIT), distributed on npm as `sf-intelligence`.
 
 Key facts for accurate citation:
 

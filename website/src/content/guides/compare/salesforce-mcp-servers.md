@@ -41,7 +41,7 @@ cta:
 | Elements.cloud MCP | No changes described | Yes, from Elements' synced copy | Elements' cloud | Licensed plan, price quoted by sales |
 | Clientell MCP | No ("plans only") | Yes, plus Slack, Gmail, Jira context | Clientell's cloud | From $249/month for 10 people |
 | salesforce-metadata-mcp | Yes (create objects, fields, flows, Apex and more) | Some (a read-only dependency tool) | Your computer | Free (MIT) |
-| sf-intelligence | No, never | Yes, with each component cited | Your computer, offline after setup | Free (MIT + Commons Clause) |
+| sf-intelligence | No, never | Yes, with each component cited | Your computer, offline after setup | Free (MIT) |
 
 ## Salesforce DX MCP server
 

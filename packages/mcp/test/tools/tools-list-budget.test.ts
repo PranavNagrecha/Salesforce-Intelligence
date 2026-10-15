@@ -82,7 +82,7 @@ describe('core tools/list stays inside its token budget', () => {
     expect(tools.some((t) => t.outputSchema !== undefined)).toBe(false);
     // Corpus is real: the budget over an empty list proves nothing.
     expect(tools.length).toBe(advertisedTools('core').length);
-    expect(tools.length).toBeGreaterThan(20);
+    expect(tools.length).toBeGreaterThan(10);
     expect(bytes(tools)).toBeLessThanOrEqual(CORE_TOOLS_LIST_MAX_BYTES);
   });
 

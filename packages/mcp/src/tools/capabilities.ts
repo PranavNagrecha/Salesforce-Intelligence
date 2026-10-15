@@ -706,13 +706,13 @@ const COMMANDS: readonly CommandInfo[] = [
  */
 const ROUTING_GUIDANCE: ConversationalGuidance = {
   startHere:
-    'Default SFI_TOOL_PROFILE=core advertises the core spine (resolve/search/graph reads/routing/capabilities/list+describe+run_analysis/live_consent). On a vague or broad question, call sfi.route_question first — it returns toolCandidates plus a plane/route hint. Default to the offline vault. For any non-core tool (including sfi.interpret and sfi.live_*), call sfi.run_analysis { name, args }. Live data requires sfi.live_consent { grant: true } or SFI_LIVE_PLANE_ENABLED=1 — not per-call liveEnabled. Before destructive verdicts, call sfi.coverage_report via run_analysis.',
+    'Default SFI_TOOL_PROFILE=core advertises 16 tools: the spine (resolve/search/get_component/health_check/list+describe+run_analysis/live_consent) plus the tools behind the advertised questions (where-used, safe-to-delete, what-happens-on-save, dead code, why-cant-see, effective permissions, flow graph, org overview). On a vague or broad question, run sfi.route_question via run_analysis first — it returns toolCandidates plus a plane/route hint. Default to the offline vault. For any non-core tool (including sfi.interpret and sfi.live_*), call sfi.run_analysis { name, args }. Live data requires sfi.live_consent { grant: true } or SFI_LIVE_PLANE_ENABLED=1 — not per-call liveEnabled. Before destructive verdicts, call sfi.coverage_report via run_analysis.',
   onAmbiguous:
     'On ambiguous resolution, clarify the component first. If the user wants live data and live is disabled, say so and offer to grant with sfi.live_consent { grant: true } (in core; OrgId-bound, read-only) — do not guess from the vault.',
   onNone:
     'On none, offer /sfi-refresh for metadata gaps. For live-record questions when offline, name sfi.live_count or sfi.live_sample (via run_analysis) and the consent requirement — never invent counts. When route_question returns toolCandidates (no rule placed the question, or it matched only weakly), follow its `guidance`: those candidates are an advisory shortlist — pick the right tool(s) from them, resolve any named component, invoke non-core tools via run_analysis, then synthesize. Do NOT say the capability is unbuilt when candidates are offered. Only a true unknown with NO candidates means the capability is not built yet (the gap is logged).',
   groundAnswer:
-    'Run the routed tools (core directly; everything else via sfi.run_analysis), then synthesize ONE answer from their output via sfi.synthesize_answer { question, draft }. It returns hallucinatedIds — any canonical id you wrote that no tool returned. Strip those before answering; cite only ids the tools produced, with their provenance.',
+    'Run the routed tools (core directly; everything else via sfi.run_analysis), then synthesize ONE answer from their output via sfi.synthesize_answer { question, draft } (through run_analysis). It returns hallucinatedIds — any canonical id you wrote that no tool returned. Strip those before answering; cite only ids the tools produced, with their provenance.',
 };
 
 const BOUNDARIES: readonly string[] = [

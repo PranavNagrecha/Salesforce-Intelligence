@@ -7,34 +7,40 @@
  * instruct a direct call.
  */
 
-/** Mirrors packages/mcp/src/tools/tool-profile.ts CORE_PROFILE_TOOLS. */
-export const CORE_PROFILE_TOOLS = Object.freeze(
-  new Set([
-    'sfi.resolve',
-    'sfi.search_components',
-    'sfi.get_component',
-    'sfi.list_components',
-    'sfi.get_edges',
-    'sfi.get_impact',
-    'sfi.effective_permissions',
-    'sfi.order_of_execution',
-    'sfi.org_history',
-    'sfi.health_check',
-    'sfi.org_card',
-    'sfi.route_question',
-    'sfi.synthesize_answer',
-    'sfi.capabilities',
-    'sfi.guidance',
-    'sfi.list_analyses',
-    'sfi.describe_analysis',
-    'sfi.run_analysis',
-    'sfi.live_consent',
-  ]),
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+/**
+ * The core roster, DERIVED from the committed ProductManifest
+ * (`eval/product-manifest.json` → `tools.profiles.core`), which the gate keeps
+ * in step with `packages/mcp/src/tools/tool-profile.ts` via
+ * `product-manifest:check`. This used to be a hand-mirrored copy "kept in step"
+ * by a comment; it drifted the first time the roster changed and the check
+ * passed vacuously.
+ */
+const manifestPath = join(
+  dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '..',
+  'eval',
+  'product-manifest.json',
 );
+const loadCoreRoster = () => {
+  const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+  const core = manifest?.tools?.profiles?.core;
+  if (!Array.isArray(core) || core.length === 0) {
+    throw new Error(
+      `${manifestPath} has no tools.profiles.core — run \`pnpm -r build && pnpm product-manifest\` first`,
+    );
+  }
+  return core;
+};
+export const CORE_PROFILE_TOOLS = Object.freeze(new Set(loadCoreRoster()));
 
 export const GATEWAY_FOOTER = [
-  '**Grounding & routing (shared contract).** For a vague or broad ask, call',
-  '`sfi.route_question` first — in the default hybrid mode it returns a',
+  '**Grounding & routing (shared contract).** For a vague or broad ask, run',
+  '`sfi.route_question` through `sfi.run_analysis` first — it returns a',
   'meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a',
   'suggested plane and a `route` hint (and whether to `sfi.resolve` a name',
   'first). **Default tool profile is `core`:** only the core spine (including',
@@ -44,7 +50,7 @@ export const GATEWAY_FOOTER = [
   'Optional: `sfi.describe_analysis` first when args are unclear. Every org',
   'fact must come from an `sfi.*` tool call, cited by its canonical id — never',
   'from memory. Build the answer only from what the tools returned, then pass',
-  'it through `sfi.synthesize_answer`, which flags any `hallucinatedIds`',
+  'it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds`',
   '(canonical ids no tool produced). Full cascade: `using-sf-intelligence`.',
 ].join(' ');
 

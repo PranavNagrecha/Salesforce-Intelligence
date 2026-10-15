@@ -201,7 +201,7 @@ specific record* would trigger it; check the record's
 
 ### Step 2 — Enumerate or fetch the target node(s)
 
-For type-scoped enumerations, call `sfi.list_components`:
+For type-scoped enumerations, call `sfi.run_analysis` with `{ "name": "sfi.list_components", "args": { … } }`:
 
 ```json
 { "type": "WorkflowRule", "parentId": "CustomObject:Account" }
@@ -221,7 +221,7 @@ walking edges. This gives the timeline its context.
 ### Step 3 — Walk the impact / edge graph
 
 For a **rule-impact** question ("what does this rule touch?"),
-call `sfi.get_impact` with the rule's id:
+call `sfi.run_analysis` with `{ "name": "sfi.get_impact", "args": { … } }` with the rule's id:
 
 ```json
 { "componentId": "WorkflowRule:Account.Notify_Sales_On_New_Tier1", "hops": 2 }
@@ -712,7 +712,7 @@ Claude's flow:
 1. **Parse** → the question is a `sendsEmail` inversion. Target id
    is `EmailTemplate:Finance.CreditApprovalNeeded` (`Folder.Template`
    format).
-2. **Call** `sfi.get_edges` with `{ nodeId:
+2. **Call** `sfi.run_analysis` with `{ "name": "sfi.get_edges", "args": { … } }` with `{ nodeId:
    'EmailTemplate:Finance.CreditApprovalNeeded', direction: 'in',
    edgeType: 'sendsEmail' }`.
 3. **Receive** (illustrative):
@@ -888,7 +888,7 @@ Before sending a response, confirm:
       filter; for specific-rule questions, I called
       `sfi.get_component` to fetch properties before walking
       edges.
-- [ ] I called `sfi.get_impact` for rule-impact questions and
+- [ ] I called `sfi.run_analysis` for `sfi.get_impact` for rule-impact questions and
       `sfi.get_edges` for inversion / approver-chain / leaf-node
       questions.
 - [ ] I bucketed the edges by `edgeType` (`triggersOn`,

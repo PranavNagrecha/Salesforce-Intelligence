@@ -34,7 +34,7 @@ import { saveManifest, vaultPaths } from '@sf-intelligence/vault';
 
 import type { Context } from '../../src/server.js';
 import { buildContext, shutdown } from '../../src/server.js';
-import { advertisedTools } from '../../src/tools/index.js';
+import { V01_TOOLS, advertisedTools } from '../../src/tools/index.js';
 import { dispatchTool } from '../../src/tools/tool-dispatch.js';
 
 type JsonSchema = Readonly<Record<string, unknown>>;
@@ -233,7 +233,8 @@ describe('core tool descriptions advertise only values the tool accepts', () => 
   });
 
   it('FAILS on a synthetic description that advertises a value the tool refuses', async () => {
-    const real = advertisedTools('core').find((t) => t.name === 'sfi.who_can_access_object');
+    // Fixture only: any registered tool with an enum arg will do (this one left core in 0.5.0).
+    const real = V01_TOOLS.find((t) => t.name === 'sfi.who_can_access_object');
     expect(real).toBeDefined();
     const synthetic: ToolLike = {
       name: 'sfi.who_can_access_object',
@@ -249,9 +250,8 @@ describe('core tool descriptions advertise only values the tool accepts', () => 
   });
 
   it('FAILS on the example and by-default list shapes too', async () => {
-    const core = advertisedTools('core');
-    const edges = core.find((t) => t.name === 'sfi.get_edges');
-    const consent = core.find((t) => t.name === 'sfi.live_consent');
+    const edges = V01_TOOLS.find((t) => t.name === 'sfi.get_edges');
+    const consent = V01_TOOLS.find((t) => t.name === 'sfi.live_consent');
     expect(edges).toBeDefined();
     expect(consent).toBeDefined();
     const mutated = [
@@ -283,7 +283,9 @@ describe('core tool descriptions advertise only values the tool accepts', () => 
     expect(all.unverifiable).toEqual([]);
     // Not vacuous: the roster advertises lists, and the arg that once drifted is
     // checked against the real handler, not skipped.
-    expect(lists).toBeGreaterThan(5);
-    expect(all.probed).toContain('sfi.who_can_access_object principalType');
+    expect(lists).toBeGreaterThan(3);
+    // Every advertised list on the 0.5.0 core roster is schema-enumerated, so the
+    // handler probe has nothing left to check here; `unverifiable` above is what
+    // keeps a list the schema does not enumerate from passing silently.
   }, 60_000);
 });

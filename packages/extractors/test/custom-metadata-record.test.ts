@@ -285,6 +285,67 @@ describe('extractCustomMetadataRecord', () => {
         await rm(dir, { recursive: true, force: true });
       }
     });
+
+    it('emits a references edge to ApexClass for a class/handler-shaped value cell', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<CustomMetadata xmlns="http://soap.sforce.com/2006/04/metadata" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <label>Virus Scan Config</label>
+    <protected>false</protected>
+    <values>
+        <field>Demo_Handler_Class__c</field>
+        <value xsi:type="xsd:string">Demo_VirusScanHandler</value>
+    </values>
+</CustomMetadata>`;
+      const { dir, path } = await writeTempCmdXml(
+        'Demo_Handler_Config__mdt.Virus_Scan',
+        xml,
+      );
+      try {
+        const result = await extractCustomMetadataRecord(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const refEdges = result.value.edges.filter((e) => e.edgeType === 'references');
+        expect(refEdges).toHaveLength(1);
+        expect(refEdges[0]).toMatchObject({
+          fromId: 'CustomMetadataRecord:Demo_Handler_Config__mdt.Virus_Scan',
+          toId: 'ApexClass:Demo_VirusScanHandler',
+          edgeType: 'references',
+          confidence: 'heuristic',
+          source: 'custom-metadata-record-extractor',
+          properties: {
+            via: 'value-cell',
+            valueField: 'Demo_Handler_Class__c',
+          },
+        });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits no ApexClass edge for a sentence or __c value in a class-shaped cell', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<CustomMetadata xmlns="http://soap.sforce.com/2006/04/metadata" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+    <label>Noise Cells</label>
+    <protected>false</protected>
+    <values>
+        <field>Notes_Handler__c</field>
+        <value xsi:type="xsd:string">runs after save</value>
+    </values>
+    <values>
+        <field>Fallback_Class__c</field>
+        <value xsi:type="xsd:string">Some_Field__c</value>
+    </values>
+</CustomMetadata>`;
+      const { dir, path } = await writeTempCmdXml('Cfg__mdt.Noise', xml);
+      try {
+        const result = await extractCustomMetadataRecord(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.edges.every((e) => e.edgeType === 'parentOf')).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
   });
 
   describe('error cases', () => {

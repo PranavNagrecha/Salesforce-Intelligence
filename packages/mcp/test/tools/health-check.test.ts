@@ -805,6 +805,30 @@ describe('healthCheckHandler: offline vault-version nudge', () => {
     expect(result.value.data.freshness.stale).toBe(false);
   });
 
+  it('FAIL-BEFORE/PASS-AFTER: health_check is the place that names missing edge families', async () => {
+    // A 0.3.3 vault under 0.4.0 is missing only the 0.4.0 families — health_check
+    // enumerates them; every other tool's freshness.warning does not.
+    process.env[PLUGIN_ENV] = '0.4.0';
+    const staleCtx = {
+      ...ctx,
+      manifest: { ...ctx.manifest, version: '0.3.3' },
+    };
+    const result = await healthCheckHandler(staleCtx, {}, refreshedMs + 3 * DAY);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const freshness = result.value.data.freshness;
+    expect(freshness.nudge).toContain('Apex Custom Label reference edges');
+    expect(freshness.nudge).toContain('method-level LWC/Aura -> Apex caller edges');
+    expect(freshness.nudge).not.toContain('OmniStudio');
+    expect(freshness.missingEdgeFamilies).toEqual(
+      expect.arrayContaining([
+        expect.stringContaining('Apex Custom Label reference edges'),
+        expect.stringContaining('method-level LWC/Aura -> Apex caller edges'),
+      ]),
+    );
+    expect(freshness.missingEdgeFamilies?.some((f) => f.includes('OmniStudio'))).toBe(false);
+  });
+
   it('stays quiet when the running plugin matches the vault builder version', async () => {
     process.env[PLUGIN_ENV] = '0.1.0';
     const result = await healthCheckHandler(ctx, {}, refreshedMs + 3 * DAY);

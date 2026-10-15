@@ -109,7 +109,8 @@ import {
 import { coercePrefix } from './coerce-id.js';
 import {
   buildReservedConceptReasoning,
-  CONCEPT_REASONING_SKIPPED_NOTE,
+  CONCEPT_REASONING_AVAILABLE_HINT,
+  conceptReasoningOffFields,
   CONCEPT_REASONING_UNAVAILABLE_NOTE,
   type ConceptReasoningEnvelope,
 } from './concept-reasoning.js';
@@ -191,7 +192,7 @@ const methodScopeNotAppliedSuffix = (classId: string, methodName: string): strin
 const explainApexMethodInputBaseSchema = z.object({
   classApiName: z.string().min(1),
   methodName: z.string().min(1).optional(),
-  // Concept-rule reasoning; DEFAULTS TRUE (opt-OUT). See `conceptReasoning`.
+  // Concept-rule reasoning; DEFAULTS FALSE (opt-IN). See `conceptReasoning`.
   includeConceptReasoning: z.boolean().optional(),
 });
 
@@ -467,9 +468,11 @@ export interface ExplainApexMethodOutput {
    * REASONING-REACHABILITY — deterministic concept-rule claims about THIS class
    * or trigger, on the shared `EvidenceEnvelopeV2` contract plus a
    * `completeness` report that keeps "checked and found nothing" distinct from
-   * "never checked". DEFAULT ON — absent only when the caller passed
-   * `includeConceptReasoning: false`, or the reasoning read failed (in which
-   * case the block is omitted rather than the answer failed).
+   * "never checked". DEFAULT OFF — present ONLY when the caller passed
+   * `includeConceptReasoning: true`. When off, the response carries
+   * `conceptReasoningAvailable: true` plus a one-line hint naming the flag.
+   * Also absent when the reasoning read failed (in which case the block is
+   * omitted rather than the answer failed).
    *
    * ApexClass is the single largest anchor in the concept model — 26 of the 133
    * node-shaped rules bind on it (sharing posture, async boundaries, external
@@ -482,6 +485,12 @@ export interface ExplainApexMethodOutput {
    * NOTHING WAS CHECKED — never "clean".
    */
   readonly conceptReasoning?: ConceptReasoningEnvelope;
+  /**
+   * Present when `conceptReasoning` was not attached because the flag is off
+   * (the default). Always `true` when present — pass `includeConceptReasoning:
+   * true` to attach the block (see disclosure for the one-line hint).
+   */
+  readonly conceptReasoningAvailable?: true;
 }
 
 /**
@@ -1082,32 +1091,36 @@ export const explainApexMethodHandler = async (
 
   const annotations = await annotationsBlockFor(ctx, classId);
 
-  // REASONING-REACHABILITY — the class node is already resolved, so this costs
-  // one bound-type edge query + one endpoint node query (both capped). A failed
-  // read omits the block rather than failing an otherwise complete answer.
-  const reservedReasoning =
-    input.includeConceptReasoning === false
-      ? null
-      : await buildReservedConceptReasoning(ctx, classId, { rootNode: node });
+  // REASONING-REACHABILITY — opt-IN. The class node is already resolved, so this
+  // costs one bound-type edge query + one endpoint node query (both capped). A
+  // failed read omits the block rather than failing an otherwise complete answer.
+  const wantConceptReasoning = input.includeConceptReasoning === true;
+  const reservedReasoning = wantConceptReasoning
+    ? await buildReservedConceptReasoning(ctx, classId, { rootNode: node })
+    : null;
   const conceptReasoning: ConceptReasoningEnvelope | null =
     reservedReasoning?.envelope ?? null;
   // R3 — every path must SAY what happened to the reasoning layer. Absence of
-  // the block is not evidence of absence, so neither an opt-out nor a failed
+  // the block is not evidence of absence, so neither default-off nor a failed
   // read may be silent. This tool has no `boundaries[]`, so it rides the
   // `disclosure` string (appended, never replacing the pinned honesty axis).
   const conceptNote =
     conceptReasoning !== null
       ? ` Concept reasoning: ${conceptReasoning.completeness.summary}`
-      : input.includeConceptReasoning === false
-        ? ` ${CONCEPT_REASONING_SKIPPED_NOTE}`
-        : ` ${CONCEPT_REASONING_UNAVAILABLE_NOTE(classId)}`;
+      : wantConceptReasoning
+        ? ` ${CONCEPT_REASONING_UNAVAILABLE_NOTE(classId)}`
+        : ` ${CONCEPT_REASONING_AVAILABLE_HINT}`;
 
   return ok({
     data: {
       ...data,
       disclosure: data.disclosure + conceptNote,
       ...(annotations !== undefined ? { annotations } : {}),
-      ...(conceptReasoning !== null ? { conceptReasoning } : {}),
+      ...(conceptReasoning !== null
+        ? { conceptReasoning }
+        : wantConceptReasoning
+          ? {}
+          : conceptReasoningOffFields()),
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,

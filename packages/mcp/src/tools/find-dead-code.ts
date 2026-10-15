@@ -40,7 +40,10 @@
  *     (`isTest === true`) or via heuristic-only edges that may be
  *     stripped by dynamic SOQL / reflective access. The v2.7
  *     `method_reachability` `test-only-reachable` verdict cascades
- *     here.
+ *     here. For an ApexClass this verdict also survives the same
+ *     static-type-usage grep: a production type-name reference
+ *     (`List<Other>`) that the graph missed downgrades it to
+ *     `uncertain` rather than reporting test-only dead.
  *     An ASYNC-DISPATCH class (Queueable / Batchable / Schedulable) is
  *     NEVER `likely_dead` and never `definitely_dead` — see `uncertain`.
  *   - `uncertain`: reached by at least one EXTERNAL entry point (REST
@@ -237,7 +240,7 @@ const REFERRER_SCAN_INCOMPLETE_DISCLOSURE =
   'the Apex referrer census stopped at the residual node-scan cap, so `qualityScanCoverage` counts a PREFIX of the Apex corpus rather than all of it. Nodes behind the cap were neither censused nor considered by the `soundness` envelope.';
 
 const STATIC_TYPE_USAGE_DISCLOSURE =
-  'static-type-usage re-check: before an ApexClass is reported definitely_dead its api name is grep-searched (whole-word) across non-test production .cls/.trigger source. A class referenced only via a static-field or type-name usage (`Other.CONST`, `List<Other>`, `JSON.deserialize(.., List<Other>.class)`) — which the parser does NOT model as an inbound graph edge — is downgraded to `uncertain` (suppressed unless includeUncertain) instead of reported dead. Residual blind spots: the grep is line-literal (a class name in a comment or string could over-suppress), and dynamic `Type.forName(\'Other\')` references stay invisible.';
+  'static-type-usage re-check: before an ApexClass is reported definitely_dead or likely_dead its api name is grep-searched (whole-word) across non-test production .cls/.trigger source. A class referenced only via a static-field or type-name usage (`Other.CONST`, `List<Other>`, `JSON.deserialize(.., List<Other>.class)`) — which the parser does NOT model as an inbound graph edge — is downgraded to `uncertain` (suppressed unless includeUncertain) instead of reported dead. Residual blind spots: the grep is line-literal (a class name in a comment or string could over-suppress), and dynamic `Type.forName(\'Other\')` references stay invisible.';
 
 /**
  * The dead-code types whose nodes carry an OBJECT parent in the graph, and are
@@ -1266,24 +1269,27 @@ export const findDeadCodeHandler = async (
     });
   }
 
-  // ---- STATIC-TYPE-USAGE re-check (definitely_dead ApexClass only) --------
+  // ---- STATIC-TYPE-USAGE re-check (definitely_dead + likely_dead ApexClass) --
   // A class used ONLY via a static-field or type-name reference
   // (`Other.CONST`, `List<Other>`, `JSON.deserialize(.., List<Other>.class)`)
   // never becomes an inbound `callsApex` / `references` graph edge, so the CTE
-  // sees zero in-degree and wrongly calls it definitely_dead. Grep the vault
-  // Apex source for a whole-word reference from a NON-TEST, non-self file; if
-  // one exists the class is live-at-compile-time — downgrade to `uncertain`
-  // (suppressed unless includeUncertain) and disclose. Scoped to
-  // definitely_dead ApexClass candidates so live/entry-point classes and the
-  // (already-hedged) likely_dead set cost nothing.
+  // sees zero in-degree (definitely_dead) or test-only in-degree (likely_dead)
+  // and wrongly certifies death. Grep the vault Apex source for a whole-word
+  // reference from a NON-TEST, non-self file; if one exists the class is
+  // live-at-compile-time — downgrade to `uncertain` (suppressed unless
+  // includeUncertain) and disclose. Scoped to definitely_dead and
+  // likely_dead ApexClass candidates: both sets are small, so live /
+  // entry-point classes still cost nothing.
   let staticUsageDowngrades = 0;
   const deadApexClasses = candidates.filter(
     (c) =>
-      c.componentType === 'ApexClass' && c.verdict === 'definitely_dead',
+      c.componentType === 'ApexClass' &&
+      (c.verdict === 'definitely_dead' || c.verdict === 'likely_dead'),
   );
   if (deadApexClasses.length > 0) {
     const testClassApiNames = await fetchTestClassApiNames(ctx.graph);
-    const staticallyUsed = new Set<ComponentId>();
+    // componentId → vault-relative path of the first production referrer.
+    const staticallyUsed = new Map<ComponentId, string>();
     for (const candidate of deadApexClasses) {
       const selfLower = candidate.apiName.toLowerCase();
       // limit:1 — existence is all that matters. The pathFilter drops the
@@ -1302,22 +1308,25 @@ export const findDeadCodeHandler = async (
         },
       });
       if (grep.ok && grep.value.matches.length > 0) {
-        staticallyUsed.add(candidate.componentId);
+        const hit = grep.value.matches[0];
+        if (hit !== undefined) {
+          staticallyUsed.set(candidate.componentId, hit.path);
+        }
       }
     }
     if (staticallyUsed.size > 0) {
-      candidates = candidates.map((c) =>
-        staticallyUsed.has(c.componentId)
-          ? {
-              ...c,
-              verdict: 'uncertain' as const,
-              reasoning:
-                'referenced by non-test production Apex via a static-field or type-name usage ' +
-                '(`Other.CONST`, `List<Other>`, `JSON.deserialize(.., List<Other>.class)`) that the ' +
-                'parser does not model as an inbound edge; not dead — delete the referencing code first',
-            }
-          : c,
-      );
+      candidates = candidates.map((c) => {
+        const referrerPath = staticallyUsed.get(c.componentId);
+        if (referrerPath === undefined) return c;
+        return {
+          ...c,
+          verdict: 'uncertain' as const,
+          reasoning:
+            `referenced by non-test production Apex in \`${referrerPath}\` via a static-field or ` +
+            'type-name usage (`Other.CONST`, `List<Other>`, `JSON.deserialize(.., List<Other>.class)`) ' +
+            'that the parser does not model as an inbound edge; not dead — delete the referencing code first',
+        };
+      });
       staticUsageDowngrades = staticallyUsed.size;
       // The downgrade to `uncertain` is all that is needed: the ONE
       // `includeUncertain` filter below removes it from the listing, and the
@@ -1491,13 +1500,15 @@ export const findDeadCodeHandler = async (
     boundaries.push(ASYNC_DISPATCH_DISCLOSURE);
   }
   // Disclose the static-type-usage re-check whenever it downgraded a class OR a
-  // definitely_dead ApexClass survived it — so a surviving verdict is understood
-  // to have passed the grep, and any suppression is transparent.
+  // definitely_dead / likely_dead ApexClass survived it — so a surviving
+  // verdict is understood to have passed the grep, and any suppression is
+  // transparent. `staticUsageDowngrades` counts both prior verdicts.
   if (
     staticUsageDowngrades > 0 ||
     candidates.some(
       (c) =>
-        c.componentType === 'ApexClass' && c.verdict === 'definitely_dead',
+        c.componentType === 'ApexClass' &&
+        (c.verdict === 'definitely_dead' || c.verdict === 'likely_dead'),
     )
   ) {
     boundaries.push(STATIC_TYPE_USAGE_DISCLOSURE);

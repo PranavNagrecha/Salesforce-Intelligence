@@ -1,6 +1,6 @@
 # Contributing to sf-intelligence
 
-Thank you for helping improve SfIntelligence. This project is MIT + Commons Clause;
+Thank you for helping improve SfIntelligence. This project is MIT;
 by contributing you agree your contributions are licensed under the same
 terms.
 
@@ -33,23 +33,29 @@ See [`REPO-STRUCTURE.md`](./REPO-STRUCTURE.md) for the monorepo map:
 - `packages/graph` → DuckDB store
 - `packages/mcp` → MCP server and `sfi.*` tools
 - `packages/cli` → `sfi` command and refresh pipeline
-- `.claude/skills/` → agent skills (edit in place or stage in `skill-updates/`)
+- `.claude/skills/` → agent skills (edit in place)
 
 Each package has co-located unit tests under `packages/*/test/`. Cross-package
-integration tests live in `tests/integration/` (requires maintainer fixtures;
-not run in CI by default).
+integration tests live in `tests/integration/` and need maintainer fixtures;
+run them with `pnpm test:all` when those fixtures are available (not part of
+default CI).
+
+Some extractor unit tests skip unless `SFI_HARNESS_ROOT` points at a directory
+that holds both `tests/fixtures` and `tests/golden`. Without it, `pnpm test`
+still builds and runs; those skipped assertions simply do not execute.
 
 ## Commands
 
 | Command | Purpose |
 | --- | --- |
 | `pnpm build` | Compile all packages |
-| `pnpm test` | Unit tests + integration suite |
+| `pnpm test` | **Builds first**, then package unit tests (`pnpm -r build && pnpm -r test`) |
+| `pnpm test:all` | `pnpm test` plus the integration suite |
 | `pnpm lint` | ESLint |
 | `pnpm eval` | Retrieval golden eval |
 | `pnpm eval:analytical` | Analytical tool eval |
 | `pnpm v4-gate` | Full release gate (lint, test, eval, scale, guard) |
-| `pnpm guard` | Privacy scan of shipping set |
+| `pnpm guard` | Privacy scan of shipping set (needs org blocklist, or `SFI_ALLOW_NO_BLOCKLIST=1`) |
 | `pnpm e2e` | MCP transport smoke (graph-level vault) |
 | `pnpm onboard:smoke` | New-user onboarding chain on a synthetic fixture (init → refresh → doctor → samples) |
 
@@ -58,32 +64,41 @@ release artifacts.
 
 ## Adding or changing MCP tools
 
-1. Add a handler in `packages/mcp/src/tools/<tool-name>.ts`.
-2. Register in `packages/mcp/src/tools/index.ts` (`V01_TOOLS` + dispatch).
-3. Add co-located tests in `packages/mcp/test/tools/<tool-name>.test.ts`.
-4. Update skills if user-facing behavior changes (especially
-   `.claude/skills/using-sf-intelligence/SKILL.md` and
-   `.claude/skills/answering-org-questions/SKILL.md`).
-5. If the tool affects trust boundaries, update `docs/architecture.md` and
-   `docs/guides/asking-questions.md`.
-6. **Rebuild the CLI bundle after any `packages/mcp/` change — especially
-   `intent-router.ts`.** The `sfi` command bundles the MCP server into a single
-   `dist/index.js` via esbuild, so an MCP/router edit is NOT live in `sfi mcp`
-   (or the QA harness, which drives `sfi mcp`) until you run:
+`packages/mcp/src/tools/index.ts` is re-exports only. The live registry is
+`packages/mcp/src/tools/roster.ts` (`V01_TOOLS`); dispatch is the switch in
+`packages/mcp/src/tools/tool-dispatch.ts`.
 
-   ```sh
-   pnpm --filter sf-intelligence build   # rebuilds packages/cli/dist/index.js
-   ```
+A **new** tool touches every row below. The "Outsider can run?" column is what
+you can verify from a public clone with no private vaults or harness.
 
-   `pnpm -r build` (and CI's build step) covers this, but the targeted command is
-   the fast path while iterating. Forgetting it makes stale-dist mask your change.
-7. **For a NEW tool, also:** bump `website/src/data/site-data.json` `toolCount` (the
-   `verify-doc-sync` gate fails on a mismatch), add the tool to the
-   order-sensitive roster in `packages/mcp/test/server.test.ts` (two lists), and
-   **add it to `sf-intelligence-qa/scripts/tool-smoke.mjs` `MINIMAL` with a
-   verified vault id** so the gate exercises it against a REAL org — unit tests
-   run on synthetic graphs; without a `tool-smoke` entry a new tool is never run
-   against real-org data. Verify the id returns `ok` (don't guess).
+| What to touch | Why | Outsider can run? |
+| --- | --- | --- |
+| Handler `packages/mcp/src/tools/<tool-name>.ts` | Implementation | Yes — compile / unit test |
+| `packages/mcp/src/tools/roster.ts` (`V01_TOOLS`) | Advertised schema | Yes — `pnpm doc-sync` / build |
+| `packages/mcp/src/tools/tool-dispatch.ts` switch arm | Runtime invoke | Yes — unit / e2e smoke |
+| `packages/mcp/src/intent-router.ts` grandfather list (if not funnel-routable yet) | "every tool is router-reachable or grandfathered" test | Yes — that package test |
+| `packages/mcp/test/server.test.ts` expected name list (order-sensitive) | Roster drift test | Yes — that test |
+| `packages/mcp/test/tools/<tool-name>.test.ts` | Per-tool coverage | Yes — unit test |
+| Funnel-recall gold row in `packages/mcp/test/funnel-recall.test.ts` | Definition of done for routing | Partly — in-repo test yes; authoritative recall harnesses are maintainer-only |
+| Regenerate `eval/product-manifest.json` + `eval/product-surface.json` (`pnpm product-manifest` / `pnpm product-surface`) | Manifest / surface check scripts | Yes |
+| `website/src/data/site-data.json` `toolCount` | `pnpm doc-sync` | Yes |
+| `packages/mcp/src/tools/tool-profile.ts` if the tool is directly invokable on the default profile | Skill-gateway / profile gate | Yes |
+| `changelog.d/<slug>.md` fragment | `pnpm changelog:check` | Yes |
+
+Also update skills when user-facing behavior changes (especially
+`.claude/skills/using-sf-intelligence/SKILL.md` and
+`.claude/skills/answering-org-questions/SKILL.md`), and
+`docs/architecture.md` / `docs/guides/asking-questions.md` if trust boundaries
+change.
+
+**Rebuild after any `packages/mcp/` change.** The `sfi` command bundles the MCP
+server into `packages/cli/dist/index.js`, so an MCP or router edit is not live
+in `sfi mcp` until you build. `pnpm test` already builds first; while iterating
+you can use:
+
+```sh
+pnpm --filter sf-intelligence build   # rebuilds packages/cli/dist/index.js
+```
 
 Tools must stay **read-only**. Do not add write paths to Salesforce.
 
@@ -111,12 +126,8 @@ type, not just custom metadata — MUST follow this contract:
    the vault"**, surfaced in `boundaries[]` — NEVER "nothing uses this".
 6. **Caps readable** — `truncated` / `scanTruncated` / `boundaryNote` +
    pagination on large lists (see the scan-cap helper).
-7. **Router + harness locked** — a gold-set case per family + a collision vs the
-   nearest describe/impact intent; the A4 honesty battery checks the empty-result
-   wording.
-
-The full contract + a per-component-family describe-vs-usage matrix lives in the
-capability audit (`.sfi/local/CAPABILITY-AUDIT.md` → "Usage & discovery").
+7. **Router locked** — a funnel-recall gold row per family plus a collision vs
+   the nearest describe/impact intent; empty-result wording must stay honest.
 
 ## Adding extractors
 
@@ -136,8 +147,7 @@ User-facing doc changes belong in:
 
 Update [`docs/README.md`](./docs/README.md) when adding new doc files.
 
-Agent skills live in `.claude/skills/*/SKILL.md`. The build harness sometimes
-stages skill rewrites in `skill-updates/` for manual review before copy.
+Agent skills live in `.claude/skills/*/SKILL.md`; edit them in place.
 
 ## Privacy guard — org identifiers
 
@@ -156,8 +166,8 @@ config reference and category guide.
 ## Changelog fragments (required for code changes)
 
 Every PR that touches `packages/**` or `scripts/**` **must** include a
-changelog fragment. Create a file `changelog.d/<item-id>.md` with
-Keep-a-Changelog subsections:
+changelog fragment. Create a file `changelog.d/<slug>.md` (a short slug
+describing the change) with Keep-a-Changelog subsections:
 
 ```markdown
 ### Added
@@ -175,22 +185,22 @@ Only include the subsections that apply. The fragment is assembled into
 
 ```sh
 pnpm changelog:assemble   # regenerate CHANGELOG.md [Unreleased] block
-pnpm changelog:check      # CI guard — exits 1 if code diff lacks a fragment
+pnpm changelog:check      # exits 1 if code diff lacks a fragment
 ```
 
-The CI gate enforces fragment presence automatically. Docs-only, website-only,
-and examples-only diffs are exempt. See [`changelog.d/README.md`](./changelog.d/README.md)
-for the full specification and [`changelog.d/r7-f1.md`](./changelog.d/r7-f1.md)
-for a complete example.
+Docs-only, website-only, and examples-only diffs are exempt. See
+[`changelog.d/README.md`](./changelog.d/README.md) for the full specification
+and format template (fragments are deleted at release, so there is no checked-in
+example file to copy).
 
 ## Pull request checklist
 
 - [ ] `pnpm lint` passes
-- [ ] `pnpm -r test` passes
+- [ ] `pnpm test` passes (builds first, then unit tests)
 - [ ] New behavior has tests (unit or eval cases where appropriate)
 - [ ] Docs updated if user-visible behavior changed
 - [ ] No org-specific data, vault paths, or secrets in the diff
-- [ ] `changelog.d/<item-id>.md` fragment added (required for `packages/` or `scripts/` changes)
+- [ ] `changelog.d/<slug>.md` fragment added (required for `packages/` or `scripts/` changes)
 - [ ] If it answers a "where used / who references / depends on" question, it
       follows the reverse-lookup contract above (resolve-first, verb-routed,
       evidence-tiered, empty≠absent, caps readable)
@@ -224,14 +234,6 @@ have a dated `## [X.Y.Z] — YYYY-MM-DD` entry for that version, or pass
 `--metadata-only` on the consistency script for an explicit packaging-only
 exemption. Internal `@sf-intelligence/*` workspace `package.json` versions are
 not independently published and are not required to match.
-
-## Known-failures allowlist (QA gate)
-
-Pre-existing, accepted test failures are tracked with expiry dates in
-`sf-intelligence-qa/config/known-failures.json` (in the QA harness repo).
-These suppress specific gate step failures without masking NEW regressions.
-Add an entry only for a failure that is explicitly documented and backlog-tracked;
-include a clear `reason` and a near-term `expires` date.
 
 ## Code of conduct
 

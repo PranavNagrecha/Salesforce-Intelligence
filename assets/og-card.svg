@@ -28,7 +28,7 @@
     <text y="80" font-size="76" font-weight="800" fill="#FFFFFF">An intelligence layer</text>
     <text y="160" font-size="76" font-weight="800" fill="#FFFFFF">for your Salesforce org.</text>
 
-    <text y="230" font-size="22" fill="#9BB3D1">Offline. Read-only. MCP-first. MIT + Commons Clause.</text>
+    <text y="230" font-size="22" fill="#9BB3D1">Offline. Read-only. MCP-first. MIT.</text>
 
     <g transform="translate(0,290)" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="18">
       <text fill="#7E8FAA">›</text>

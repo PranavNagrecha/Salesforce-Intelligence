@@ -7,9 +7,9 @@
  * subscribers — Apex triggers, Apex classes, and Flows that listen to
  * `*ChangeEvent` or `*__ChangeEvent` synthetic events.
  *
- * The tool LEVERAGES EXISTING EDGE FAMILIES rather than introducing a
- * new `subscribesToChange` edge type — CDC events are recognized by
- * NAME PATTERN on the target apiName:
+ * The tool LEVERAGES EXISTING EDGE FAMILIES (`listensTo` / `triggersOn`) —
+ * there is no dedicated Change-Event subscription edge type. CDC events
+ * are recognized by NAME PATTERN on the target apiName:
  *
  *   - Standard objects: `{ObjectName}ChangeEvent` (no separator).
  *   - Custom objects: `{ObjectNameWithout__c}__ChangeEvent`.
@@ -50,9 +50,12 @@
  *     resolved node. Sort is `(subscriberId ASC, changeEventName ASC)`
  *     so multi-event subscribers render deterministically.
  *   - Honesty axis (verbatim in `disclosure`): CDC subscription
- *     detection here recognizes by NAME PATTERN only. The
- *     `EventBus.subscribe(...)` programmatic registration path is
- *     invisible. (CR-CAP-18: the DECLARED per-member filter
+ *     detection here recognizes by NAME PATTERN on existing
+ *     `listensTo` / `triggersOn` edges. `EventBus.subscribe(...)` to a
+ *     Platform Event (`__e`) is modeled as `listensTo`; a subscription
+ *     whose channel names a Change Event is parsed by the scanner but
+ *     not yet minted as an edge — so CDC EventBus subscribers stay
+ *     invisible here. (CR-CAP-18: the DECLARED per-member filter
  *     expressions in `*.platformEventChannelMember-meta.xml` ARE now
  *     extracted — surfaced on the publish-side `references` edge — but
  *     that is the declared XML text, NOT runtime filter evaluation of
@@ -253,16 +256,17 @@ export interface CdcSubscribersOutput {
 
 /**
  * Verbatim honesty disclosure surfaced ALWAYS in the response. The
- * heuristic v2.8 CDC detection sees the `listensTo` edge produced by
- * the v1.5 R3 extractors and matches on the target apiName's CDC
- * pattern; the `EventBus.subscribe(...)` programmatic registration is
- * invisible. CR-CAP-18: the DECLARED per-member filter expressions in
+ * heuristic v2.8 CDC detection sees `listensTo` / `triggersOn` edges and
+ * matches on the target apiName's CDC pattern. `EventBus.subscribe(...)`
+ * to a Platform Event (`__e`) is modeled as `listensTo`; a subscription
+ * to a Change Event is parsed by the scanner but not yet minted as an
+ * edge. CR-CAP-18: the DECLARED per-member filter expressions in
  * `*.platformEventChannelMember-meta.xml` ARE now extracted (publish-side
  * `references` edge), but that is the declared XML text, NOT runtime
  * filter EVALUATION of which records flow through the channel.
  */
 const CDC_SUBSCRIBERS_DISCLOSURE =
-  'CDC subscribers are recognized by name pattern on the edge TARGET (objects ending in `ChangeEvent` or `__ChangeEvent`) across two edge families: a Flow / Apex-class `listensTo` edge, and an Apex CDC trigger\'s declared `triggersOn` edge — `trigger X on AccountChangeEvent` mints `triggersOn` and never `listensTo`, so a row carrying `subscriptionEdge: "triggersOn"` is that trigger. STRUCTURAL: a `{X}ChangeEvent` is synthesised by the platform and is NEVER a retrievable CustomObject on any org, so the scan set is built from Change Event edge TARGETS, not from retrieved nodes — `summary.scannedChangeEvents` reports how many were actually checked, and `0` there means nothing was checked rather than nothing was found. The `EventBus.subscribe(...)` registration is NOT modeled, so subscribers may exist that this tool cannot see. `channelMembers` surfaces CDC ENABLEMENT: a `PlatformEventChannelMember` that selects a Change Event means CDC is on for that object even when no code subscribes — an empty `subscribers` list with a non-empty `channelMembers` list is "enabled, no modeled subscribers", NOT "CDC unused". CR-CAP-18: per-member filter expressions in `*.platformEventChannelMember-meta.xml` ARE extracted (declared XML text — NOT runtime filter evaluation of which records flow).';
+  'CDC subscribers are recognized by name pattern on the edge TARGET (objects ending in `ChangeEvent` or `__ChangeEvent`) across two edge families: a Flow / Apex-class `listensTo` edge, and an Apex CDC trigger\'s declared `triggersOn` edge — `trigger X on AccountChangeEvent` mints `triggersOn` and never `listensTo`, so a row carrying `subscriptionEdge: "triggersOn"` is that trigger. STRUCTURAL: a `{X}ChangeEvent` is synthesised by the platform and is NEVER a retrievable CustomObject on any org, so the scan set is built from Change Event edge TARGETS, not from retrieved nodes — `summary.scannedChangeEvents` reports how many were actually checked, and `0` there means nothing was checked rather than nothing was found. `EventBus.subscribe(...)` to a Platform Event (`__e`) is modeled as `listensTo`; a subscription whose channel names a Change Event is parsed by the scanner but not yet minted as an edge, so CDC EventBus subscribers remain invisible here. `channelMembers` surfaces CDC ENABLEMENT: a `PlatformEventChannelMember` that selects a Change Event means CDC is on for that object even when no code subscribes — an empty `subscribers` list with a non-empty `channelMembers` list is "enabled, no modeled subscribers", NOT "CDC unused". CR-CAP-18: per-member filter expressions in `*.platformEventChannelMember-meta.xml` ARE extracted (declared XML text — NOT runtime filter evaluation of which records flow).';
 
 /**
  * Appended when the scan set was EMPTY — no Change Event is referenced by any

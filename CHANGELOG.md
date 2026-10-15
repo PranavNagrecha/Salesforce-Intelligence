@@ -5,6 +5,34 @@ adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.5.0] — 2026-10-15
+
+### Added
+- **License: plain MIT.** The Commons Clause condition that earlier releases carried is removed; `LICENSE`, `NOTICE`, every package manifest and the website say MIT and nothing else.
+- `RELEASING.md`: the release cadence (a minor on the first Tuesday of each month, with batched patches for user-facing or security bugs) and the exact release order, with the known traps.
+- `pnpm release:check` (`scripts/release-check.mjs`): runs every step of CI's `unit-test` and `build-test` jobs locally, read from `.github/workflows/ci.yml` so it cannot drift. It fails closed when the org-leak blocklist is missing.
+- `.github/workflows/release-reminder.yml`: opens a "Release vX.Y.0 due" issue on the first Tuesday of each month, with the checklist and the commits since the last tag.
+
+### Changed
+- The default (`core`) tool profile now advertises 16 tools instead of 25: the spine (`sfi.resolve`, `sfi.search_components`, `sfi.get_component`, `sfi.health_check`, `sfi.list_analyses`, `sfi.describe_analysis`, `sfi.run_analysis`, `sfi.live_consent`) plus the eight tools that answer the questions the package page advertises: `sfi.find_component_usages`, `sfi.safe_to_delete_field`, `sfi.what_happens_on_save`, `sfi.find_dead_code`, `sfi.why_cant_user_see_record`, `sfi.effective_permissions`, `sfi.flow_graph`, `sfi.org_overview`. Where-used, dead code and flow graph were previously not directly callable by default. `sfi.route_question`, `sfi.synthesize_answer`, `sfi.capabilities`, `sfi.guidance`, `sfi.org_card`, `sfi.org_history`, `sfi.get_edges`, `sfi.get_impact`, `sfi.list_components`, `sfi.order_of_execution`, `sfi.who_can_access_object` and `sfi.field_access_audit` remain available through `sfi.run_analysis` with byte-identical output, or directly under `SFI_TOOL_PROFILE=full`.
+- The skill-gateway check (`scripts/check-skill-gateway.mjs`) now derives the core roster from `eval/product-manifest.json` instead of a hand-mirrored copy that had drifted silently.
+- Shorter contracts for the default tools: `sfi.effective_permissions`, `sfi.why_cant_user_see_record` and `sfi.safe_to_delete_field` descriptions trimmed by a fifth to a quarter; the long form stays available through `sfi.describe_analysis { detail: 'full' }`. `sfi.org_overview` now points at `sfi.org_card` through `sfi.run_analysis`. `sfi.what_happens_on_save` trimmed by a third and points at `sfi.order_of_execution` through `sfi.run_analysis`.
+- `vaultState.freshness.warning` is one sentence under 200 bytes (builder version, running version, age in days, `run sfi refresh to update`) instead of enumerating every edge family added since the vault builder. Machine fields `builtBy`, `runningVersion`, `ageDays`, and `stale` stay on the stamp. Edge-family detail moves to `sfi.health_check` (`freshness.nudge` + `missingEdgeFamilies`) — measured on `packages/cli/demo-source` via `sfi.get_component` on `CustomObject:Project__c`: warning **1044 → 94** bytes.
+- `conceptReasoning` is now opt-in (`includeConceptReasoning: true`) on `sfi.get_component`, `sfi.field_360`, `sfi.what_happens_on_save`, and `sfi.explain_apex_method`. Default responses carry `conceptReasoningAvailable: true` plus a one-line hint naming the flag instead of ~5 KB of nested completeness/coverage/trust around a few short claims.
+- Root `pnpm test` builds all packages before running unit tests; `pnpm test:all` adds the integration suite.
+- CONTRIBUTING documents the real tool registration path (`roster.ts` / `tool-dispatch.ts`) and the full new-tool fan-out, without private-repo pointers.
+- Changelog fragment filenames use a short descriptive slug, not a private backlog id.
+- `pnpm guard` (`release-guard.mjs`) fails closed locally when the org blocklist is missing unless `SFI_ALLOW_NO_BLOCKLIST=1`.
+
+### Fixed
+- `find_dead_code` now greps production Apex source before reporting a class `likely_dead` (not only `definitely_dead`). A class reached only from tests but still named in production code as a type (`List<Other>`, a static field, or `JSON.deserialize(..., List<Other>.class)`) is downgraded to `uncertain`, with the referencing file named in the reasoning, instead of looking safe to delete.
+- Custom Metadata value cells whose field name ends in `Class__c`, `ClassName__c`, `Handler__c`, `HandlerClass__c`, or `ApexClass__c` now mint a heuristic `references` edge to the Apex class named in the cell. A handler registered only through configuration no longer looks unused to dead-code and usage tools.
+- Quick-action Visualforce `references` edges now target `VisualforcePage:{name}`, matching the VisualforcePage extractor node id (previously `ApexPage:{name}`, which left the edge dangling).
+- `unused_components`: EmailTemplate, Group, and StaticResource notes no longer claim blind spots the extractors already cover (`sendsEmail`, `hasMember`, declared resource edges).
+- `what_if_change_method_signature`: disclosure now says callers come from modeled `callsApex` edges (AST when present), not a regex-only / no-AST scanner.
+- `cdc_subscribers` and `event_subscribers`: both now state the same EventBus truth — Platform Event subscribe is `listensTo`; Change Event subscribe is parsed but not yet an edge.
+- `endpoint_catalog`: `notCovered` no longer contradicts itself on Custom Setting / Custom Metadata values (vault holds them; this catalog does not yet scan those rows for URLs).
+
 ## [0.4.0] — 2026-10-10
 
 ### Added

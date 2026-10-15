@@ -550,9 +550,9 @@ describe('tool profiles (P13-GW-profiles)', () => {
     expect(names).toEqual(fullOrder);
     // The gateway + orientation backbone is all present:
     for (const must of [
-      'sfi.resolve', 'sfi.route_question', 'sfi.org_card', 'sfi.capabilities',
+      'sfi.resolve', 'sfi.search_components', 'sfi.get_component',
       'sfi.list_analyses', 'sfi.describe_analysis', 'sfi.run_analysis',
-      'sfi.health_check', 'sfi.synthesize_answer', 'sfi.live_consent',
+      'sfi.health_check', 'sfi.live_consent',
     ]) {
       expect(names).toContain(must);
     }

@@ -19,6 +19,7 @@ import {
 import { componentPath } from '@sf-intelligence/vault';
 
 import type { Context } from '../../src/server.js';
+import { CONCEPT_REASONING_AVAILABLE_HINT } from '../../src/tools/concept-reasoning.js';
 import {
   getComponentHandler,
   getComponentInputSchema,
@@ -1106,7 +1107,8 @@ describe('getComponentHandler', () => {
       const { data } = result.value;
 
       expect(data.metadataOnly).toBeUndefined();
-      expect(data.disclosure).toBeUndefined();
+      // V5-3b: concept reasoning is opt-in, so the default call carries only the opt-in hint here.
+      expect(data.disclosure).toBe(CONCEPT_REASONING_AVAILABLE_HINT);
       expect(data.omittedPropertyKeys).toBeUndefined();
       // Full fidelity: both huge arrays present, full length.
       expect(

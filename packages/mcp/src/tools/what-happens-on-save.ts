@@ -142,7 +142,8 @@ import {
 } from './apex-receiver.js';
 import {
   buildReservedConceptReasoning,
-  CONCEPT_REASONING_SKIPPED_NOTE,
+  CONCEPT_REASONING_AVAILABLE_HINT,
+  conceptReasoningOffFields,
   CONCEPT_REASONING_UNAVAILABLE_NOTE,
   CONCEPT_RESERVATION_MAX_BYTES,
   type ConceptReasoningEnvelope,
@@ -328,10 +329,9 @@ export const whatHappensOnSaveInputSchema = z
      * `appliedPhaseFilter`.
      */
     phase: z.enum(AUTOMATION_PHASES).optional(),
-    // Concept-rule reasoning; DEFAULTS TRUE (opt-OUT) on the full view and
-    // FALSE on a `phase`-filtered query (a phase call is a RECOVERY call, so
-    // the whole budget goes to the requested phase). An explicit `true` always
-    // wins. Its bytes are RESERVED out of the SOE budget, never bolted on.
+    // Concept-rule reasoning; DEFAULTS FALSE (opt-IN) on every path. An
+    // explicit `true` attaches the block when budget headroom allows. Its
+    // bytes come from leftover SOE budget, never reserved ahead of the answer.
     includeConceptReasoning: z.boolean().optional(),
     /**
      * Return the FULL roster of inactive configured automation as
@@ -681,23 +681,20 @@ export interface WhatHappensOnSaveOutput {
    * REASONING-REACHABILITY — deterministic concept-rule claims about the target
    * OBJECT, on the shared `EvidenceEnvelopeV2` contract plus a `completeness`
    * report that keeps "checked and found nothing" distinct from "never
-   * checked". DEFAULT ON — absent when the caller passed
-   * `includeConceptReasoning: false`, when the reasoning read failed, or when
-   * the ANSWER used the budget (see below).
+   * checked". DEFAULT OFF — present ONLY when the caller passed
+   * `includeConceptReasoning: true` AND the leftover budget can hold it. When
+   * off, the response carries `conceptReasoningAvailable: true` plus a
+   * one-line hint naming the flag. When opted in but the ANSWER used the
+   * budget (or the read failed), see {@link conceptReasoningOmitted}.
    *
    * HOW IT SHARES THE BUDGET (F4). This tool's SOE cap (`soeBudgetBytes()`)
    * is DERIVED to sit just below what the global response guard would trim to,
-   * so the block cannot simply be bolted on afterwards. It used to claim its slice by RIGHT:
-   * built first and its size subtracted from the budget, so an opt-out-able
-   * enrichment reserved space ahead of the order of execution — measured on a
-   * real org's busiest object, 27 of 109 steps with reasoning on against 54
-   * with it off.
-   *
-   * The steps are now fitted FIRST, against the whole budget, and reasoning
-   * gets what is left (still capped by `CONCEPT_RESERVATION_MAX_BYTES` — the
-   * headroom is a ceiling, not a licence). On a heavy object nothing is left
-   * and the block is ABSENT, with a verbatim note saying the steps kept the
-   * budget and that no concept layer was checked.
+   * so the block cannot simply be bolted on afterwards. The steps are fitted
+   * FIRST, against the whole budget, and reasoning gets what is left (still
+   * capped by `CONCEPT_RESERVATION_MAX_BYTES` — the headroom is a ceiling, not
+   * a licence). On a heavy object nothing is left and the block is ABSENT,
+   * with a typed omission saying the steps kept the budget and that no concept
+   * layer was checked.
    *
    * Read `completeness.noRuleCoversComponentType` FIRST: when true, no concept
    * rule applies to this component type and an empty `claims` list means
@@ -705,11 +702,20 @@ export interface WhatHappensOnSaveOutput {
    */
   readonly conceptReasoning?: ConceptReasoningEnvelope;
   /**
-   * TYPED ABSENCE for {@link conceptReasoning} — present EXACTLY when that key
-   * is absent, and never at the same time as it. Read it before concluding
-   * anything from a missing reasoning block: `checked: false` means no concept
-   * layer ran, which is "not checked", never "nothing found". See
-   * {@link ConceptReasoningOmission}.
+   * Present when `conceptReasoning` was not attached because the flag is off
+   * (the default). Always `true` when present — pass `includeConceptReasoning:
+   * true` to attach the block (see disclosure for the one-line hint). Mutually
+   * exclusive with {@link conceptReasoning} and {@link conceptReasoningOmitted}.
+   */
+  readonly conceptReasoningAvailable?: true;
+  /**
+   * TYPED ABSENCE for {@link conceptReasoning} — present when the caller asked
+   * for the block (`includeConceptReasoning: true`) but it could not be
+   * attached (no budget headroom, or the build failed). Never at the same time
+   * as {@link conceptReasoning} or {@link conceptReasoningAvailable}. Read it
+   * before concluding anything from a missing reasoning block: `checked: false`
+   * means no concept layer ran, which is "not checked", never "nothing found".
+   * See {@link ConceptReasoningOmission}.
    */
   readonly conceptReasoningOmitted?: ConceptReasoningOmission;
   /**
@@ -728,15 +734,6 @@ export interface WhatHappensOnSaveOutput {
    */
   readonly recoveryPath?: SoeRecoveryPath;
 }
-
-/**
- * FIX 3 (3). Appended after {@link CONCEPT_REASONING_SKIPPED_NOTE} when the
- * skip was this tool's phase-filter DEFAULT rather than the caller's explicit
- * `includeConceptReasoning: false` — so a caller never has to guess which of
- * the two happened.
- */
-const PHASE_FILTER_CONCEPT_REASONING_OFF_NOTE =
-  'Concept reasoning is off by default on a phase-filtered query so the whole budget goes to the requested phase; pass includeConceptReasoning: true to force it.';
 
 /**
  * F4. Room kept back from the SOE budget for the honesty scaffolding appended
@@ -1355,37 +1352,23 @@ export const saveOrderConceptRelevance = (event: DmlEvent): ConceptRelevance => 
 });
 
 /**
- * TYPED ABSENCE for the concept-reasoning block (R1).
+ * TYPED ABSENCE for the concept-reasoning block (R1) when the caller ASKED for
+ * it (`includeConceptReasoning: true`) but it could not be attached.
  *
- * `conceptReasoning` is documented DEFAULT ON, so a host that finds the key
- * missing has no way to tell "the reasoning engine ran and flagged nothing"
- * from "no concept layer was checked at all" — and the block's own contract
- * (`completeness.noRuleCoversComponentType`) exists precisely to stop that
- * misreading. Measured on a real org: the key is present on four light objects
- * and absent on the two heavy ones, i.e. absent exactly where the answer is
- * least complete. The prose said so; nothing TYPED did, and a machine consumer
- * reading `data` cannot be asked to regex a paragraph.
- *
- * So absence is now decided by a property the payload CARRIES. `checked` is the
- * literal `false` — this object is emitted ONLY when the block is missing.
+ * Default-off absence uses `conceptReasoningAvailable: true` instead — that is
+ * the expected quiet path. This object covers the surprising path: the caller
+ * opted in and still got no block (budget, or build failure). `checked` is the
+ * literal `false` — this object is emitted ONLY when the block is missing after
+ * an opt-in.
  */
 export interface ConceptReasoningOmission {
   /** Literal `false`. An absent `conceptReasoning` is never "checked and clean". */
   readonly checked: false;
-  readonly reason:
-    | 'caller-opted-out'
-    | 'phase-filter-default'
-    | 'no-budget-headroom'
-    | 'build-unavailable';
+  readonly reason: 'no-budget-headroom' | 'build-unavailable';
   /**
    * Bytes left for the block after the steps were fitted. Never negative.
-   *
-   * ABSENT — not zero — on `caller-opted-out` and `phase-filter-default`, where
-   * the block was never attempted and no headroom was ever measured. A `0`
-   * beside {@link minimumHeadroomBytes} reads as a MEASUREMENT saying "no room
-   * was left", which is a different (and false) claim from "no one looked". A
-   * typed-absence field that invents a number is the exact shape this field
-   * exists to prevent, so it is omitted instead.
+   * Always present on this typed-absence path — the block was attempted, so a
+   * headroom was measured.
    */
   readonly headroomBytes?: number;
   /**
@@ -2102,40 +2085,19 @@ export const whatHappensOnSaveHandler = async (
   // entire action inventory on ~30 KB payloads, 10 KB UNDER budget, and then
   // disclosed a truncation its own arithmetic had invented).
   //
-  // FIX 3 (3). A `phase` call is a RECOVERY call, not a reasoning call: the
-  // caller is here because the full view could not hold that phase, so the
-  // whole budget goes to the phase they asked for. An explicit
-  // `includeConceptReasoning: true` still wins.
-  const conceptReasoningOffByPhaseDefault =
-    input.phase !== undefined && input.includeConceptReasoning === undefined;
-  const wantConceptReasoning =
-    input.includeConceptReasoning ?? input.phase === undefined;
-  // R1 — TYPED ABSENCE. Every path that leaves `conceptReasoning` off the
-  // payload also records WHY, in a field, not only in prose. A host that reads
-  // `data` and finds neither key would otherwise be free to read the missing
-  // block as "the reasoning engine found nothing", which is the one reading the
-  // block exists to prevent. Set here for the opt-out paths and below for the
-  // two budget paths; attached at the end, and only when `conceptReasoning`
-  // itself is absent, so the two keys can never both appear.
+  // DEFAULT OFF (opt-IN). An explicit `includeConceptReasoning: true` attaches
+  // the block when leftover budget allows; otherwise the response carries
+  // `conceptReasoningAvailable: true` plus a one-line hint naming the flag.
+  const wantConceptReasoning = input.includeConceptReasoning === true;
+  // R1 — TYPED ABSENCE when the caller ASKED for the block and did not get it.
+  // Default-off uses `conceptReasoningAvailable` instead (expected quiet path).
   let conceptReasoningOmitted: ConceptReasoningOmission | undefined;
-  // The opt-out sentence is appended AFTER the budget pass (it is honesty
-  // scaffolding, paid for by the reserve below). Appended before, it made an
-  // opted-out call fit fewer steps than a reasoning-on call at the margin.
+  // The default-off hint is appended AFTER the budget pass (honesty scaffolding,
+  // paid for by the reserve below). Appended before, it made an off call fit
+  // fewer steps than an on call at the margin.
   let skipNote: string | undefined;
   if (!wantConceptReasoning) {
-    skipNote = conceptReasoningOffByPhaseDefault
-      ? `${CONCEPT_REASONING_SKIPPED_NOTE} ${PHASE_FILTER_CONCEPT_REASONING_OFF_NOTE}`
-      : CONCEPT_REASONING_SKIPPED_NOTE;
-    // NO `headroomBytes` / `minimumHeadroomBytes` here. The block was never
-    // attempted on this path, so there is no measurement to report and a `0`
-    // would read as one. `reason` carries the whole truth; the sentence is in
-    // `disclosure`.
-    conceptReasoningOmitted = {
-      checked: false,
-      reason: conceptReasoningOffByPhaseDefault
-        ? 'phase-filter-default'
-        : 'caller-opted-out',
-    };
+    skipNote = CONCEPT_REASONING_AVAILABLE_HINT;
   }
 
   // RESERVE the post-enforcement additions instead of bolting them on after.
@@ -2259,8 +2221,10 @@ export const whatHappensOnSaveHandler = async (
     data.conceptReasoning = conceptReasoning;
   } else if (conceptReasoningOmitted !== undefined) {
     // Mutually exclusive by construction: the omission marker exists only on
-    // the paths that produced no envelope, and this branch is the only writer.
+    // the paths that produced no envelope after an opt-in.
     data.conceptReasoningOmitted = conceptReasoningOmitted;
+  } else if (!wantConceptReasoning) {
+    Object.assign(data, conceptReasoningOffFields());
   }
 
   // RECOVERY PATH — measured LAST, gated on the cap the GLOBAL REDUCER actually

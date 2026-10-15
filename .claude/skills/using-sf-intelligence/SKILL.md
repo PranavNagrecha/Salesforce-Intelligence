@@ -44,7 +44,7 @@ only, not consent — never silent
 fallback from stale vault data.
 
 **Orient first: load the org card.** On the first org-touching turn of a
-session, call `sfi.org_card` (no arguments) — ONE cheap cache read that
+session, call `sfi.run_analysis` with `{ "name": "sfi.org_card", "args": { … } }` (no arguments) — ONE cheap cache read that
 returns the refresh-time orientation card: identity & freshness, scale,
 coverage and blind spots, the org's top objects by inbound dependencies,
 automation density, permissions posture, integration surface, naming
@@ -116,7 +116,7 @@ route. `route_question` is the front door; the cascade is how each step runs.
   sharing rule, LWC, integration, CPQ or OmniStudio component.
 - Schema, dependency, impact, permission, automation, integration, or
   naming-convention questions about the org.
-- "What can you do / what can I ask?" → call `sfi.capabilities`.
+- "What can you do / what can I ask?" → call `sfi.run_analysis` with `{ "name": "sfi.capabilities", "args": { … } }`.
 - Anything that asks Claude to reason over the org's structure.
 
 ## When NOT to use
@@ -220,7 +220,7 @@ relationship:
 ### Step 5 — route to the right specialist tool
 
 Beyond the basics there are many more tools. Match the question to the
-capability area (call `sfi.capabilities` for the full map):
+capability area (call `sfi.run_analysis` with `{ "name": "sfi.capabilities", "args": { … } }` for the full map):
 
 - **Coverage / trust** — `sfi.coverage_report`, `sfi.health_check`.
   Before **`sfi.safe_to_delete_field`** or destructive **`what_if_*`**,

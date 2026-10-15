@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Offline-first hybrid MCP knowledge base for a Salesforce org.",
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/PranavNagrecha/Salesforce-Intelligence.git"
@@ -20,7 +20,8 @@
     "prepare": "node scripts/install-hooks.mjs",
     "tsc": "tsc -b",
     "lint": "ESLINT_USE_FLAT_CONFIG=false eslint . --ext .ts",
-    "test": "pnpm -r test && pnpm test:integration",
+    "test": "pnpm -r build && pnpm -r test",
+    "test:all": "pnpm test && pnpm test:integration",
     "test:cli": "pnpm --filter ./packages/cli test",
     "test:integration": "vitest run --config tests/integration/vitest.config.ts",
     "test:integration:gate": "vitest run --config tests/integration/vitest.config.ts end-to-end.test.ts envelope-honesty.test.ts post-refresh-golden.test.ts snapshot-trend.test.ts",

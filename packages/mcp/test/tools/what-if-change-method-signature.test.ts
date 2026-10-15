@@ -569,7 +569,11 @@ describe('whatIfChangeMethodSignatureHandler', () => {
     });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value.data.disclosure).toContain('heuristic confidence');
+    // Callers come from modeled callsApex edges (AST when present), not a
+    // free-standing regex scan that pretends there is no AST path.
+    expect(result.value.data.disclosure).toMatch(/callsApex/);
+    expect(result.value.data.disclosure).toMatch(/AST-extracted|apex-ast/);
+    expect(result.value.data.disclosure).not.toMatch(/regex\/token, no AST/);
     expect(result.value.data.disclosure).toContain('Type.forName');
     expect(result.value.data.disclosure).toContain('coversTest');
   });
@@ -591,6 +595,7 @@ describe('whatIfChangeMethodSignatureHandler', () => {
     // No blanket "all callers ... heuristic" / "via the apex-scanner ...
     // heuristic" sweep that erases the parsed/declared tiers.
     expect(disclosure).not.toMatch(/all callers[^.]*heuristic/i);
+    expect(disclosure).not.toMatch(/regex\/token, no AST/);
   });
 
   it('echoes the manifest vaultState into the response envelope', async () => {

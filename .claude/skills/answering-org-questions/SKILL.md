@@ -28,7 +28,7 @@ evidence in the vault" — NEVER "nothing uses this".
 ## Overview
 
 This skill is the conversational interface to the `sf-intelligence`
-vault. The flow: **call `sfi.route_question` first** — in the default hybrid
+vault. The flow: **call `sfi.run_analysis` with `{ "name": "sfi.route_question", "args": { … } }` first** — in the default hybrid
 mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick
 from) plus a suggested plane (`vault` | `live` | `hybrid` | `unknown`) and a
 regex `route` as a HINT — then **pick the tool(s)** from the candidates,

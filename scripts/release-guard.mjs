@@ -11,8 +11,8 @@
  * forbidden.
  *
  * Design intent: the committed tree carries NO private-org metadata, so the
- * guard is a seatbelt, not a filter. A fresh public clone (no local name file)
- * still passes because there is nothing private left to find.
+ * guard is a seatbelt, not a filter. A missing org blocklist fails closed
+ * (exit 2) unless SFI_ALLOW_NO_BLOCKLIST=1 / --allow-no-blocklist.
  */
 
 import { execSync } from 'node:child_process';
@@ -62,9 +62,10 @@ export const ALLOWLIST = [
 // names) live in a GITIGNORED maintainer-only file so this committed guard is
 // itself public-clean. The ONE loader (scripts/lib/forbidden-names.mjs) fails
 // CLOSED: a malformed file is a failure, never a silent drop to the generic
-// patterns. A MISSING file is allowed locally (with a loud VACUOUS note) but
-// refused under CI unless SFI_ALLOW_NO_BLOCKLIST=1 — the publish workflow
-// materializes the secret, so an empty secret must not ship a release.
+// patterns. A MISSING or empty blocklist also fails (exit 2) unless
+// SFI_ALLOW_NO_BLOCKLIST=1 or --allow-no-blocklist — the same contract
+// scan-org-leaks.mjs uses under --strict. The publish workflow materializes
+// the secret; an empty secret must not ship a release.
 //
 // Loading never throws at import (release-snapshot imports this module);
 // {@link blocklistProblem} reports the failure and the CLI turns it into a
@@ -81,14 +82,14 @@ export const BLOCKLIST = blocklist;
 
 /**
  * Why this run must not report a pass, or null. A broken blocklist is always a
- * problem; a missing/empty one only in strict mode (default: CI=true) without
- * an explicit SFI_ALLOW_NO_BLOCKLIST=1.
+ * problem; a missing/empty one is refused in strict mode (default: always)
+ * without an explicit SFI_ALLOW_NO_BLOCKLIST=1 / --allow-no-blocklist.
  *
  * @param {{ strict?: boolean, allowNoBlocklist?: boolean }} [opts]
  * @returns {string | null}
  */
 export function blocklistProblem({
-  strict = process.env.CI === 'true',
+  strict = true,
   allowNoBlocklist = allowNoBlocklistFromEnv(),
 } = {}) {
   if (blocklistError) return blocklistError;

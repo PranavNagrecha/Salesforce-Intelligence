@@ -16,9 +16,12 @@
  * signal for their own verdicts (`safe_to_delete_field`, `health_check`) read
  * {@link assessVaultFreshness} instead of re-deriving it.
  *
- * The age is reported in coarse BANDS (`>7d`, `>30d`, `>90d`), never as a
- * day count, so a response does not change byte-for-byte every day — only when
- * a band boundary is crossed. `health_check` still reports the exact day count.
+ * Per-response `vaultState.freshness.warning` is ONE sentence under 200 bytes
+ * (builder version, running version, age in days, refresh hint). The edge-
+ * family enumeration lives only on `sfi.health_check` — the place a user asks
+ * for the detail — via {@link EDGE_FAMILIES_BY_VERSION} /
+ * `missingEdgeFamilies`. Machine fields (`builtBy`, `runningVersion`,
+ * `ageDays`, `stale`) stay on the stamp so hosts can act without parsing prose.
  */
 import type { McpResponse } from '@sf-intelligence/contracts';
 import { compareVersions } from '@sf-intelligence/core';
@@ -37,11 +40,15 @@ export const MS_PER_DAY = 24 * 60 * 60 * 1000;
 /** Age (whole days) at or above which a vault is flagged stale (matches health_check). */
 export const STALE_AGE_DAYS = 7;
 
+/** Hard budget for `vaultState.freshness.warning` (V5-3a). */
+export const FRESHNESS_WARNING_MAX_BYTES = 200;
+
 /**
  * Extraction capabilities added per release, oldest first. A vault built
  * before `since` does not hold these edges, so their absence proves nothing.
- * Named so a stale-builder caveat says WHAT a re-refresh buys. Append a row
+ * Named so `sfi.health_check` can say WHAT a re-refresh buys. Append a row
  * whenever a release adds an edge family a dependency answer relies on.
+ * Do NOT enumerate these on every tool response — only health_check surfaces them.
  */
 export const EDGE_FAMILIES_BY_VERSION: readonly {
   readonly since: string;
@@ -105,7 +112,11 @@ export interface VaultFreshnessAssessment {
   readonly running: string | null;
   /** `true` only when both versions parse and `builtBy` is older than `running`. */
   readonly builderStale: boolean;
-  /** Edge families added after `builtBy` (empty unless `builderStale`). */
+  /**
+   * Edge families added after `builtBy` (empty unless `builderStale`).
+   * For `sfi.health_check` and tools that gate on a named family — never for
+   * the per-response warning string.
+   */
   readonly missingEdgeFamilies: readonly string[];
 }
 
@@ -167,43 +178,59 @@ export const assessVaultFreshness = (
 };
 
 /**
- * One-line stale-builder caveat, or `undefined` when the builder is current or
- * the drift is undetectable. Shared by the dispatcher and the tools that fold
- * it into their own verdicts.
+ * One sentence under {@link FRESHNESS_WARNING_MAX_BYTES}: builder version,
+ * running version, vault age in days, and the refresh hint. `undefined` when
+ * the vault is fresh and the builder is current (or drift is undetectable).
  */
-export const builderStaleCaveat = (a: VaultFreshnessAssessment): string | undefined => {
-  if (!a.builderStale || a.builtBy === null || a.running === null) return undefined;
-  const missing =
-    a.missingEdgeFamilies.length > 0
-      ? ` Missing until re-refresh: ${a.missingEdgeFamilies.join('; ')}.`
-      : '';
+export const freshnessWarning = (a: VaultFreshnessAssessment): string | undefined => {
+  if (!a.builderStale && !a.stale) return undefined;
+  const built = a.builtBy ?? 'unknown';
+  const running = a.running ?? 'unknown';
+  const age = a.ageDays === null ? 'unknown' : String(a.ageDays);
   return (
-    `Vault built by sf-intelligence ${a.builtBy}; running ${a.running}. Extraction added since ` +
-    `${a.builtBy} is absent, so "no referrers / nothing found" is NOT proof — run \`sfi refresh\`.${missing}`
+    `Vault built by sf-intelligence ${built}; running ${running}; age ${age} days. ` +
+    'Run sfi refresh to update.'
   );
 };
 
-/** One-line age caveat (banded), or `undefined` when the vault is fresh. */
+/**
+ * Stale-builder caveat for tools that fold the signal into their own verdict
+ * (`safe_to_delete_field`). Same short sentence as {@link freshnessWarning} —
+ * edge-family detail is health_check-only.
+ */
+export const builderStaleCaveat = (a: VaultFreshnessAssessment): string | undefined => {
+  if (!a.builderStale || a.builtBy === null || a.running === null) return undefined;
+  return freshnessWarning(a);
+};
+
+/** @deprecated Prefer {@link freshnessWarning}; kept for call-site clarity on age-only paths. */
 export const ageCaveat = (a: VaultFreshnessAssessment): string | undefined =>
-  a.stale && a.ageBand !== undefined
-    ? `Vault snapshot is ${a.ageBand} old (refreshed ${a.refreshedAt}); the org may have changed since — run \`sfi refresh\`.`
-    : undefined;
+  a.stale && !a.builderStale ? freshnessWarning(a) : undefined;
 
 /** The compact block stamped on `vaultState` when anything is stale. */
 export interface VaultFreshnessStamp {
+  /** Manifest builder version (`null` when unknown). */
+  readonly builtBy: string | null;
+  /** Running sf-intelligence version (`null` when unknown). */
+  readonly runningVersion: string | null;
+  /** Whole days since refresh (`null` when unparseable). */
+  readonly ageDays: number | null;
+  /** `true` when age is at or above {@link STALE_AGE_DAYS}. */
+  readonly stale: boolean;
+  /** Coarse age band, present only when `stale`. */
   readonly ageBand?: AgeBand;
-  readonly builderStale?: { readonly builtBy: string; readonly running: string };
+  /** One sentence under {@link FRESHNESS_WARNING_MAX_BYTES}. */
   readonly warning: string;
 }
 
+/** Short stale-builder blind-spot note — one mention, no edge-family list. */
 const STALE_BUILDER_BLIND_SPOT_NOTE =
-  'Vault built by an older sf-intelligence than the one running; referrer kinds extracted only by ' +
-  'newer builders are absent from this result. Re-run `sfi refresh`.';
+  'Vault built by an older sf-intelligence; newer referrer kinds are absent. Run sfi refresh.';
 
 /**
  * Apply the assessment to a success response. Byte-transparent when the vault
  * is fresh and the builder is current. Otherwise:
- *   - `vaultState.freshness` carries the banded age / builder drift + one line;
+ *   - `vaultState.freshness` carries machine fields + one short warning;
  *   - a `data.trust` block gains the warning in `limitations` and, if its
  *     `freshness` is empty, the snapshot timestamp;
  *   - on builder drift, `data.trust.completeness` `complete` becomes `partial`
@@ -217,23 +244,22 @@ export const applyVaultFreshness = <T>(
 ): McpResponse<T> => {
   if (ctx?.manifest === undefined) return resp;
   const a = assessVaultFreshness(ctx, now);
-  const builderLine = builderStaleCaveat(a);
-  const ageLine = ageCaveat(a);
-  if (builderLine === undefined && ageLine === undefined) {
+  const warning = freshnessWarning(a);
+  if (warning === undefined) {
     // Fresh vault: only fill an EMPTY `trust.freshness` (e.g. route_question
     // shipped `{}`), so every trust block names its snapshot.
-    const filled = applyToData(resp.data, a, undefined, undefined);
+    const filled = applyToData(resp.data, a, undefined);
     return filled === resp.data ? resp : { ...resp, data: filled };
   }
-  const warning = [builderLine, ageLine].filter((s): s is string => s !== undefined).join(' ');
   const stamp: VaultFreshnessStamp = {
+    builtBy: a.builtBy,
+    runningVersion: a.running,
+    ageDays: a.ageDays,
+    stale: a.stale,
     ...(a.ageBand !== undefined ? { ageBand: a.ageBand } : {}),
-    ...(builderLine !== undefined && a.builtBy !== null && a.running !== null
-      ? { builderStale: { builtBy: a.builtBy, running: a.running } }
-      : {}),
     warning,
   };
-  const data = applyToData(resp.data, a, builderLine, ageLine);
+  const data = applyToData(resp.data, a, warning);
   return {
     ...resp,
     data,
@@ -247,20 +273,17 @@ const isRec = (v: unknown): v is Rec => v !== null && typeof v === 'object' && !
 const applyToData = <T>(
   data: T,
   a: VaultFreshnessAssessment,
-  builderLine: string | undefined,
-  ageLine: string | undefined,
+  warning: string | undefined,
 ): T => {
   if (!isRec(data)) return data;
   let out: Rec = data;
   // A tool that already folds the builder caveat into its own verdict
-  // (`safe_to_delete_field`'s `builderVersionCaveat`) keeps its wording; only
-  // the age line is added so the same fact is not stated twice.
+  // (`safe_to_delete_field`'s `builderVersionCaveat`) keeps its wording; do
+  // not restate the same short sentence in trust.limitations.
   const ownsBuilderCaveat = typeof out['builderVersionCaveat'] === 'string';
-  const line = [ownsBuilderCaveat ? undefined : builderLine, ageLine]
-    .filter((s): s is string => s !== undefined)
-    .join(' ');
+  const line = ownsBuilderCaveat ? '' : (warning ?? '');
   const trust = out['trust'];
-  const stale = builderLine !== undefined || ageLine !== undefined;
+  const stale = warning !== undefined;
   if (
     isRec(trust) &&
     Array.isArray(trust['limitations']) &&
@@ -276,7 +299,7 @@ const applyToData = <T>(
         ...(Object.keys(freshness).length === 0 && trust['freshness'] !== undefined && a.refreshedAt !== ''
           ? { freshness: { snapshotRefreshedAt: a.refreshedAt } }
           : {}),
-        ...(builderLine !== undefined && completeness?.['status'] === 'complete'
+        ...(a.builderStale && completeness?.['status'] === 'complete'
           ? { completeness: { ...completeness, status: 'partial' } }
           : {}),
         limitations:
@@ -285,7 +308,7 @@ const applyToData = <T>(
     };
   }
   const soundness = out['soundness'];
-  if (builderLine !== undefined && isRec(soundness) && Array.isArray(soundness['blindSpots'])) {
+  if (a.builderStale && isRec(soundness) && Array.isArray(soundness['blindSpots'])) {
     out = {
       ...out,
       soundness: {

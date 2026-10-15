@@ -37,10 +37,11 @@ describe('skill gateway contract (Decision 2=C)', () => {
 
   it('rewrites Call/Fire lines to the gateway form', () => {
     const out = rewriteDirectInvokes(
-      'Call `sfi.why_cant_user_see_record` with the user id.\nFire `sfi.health_check`.',
+      // tech_debt_score is a non-core tool (why_cant_user_see_record joined the core roster in 0.5.0).
+      'Call `sfi.tech_debt_score` with the object id.\nFire `sfi.health_check`.',
     );
     expect(out).toContain('sfi.run_analysis');
-    expect(out).toContain('"name": "sfi.why_cant_user_see_record"');
+    expect(out).toContain('"name": "sfi.tech_debt_score"');
     expect(out).toContain('Fire `sfi.health_check`');
     expect(findDirectInvokeViolations(out)).toEqual([]);
   });

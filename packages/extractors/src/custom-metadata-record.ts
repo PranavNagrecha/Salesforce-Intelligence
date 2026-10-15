@@ -162,9 +162,35 @@ const OBJECT_CELL_SUFFIX = 'Object__c';
 const FIELD_CELL_SUFFIX = 'Field__c';
 
 /**
- * CUSTOM-METADATA-VALUE-FIELD-REFS-UNGRAPHED: resolve object/field-shaped value
- * cells into `references` edges so a mapping/field-copy CMDT is visible to
- * usage, lineage, and blast-radius tools.
+ * Field-name suffixes that conventionally hold an Apex class api name in a
+ * custom-metadata / handler-config record (e.g. `Demo_Handler_Class__c`,
+ * `Virus_Scan_Handler__c`, `Plugin_ApexClass__c`). Longest-first so
+ * `HandlerClass__c` / `ClassName__c` / `ApexClass__c` win over the shorter
+ * `Class__c` / `Handler__c` suffixes when more than one could match.
+ */
+const CLASS_CELL_SUFFIXES = [
+  'HandlerClass__c',
+  'ClassName__c',
+  'ApexClass__c',
+  'Handler__c',
+  'Class__c',
+] as const;
+
+/**
+ * Apex class identifier shape for a class-cell value: same character class as
+ * {@link isApiNameShaped}, but rejects `__c` custom-field tokens and dotted
+ * paths — those are never Apex class api names.
+ */
+const isApexClassIdentifierShaped = (value: string): boolean =>
+  isApiNameShaped(value) && !value.endsWith('__c') && !value.includes('.');
+
+const classCellSuffixOf = (fieldName: string): string | undefined =>
+  CLASS_CELL_SUFFIXES.find((suffix) => fieldName.endsWith(suffix));
+
+/**
+ * CUSTOM-METADATA-VALUE-FIELD-REFS-UNGRAPHED: resolve object/field/class-shaped
+ * value cells into `references` edges so a mapping/field-copy/handler CMDT is
+ * visible to usage, lineage, blast-radius, and dead-code tools.
  *
  * A cell whose FIELD name ends in `Object__c` (e.g. `Source_Object__c`,
  * `Target_Object__c`) and whose string VALUE is API-name-shaped emits
@@ -175,11 +201,17 @@ const FIELD_CELL_SUFFIX = 'Field__c';
  * pairs with `Source_Object__c`). When no sibling object cell resolves the
  * object, NO field edge is minted — the object is not guessed.
  *
- * Confidence is `heuristic`: the object/field linkage is inferred from the
- * `*Object__c` / `*Field__c` naming convention + value shape, not a declared
- * typed metadata relationship. Masked (`***`) and non-string cells are
- * skipped; edge targets are deduplicated so two cells naming the same object
- * do not collide on the `(fromId,toId,edgeType,source)` graph PK.
+ * A cell whose FIELD name ends in `Class__c` / `ClassName__c` / `Handler__c` /
+ * `HandlerClass__c` / `ApexClass__c` and whose string VALUE is an Apex-class
+ * identifier (API-name-shaped, not ending in `__c`, no dot) emits
+ * `CustomMetadataRecord -> ApexClass:{value}` with properties
+ * `{ via: 'value-cell', valueField }`.
+ *
+ * Confidence is `heuristic`: the object/field/class linkage is inferred from
+ * the naming convention + value shape, not a declared typed metadata
+ * relationship. Masked (`***`) and non-string cells are skipped; edge targets
+ * are deduplicated so two cells naming the same target do not collide on the
+ * `(fromId,toId,edgeType,source)` graph PK.
  */
 const extractValueRefEdges = (
   values: readonly ValueEntry[],
@@ -229,6 +261,14 @@ const extractValueRefEdges = (
           object: objectValue,
         });
       }
+    } else if (
+      classCellSuffixOf(entry.field) !== undefined &&
+      isApexClassIdentifierShaped(value)
+    ) {
+      pushEdge(`ApexClass:${value}`, {
+        via: 'value-cell',
+        valueField: entry.field,
+      });
     }
   }
   return edges;

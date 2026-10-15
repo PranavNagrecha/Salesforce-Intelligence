@@ -1,12 +1,12 @@
 # Changelog Fragments
 
-This directory contains **changelog fragments** — one Markdown file per backlog item or significant change. Fragments are assembled into `CHANGELOG.md` under the `## [Unreleased]` section by `scripts/assemble-changelog.mjs`.
+This directory contains **changelog fragments** — one Markdown file per significant change. Fragments are assembled into `CHANGELOG.md` under the `## [Unreleased]` section by `scripts/assemble-changelog.mjs`.
 
 ## Fragment format
 
-**Filename:** `changelog.d/<item-id>.md`
+**Filename:** `changelog.d/<slug>.md`
 
-Use the backlog item ID, e.g. `r7-f1.md`, `p11-onboard.md`, or `cto-p4-ast7.md`.
+Use a short slug describing the change, e.g. `onboard-smoke.md`, `field-usage-fix.md`, or `release-guard-fail-closed.md`.
 
 **Content:** Keep-a-Changelog subsections. Include only the subsections that apply.
 

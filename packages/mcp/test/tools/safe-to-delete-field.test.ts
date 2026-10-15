@@ -1901,11 +1901,9 @@ describe('safeToDeleteFieldHandler — stale-builder upgrade path', () => {
     expect(trust.limitations.some((l) => l === builderVersionCaveat)).toBe(true);
   });
 
-  // FAIL-BEFORE/PASS-AFTER: the caveat used a hard-coded "added in 0.3.0"
-  // family list, so a 0.3.2-built vault read under 0.3.3 was told the 0.3.0
-  // families were ABSENT (false — it has them) and was never told what it IS
-  // missing. The wording now comes from the shared EDGE_FAMILIES_BY_VERSION.
-  it('names only the edge families added after the vault builder', async () => {
+  // V5-3a: the per-tool caveat is one short sentence (versions + refresh).
+  // Edge-family enumeration lives only on sfi.health_check.
+  it('uses a short stale-builder caveat without enumerating edge families', async () => {
     process.env[PLUGIN_ENV] = '0.3.3';
     const result = await safeToDeleteFieldHandler(ctxBuiltBy('0.3.2'), {
       fieldId: SAFE_FIELD,
@@ -1913,10 +1911,12 @@ describe('safeToDeleteFieldHandler — stale-builder upgrade path', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const caveat = result.value.data.builderVersionCaveat ?? '';
-    expect(caveat).toContain('remoteClass');
-    expect(caveat).toContain('(0.3.3)');
+    expect(caveat).toContain('0.3.2');
+    expect(caveat).toContain('0.3.3');
+    expect(caveat).toMatch(/sfi refresh/i);
+    expect(caveat).not.toContain('remoteClass');
     expect(caveat).not.toMatch(/roll-up coupling/i);
-    expect(caveat).not.toContain('0.3.0');
+    expect(Buffer.byteLength(caveat, 'utf8')).toBeLessThan(280);
     expect(result.value.data.verdict).toBe('review');
   });
 

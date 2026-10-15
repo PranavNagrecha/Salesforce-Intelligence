@@ -4,7 +4,7 @@ Ask your AI what breaks before you change Salesforce. Offline, read-only, cited 
 
 A **grounded, fail-closed backend for AI assistants** working in one Salesforce org — answers come from the org's **real metadata**, not a guess.
 
-`sf-intelligence` is an **offline-first, read-only, MCP-first knowledge base** for a single Salesforce org. One `sf project retrieve` builds a local vault (Markdown + a DuckDB dependency graph); a semantic router **advises** a ranked tool shortlist and your **host LLM decides** which to run. It **fails closed** — write imperatives and prompt injection are refused by shape, an unanswerable ask gets an honest gap instead of a lookalike tool, and genuine ambiguity gets a clarifying question instead of a guess. MIT + Commons Clause.
+`sf-intelligence` is an **offline-first, read-only, MCP-first knowledge base** for a single Salesforce org. One `sf project retrieve` builds a local vault (Markdown + a DuckDB dependency graph); a semantic router **advises** a ranked tool shortlist and your **host LLM decides** which to run. It **fails closed** — write imperatives and prompt injection are refused by shape, an unanswerable ask gets an honest gap instead of a lookalike tool, and genuine ambiguity gets a clarifying question instead of a guess. MIT.
 
 Requires **Node.js 20+**. `npx -y sf-intelligence …` needs no install; `npm install -g sf-intelligence` puts `sfi` on your PATH for shorter commands. Upgrading from an earlier version? Breaking changes and upgrade steps for every release are in the [CHANGELOG](https://github.com/PranavNagrecha/Salesforce-Intelligence/blob/main/CHANGELOG.md).
 
@@ -80,7 +80,7 @@ sfi doctor                            # diagnose sf CLI / vault / auth issues
 
 `--target-org` is **required** on `sfi init` whenever stdin isn't a terminal — which includes every MCP host, so always pass it there.
 
-Then ask anything in your MCP client — *"what fields does Account have?"*, *"what breaks if I delete this field?"*, *"who can edit Salary__c?"*, *"why can't this profile see Opportunities?"*, *"what happens when I save a Project?"*, *"give me a tour of this org."*
+Then ask anything in your MCP client — *"what fields does Account have?"*, *"where is this field used?"*, *"what breaks if I delete this field?"*, *"what happens when I save a Project?"*, *"which Apex is dead?"*, *"why can't this profile see Opportunities?"*, *"who can edit Salary__c?"*, *"how does this flow work?"*, *"give me a tour of this org"*. Every answer cites the component ids it came from.
 
 **Connected, but the org looks empty?** Before the first `sfi refresh` finishes, the server boots in setup mode and exposes exactly one tool, `sfi.setup_status` — ask your chat "what do you need from me?" and it will name the exact next command (and where it's looking for the vault).
 
@@ -109,5 +109,5 @@ Full guides, capabilities, the tool catalog, and configuration: **https://sfi.au
 
 ## License
 
-MIT + Commons Clause — see the `LICENSE` file shipped in this package, or
+MIT — see the `LICENSE` file shipped in this package, or
 <https://sfi.auditforce.cloud/licensing>.

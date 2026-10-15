@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT%20%2B%20Commons%20Clause-blue.svg" alt="License: MIT + Commons Clause"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: Commons Clause"></a>
   <a href="https://www.npmjs.com/package/sf-intelligence"><img src="https://img.shields.io/npm/v/sf-intelligence.svg?color=cb3837&label=npm" alt="npm version"></a>
   <a href="https://github.com/PranavNagrecha/Salesforce-Intelligence/actions/workflows/ci.yml"><img src="https://github.com/PranavNagrecha/Salesforce-Intelligence/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/node-%E2%89%A520-339933.svg" alt="Node.js >= 20">
@@ -28,7 +28,7 @@ single Salesforce org. You run one retrieve (`sf project retrieve`); it builds a
 local Markdown vault and a DuckDB dependency graph. From then on every answer is
 served locally by default — **offline-first, no network egress for vault
 answers.** An **opt-in live read-only plane** (`sfi.live_*`) can answer record
-counts and samples when enabled. Private by design. MIT + Commons Clause.
+counts and samples when enabled. Private by design. MIT.
 
 It is **not a standalone chatbot** — it has no chat surface. It is the
 evidence layer an AI host consumes: a router that **advises** (ranked tool
@@ -543,8 +543,8 @@ for the live tool map.
 
 ### Optional: full roster vs compact core
 
-**Default is the 25-tool core roster** (includes `sfi.live_consent`). Its
-`tools/list` is about 33 KB (a test keeps it under 40 KB); the full roster is
+**Default is the 16-tool core roster** (includes `sfi.live_consent`). Its
+`tools/list` is about 21 KB (a test keeps it under 40 KB); the full roster is
 about 525 KB, which a host pays before the first question. Non-core tools stay
 reachable via `sfi.run_analysis` (byte-identical) and are not directly
 invokable under core. Set `SFI_TOOL_PROFILE=full` (or add
@@ -718,7 +718,7 @@ multiple orgs. Share it (or just describe the gap) at
 
 ## License
 
-`sf-intelligence` is licensed under the **MIT License with the [Commons Clause](./LICENSE)** (see also [`NOTICE`](./NOTICE)). In plain English:
+`sf-intelligence` is licensed under the **[MIT License](./LICENSE)** (see also [`NOTICE`](./NOTICE)). Releases before 0.5.0 carried a Commons Clause condition; it was removed in 0.5.0. In plain English:
 
 - ✅ **Free to use for any purpose — including at work, inside a company.** Evaluate, study, modify, self-host for your own use, fork, redistribute, and contribute — all free.
 - 🚫 **You may not _Sell_ it without a commercial license** — i.e. provide it to third parties, for a fee, as a product or service whose value derives substantially from the Software. That includes offering it (or a hosted / SaaS / derivative version) as a paid product or service, reselling it or paid access to it, or charging for hosting/support whose value derives substantially from it.

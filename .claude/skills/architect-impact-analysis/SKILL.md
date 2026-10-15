@@ -195,7 +195,7 @@ proceeding: "I'm reading this as `CustomField:Account.Industry__c` —
 correct?" Don't proceed without that confirmation when there are 2+
 high-scoring candidates.
 
-### Step 3 — Call `sfi.get_impact`
+### Step 3 — Call `sfi.run_analysis` with `{ "name": "sfi.get_impact", "args": { … } }`
 
 Default invocation:
 
@@ -403,7 +403,7 @@ Claude's flow:
 1. **Translate** "the Industry field on Account" →
    `CustomField:Account.Industry__c`. Unambiguous; skip
    `search_components`.
-2. **Call** `sfi.get_impact` with `{ componentId:
+2. **Call** `sfi.run_analysis` with `{ "name": "sfi.get_impact", "args": { … } }` with `{ componentId:
    'CustomField:Account.Industry__c', hops: 2 }`.
 3. **Receive** (hypothetical): 8 nodes, 11 edges, traversed types
    `['grantedBy', 'parentOf', 'readsFrom', 'references',
@@ -546,7 +546,7 @@ Before sending a response, confirm:
 - [ ] I translated the user's component reference into a canonical ID
       (`Type:Id`), confirming via `sfi.search_components` when
       ambiguous.
-- [ ] I called `sfi.get_impact` with `hops: 2` (or 3 only on explicit
+- [ ] I called `sfi.run_analysis` for `sfi.get_impact` with `hops: 2` (or 3 only on explicit
       request), and — for formula-focused questions — also
       `sfi.find_formula_references`.
 - [ ] I organized the impact subgraph by component type, with each

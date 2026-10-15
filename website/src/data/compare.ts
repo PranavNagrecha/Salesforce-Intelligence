@@ -7,7 +7,7 @@ export const SFI = {
   where: "On your computer. The metadata snapshot never leaves it",
   writes: "Never. It has no way to write to the org",
   price: "Free",
-  source: "Source available (MIT + Commons Clause)",
+  source: "Open source (MIT)",
   hosts: "Claude Code, Claude Desktop, Cursor, VS Code + Copilot, Codex and other MCP clients",
   cites: "Names every component an answer relies on, and what it couldn’t check",
   setup: "One command for the demo org; one read-only refresh for your own",

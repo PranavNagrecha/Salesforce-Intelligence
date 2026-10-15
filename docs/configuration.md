@@ -275,7 +275,7 @@ field.
 
 ## Tool profile (advertised roster)
 
-Under the default profile, 25 advertised tool schemas (231 registered; 5
+Under the default profile, 16 advertised tool schemas (231 registered; 5
 back-compat aliases stay hidden) form the core roster: the spine — including
 `sfi.live_consent` — plus the tools that answer the questions the package page
 advertises. That second half is DERIVED from `ADVERTISED_QUESTION_TOOLS`
@@ -283,7 +283,7 @@ advertises. That second half is DERIVED from `ADVERTISED_QUESTION_TOOLS`
 page advertises its tools too, and a question with no tool behind it fails the
 build rather than the user. The full non-hidden roster is 226 schemas and costs
 tens of thousands of context tokens in MCP clients that do not defer tool
-definitions. **Default is `core`** (AUDIT-F6): only that 25-schema roster is
+definitions. **Default is `core`** (AUDIT-F6): only that 16-schema roster is
 advertised and directly invokable. Everything else stays reachable via
 `sfi.run_analysis` with byte-identical output. Set `SFI_TOOL_PROFILE=full` to
 advertise and directly invoke the entire roster. The profile is fixed at
@@ -291,7 +291,7 @@ server boot — clients fetch `tools/list` once.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SFI_TOOL_PROFILE` | `core` | Default `core` advertises (and directly invokes) the 25-schema core roster — the spine (incl. `sfi.live_consent`) plus the tools that answer the advertised questions; non-core tools run via `sfi.run_analysis`. Set `full` to advertise/invoke the entire roster. Unknown values warn on stderr and fall back to `core`. |
+| `SFI_TOOL_PROFILE` | `core` | Default `core` advertises (and directly invokes) the 16-schema core roster — the spine (incl. `sfi.live_consent`) plus the tools that answer the advertised questions; non-core tools run via `sfi.run_analysis`. Set `full` to advertise/invoke the entire roster. Unknown values warn on stderr and fall back to `core`. |
 
 ## Input scope & selectors
 

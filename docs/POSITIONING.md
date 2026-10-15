@@ -281,7 +281,7 @@ Gearset/Copado/DX MCP still ship the change.
 3. **Natural language in the editor.** MCP server driven from Claude Code /
    Cursor / other hosts. Skills route to `sfi.*` tools and cite canonical
    component IDs.
-4. **Free (MIT + Commons Clause).** No per-seat meter. Run `sfi.capabilities`
+4. **Free (MIT).** No per-seat meter. Run `sfi.capabilities`
    for the live roster.
 5. **Two graphs, joined — reasoning, not just retrieval.** The grounded org
    graph (graph A) is joined to a curated, org-independent **concept model**

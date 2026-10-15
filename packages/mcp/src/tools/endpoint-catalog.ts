@@ -363,7 +363,7 @@ const UNCOVERED_URL_SURFACES: readonly string[] = [
   'Apex callout targets computed at runtime: string literals and constants in the `setEndpoint(` argument are folded into `resolution.literalPrefix` and each custom metadata / custom label / custom setting part is named (with the values the vault holds), but a part read from a variable, parameter or method call stays `unresolved`, a host or credential running to the end of the literal part is named with `nameMayContinue` (the runtime part could extend it), and a site whose literal part is cut off mid-name (`\'https://api.\' + x`) stays `dynamic` with no host; `Http.send` to an endpoint set elsewhere is not traced. Read the call site with `sfi.search_apex_source(\'setEndpoint\')`.',
   'URLs embedded in LWC / Aura / Visualforce markup, and in static resources — not parsed for URLs.',
   'ConnectedApp OAuth callback URLs and WebLink / custom-button targets — modeled as node properties but NOT part of this URL axis; `sfi.integration_map` returns ConnectedApps as first-class rows.',
-  'URLs stored as DATA rather than metadata — Custom Setting / Custom Metadata rows, environment config resolved at runtime. An offline vault holds the metadata, not the row values.',
+  'URLs stored in Custom Setting / Custom Metadata row values — the vault holds those values, but this catalog does not yet scan them for URLs (Apex `setEndpoint` folding already names CMDT/CS/label parts when they appear in source).',
 ];
 
 /** ARCH-08: row cap on `apexCallouts` (the count and host flags stay complete). */

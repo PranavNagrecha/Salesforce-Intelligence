@@ -332,7 +332,7 @@ Filter by:
 | "where do we expose `@AuraEnabled` methods" | `properties.hasAuraEnabledMethod === true` |
 | "what invocable methods do we have" | `properties.hasInvocableMethod === true` |
 
-For each matching class, call `sfi.get_edges` with the class id,
+For each matching class, call `sfi.run_analysis` with `{ "name": "sfi.get_edges", "args": { … } }` with the class id,
 `direction: 'out'`, `edgeType: 'exposes'` — the `toId` of each
 edge is a **synthetic id** `ExternalApi:{kind}/{path}` (see
 *Synthetic ids* below) that surfaces the actual external API path
@@ -829,7 +829,7 @@ User: *"List all queueable classes."*
 Claude's flow:
 
 1. **Classify** → Category (c), async / job classifier.
-2. **Fire** `sfi.list_components` with
+2. **Fire** `sfi.run_analysis` with `{ "name": "sfi.list_components", "args": { … } }` with
    `{ type: 'ApexClass', limit: 500 }`.
 3. **Filter client-side** for nodes where
    `properties.isQueueable === true`.

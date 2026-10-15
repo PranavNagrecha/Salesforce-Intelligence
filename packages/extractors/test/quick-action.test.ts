@@ -272,12 +272,15 @@ describe('extractQuickAction', () => {
       }
     });
 
-    it('emits references to ApexPage for VisualforcePage actions', async () => {
+    it('emits references to VisualforcePage for VisualforcePage actions', async () => {
+      // Must match the VisualforcePage extractor node id form
+      // (`VisualforcePage:{name}`), not the metadata root `ApexPage`.
+      const pageName = 'Demo_Vf_Page';
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <QuickAction xmlns="http://soap.sforce.com/2006/04/metadata">
   <label>VF Action</label>
   <type>VisualforcePage</type>
-  <page>MyVfPage</page>
+  <page>${pageName}</page>
 </QuickAction>`;
       const { dir, path } = await writeTempTopLevelQuickAction(
         'Global.VfAction.quickAction-meta.xml',
@@ -292,7 +295,8 @@ describe('extractQuickAction', () => {
         );
         expect(refsEdge).toBeDefined();
         if (!refsEdge) return;
-        expect(refsEdge.toId).toBe('ApexPage:MyVfPage');
+        expect(refsEdge.toId).toBe(`VisualforcePage:${pageName}`);
+        expect(refsEdge.toId.startsWith('VisualforcePage:')).toBe(true);
         expect(refsEdge.properties).toEqual({ targetKind: 'page' });
       } finally {
         await rm(dir, { recursive: true, force: true });

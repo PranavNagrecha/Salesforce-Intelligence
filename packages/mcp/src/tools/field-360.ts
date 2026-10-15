@@ -87,7 +87,8 @@ import type { Context } from '../server.js';
 import { annotationsBlockFor, type AnnotationsBlock } from './annotations.js';
 import {
   buildReservedConceptReasoning,
-  CONCEPT_REASONING_SKIPPED_NOTE,
+  CONCEPT_REASONING_AVAILABLE_HINT,
+  conceptReasoningOffFields,
   CONCEPT_REASONING_UNAVAILABLE_NOTE,
   type ConceptReasoningEnvelope,
 } from './concept-reasoning.js';
@@ -219,7 +220,7 @@ export const field360InputSchema = z
     // truncated page's `nextCursor`; carries the resume offset + which section
     // (validates | formulas | writers | …) it advances. Omit = today's behavior.
     cursor: z.string().min(1).optional(),
-    // Concept-rule reasoning; DEFAULTS TRUE (opt-OUT). See `conceptReasoning`.
+    // Concept-rule reasoning; DEFAULTS FALSE (opt-IN). See `conceptReasoning`.
     includeConceptReasoning: z.boolean().optional(),
   })
   .refine((i) => i.fieldId !== undefined || i.componentId !== undefined, {
@@ -405,20 +406,28 @@ export interface Field360Output {
    * REASONING-REACHABILITY — deterministic concept-rule claims about THIS
    * field, projected onto the shared `EvidenceEnvelopeV2` contract and extended
    * with a `completeness` report that keeps "checked and found nothing"
-   * distinct from "never checked". DEFAULT ON — absent only when the caller
-   * passed `includeConceptReasoning: false`, or the reasoning read failed (in
-   * which case the block is omitted rather than the answer failed).
+   * distinct from "never checked". DEFAULT OFF — present ONLY when the caller
+   * passed `includeConceptReasoning: true`. When off, the response carries
+   * `conceptReasoningAvailable: true` plus a one-line hint naming the flag.
+   * Also absent when the reasoning read failed (in which case the block is
+   * omitted rather than the answer failed).
    *
-   * Its serialized size is RESERVED out of the per-section byte budget before
-   * the sections are paged, so reasoning is a first-class part of the answer
-   * rather than whatever fits in the leftovers; the existing `nextCursor` /
-   * `truncatedAtN` disclosure reports what that cost.
+   * When opted in, its serialized size is RESERVED out of the per-section byte
+   * budget before the sections are paged, so reasoning is a first-class part of
+   * the answer rather than whatever fits in the leftovers; the existing
+   * `nextCursor` / `truncatedAtN` disclosure reports what that cost.
    *
    * Read `completeness.noRuleCoversComponentType` FIRST: when it is true NOTHING
    * was checked for this component and the empty `claims` array is SILENCE,
    * never "clean".
    */
   readonly conceptReasoning?: ConceptReasoningEnvelope;
+  /**
+   * Present when `conceptReasoning` was not attached because the flag is off
+   * (the default). Always `true` when present — pass `includeConceptReasoning:
+   * true` to attach the block (see boundaries for the one-line hint).
+   */
+  readonly conceptReasoningAvailable?: true;
 }
 
 /**
@@ -1281,18 +1290,17 @@ export const field360Handler = async (
     ['listViews', buckets.listViews],
   ];
 
-  // REASONING-REACHABILITY — run the concept rules for this field FIRST, so the
-  // synthesis answer carries the structural implications the model can prove and
-  // not just the edge inventory. Built before pagination on purpose: its bytes
-  // are RESERVED out of the section byte budget below rather than bolted on
-  // afterwards, so reasoning is a first-class part of the answer instead of
-  // whatever fits in the leftovers. The root node is already resolved, so this
+  // REASONING-REACHABILITY — opt-IN. When requested, run the concept rules for
+  // this field FIRST so the synthesis answer carries the structural implications
+  // the model can prove and not just the edge inventory. Built before pagination
+  // on purpose: its bytes are RESERVED out of the section byte budget below
+  // rather than bolted on afterwards. The root node is already resolved, so this
   // costs one bound-type edge query + one endpoint node query (both capped);
   // `null` (a failed read) omits the block rather than failing the answer.
-  const reserved =
-    input.includeConceptReasoning === false
-      ? null
-      : await buildReservedConceptReasoning(ctx, fieldId, { rootNode: fieldNode });
+  const wantConceptReasoning = input.includeConceptReasoning === true;
+  const reserved = wantConceptReasoning
+    ? await buildReservedConceptReasoning(ctx, fieldId, { rootNode: fieldNode })
+    : null;
   const conceptReasoning: ConceptReasoningEnvelope | null = reserved?.envelope ?? null;
   const conceptReservedBytes = reserved?.reservedBytes ?? 0;
 
@@ -1666,13 +1674,12 @@ export const field360Handler = async (
           'for the uncapped view.',
       );
     }
-  } else if (input.includeConceptReasoning === false) {
-    boundaries.push(CONCEPT_REASONING_SKIPPED_NOTE);
-  } else {
-    // The THIRD branch. Default-on plus a null result used to emit nothing at
-    // all, turning an unambiguous absence into a three-way ambiguity — exactly
-    // the conflation this tool's honesty axis exists to prevent.
+  } else if (wantConceptReasoning) {
+    // Asked for it, but the read failed — never silent.
     boundaries.push(CONCEPT_REASONING_UNAVAILABLE_NOTE(fieldId));
+  } else {
+    // DEFAULT OFF — one-line hint naming the flag.
+    boundaries.push(CONCEPT_REASONING_AVAILABLE_HINT);
   }
 
   const dataShape = await readFactBlock(ctx, fieldId, 'fillRate');
@@ -1738,7 +1745,11 @@ export const field360Handler = async (
       ...(dataShape !== undefined ? { dataShape } : {}),
       ...(annotations !== undefined ? { annotations } : {}),
       ...(reportUsage !== undefined ? { reportUsage } : {}),
-      ...(conceptReasoning !== null ? { conceptReasoning } : {}),
+      ...(conceptReasoning !== null
+        ? { conceptReasoning }
+        : wantConceptReasoning
+          ? {}
+          : conceptReasoningOffFields()),
       ...(cursorBlock !== undefined
         ? {
             nextCursor: cursorBlock.nextCursor,

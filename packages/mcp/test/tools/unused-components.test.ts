@@ -275,8 +275,11 @@ describe('unusedComponentsHandler', () => {
     const entry = result.value.data.components[0];
     expect(entry).toBeDefined();
     expect(entry?.invisibleReferencesNote.length).toBeGreaterThan(20);
-    // The EmailTemplate note specifically calls out alert references.
-    expect(entry?.invisibleReferencesNote).toMatch(/alert|template|Email/i);
+    // Workflow/approval/assignment/escalation sendsEmail edges ARE modeled;
+    // only Apex Messaging / dynamic template selection stay invisible.
+    expect(entry?.invisibleReferencesNote).toMatch(/sendsEmail/);
+    expect(entry?.invisibleReferencesNote).toMatch(/Messaging\.SingleEmailMessage|dynamic template/i);
+    expect(entry?.invisibleReferencesNote).not.toMatch(/may be invisible/i);
   });
 
   it('attaches a per-type invisibleReferencesNote with PermissionSet-specific text for that type', async () => {

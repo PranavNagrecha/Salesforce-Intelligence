@@ -1047,6 +1047,11 @@ describe('endpointCatalogHandler — the total is never certified as every URL i
     const notCovered = r.value.data.notCovered.join(' ');
     expect(notCovered).toContain('setEndpoint');
     expect(notCovered).toContain('Apex');
+    // Vault holds Custom Setting / Custom Metadata values; this tool does not
+    // yet scan those rows for URLs — never claim the vault lacks the values.
+    expect(notCovered).toMatch(/Custom Setting|Custom Metadata/);
+    expect(notCovered).toMatch(/vault holds/);
+    expect(notCovered).not.toMatch(/holds the metadata, not the row values/);
   });
 
   it('the disclosure says an allowlist entry is an authorization, not a proven callout', async () => {

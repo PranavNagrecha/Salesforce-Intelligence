@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "DuckDB graph store, resolver, and import pipeline.",
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/PranavNagrecha/Salesforce-Intelligence.git",

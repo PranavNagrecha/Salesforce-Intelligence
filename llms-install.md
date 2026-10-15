@@ -26,7 +26,7 @@ Add this server to the MCP settings file (for Cline: `cline_mcp_settings.json`):
 }
 ```
 
-The first start unpacks a synthetic demo org to `~/.sf-intelligence/demo`. The server should list 25 tools. Suggested first question: "What happens when an Opportunity is saved?"
+The first start unpacks a synthetic demo org to `~/.sf-intelligence/demo`. The server should list 16 tools. Suggested first question: "What happens when an Opportunity is saved?"
 
 ## Step 2B: the user's own org
 
@@ -63,7 +63,7 @@ Always pass an absolute `--vault` path (or set the `SFI_VAULT` environment varia
 
 ## Step 3: verify
 
-- With a vault, the server lists its full tool set (25 core tools in 0.4.0) and `sfi.org_card` names the org.
+- With a vault, the server lists its full tool set (16 core tools in 0.5.0) and `sfi.org_card` names the org.
 - If it lists only one tool, `sfi.setup_status`, the server is in setup mode: the vault path is missing or wrong. Call `sfi.setup_status`; it reports the paths it checked. Fix the `--vault` path and restart the server.
 - `npx -y sf-intelligence doctor` (run in the project folder) diagnoses the CLI, vault, org auth and freshness and prints fixes.
 - Keep the vault current by re-running `npx -y sf-intelligence refresh` in the project folder after org changes.

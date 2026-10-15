@@ -61,7 +61,11 @@ import {
   type AssignmentDataCoverage,
 } from './coverage-report.js';
 import { withReferencedButAbsent } from './referenced-but-absent.js';
-import { assessVaultFreshness, MS_PER_DAY } from './vault-freshness.js';
+import {
+  assessVaultFreshness,
+  EDGE_FAMILIES_BY_VERSION,
+  MS_PER_DAY,
+} from './vault-freshness.js';
 
 
 /**
@@ -236,8 +240,17 @@ export interface HealthFreshness {
   /**
    * Human-readable yellow flag, or `null` when the vault is fresh and the
    * source has not drifted. Never asserts anything about the live org.
+   * When the builder is stale, the nudge enumerates missing edge families
+   * (from `EDGE_FAMILIES_BY_VERSION` via the shared freshness assessment) —
+   * the only tool response that does.
    */
   readonly nudge: string | null;
+  /**
+   * Edge families added after the vault builder. Present only when the
+   * builder is older than the running version — the detail hosts need
+   * without scraping every other tool's `vaultState.freshness.warning`.
+   */
+  readonly missingEdgeFamilies?: readonly string[];
 }
 
 /**
@@ -293,9 +306,19 @@ const buildFreshness = (
   // the older build never emitted. Purely local — reads the running version from
   // `SFI_PLUGIN_VERSION` (set by `sfi mcp` at startup) and never touches the
   // network; an absent env var or unparseable version simply skips the clause.
+  // health_check is the ONE place that enumerates EDGE_FAMILIES_BY_VERSION.
+  // Every other tool response gets a one-sentence freshness.warning instead.
+  const missingEdgeFamilies = assessed.builderStale ? assessed.missingEdgeFamilies : [];
+  if (missingEdgeFamilies.length > 0 && EDGE_FAMILIES_BY_VERSION.length === 0) {
+    throw new Error('EDGE_FAMILIES_BY_VERSION must list extraction capabilities');
+  }
   if (assessed.builderStale) {
+    const missing =
+      missingEdgeFamilies.length > 0
+        ? ` Missing until re-refresh: ${missingEdgeFamilies.join('; ')}.`
+        : '';
     clauses.push(
-      `This vault was built by sf-intelligence ${assessed.builtBy ?? ''}, but you are running ${assessed.running ?? ''}; run \`/sfi-refresh\` to rebuild it with the newer version's extractors (metadata types or fixes added since ${assessed.builtBy ?? ''} may be missing).`,
+      `This vault was built by sf-intelligence ${assessed.builtBy ?? ''}, but you are running ${assessed.running ?? ''}; run \`/sfi-refresh\` to rebuild it with the newer version's extractors (metadata types or fixes added since ${assessed.builtBy ?? ''} may be missing).${missing}`,
     );
   }
   const nudge = clauses.length > 0 ? clauses.join(' ') : null;
@@ -306,6 +329,7 @@ const buildFreshness = (
     stale,
     lastRefresh: { available: recent.available, componentsChanged },
     nudge,
+    ...(missingEdgeFamilies.length > 0 ? { missingEdgeFamilies } : {}),
   };
 };
 

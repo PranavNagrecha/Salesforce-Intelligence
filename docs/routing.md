@@ -45,7 +45,7 @@ returns, for one plain-language question:
 | `route` | **Advisory hint** | The deterministic route: an intent, ordered `route.tools` (with step ids and `dependsOn` edges for compound questions), plane, confidence, `suggestedArgs`, disclosures. A suggestion to inform your pick — never a command. |
 | `guidance` | Informative | One line stating the loop the host owns: read the candidates → resolve any named component → pick/sequence the tool(s) → run them → ground via `sfi.synthesize_answer`. |
 
-`answers` exists because the default tool profile is `core`, which advertises 25
+`answers` exists because the default tool profile is `core`, which advertises 16
 of 226 tools. For every other candidate the shortlist would otherwise name a tool
 whose description is nowhere in your context, recoverable only by an
 `sfi.describe_analysis` round trip per candidate. The one-liner is the same text
@@ -244,7 +244,7 @@ honestly `unrouted` with candidates still present for you to reason over.
 
 ## 7. Tool profiles — and why rows carry `answers`
 
-The default tool profile is `core`, which advertises **25 of 226** tools. Every
+The default tool profile is `core`, which advertises **16 of 226** tools. Every
 other analysis is reached through `sfi.run_analysis` with a `name` and `args`,
 using `sfi.list_analyses` and `sfi.describe_analysis` as the catalog.
 

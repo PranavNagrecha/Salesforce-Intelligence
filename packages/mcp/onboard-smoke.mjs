@@ -280,7 +280,7 @@ try {
     const health = await callText(client, 'sfi.health_check', {});
     check('health_check: graph readable', health.includes('"graphReadable":true'), health.slice(0, 120));
 
-    const list = await callText(client, 'sfi.list_components', { type: 'CustomObject' });
+    const list = await callText(client, 'sfi.run_analysis', { name: 'sfi.list_components', args: { type: 'CustomObject' } });
     check('list_components returns the onboarded object', list.includes(`CustomObject:${OBJECT}`), list.slice(0, 120));
 
     const resolved = await callText(client, 'sfi.resolve', { query: 'onboard widget' });

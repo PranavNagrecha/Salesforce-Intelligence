@@ -578,6 +578,12 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
     }
   });
 
+  /** The gateway law: a core tool is called directly, anything else through run_analysis. */
+  const envelope = (tool: string, args: Record<string, unknown>) =>
+    isDirectlyInvokable(tool, 'core')
+      ? { tool, args }
+      : { tool: 'sfi.run_analysis', args: { name: tool, args } };
+
   it('keeps core-roster tools as direct calls under core', async () => {
     process.env['SFI_TOOL_PROFILE'] = 'core';
     const r = await routeQuestionHandler(ctx, {
@@ -586,7 +592,8 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    expect(r.value.data.invoke?.[0]).toEqual({ tool: 'sfi.org_card', args: {} });
+    // org_card left the core roster in 0.5.0; the law, not the tool, is what this pins.
+    expect(r.value.data.invoke?.[0]).toEqual(envelope('sfi.org_card', {}));
   });
 
   it('withholds executable calls when clarification is required', async () => {
@@ -661,11 +668,8 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.invoke).toEqual([
-      { tool: 'sfi.list_components', args: { type: 'CustomObject' } },
-      {
-        tool: 'sfi.run_analysis',
-        args: { name: 'sfi.live_storage_by_object', args: {} },
-      },
+      envelope('sfi.list_components', { type: 'CustomObject' }),
+      envelope('sfi.live_storage_by_object', {}),
     ]);
   });
 
@@ -682,17 +686,11 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
     },
     {
       question: 'Are there any inactive validation rules on the Account object?',
-      expected: {
-        tool: 'sfi.list_components',
-        args: { type: 'ValidationRule' },
-      },
+      expected: envelope('sfi.list_components', { type: 'ValidationRule' }),
     },
     {
       question: 'Which Apex classes have not been modified in over two years?',
-      expected: {
-        tool: 'sfi.list_components',
-        args: { type: 'ApexClass' },
-      },
+      expected: envelope('sfi.list_components', { type: 'ApexClass' }),
     },
     {
       question: 'Find hardcoded IDs across formulas and validation rules',
@@ -706,17 +704,11 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
     },
     {
       question: 'How many reports exist in this org?',
-      expected: {
-        tool: 'sfi.list_components',
-        args: { type: 'Report' },
-      },
+      expected: envelope('sfi.list_components', { type: 'Report' }),
     },
     {
       question: 'Which pages have the most components and slowest load times?',
-      expected: {
-        tool: 'sfi.list_components',
-        args: { type: 'FlexiPage' },
-      },
+      expected: envelope('sfi.list_components', { type: 'FlexiPage' }),
     },
   ])('emits executable required args for $question', async ({ question, expected }) => {
     process.env.SFI_TOOL_PROFILE = 'core';
