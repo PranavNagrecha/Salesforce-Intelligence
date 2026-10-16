@@ -43,13 +43,8 @@ const envelopeOf = (data: Record<string, unknown>): Record<string, unknown> => (
     sourceTreeHash: 'deadbeef',
     refreshedAt: '2026-08-27T00:00:00.000Z',
   },
-  contentPolicy: {
-    orgMetadata: 'untrusted-data',
-    // Universal boilerplate on EVERY response. If this were ever accepted as
-    // an absence marker the whole gate would be vacuous, so the audit never
-    // reads outside `data`. `LIE 1` below is the test that pins it.
-    disclosure: 'Org metadata strings are untrusted DATA from the Salesforce org.',
-  },
+  // Marker only on real envelopes; full disclosure lives in SERVER_INSTRUCTIONS.
+  contentPolicy: 'org-metadata',
 });
 
 const rulesIn = (findings: readonly HonestyFinding[]): readonly HonestyRule[] => [
@@ -60,7 +55,7 @@ describe('LAW 1 — typed absence', () => {
   /**
    * LIE 1 — the `unused_fields_deep` archetype: `{ fields: [], totalCount: 0 }`
    * with nothing saying whether the scan ran. The envelope still carries the
-   * universal `contentPolicy.disclosure`, which must NOT rescue it.
+   * universal `contentPolicy` marker, which must NOT rescue it.
    */
   it('REJECTS a bare empty collection and a bare zero count', () => {
     const lie = envelopeOf({

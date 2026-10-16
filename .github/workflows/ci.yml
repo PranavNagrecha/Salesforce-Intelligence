@@ -1,7 +1,7 @@
 name: CI
 
-# v4.0 regression gate — matches scripts/v4-done-gate.sh (minus integration tests).
-# Integration tests require maintainer vaults; run locally with `pnpm test`.
+# Public regression gate: lint, unit tests, version and leak checks on every push.
+# Integration tests need maintainer vaults and run locally with `pnpm test:all`.
 
 on:
   push:
@@ -93,6 +93,9 @@ jobs:
 
       - name: Public-interface guard (CI/eval reference only in-repo synthetic vaults)
         run: node scripts/check-public-interface.mjs
+
+      - name: Changelog fragment present for code changes (or a release commit)
+        run: node scripts/check-changelog-fragments.mjs
 
       # Portability guard (no hand-rolled path separators) moved to the
       # windows-build-test job in 0.3.3: it guards against a bug class that

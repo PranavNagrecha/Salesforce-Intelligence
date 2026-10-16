@@ -173,11 +173,11 @@ const getSections = (
  *      preview; `<fields>` repeats once per field).
  *
  * Items without a `<field>` child (empty space, Visualforce page, custom
- * link, blank summary item) are skipped. Related-list columns
- * (`relatedLists > fields`) are deliberately NOT collected — those are
- * fields of the RELATED object, not this one, so a `CustomField:{thisObj}.X`
- * edge would be wrong. Deduplication preserves first-seen order; the caller
- * re-sorts for deterministic output.
+ * link, blank summary item) are skipped. Related-list columns are fields of
+ * the RELATED object, not this layout's object — they are captured separately
+ * as `relatedListFieldRefs` on the Layout node and resolved at import time
+ * (same child-relationship map as FlexiPage dynamic related lists). Deduplication
+ * preserves first-seen order; the caller re-sorts for deterministic output.
  */
 const collectFieldReferences = (
   rootObj: Record<string, unknown>,
@@ -219,6 +219,37 @@ const collectFieldReferences = (
     }
   }
   return fields;
+};
+
+/**
+ * Pair each `<relatedLists>` block's `<relatedList>` token with its `<fields>`
+ * column names. Column names are bare api names on the child object; the
+ * relationship name is NOT an object api name and is never turned into a field
+ * id here. Entries with no columns are omitted. Resolved into `usedInLayout`
+ * edges on the child object at import time (`relationship-refs.ts`).
+ */
+const collectRelatedListFieldRefs = (
+  rootObj: Record<string, unknown>,
+): Array<{ relatedListApiName: string; fields: string[] }> => {
+  const out: Array<{ relatedListApiName: string; fields: string[] }> = [];
+  for (const block of toArray(rootObj['relatedLists'])) {
+    if (typeof block !== 'object' || block === null) continue;
+    const blockObj = block as Record<string, unknown>;
+    const relatedListRaw = unwrapSingle(blockObj['relatedList']);
+    if (relatedListRaw === undefined || relatedListRaw === null) continue;
+    const relatedListApiName = String(relatedListRaw);
+    if (relatedListApiName.length === 0) continue;
+    const fields = [
+      ...new Set(
+        toArray(blockObj['fields'])
+          .map((raw) => (raw === undefined || raw === null ? '' : String(raw)))
+          .filter((name) => name.length > 0),
+      ),
+    ].sort();
+    if (fields.length === 0) continue;
+    out.push({ relatedListApiName, fields });
+  }
+  return out;
 };
 
 /**
@@ -352,8 +383,11 @@ const buildEdges = (
  * `CustomObject`, one `usedInLayout` edge per distinct field
  * reference — collected across the detail body, the Highlights Panel
  * (`summaryLayout`), and the mini layout (`miniLayout`), deduplicated and
- * sorted by `toId` for stable output (see `collectFieldReferences`) — and
- * one `references` edge (`properties.targetKind: 'customButton'`) per
+ * sorted by `toId` for stable output (see `collectFieldReferences`). Related-
+ * list columns are parked on `properties.relatedListFieldRefs` and become
+ * `usedInLayout` edges on the child object at import time when the relationship
+ * resolves; unresolved list names land on `properties.unresolvedRelatedLists`.
+ * Also one `references` edge (`properties.targetKind: 'customButton'`) per
  * distinct `<customButtons>` entry to its `WebLink:{object}.{name}`, with
  * the same names mirrored on `properties.customButtons`, and one
  * `references` edge (`properties.targetKind: 'quickAction'`) per distinct
@@ -422,6 +456,7 @@ export const extractLayout = async (
   const nodeId = `Layout:${objectApiName}.${layoutName}`;
   const sections = getSections(rootObj);
   const fieldReferences = collectFieldReferences(rootObj);
+  const relatedListFieldRefs = collectRelatedListFieldRefs(rootObj);
   const customButtons = collectCustomButtons(rootObj);
   const platformQuickActions = collectPlatformQuickActions(rootObj);
 
@@ -441,6 +476,7 @@ export const extractLayout = async (
       fieldCount: fieldReferences.length,
       sectionCount: sections.length,
       customButtons,
+      ...(relatedListFieldRefs.length > 0 ? { relatedListFieldRefs } : {}),
     },
   };
 

@@ -20,29 +20,22 @@ const plain: Record<string, string> = {
   "sfi.resolve": "Which component do you mean?",
   "sfi.search_components": "Find a component by name or label",
   "sfi.get_component": "Show me this component",
-  "sfi.list_components": "List every object, field, flow…",
-  "sfi.get_edges": "What is this directly connected to?",
-  "sfi.get_impact": "What breaks if I change this?",
+  "sfi.find_component_usages": "Where is this used?",
+  "sfi.find_dead_code": "Which code and automation is never used?",
+  "sfi.flow_graph": "Show me this flow’s steps and branches",
   "sfi.effective_permissions": "What does this profile and permission set mix allow?",
-  "sfi.order_of_execution": "What runs on insert, update, delete and undelete?",
-  "sfi.org_history": "What changed between refreshes?",
   "sfi.health_check": "Is the snapshot healthy and current?",
-  "sfi.org_card": "Give me a quick card about this org",
-  "sfi.route_question": "Which tool fits this question?",
-  "sfi.synthesize_answer": "Is this answer backed by evidence?",
-  "sfi.capabilities": "What can you answer?",
-  "sfi.guidance": "General Salesforce best practice",
   "sfi.list_analyses": "What other analyses are there?",
   "sfi.describe_analysis": "How do I call this analysis?",
   "sfi.run_analysis": "Run any analysis by name",
   "sfi.live_consent": "Turn the live, read-only mode on or off",
   "sfi.safe_to_delete_field": "Can I delete this field?",
   "sfi.why_cant_user_see_record": "Why can’t this user see it?",
-  "sfi.who_can_access_object": "Who can reach this object?",
-  "sfi.field_access_audit": "Who can read or edit this field?",
   "sfi.what_happens_on_save": "What runs when a record is saved?",
   "sfi.org_overview": "Give me a tour of this org",
 };
+const unlabelled = core.filter((n) => !(n in plain));
+if (unlabelled.length) throw new Error(`tools.astro: add a plain-language question for ${unlabelled.join(", ")}`);
 
 const rest = sections
   .map((s) => ({ label: s.label, tools: s.tools.filter((t) => !coreSet.has(t.name)) }))
@@ -93,7 +86,7 @@ const jsonld = [
 
   <section class="block" aria-labelledby="all">
     <h2 id="all">Everything else, by job</h2>
-    <p>{listedCount} tools in all, {listedCount - core.length} of them below. All read-only.</p>
+    <p>{listedCount} tools in all, {listedCount - core.length} of them below. None of them writes to Salesforce; the annotation tools save your notes into the local snapshot folder and nowhere else.</p>
     <nav class="toc" aria-label="Tool groups">
       {rest.map((s) => <a href={`#${slug(s.label)}`}>{s.label}</a>)}
     </nav>

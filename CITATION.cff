@@ -3,7 +3,7 @@ message: "If you use sf-intelligence in your work, please cite it using the meta
 title: sf-intelligence
 abstract: >-
   Salesforce Org Intelligence for AI agents — a read-only, offline,
-  source-available MCP server and CLI that answers metadata, dependency,
+  open-source (MIT) MCP server and CLI that answers metadata, dependency,
   permission, Apex and Flow questions grounded in an org's real retrieved
   metadata, with confidence-tagged evidence and honest refusals.
 type: software
@@ -12,9 +12,10 @@ authors:
     given-names: Pranav
 repository-code: "https://github.com/PranavNagrecha/Salesforce-Intelligence"
 url: "https://sfi.auditforce.cloud"
+license: MIT
 license-url: "https://github.com/PranavNagrecha/Salesforce-Intelligence/blob/main/LICENSE"
-version: 0.2.4
-date-released: "2026-07-23"
+version: 0.6.0
+date-released: "2026-10-16"
 keywords:
   - salesforce
   - mcp

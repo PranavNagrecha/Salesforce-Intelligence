@@ -3,14 +3,14 @@ name: developer-impact-and-reachability
 description: |
   Answers Salesforce developer "what breaks if I change X / where is M
   reachable from / what does this method touch / is this dead code"
-  questions. Cascades the v2.3 what-if composer family
+  questions. Cascades the what-if composer family
   (`what_if_deactivate_flow`, `what_if_disable_trigger`,
   `what_if_change_method_signature`, `what_if_change_field_type`,
   `what_if_remove_picklist_value`, `what_if_make_field_required`,
-  `what_if_merge_profiles`, `what_if_split_profile`) and the v2.7 deep
+  `what_if_merge_profiles`, `what_if_split_profile`) and the deep
   code-understanding tools (`call_graph`, `downstream_effects`,
   `test_coverage_for_method`, `method_reachability`,
-  `meaningful_test_audit`). Discloses the v2.3 / v2.7 boundary axes
+  `meaningful_test_audit`). Discloses the what-if and reachability boundary axes
   verbatim: class-granularity (not method); dynamic-dispatch and
   reflective-invocation invisibility; method-name echo (`method_name`
   surfaced verbatim, not subsetted); cross-class transitive analysis
@@ -21,15 +21,15 @@ description: |
 
 ## Overview
 
-This skill is the developer persona's companion to v2.3's what-if
-composer family and v2.7's deep code-understanding tools. The
+This skill is the developer persona's companion to the what-if
+composer family and the deep code-understanding tools. The
 developer's first-line question is one of five shapes:
 
 1. **"What breaks if I change X?"** — for a specific component +
    change kind, the answer is a structured `WhatIfImpactItem[]`
    list grouped by category (`metadata-blocker`,
    `code-needs-update`, `integration-touch`, `test-class-update`,
-   `invisible-risk`, `configuration-only`). v2.3 composers.
+   `invisible-risk`, `configuration-only`).
 2. **"Where is method M reachable from?"** — `sfi.call_graph` with
    `direction: 'both'` walks `callsApex` edges in both directions
    from a root class.
@@ -49,13 +49,13 @@ Plus a sixth shape:
    `sfi.meaningful_test_audit` ranks every `@isTest` class by
    fake-assertion count and assertion density.
 
-The boundary that matters for developers: **v2.7 ships
+The boundary that matters for developers: **sf-intelligence ships
 CLASS-level granularity.** A call from `ApexClass:A.foo()` to
 `ApexClass:B.bar()` produces ONE `A → B` `callsApex` edge with no
 method partition. The `methodName` input parameter on
 `sfi.test_coverage_for_method` is ACCEPTED and ECHOED verbatim into
-the response so callers can pipeline through a future v2.7.1
-method-scoped resolution — but v2.7 does NOT subset coverage by
+the response so callers can pipeline through a later release
+method-scoped resolution — but sf-intelligence does NOT subset coverage by
 method. Surface this verbatim.
 
 `sfi.method_reachability`, `sfi.call_graph` and
@@ -72,8 +72,8 @@ why `sfi.call_graph` (a deliberate `callsApex`-only walk) is never
 whole usage set) can be. Treat `complete: false` as "verify by reading
 the source", and never present it as a full picture.
 
-The v2.3 composer boundary: **the composers project, not
-predict.** Each what-if composer reads the v2.2-vintage vault state,
+The composer boundary: **the composers project, not
+predict.** Each what-if composer reads the vault state,
 applies its own per-tool rule set, and returns a
 structured impact list. Runtime evaluation, dataflow analysis,
 cross-class transitive analysis, and dynamic Apex are all invisible.
@@ -94,23 +94,23 @@ Concrete triggers:
 - **"What breaks if I change `processOrder`'s signature?"** — Use
   `sfi.what_if_change_method_signature`.
 - **"What breaks if I change `Industry__c` from Text to
-  Picklist?"** — Use `sfi.what_if_change_field_type`.
+  Picklist?"** — Use `sfi.what_if_change_field_type` (via `sfi.run_analysis`).
 - **"What breaks if I remove the `Tier 1` picklist value?"** — Use
   `sfi.what_if_remove_picklist_value`.
 - **"What breaks if I make `Industry__c` required?"** — Use
   `sfi.what_if_make_field_required`.
 - **"What if I merge `Sales_Rep` and `Sales_Manager` profiles?"** —
-  Use `sfi.what_if_merge_profiles`.
+  Use `sfi.what_if_merge_profiles` (via `sfi.run_analysis`).
 - **"How would I split `Sales_Rep` into per-team perm sets?"** —
-  Use `sfi.what_if_split_profile`.
+  Use `sfi.what_if_split_profile` (via `sfi.run_analysis`).
 
 ### Reachability / call-graph shape
 
 - **"Where is `OpportunityService.processOpp` called from?"** /
-  **"What calls this method?"** — Use `sfi.call_graph` with
+  **"What calls this method?"** — Use `sfi.call_graph` (via `sfi.run_analysis`) with
   `direction: 'upstream'`.
 - **"What does `processOpp` call?"** / **"What does this method
-  invoke downstream?"** — Use `sfi.call_graph` with
+  invoke downstream?"** — Use `sfi.call_graph` (via `sfi.run_analysis`) with
   `direction: 'downstream'`.
 - **"Map the full call chain around `OpportunityService`."** — Use
   `sfi.call_graph` with `direction: 'both'`, `maxDepth: 3`.
@@ -120,12 +120,12 @@ Concrete triggers:
 - **"What tests cover `OpportunityService`?"** — Use
   `sfi.test_coverage_for_method`.
 - **"Is `OpportunityService` dead code? / Where is this class
-  actually reached from?"** — Use `sfi.method_reachability`.
+  actually reached from?"** — Use `sfi.method_reachability` (via `sfi.run_analysis`).
 
 ### Test-quality shape
 
 - **"Does `OpportunityServiceTest` actually assert anything?"** /
-  **"What tests are fake?"** — Use `sfi.meaningful_test_audit`.
+  **"What tests are fake?"** — Use `sfi.meaningful_test_audit` (via `sfi.run_analysis`).
 
 ## When NOT to fire
 
@@ -133,22 +133,22 @@ Defer to another skill when:
 
 - **The user asks "where is `OpportunityService` used in source code?"**
   That's a code-reference question. Defer to
-  `developer-apex-refactor` → `sfi.find_code_usages`.
+  `developer-apex-refactor` → `sfi.find_code_usages` (via `sfi.run_analysis`).
 - **The user asks "what fields does Opportunity have?"** Schema
   lookup; defer to `answering-org-questions`.
 - **The user asks "audit my Apex for quality issues."** Defer to
-  `developer-code-quality` → `sfi.code_quality_audit`.
+  `developer-code-quality` → `sfi.code_quality_audit` (via `sfi.run_analysis`).
 - **The user asks "what's the convention for status fields?"**
   Pattern recognition; defer to `recognizing-naming-conventions`.
 - **The user wants the full cross-component dependency report**
   ("what depends on this field?"). That's
-  `architect-impact-analysis` → `sfi.get_impact` (BFS over every
+  `architect-impact-analysis` → `sfi.get_impact` (via `sfi.run_analysis`) (BFS over every
   edge type, not just `callsApex`).
-- **The user wants live coverage percentages.** v2.7 surfaces test
+- **The user wants live coverage percentages.** sf-intelligence surfaces test
   REACHABILITY, not Apex Test Run's actual coverage percentage.
-  v2.7 is offline; tell the user to run `sf apex test run` for the
+  sf-intelligence is offline; tell the user to run `sf apex test run` for the
   runtime numbers.
-- **The user wants the recognizer to WRITE the refactor.** v2.3 is
+- **The user wants the recognizer to WRITE the refactor.** sf-intelligence is
   read-only; it surfaces impact but never generates the deploy
   package.
 
@@ -156,9 +156,9 @@ Defer to another skill when:
 
 The 16 tools split by question shape. Pick the right entry point.
 
-### Category A — What-if change projection (v2.3, 11 composers)
+### Category A — What-if change projection (11 composers)
 
-Each composer reads the v2.2-vintage vault state, applies its own rule
+Each composer reads the vault state, applies its own rule
 set, and returns:
 
 - `impacts: WhatIfImpactItem[]` — one entry per affected component.
@@ -208,8 +208,7 @@ CALLERS on deactivation, surfaced as a distinct `broken-caller`
 category, and FlexiPages whose Flow component EMBEDS this Flow
 (`references` / `referenceKind: 'embeddedFlow'`) are EMBEDDED CALLERS,
 surfaced as a distinct `embedded-caller` category — the embed is an
-active invocation at render time, not passive access (this used to be
-excluded on the "access, not usage" theory; it no longer is).
+active invocation at render time, not passive access.
 `structuralVerdict`: `safe` (no verdict-bearing impact) / `risky`
 (callsApex only, or broken callers that are all inactive
 Draft/Obsolete) / `blocking` (record write, trigger, email-send, or
@@ -295,20 +294,20 @@ sensitive. Categories typically spread across `metadata-blocker`
 
 #### `sfi.what_if_remove_picklist_value`
 
-The most dependency-heavy v2.3 tool. Composes over:
+The most dependency-heavy what-if tool. Composes over:
 - Dependent picklist detection (`properties.controllingField`).
 - Formula reference detection (re-tokenize each formula source).
-- Flow decision detection (v2.0a `firesWhen` →
+- Flow decision detection (`firesWhen` →
   `ConditionalContext` → search for `== 'value'` /
   `!= 'value'` patterns).
 - Apex string-literal detection (conjunction: ApexClass has the
   literal AND has an incoming `readsFrom`/`writesTo` edge to the
   target field).
 
-The hard dependency on v2.0a: without `firesWhen` edges and
+The hard dependency: without `firesWhen` edges and
 `ConditionalContext` extraction, Flow decisions keyed on the value
 would be invisible. The composer surfaces an error if the vault
-is missing v2.0a extraction.
+is missing `ConditionalContext` extraction.
 
 #### `sfi.what_if_change_field_value`
 
@@ -328,7 +327,7 @@ Surface verbatim: the vault cannot see external upsert systems, the
 IdP side of SSO, or dynamic / managed-package code; automation
 buckets surface only declarative value-literal couplings — Apex
 literal comparisons remain invisible. For the portfolio version
-across many fields on an object, use `sfi.value_change_audit`.
+across many fields on an object, use `sfi.value_change_audit` (via `sfi.run_analysis`).
 
 #### `sfi.what_if_make_field_required`
 
@@ -361,7 +360,7 @@ Conflict shape depends on setting type. Default
 `suggestedResolution: 'manual'`. Optional `'max'` / `'min'` for
 starting-point recommendations.
 
-Multi-profile merge (3+) is not supported in v2.3.
+Multi-profile merge (3+) is not supported.
 
 #### `sfi.what_if_split_profile`
 
@@ -404,7 +403,7 @@ keeps it). Revoking a set not in the baseline is a disclosed no-op
 (`targetInBaseline: false`). Verdict `safe` on a no-op, else
 `review`. Same honesty surface as `assign_permset`.
 
-### Category B — Reachability (v2.7, 5 tools)
+### Category B — Reachability (5 tools)
 
 #### `sfi.call_graph`
 
@@ -416,7 +415,7 @@ Direction: `'upstream'` (incoming — who calls me), `'downstream'`
 { "rootId": "ApexClass:OpportunityService", "direction": "both", "maxDepth": 3 }
 ```
 
-Class-granularity is the v2.7 honesty boundary. State it.
+Class-granularity is the honesty boundary. State it.
 
 Input key is **`rootId`** (or the `componentId` alias) — it is
 REQUIRED. There is no `classApiName` alias on this tool, unlike
@@ -446,7 +445,7 @@ class, lists outgoing `writesTo` (field-write effects),
 (email effects). Returns `DownstreamEffect[]` categorized by
 edgeType.
 
-Callouts are NOT a separate v2.7 edge type (no `Apex.Http.send`
+Callouts are NOT a separate edge type (no `Apex.Http.send`
 extractor yet); the disclosure surfaces this gap explicitly.
 
 #### `sfi.test_coverage_for_method`
@@ -456,16 +455,16 @@ with `properties.isTest === true`. Returns `coveringTestClasses[]`
 sorted by id.
 
 The `methodName` parameter is ACCEPTED and echoed verbatim into
-the response — but v2.7 does NOT subset coverage by method. The
+the response — but sf-intelligence does NOT subset coverage by method. The
 class-granularity honesty boundary is verbatim. Method-level
-granularity is deferred to v2.7.1.
+granularity is deferred to a later release.
 
 #### `sfi.method_reachability`
 
 Walks upstream **USAGE** edges from the target — every `EdgeType`
 EXCEPT `parentOf` (structural containment) and `grantedBy` (an access
-grant is not a use). It is a DENY-list, not the `['callsApex']`
-allow-list it used to be: an allow-list can never learn about an edge
+grant is not a use). It is a DENY-list, not a `['callsApex']`
+allow-list: an allow-list can never learn about an edge
 type added after it (`dispatchesAsync`, the Apex scanner's
 `references`), and it is wrong in the direction that calls live code
 dead.
@@ -502,7 +501,7 @@ Combined verdict:
 - `likely-dead-code` — neither reaches within the depth cap.
 
 Surface the response's own `disclosure` verbatim rather than
-paraphrasing it. It states the v2.7 class granularity, the depth-3 BFS
+paraphrasing it. It states the class granularity, the depth-3 BFS
 cap, and that dynamic dispatch (`Type.forName`), reflective invocation
 and framework wiring are invisible. Two conditional suffixes matter:
 - on `likely-dead-code` it adds that this is NOT the org's dead-code
@@ -515,7 +514,7 @@ and framework wiring are invisible. Two conditional suffixes matter:
 #### `sfi.meaningful_test_audit`
 
 For every `isTest === true` ApexClass, computes:
-- `assertionCount` — invocations of `System.assert*` per v2.1.
+- `assertionCount` — invocations of `System.assert*`.
 - `fakeAssertionCount` — `qualityIssues[]` entries with
   `rule === 'fake-assertion'`.
 - `density` — `assertionCount / max(1, sourceBytes / 1000)`.
@@ -530,17 +529,17 @@ are invisible.
 
 ## Honesty axes
 
-### v2.7 class-granularity boundary (surface on every reachability response — summarised here; quote the response's own `disclosure`)
+### Class-granularity boundary (surface on every reachability response — summarised here; quote the response's own `disclosure`)
 
-> v2.7 ships CLASS-level granularity. A call from `ApexClass:A.foo()`
+> sf-intelligence ships CLASS-level granularity. A call from `ApexClass:A.foo()`
 > to `ApexClass:B.bar()` produces ONE `A → B` `callsApex` edge
 > with no method partition. The `methodName` input is accepted and
 > echoed into the response so callers can pipeline through future
-> method-scoped resolution — but v2.7 does NOT subset coverage,
+> method-scoped resolution — but sf-intelligence does NOT subset coverage,
 > reachability, or downstream effects by method. Method-level edge
-> resolution is deferred to v2.7.1.
+> resolution is deferred to a later release.
 
-### v2.7 invisible-dispatch boundary (surface on every reachability response — the response's own `disclosure` string is the authoritative wording; this is a summary of it, not a quotation)
+### Invisible-dispatch boundary (surface on every reachability response — the response's own `disclosure` string is the authoritative wording; this is a summary of it, not a quotation)
 
 > Dynamic dispatch (`Type.forName('...').newInstance().method(...)`),
 > reflective invocation, same-namespace framework wiring
@@ -559,7 +558,7 @@ such a class OFF `likely-dead-code` and map it to `uncertain` in
 outside invocation, never that the registration is live. Do not read
 either as "reachable"; read it as "not dead, unproven".
 
-### v2.3 confidence-floor rule
+### Confidence-floor rule
 
 For each finding, `confidence` is the worst confidence on the walk
 path from the changing component to the affected component. The
@@ -574,7 +573,7 @@ order is: `heuristic` (worst) < `parsed` < `declared` (best).
 State the per-finding confidence explicitly; don't paraphrase
 `heuristic` as "likely".
 
-### v2.3 per-tool boundaries (selected verbatim phrases)
+### Per-tool boundaries (selected verbatim phrases)
 
 | Tool | Verbatim phrase |
 |---|---|
@@ -584,12 +583,12 @@ State the per-finding confidence explicitly; don't paraphrase
 | `what_if_deactivate_flow` | "Deactivation does NOT delete the Flow; its definition remains and a later reactivation restores every effect listed. Parent Flows invoking this Flow as a declared `<subflows>` call ARE modeled as broken callers (an Active parent forces `blocking`); Lightning pages whose Flow component EMBEDS this Flow (declared `embeddedFlow` references) ARE modeled as embedded callers and always force `blocking`. The STILL-invisible path is Apex that invokes the Flow via `Flow.Interview` or `@InvocableMethod` chains, plus non-metadata launch points (buttons, quick actions)." |
 | `what_if_disable_trigger` | "Apex code that conditionally invokes the disabled trigger logic via a static utility wrapping the same handler is invisible. Test classes using `Test.startTest()` / `Test.stopTest()` semantics may depend on the trigger firing — review test setup before disabling." |
 | `what_if_change_method_signature` | "Callers come from the default-on Apex AST call-site index (`parsed`), with the recall scanner backfilling parse-failure files (`heuristic`) — cite each caller's own confidence; dynamic dispatch via Type.forName + invoke is invisible to both. Test classes identified by @isTest + naming convention; non-convention test classes may be missed." |
-| `what_if_merge_profiles` | "Multi-profile (3+) merge is not supported in v2.3 — exactly two profiles per call. Tie-break defaults to A wins for setting types where comparators are undefined." |
+| `what_if_merge_profiles` | "Multi-profile (3+) merge is not supported — exactly two profiles per call. Tie-break defaults to A wins for setting types where comparators are undefined." |
 | `what_if_split_profile` | "Greedy heuristic with no backtracking. Optimal partitioning (minimum overlap, maximum coverage) requires graph clustering; deferred to future milestone." |
 
-### v2.7 v2.1 inheritance — meaningful_test_audit
+### meaningful_test_audit inheritance
 
-- **`@isTest` recognition tied to v1.4 extraction.** A test class
+- **`@isTest` recognition tied to the Apex extraction.** A test class
   identified ONLY by naming convention (`MyClassTest` with no
   `@isTest` annotation) WILL NOT have `isTest: true`. The audit
   scope is `properties.isTest === true` set.
@@ -631,7 +630,7 @@ Claude's flow:
       { "conditionContextId": "ConditionalContext:Flow:Set_Opportunity_Owner.condition-0", "expression": "RecordType.DeveloperName == 'Standard_Opportunity' AND Owner == null" }
     ],
     "trust": { "…": "…" },
-    "disclosure": "v2.3 what-if analysis is composition over the v2.2 vault state. …"
+    "disclosure": "The what-if analysis is composition over the vault state. …"
   }
 }
 ```
@@ -698,17 +697,17 @@ The response leads with the `blocking` verdict, organizes by
 category, cites canonical IDs + edge confidence, surfaces the
 firing conditions (the actual gating logic the deactivation
 silences), suggests concrete next steps, and appends the
-verbatim v2.3 disclosure.
+verbatim disclosure.
 
 ## Anti-patterns
 
 | Mistake | Why it's wrong |
 |---|---|
-| Subsetting `sfi.test_coverage_for_method` results by the user-supplied `methodName`. | The class-granularity boundary is verbatim: v2.7 does NOT subset by method. The `methodName` is echoed for caller-pipelining only. Surface every covering test class for the target CLASS, with the verbatim disclosure. |
+| Subsetting `sfi.test_coverage_for_method` results by the user-supplied `methodName`. | The class-granularity boundary is verbatim: sf-intelligence does NOT subset by method. The `methodName` is echoed for caller-pipelining only. Surface every covering test class for the target CLASS, with the verbatim disclosure. |
 | Treating a `likely-dead-code` verdict from `sfi.method_reachability` as "this class is safe to delete." | Dynamic dispatch, reflective invocation, framework wiring, and managed-package callers are invisible. The verdict means "no usage in-edge and no entry-point classifier within depth-3"; verify with `sfi.find_dead_code` (adds a whole-word source re-check that can downgrade the class to `uncertain`) and `sfi.find_code_usages` before deletion. |
 | Surfacing a what-if finding without its `confidence`. | The confidence is the developer's verification axis. A `heuristic` finding is a candidate for false positive; a `declared` finding is metadata-sourced. State both. |
 | Subsetting `sfi.what_if_change_field_type` results to only `metadata-blocker` (hiding `configuration-only`). | The configuration-only findings (layouts, perm-set assignments) are the developer's "fix this before deploy" surface even though they won't break the deploy. Surface them; group by category, don't drop. |
-| Calling `sfi.what_if_remove_picklist_value` against a vault missing v2.0a extraction. | The composer surfaces an error in this case (Flow decisions keyed on the value would be invisible without `firesWhen` edges + `ConditionalContext` nodes). Recover with the v2.0a-not-extracted message; suggest `/sfi-refresh`. |
+| Calling `sfi.what_if_remove_picklist_value` against a vault missing the extraction. | The composer surfaces an error in this case (Flow decisions keyed on the value would be invisible without `firesWhen` edges + `ConditionalContext` nodes). Recover with the extraction-not-run message; suggest `/sfi-refresh`. |
 | Calling `sfi.call_graph` with `maxDepth: 10`. | `maxDepth` is bounded at **5**, so 10 is a rejected `invalid-query`, not a deep walk. The class-granularity boundary collapses methods together anyway; long chains rarely surface useful structure. Default `maxDepth: 3`; raise it to at most 5, and only when the user asks for an exhaustive walk. |
 | Treating `cycleDetected: true` in `sfi.call_graph` as "the architecture is broken." | A queueable class enqueueing itself is the textbook chunking pattern, NOT a bug. Mention the cycle but distinguish self-enqueue from genuine call-graph cycles. |
 | Skipping the dynamic-dispatch boundary on `sfi.test_coverage_for_method` results. | A class genuinely tested via `Type.forName(...)` will surface with an empty `coveringTestClasses[]`. State the boundary even when results are non-empty; the user may have OTHER tests that aren't surfacing. |
@@ -727,12 +726,12 @@ verbatim v2.3 disclosure.
   here and `sfi.test_coverage_gaps` there share the same
   `fake-assertion` rule.
 - `architect-impact-analysis` — for cross-component impact ("what
-  depends on this field"). v0.2 `sfi.get_impact` walks every edge
-  type; v2.3 composers narrow to a specific change kind.
+  depends on this field"). `sfi.get_impact` walks every edge
+  type; the composers narrow to a specific change kind.
 - `architect-async-and-events` — for `sfi.async_chain_depth`
   (transitive `dispatchesAsync` walk). Adjacent to
   `sfi.call_graph` but specialized to async dispatch.
-- `developer-field-deep-dive` — for v3.0 field synthesis
+- `developer-field-deep-dive` — for the full field synthesis
   (`sfi.field_360`, `sfi.field_lineage`) which COMPOSES this
   skill's per-method walks.
 
@@ -765,7 +764,7 @@ Before sending a response, confirm:
       Apex-create-coverage invisibility verbatim.
 - [ ] For `what_if_change_method_signature`, I surfaced the Q105
       dynamic-dispatch + test-class-naming-convention disclosure.
-- [ ] For `what_if_remove_picklist_value`, I confirmed v2.0a
+- [ ] For `what_if_remove_picklist_value`, I confirmed `ConditionalContext`
       extraction ran (the composer errors otherwise).
 - [ ] For `meaningful_test_audit`, I cited the custom-assertion-
       helper invisibility verbatim.
@@ -776,4 +775,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

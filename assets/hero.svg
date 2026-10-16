@@ -29,7 +29,7 @@
   <g font-size="13.5" fill="#7FE7A5">
     <g transform="translate(1008,58)">
       <rect width="150" height="33" rx="16.5" fill="url(#chipbg)" stroke="#2A5A3B"/>
-      <text x="18" y="21">sfi.get_impact</text>
+      <text x="18" y="21">sfi.find_component_usages</text>
     </g>
     <g transform="translate(772,104)">
       <rect width="262" height="33" rx="16.5" fill="url(#chipbg)" stroke="#2A5A3B"/>
@@ -37,15 +37,15 @@
     </g>
     <g transform="translate(1024,150)">
       <rect width="146" height="33" rx="16.5" fill="url(#chipbg)" stroke="#2A5A3B"/>
-      <text x="18" y="21">sfi.field_360</text>
+      <text x="18" y="21">sfi.what_happens_on_save</text>
     </g>
     <g transform="translate(806,196)">
       <rect width="214" height="33" rx="16.5" fill="url(#chipbg)" stroke="#2A5A3B"/>
-      <text x="18" y="21">sfi.order_of_execution</text>
+      <text x="18" y="21">sfi.flow_graph</text>
     </g>
     <g transform="translate(998,242)">
       <rect width="172" height="33" rx="16.5" fill="url(#chipbg)" stroke="#2A5A3B"/>
-      <text x="18" y="21">sfi.pii_inventory</text>
+      <text x="18" y="21">sfi.effective_permissions</text>
     </g>
     <g transform="translate(780,288)">
       <rect width="228" height="33" rx="16.5" fill="url(#chipbg)" stroke="#2A5A3B"/>
@@ -59,7 +59,7 @@
 
   <!-- brand line -->
   <text x="70" y="70" fill="#3DF07A" font-size="27" font-weight="700" filter="url(#glow)">&gt;_ sf-intelligence</text>
-  <text x="70" y="98" fill="#5E8A6E" font-size="16">read-only · offline · source-available</text>
+  <text x="70" y="98" fill="#5E8A6E" font-size="16">read-only · offline · open source (MIT)</text>
 
   <!-- headline -->
   <text x="68" y="168" fill="#EAF6EE" font-size="44" font-weight="800" letter-spacing="-1">Salesforce Org Intelligence</text>
@@ -71,11 +71,11 @@
 
   <!-- stats -->
   <text x="70" y="330" font-size="17.5" font-weight="700">
-    <tspan fill="#3DF07A">209 tools</tspan><tspan fill="#43514A">  ·  </tspan><tspan fill="#3DF07A">23 edge types</tspan><tspan fill="#43514A">  ·  </tspan><tspan fill="#3DF07A">102 component types</tspan><tspan fill="#43514A">  ·  </tspan><tspan fill="#9FB4A6">0 writes</tspan>
+    <tspan fill="#3DF07A">cited answers</tspan><tspan fill="#43514A">  ·  </tspan><tspan fill="#3DF07A">23 edge types</tspan><tspan fill="#43514A">  ·  </tspan><tspan fill="#3DF07A">103 component types</tspan><tspan fill="#43514A">  ·  </tspan><tspan fill="#9FB4A6">0 writes</tspan>
   </text>
 
   <!-- terminal command -->
-  <text x="70" y="366" font-size="16"><tspan fill="#3DF07A">$</tspan><tspan fill="#8AA795"> sfi ask "what breaks if I delete Account.Industry?"</tspan></text>
+  <text x="70" y="366" font-size="16"><tspan fill="#3DF07A">&gt;</tspan><tspan fill="#8AA795"> what breaks if I delete Account.Industry?</tspan></text>
 
   <!-- footer -->
   <text x="70" y="400" fill="#5E7466" font-size="13.5">MIT   ·   github.com/PranavNagrecha/Salesforce-Intelligence   ·   sfi.auditforce.cloud</text>

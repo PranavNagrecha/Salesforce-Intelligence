@@ -72,17 +72,23 @@ export type {
   MethodCallSite,
   OmniStudioApexCall,
 } from './apex-scanner.js';
-export { scanFrontendSource } from './frontend-scanner.js';
+export {
+  scanAuraMarkupFields,
+  scanFrontendSource,
+  scanLwcHtml,
+} from './frontend-scanner.js';
 export type {
   FrontendApexCall,
   FrontendComponentRef,
   FrontendDialect,
   FrontendFieldAccess,
   FrontendFieldAccessOrigin,
+  FrontendMarkupScanOutput,
   FrontendResourceRef,
   FrontendScannerError,
   FrontendScannerErrorKind,
   FrontendScannerOutput,
+  FrontendUnresolvedFieldBinding,
 } from './frontend-scanner.js';
 export { tokenizeFormula } from './formula-tokenizer.js';
 export type {

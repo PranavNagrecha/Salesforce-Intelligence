@@ -1,16 +1,16 @@
 ---
-description: Show SfIntelligence vault freshness and component counts.
+description: Show sf-intelligence vault freshness and component counts.
 argument-hint: "[--json]"
 ---
 
-You are about to show the SfIntelligence vault status.
+You are about to show the sf-intelligence vault status.
 
 ## Running the CLI
 
 The plugin installs the MCP server, not the `sfi` command. Before the first
 command, run `command -v sfi` via the Bash tool. If it prints a path, run the
 commands below as written. If it prints nothing, run every `sfi …` command
-below as `npx -y sf-intelligence@0.5.0 …` instead, with the same arguments.
+below as `npx -y sf-intelligence@0.6.0 …` instead, with the same arguments.
 The Bash tool has no terminal, so the CLI cannot prompt: always pass the
 flags it would otherwise ask for.
 

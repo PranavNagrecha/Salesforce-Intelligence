@@ -6,8 +6,8 @@
  * signal is lost, not merely inconvenient. This script is privacy-preserving:
  * it stores aggregate counts only (no popular paths, no referrers, no tokens).
  *
- * Cadence (maintainer): run at least weekly (daily is fine). Documented in
- * docs/reports/adoption-baseline.md. Default output is gitignored.
+ * Cadence (maintainer): run at least weekly (daily is fine). Default output
+ * is gitignored.
  *
  * Usage:
  *   node scripts/capture-github-traffic.mjs

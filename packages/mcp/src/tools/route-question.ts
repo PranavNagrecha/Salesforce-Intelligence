@@ -1186,6 +1186,7 @@ const TOOL_COMPATIBLE_TYPES: ReadonlyMap<string, ReadonlySet<string>> = new Map(
   ['sfi.call_graph', new Set(['ApexClass', 'ApexTrigger'])],
   ['sfi.method_reachability', new Set(['ApexClass', 'ApexTrigger'])],
   ['sfi.explain_apex_method', new Set(['ApexClass', 'ApexTrigger'])],
+  ['sfi.crud_fls_audit', new Set(['ApexClass', 'ApexTrigger'])],
   ['sfi.who_can_access_object', new Set(['CustomObject'])],
   ['sfi.object_access_audit', new Set(['CustomObject'])],
   ['sfi.field_access_audit', new Set(['CustomField'])],

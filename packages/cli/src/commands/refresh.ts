@@ -6085,7 +6085,7 @@ export const registerRefreshCommand = (program: Command): void => {
     )
     .option(
       '--with-tooling-api',
-      'After the offline refresh completes, run the v1.7 Tooling API enrichment pass to hydrate `lastModifiedDate` / `lastModifiedBy` / `apiVersion` on enrichable nodes, confirm declared dependencies (stamps `confirmedByApi` on matching edges and appends `dependsOnFromApi` edges from MetadataComponentDependency), and capture the platform PermissionDependency graph ("permission X requires permission Y") to `meta/permission-dependencies.json` so effective-permission answers expand declared grants through their required permissions instead of understating access. Requires `sf` CLI installed and the target org alias authenticated.',
+      'After the offline refresh completes, run the Tooling API enrichment pass to hydrate `lastModifiedDate` / `lastModifiedBy` / `apiVersion` on enrichable nodes, confirm declared dependencies (stamps `confirmedByApi` on matching edges and appends `dependsOnFromApi` edges from MetadataComponentDependency), and capture the platform PermissionDependency graph ("permission X requires permission Y") to `meta/permission-dependencies.json` so effective-permission answers expand declared grants through their required permissions instead of understating access. Requires `sf` CLI installed and the target org alias authenticated.',
     )
     .option(
       '--with-audit-trail',

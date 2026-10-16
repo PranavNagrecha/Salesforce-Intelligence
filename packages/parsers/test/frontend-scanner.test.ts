@@ -2,6 +2,7 @@
 
 import {
   scanFrontendSource,
+  scanLwcHtml,
   type FrontendDialect,
 } from '../src/frontend-scanner.js';
 
@@ -482,5 +483,99 @@ describe('scanFrontendSource — resourceRefs (P14-USAGE-label-static-graph)', (
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.resourceRefs.map((r) => r.apiName)).not.toContain('c');
+  });
+});
+
+describe('scanLwcHtml — component markup field bindings (V6-6)', () => {
+  it('binds input/output fields and record-form lists when object-api-name is present', () => {
+    const html = `<template>
+  <lightning-record-edit-form object-api-name="Demo_Obj__c" fields="Demo_Field__c, Demo_Other__c">
+    <lightning-input-field field-name="Demo_Notes__c"></lightning-input-field>
+    <lightning-output-field field-name="Demo_Status__c"></lightning-output-field>
+  </lightning-record-edit-form>
+</template>`;
+    const result = scanLwcHtml(html);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.fieldAccesses).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'write',
+          object: 'Demo_Obj__c',
+          field: 'Demo_Field__c',
+          origin: 'lwc-markup',
+        }),
+        expect.objectContaining({
+          type: 'write',
+          object: 'Demo_Obj__c',
+          field: 'Demo_Notes__c',
+          origin: 'lwc-markup',
+        }),
+        expect.objectContaining({
+          type: 'read',
+          object: 'Demo_Obj__c',
+          field: 'Demo_Status__c',
+          origin: 'lwc-markup',
+        }),
+      ]),
+    );
+    expect(result.value.unresolvedFieldBindings).toEqual([]);
+  });
+
+  it('emits markup-qualified access for Object.Field without enclosing object', () => {
+    const html = `<template>
+  <lightning-input-field field-name="Demo_Obj__c.Demo_Qualified__c"></lightning-input-field>
+</template>`;
+    const result = scanLwcHtml(html);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.fieldAccesses[0]).toMatchObject({
+      type: 'write',
+      object: 'Demo_Obj__c',
+      field: 'Demo_Qualified__c',
+      origin: 'markup-qualified',
+    });
+  });
+
+  it('records bare field names as unresolved without minting field access edges', () => {
+    const html = `<template>
+  <lightning-input-field field-name="Demo_Bare__c"></lightning-input-field>
+</template>`;
+    const result = scanLwcHtml(html);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.fieldAccesses).toEqual([]);
+    expect(result.value.unresolvedFieldBindings).toEqual([
+      expect.objectContaining({ fieldName: 'Demo_Bare__c', type: 'write' }),
+    ]);
+  });
+});
+
+describe('scanFrontendSource — Aura markup field bindings (V6-6)', () => {
+  it('reads force:recordData fields and lightning input/output fields', () => {
+    const markup = `<aura:component>
+  <force:recordData sobjectType="Demo_Obj__c" fields="Demo_Field__c, Demo_Other__c"/>
+  <lightning:inputField fieldName="Demo_Notes__c" objectApiName="Demo_Obj__c"/>
+  <lightning:outputField fieldName="Demo_Status__c" objectApiName="Demo_Obj__c"/>
+</aura:component>`;
+    const result = scanFrontendSource(markup, 'aura');
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.fieldAccesses).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'read',
+          object: 'Demo_Obj__c',
+          field: 'Demo_Field__c',
+          origin: 'aura-markup',
+        }),
+        expect.objectContaining({
+          type: 'write',
+          object: 'Demo_Obj__c',
+          field: 'Demo_Notes__c',
+          origin: 'aura-markup',
+        }),
+      ]),
+    );
   });
 });

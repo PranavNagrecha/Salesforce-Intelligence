@@ -213,13 +213,13 @@ Illustrative only — invented object and field names.
 
 | Field | Pop. | Prior call | Final call | Conf. | One-line reason |
 |---|---|---|---|---|---|
-| **CHANGED — `Custom_Object__c.My_Records_Flag__c`** | 0% (artifact) | Remove / No Risk | **Keep** | High (0/3 refuters could break it) | Running-user formula, so 0% measures who ran the query; it is the **sole filter** of 2 reports on a live manager-scoped dashboard — deleting it fails those reports **open**, not empty |
+| **CHANGED — `Demo_Object__c.Demo_My_Records_Flag__c`** | 0% (artifact) | Remove / No Risk | **Keep** | High (0/3 refuters could break it) | Running-user formula, so 0% measures who ran the query; it is the **sole filter** of 2 reports on a live manager-scoped dashboard — deleting it fails those reports **open**, not empty |
 
 **Backing evidence record:**
 
 ```
-Field           Custom_Object__c.My_Records_Flag__c            [illustrative]
-Type            Formula (Checkbox) — IF(Owner_Lookup__r.Id = $User.Id, TRUE, FALSE)
+Field           Demo_Object__c.Demo_My_Records_Flag__c            [illustrative]
+Type            Formula (Checkbox) — IF(Demo_Owner_Lookup__r.Id = $User.Id, TRUE, FALSE)
 Structural      not required · not unique · trackHistory=false
 Population      N/A (formula). Prior figure "0%" is a MEASUREMENT ARTIFACT:
                 the formula is true only for the querying identity's own rows.

@@ -10,9 +10,20 @@ not, start with [`installation.md`](./installation.md) and
 tool surface, see [`../architecture.md`](../architecture.md).
 
 You don't need to know any API name, intent name, or tool name to start.
-The plugin maps each question to the matching `sfi.*` tool and cites
-canonical component IDs in its response; this guide is the human-readable
-map of what works.
+Your AI host picks the matching `sfi.*` tool and cites canonical component
+IDs in its response; this guide is the human-readable map of what works.
+
+A note on the tool names in this guide. A small core set is callable
+directly: `sfi.resolve`, `sfi.search_components`, `sfi.get_component`,
+`sfi.health_check`, `sfi.org_overview`, `sfi.find_component_usages`,
+`sfi.safe_to_delete_field`, `sfi.what_happens_on_save`, `sfi.find_dead_code`,
+`sfi.why_cant_user_see_record`, `sfi.effective_permissions`, `sfi.flow_graph`,
+`sfi.live_consent`, `sfi.list_analyses`, `sfi.describe_analysis` and
+`sfi.run_analysis`. Every other `sfi.*` name below runs through
+`sfi.run_analysis` with `{ name: 'sfi.<tool>', args: { ... } }` and returns
+the same answer. You never type either form: ask in plain language and the
+host does it. Coming from a release before 0.5.0? See
+[`upgrading.md`](./upgrading.md).
 
 ## 0. The conversational front door
 
@@ -41,21 +52,23 @@ Resolution is always `heuristic` confidence and labeled as such; a high
 match score is string similarity, not proof. Free-text search
 (`sfi.search_components`) self-heals through the same resolver on a
 zero-result query, so a near-miss still surfaces the likely candidates
-instead of an empty list. Ask `sfi.capabilities` (or just "what can you
-do?") for the live map of capability areas.
+instead of an empty list. Ask "what can you do?" for the map of capability
+areas; the host answers from `sfi.list_analyses`.
 
-Routing is **advisory**: `sfi.route_question` surfaces a meaning-ranked
-shortlist of tools and your AI host decides which to run — and it fails
-closed on questions it should not route (write requests, prompt injection,
-asks no tool covers get a refusal or an honest gap, never a lookalike tool).
-Terse follow-ups ("does it fire on delete too?") work when the host passes
-the optional `context.previous` param — the server keeps no conversation
-memory. Full host contract in [`../routing.md`](../routing.md).
+Routing is your AI host's job: it reads the core tool descriptions and picks
+one, or reaches any other analysis through `sfi.run_analysis`. For a
+meaning-ranked shortlist of candidate tools it can run `sfi.route_question` (through `sfi.run_analysis`)
+(through `sfi.run_analysis`). The shortlist is advice, never a command, and
+it fails closed on questions it should not route (write requests, prompt
+injection, asks no tool covers get a refusal or an honest gap, never a
+lookalike tool). Terse follow-ups ("does it fire on delete too?") work when
+the host passes the optional `context.previous` param — the server keeps no
+conversation memory. Full host contract in [`../routing.md`](../routing.md).
 
-For broad **discovery** questions, `sfi.route_question` also returns
-`suggestedArgs` — the argument the first recommended tool needs to run —
-so the ask answers in one hop instead of erroring on a missing parameter.
-"Duplicate rules on `Lead`" routes to `sfi.list_components` with
+For broad **discovery** questions the shortlist also carries
+`suggestedArgs` — the argument the first recommended tool needs to run — so
+the ask answers in one hop instead of erroring on a missing parameter.
+"Duplicate rules on `Lead`" leads to `sfi.list_components` with
 `{ type: 'DuplicateRule' }`; "what OmniScripts exist?" lists the
 OmniStudio sub-family; "CPQ dependencies" leads with the org-wide
 `sfi.cpq_dependency_map`. Questions that need a parent (e.g. "what fields
@@ -107,8 +120,10 @@ Examples:
 - "What permission sets grant access to `OpportunityService.apxc`?"
 - "Show me everything one hop from `CustomField:Account.Industry__c`."
 
-Tools: `sfi.get_edges` (one-hop, with optional `edgeType` and
-`direction`); `sfi.get_subgraph` (N-hop neighborhood).
+Tools: `sfi.find_component_usages` (everything that references a
+component, grouped by family — the where-used answer); `sfi.get_edges`
+(one-hop, with optional `edgeType` and `direction`); `sfi.get_subgraph`
+(N-hop neighborhood).
 
 A few of the foundational edge types (every edge carries a confidence —
 `declared`, `parsed`, or `heuristic`):
@@ -122,11 +137,15 @@ A few of the foundational edge types (every edge carries a confidence —
 | `callsApex`   | `Flow`                      | `ApexClass`                 |
 | `readsFrom` / `writesTo` | Apex / Flow      | `CustomField`               |
 
-The graph models 23 edge types in total across 103 component types —
-including Apex call edges, Flow-to-Apex invocations, and formula field
-references. (That 103 is the count of org-metadata *component* types in the
-graph; it is unrelated to the 143 curated reasoning *concepts* in the Concept
-Model — see §2b.) The confidence word on an edge (`declared` / `parsed` /
+The graph models many more edge types — Apex call edges, Flow-to-Apex
+invocations, formula field references, Flow screen field bindings, LWC/Aura
+markup bindings and Classic page-layout related-list columns among them.
+(The component types in the graph are unrelated to the reasoning *concepts*
+in the Concept Model — see §2b.) Screen fields, markup bindings and
+related-list columns are modeled only in vaults built by 0.6.0 or later:
+after upgrading, run `/sfi-refresh` before trusting a where-used or
+safe-to-delete verdict on a field that only a screen, a component template
+or a related list touches. The confidence word on an edge (`declared` / `parsed` /
 `heuristic`) is **edge confidence** — it grades that one relationship. A
 reasoning *claim* from `sfi.interpret` (§2b) carries a **separate** claim
 confidence; don't conflate them. The honesty boundary is **static analysis,
@@ -210,6 +229,14 @@ static analysis, so a "no references" result means "no static evidence",
 not "definitely unused". Treat heuristic-confidence matches as a strong
 lead to spot-check, not proof.
 
+**LWC / Aura markup.** Declarative bindings on base Lightning components
+(`lightning-input-field`, `lightning-record-*-form`, Aura `force:recordData`,
+and related tags) are modeled as `readsFrom` / `writesTo` edges when the
+enclosing form names an object (or the attribute is `Object.Field`).
+Bare field names with no derivable object are recorded on the bundle node
+as `unresolvedFieldBindings` and do not mint an edge — the graph will not
+guess the SObject.
+
 ### Flow questions
 
 Grep Flow XML for a literal, or ask what a Flow does.
@@ -220,10 +247,14 @@ Examples:
 - "What does `My_Flow` do when an Account is created?"
 - "Which Apex class does `My_Flow` invoke?"
 
-Tools: `sfi.search_flow_metadata` (text grep over Flow XML, same shape as
-`search_apex_source`), plus the Flow-explanation tool that narrates a
-Flow's trigger, decisions, and actions, and the `callsApex` edge that links
-a Flow to the Apex it invokes.
+Tools: `sfi.flow_graph` (the flow's elements and connectors as a graph),
+`sfi.search_flow_metadata` (text grep over Flow XML, same shape as
+`search_apex_source`), plus `sfi.explain_flow`, which narrates a Flow's
+trigger, decisions, and actions, and the `callsApex` edge that links a Flow
+to the Apex it invokes. Screen fields bound to a record field, and non-Apex
+actions (email alerts, quick actions, external services, subflows), are
+edges too, so "which flows reference `Industry__c`" includes a field that
+only a screen shows.
 
 **Boundary — same static-not-runtime caveat.** Flow analysis reads the
 declared XML; it does not execute the Flow against live records.
@@ -235,8 +266,8 @@ references what. A second class of question asks what a structure
 **implies**: does deleting this parent cascade-delete its children? Do these
 two flows run in a defined order? Is this class an entry point where
 field-level security isn't auto-enforced? Those are answered by
-`sfi.interpret`, which joins a curated, org-independent **Concept Model** (143
-concepts / 195 rules of general Salesforce truth) against the org's grounded
+`sfi.interpret`, which joins a curated, org-independent **Concept Model**
+(rules of general Salesforce truth) against the org's grounded
 vault slice and returns **cited, confidence-tiered structural claims**. It is
 deterministic and offline — no LLM, no live org read.
 
@@ -254,16 +285,17 @@ Examples of what fires today:
 - "Is `Enrollment__c` a junction object?" — the two-master many-to-many
   pattern (deleting *either* parent cascade-deletes the link records).
 
-The pattern is **resolve → interpret → synthesize**: resolve the component,
-interpret its structural implications, then let `sfi.synthesize_answer` fold
-the cited claims into the answer (hedged and attributed). A worked session:
+The pattern is **resolve → interpret → answer**: resolve the component,
+interpret its structural implications, then let the host fold the cited
+claims into the answer (hedged and attributed). A worked session:
 
 ```
 User: Is there anything risky about the automation on Account?
 
 Claude (silently): sfi.resolve({ query: 'Account' })
                    → exact: CustomObject:Account
-Claude (silently): sfi.interpret({ componentId: 'CustomObject:Account' })
+Claude (silently): sfi.run_analysis({ name: 'sfi.interpret',
+                                      args: { componentId: 'CustomObject:Account' } })
 
 Claude: Two active before-save record-triggered flows fire on
         `CustomObject:Account` in the same trigger context, so Salesforce
@@ -375,18 +407,17 @@ Examples:
 - "Who deployed `AccountTrigger`?"
 - "What's the change history for `My_Flow`?"
 
-**Canonical refusal:**
+These are answered, with prerequisites, and all run through `sfi.run_analysis`:
 
-> The offline vault is a snapshot taken at refresh time, with no change
-> history. For history, check Salesforce's Setup Audit Trail or the
-> source-control diff on `org-kb/components/` between two refresh commits.
+| Question | Tool | Needs |
+|---|---|---|
+| When was X last modified, what changed since a date | `sfi.last_modified`, `sfi.changed_since` | a refresh run with `--with-tooling-api`, which captures last-modified dates and authors |
+| Change history of one component, or how it looked at a date | `sfi.component_history`, `sfi.component_as_of` | the vault committed to git (`org-kb/components/`), so the history is the commit history |
+| Who changed setup, field value history | `sfi.live_setup_audit_trail`, `sfi.live_field_history` | the opt-in live plane (`sfi.live_consent`) |
 
-The `org-kb/components/` git diff is deterministic
-([`../architecture.md`](../architecture.md) §7), so two commits a
-week apart show exactly what changed in the org. (An opt-in
-`/sfi-refresh --with-tooling-api` enricher can pull declared dependency
-edges from the Tooling API, but the default offline vault holds no
-per-component modification history.)
+Without the prerequisite the honest answer is a refusal: the offline vault is a
+snapshot taken at refresh time, and Salesforce's Setup Audit Trail is the record
+of who changed what.
 
 ### Record-level analysis ("which Accounts have X")
 
@@ -411,7 +442,8 @@ Same boundary as live data unless `sfi.live_sample` is enabled for the org.
 Before answering "safe to delete?", "nothing uses this field", or "what breaks if
 I deactivate this flow?", check completeness:
 
-1. Call `sfi.coverage_report` (or read `coverage` from `sfi.health_check`).
+1. Read `coverage` from `sfi.health_check` (or run `sfi.coverage_report` through `sfi.run_analysis`
+   through `sfi.run_analysis`).
 2. Run the destructive or what-if tool.
 3. If the tool returns `coverageCaveat`, render it **before** the verdict.
 
@@ -429,9 +461,10 @@ full reasoning chain.
 
 Enterprise synthesis tools (`sfi.org_risk_report` — add `gate: true` for the
 deploy readiness gate — `sfi.unused_fields_deep` with `format: 'cleanup'`, etc.)
-rank offline evidence only unless you explicitly composed live tools in the same answer. Call `sfi.coverage_report` before
-acting on ranked risks. Ordering is deterministic across calls with the same vault
-state. For change-over-time, use `sfi.trend` / `sfi.diff_snapshots` (persisted
+rank offline evidence only unless you explicitly composed live tools in the same
+answer; they run through `sfi.run_analysis`. Check coverage before acting on
+ranked risks. Ordering is deterministic across calls with the same vault
+state. For change-over-time, run `sfi.trend` / `sfi.diff_snapshots` through `sfi.run_analysis` (persisted
 snapshots; `sfi refresh` captures a snapshot by default unless
 `snapshotOnRefresh: false` in `meta/config.json` — add `summary: true` to
 diff_snapshots for the compact churn digest) and `sfi.org_history` for refresh timelines.
@@ -440,15 +473,15 @@ diff_snapshots for the compact churn digest) and `sfi.org_history` for refresh t
 
 Use **hybrid** routing when the user needs both:
 
-- static dependencies from the vault (`sfi.get_impact`, `sfi.safe_to_delete_field`), and
+- static dependencies from the vault (`sfi.find_component_usages`, `sfi.safe_to_delete_field`), and
 - runtime facts from the org (`sfi.live_field_population`, `sfi.live_count`).
 
 Disclose both planes: `offline_snapshot` for graph answers, `live_org` for SOQL.
 Never imply the vault proved a field unused because a live count returned zero —
 those are separate evidence channels.
 
-Ask `sfi.capabilities` for `intelligencePlanes` and `routingGuidance` when unsure
-which plane applies.
+When unsure which plane applies: vault tools answer from the snapshot;
+anything named `sfi.live_*` reads the org and needs consent.
 
 ## 4. Phrasing tips
 
@@ -471,7 +504,7 @@ The canonical-ID format is `Type:Id`. Examples:
 - `ApexTrigger:AccountTrigger`
 - `Layout:Account-Account Layout`
 - `PermissionSet:Sales_Manager`
-- `Profile:System Administrator`
+- `Profile:Admin` (the profile's API name, not its label)
 
 Claude can recover from a casual phrasing — `sfi.search_components`
 does fuzzy matching. But canonical names cut a round-trip.
@@ -533,12 +566,13 @@ happen silently; you see only question and answer.
 User: What custom objects do we have?
 
 Claude (silently): sfi.health_check → status: healthy
-Claude (silently): sfi.list_components({ type: 'CustomObject' })
+Claude (silently): sfi.run_analysis({ name: 'sfi.list_components',
+                                      args: { type: 'CustomObject' } })
 
 Claude: Your org has 47 custom objects. The most-referenced are:
-        - `CustomObject:Account` (52 fields, 8 validation rules)
-        - `CustomObject:Opportunity` (38 fields, 5 validation rules)
-        - `CustomObject:Contact` (29 fields, 3 validation rules)
+        - `CustomObject:Project__c` (52 fields, 8 validation rules)
+        - `CustomObject:Installation__c` (38 fields, 5 validation rules)
+        - `CustomObject:Invoice__c` (29 fields, 3 validation rules)
         Full list of 47 — say "list all" for the rest.
 ```
 
@@ -547,19 +581,19 @@ Claude: Your org has 47 custom objects. The most-referenced are:
 ```
 User: What permission sets grant access to Account.Industry__c?
 
-Claude (silently): sfi.get_edges({
+Claude (silently): sfi.run_analysis({ name: 'sfi.get_edges', args: {
                      nodeId: 'CustomField:Account.Industry__c',
                      edgeType: 'grantedBy',
                      direction: 'in'   // 'incoming'/'outgoing' also accepted
-                   })
+                   } })
 
 Claude: `CustomField:Account.Industry__c` is granted by 3 permission
         sets and 2 profiles (all `confidence: declared`):
         - `PermissionSet:Sales_Manager` — read + edit
         - `PermissionSet:Marketing_Analyst` — read only
         - `PermissionSet:Data_Steward` — read + edit
-        - `Profile:System Administrator` — read + edit
-        - `Profile:Standard User` — read only
+        - `Profile:Admin` — read + edit
+        - `Profile:Standard` — read only
         Note: field-level only. Object-level permission on
         `CustomObject:Account` is a separate question.
 ```
@@ -589,9 +623,8 @@ Claude: I have no record-level data — the vault is metadata only
 ```
 User: What's our naming convention for date fields on Account?
 
-Claude (silently): sfi.get_naming_convention_report({
-                     scope: 'CustomField:Account'
-                   })
+Claude (silently): sfi.run_analysis({ name: 'sfi.get_naming_convention_report',
+                                      args: { scope: 'CustomField:Account' } })
 
 Claude: Based on 5 observed Date-type fields on `CustomObject:Account`
         (heuristic confidence):
@@ -638,7 +671,10 @@ behaviour, audit/change history, or record-level analysis, the offline
 vault can't answer it — refresh won't change that. Use the workaround in
 the canonical refusal (`sf data query`, source-control diff, Setup Audit
 Trail). For a dynamically-accessed field, remember the static-analysis
-boundary (§2): "no references" means "no static evidence".
+boundary (§2): "no references" means "no static evidence". For an error the
+tool itself returned (`invalid-query`, `component-not-found`, an oversize
+answer, "not directly invokable"), see
+[`troubleshooting.md`](./troubleshooting.md).
 
 ### Step 4: It's a bug
 
@@ -664,22 +700,26 @@ A few choices trip people up:
 - **Save order needs an explicit event.** `sfi.what_happens_on_save` takes
   `event: 'insert' | 'update' | 'upsert' | 'delete' | 'undelete'`. Trigger-style
   phrasings ("after update", "before insert") and any casing are accepted and
-  normalized; when the question doesn't say, default to `update`. Use
-  `sfi.order_of_execution` for the all-events overview.
+  normalized; when the question doesn't say, default to `update`.
+  `sfi.order_of_execution` (through `sfi.run_analysis`) gives the all-events
+  overview.
 - **Dead code: two complementary tools.** `sfi.find_dead_code` gives a
   per-component reachability verdict (entry-point / test-only / likely-dead)
   across Apex, triggers, flows, and fields. `sfi.unused_components` is the
   broader zero-inbound-usage sweep. Start with `find_dead_code` for "is THIS
-  unused?"; use `unused_components` for "what's unused org-wide?". Both are
+  unused?"; `unused_components` (through `sfi.run_analysis`) answers "what's
+  unused org-wide?". Both are
   heuristic — "no static evidence", not "proven unused".
 - **A PII field you can't name exactly.** If `sfi.field_access_audit` returns
   `component-not-found` for something like `Contact.SSN__c` (wrong API name, or
   the field simply isn't in this org), don't conclude there's no PII. Run
   `sfi.pii_inventory` (org-wide PII surface) or `sfi.find_semantic_field`
-  (locate a field by meaning) to discover the real API name first.
+  (locate a field by meaning), both through `sfi.run_analysis`, to discover
+  the real API name first.
 - **Named-flow questions: resolve first, or pass the exact API name.** Free-text
   flow names can fuzzy-match a similarly-named flow (or a field). Prefer
-  `sfi.resolve` then `sfi.explain_flow({ flowId: 'Flow:<ApiName>' })`. If the
+  `sfi.resolve`, then `sfi.flow_graph` for the structure or `sfi.explain_flow`
+  (through `sfi.run_analysis`) for the narrative. If the
   name is actually a trigger or class (e.g. "AccountTrigger"), `explain_flow`
   now tells you the real type and component rather than a bare not-found.
 
@@ -690,6 +730,9 @@ A few choices trip people up:
 - [`first-refresh.md`](./first-refresh.md) — first-refresh walk-through.
 - [`../architecture.md`](../architecture.md) — data flow, the MCP tool
   surface, edge semantics, and component/edge coverage.
+- [`troubleshooting.md`](./troubleshooting.md) — what each error a tool
+  returns means and what to do.
+- [`upgrading.md`](./upgrading.md) — moving to a newer release.
 
 If a question doesn't return what you expected and §6 doesn't surface
 the cause, the most likely culprits are: a stale vault (run

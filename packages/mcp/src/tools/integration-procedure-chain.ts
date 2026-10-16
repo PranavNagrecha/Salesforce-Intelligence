@@ -121,10 +121,10 @@ const APEX_COUPLING_DEFERRAL_DISCLOSURE =
  * the record-level data is queryable through this tool. It is not.
  */
 const RECORD_LEVEL_BOUNDARY_DISCLOSURE =
-  'v3.2 walks the OmniScript / IP / Card metadata XML. The actual ' +
+  'This tool walks the OmniScript / IP / Card metadata XML. The actual ' +
   'user-entered data and runtime state lives in OmniProcessElement and ' +
   'related SObject records; that is record-level data, out of scope ' +
-  "for v0.1's read-the-metadata posture.";
+  "for the read-the-metadata posture.";
 
 /**
  * REST endpoint reachability disclosure. Per the task's honesty
@@ -135,7 +135,7 @@ const RECORD_LEVEL_BOUNDARY_DISCLOSURE =
  */
 const REST_REACHABILITY_DISCLOSURE =
   'REST endpoint URLs are surfaced with `parsed` confidence (from the ' +
-  'propertySetConfig JSON blob); v3.2 does NOT probe the URL, verify ' +
+  'propertySetConfig JSON blob); this tool does NOT probe the URL, verify ' +
   'the endpoint is reachable, or resolve the Named Credential against ' +
   'live state.';
 

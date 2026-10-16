@@ -24,7 +24,8 @@ import { explainFlow } from "../../data/page-answers.ts";
   checks={[
     "<strong>When it starts</strong>: the object, before or after save, and the entry conditions",
     "<strong>What it changes</strong>: records it creates, updates or deletes, and the fields it sets",
-    "<strong>What it calls</strong>: subflows and Apex actions",
+    "<strong>What it shows</strong>: the fields and components on each screen",
+    "<strong>What it calls</strong>: subflows, Apex actions, email alerts, quick actions and external services",
     "<strong>Fault handling</strong>: elements with no fault path, and what that rolls back",
     "<strong>Every element in order</strong>, when you ask for the step-by-step walkthrough",
   ]}
@@ -55,7 +56,7 @@ import { explainFlow } from "../../data/page-answers.ts";
     },
   ]}
   cta={{ question: explainFlow.question, related: { href: "/blog/what-does-this-salesforce-flow-do", label: "Read the flow-reading guide" } }}
-  dateModified="2026-10-10"
+  dateModified="2026-10-16"
 >
   <h2>One flow rarely explains the problem</h2>
   <p>If you’re debugging rather than documenting, the reason a field has the wrong value is usually the order things run in, not the flow’s logic. That’s why the second answer above shows the whole save: the before trigger, the validation rule, the save itself, the after trigger, this flow, and the approval process, in the order Salesforce runs them.</p>

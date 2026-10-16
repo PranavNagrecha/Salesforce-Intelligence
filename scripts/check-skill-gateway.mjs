@@ -34,6 +34,12 @@ const files = [
   ...walkMd(join(root, '.claude/skills')),
   ...walkMd(join(root, '.claude/agents')),
   ...walkMd(join(root, '.claude/commands')),
+  // Public prose teaches the same host; a direct-call instruction there is the
+  // same defect (docs audit 2026-10-16, class fix 1).
+  ...walkMd(join(root, 'docs')),
+  ...['README.md', 'CLAUDE.md', 'llms-install.md', 'CONTRIBUTING.md', 'packages/cli/README.md']
+    .map((f) => join(root, f))
+    .filter((f) => existsSync(f)),
 ];
 
 const failures = [];

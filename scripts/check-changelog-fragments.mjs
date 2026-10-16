@@ -13,7 +13,7 @@
  */
 
 import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -105,6 +105,22 @@ if (codeFiles.length === 0) {
   // Only docs/website/examples/config changes → no fragment required
   console.log('[changelog:check] No code changes detected (packages/ or scripts/) — skipping fragment check.');
   process.exit(0);
+}
+
+// Release exemption: a release commit folds changelog.d/ into CHANGELOG.md, so
+// the diff against main has code changes and no fragments by design. Accept it
+// when CHANGELOG.md gained a section for the version packages/cli/package.json
+// now carries. (0.6.0 release gate went red on exactly this, 2026-10-16.)
+{
+  const cliVersion = JSON.parse(readFileSync(join(root, 'packages/cli/package.json'), 'utf8')).version;
+  const changelogDiff = git('diff', mergeBase, 'HEAD', '--', 'CHANGELOG.md');
+  const addsRelease = new RegExp(`^\\+## \\[${cliVersion.replace(/\./g, '\\.')}\\]`, 'm').test(changelogDiff);
+  if (addsRelease) {
+    console.log(
+      `[changelog:check] OK — release commit: CHANGELOG.md gained the [${cliVersion}] section, fragments were folded.`,
+    );
+    process.exit(0);
+  }
 }
 
 if (fragmentFiles.length > 0) {

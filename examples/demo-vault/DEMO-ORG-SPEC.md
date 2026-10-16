@@ -14,9 +14,8 @@ consulted only as XML-shape references.
 **Layout:** standard SFDX under `examples/demo-vault/source/main/default/`. Build with
 `sfi refresh --no-pull` (no org/network). Verify: `status: success`, `errors: []`.
 
-**Truth SoT (AUDIT-F7):** `truth/manifest.json` is the independent, hand-authored
-correctness contract (not dumped from DuckDB). Gate:
-`node sf-intelligence-qa/scripts/verdant-truth.mjs`. Update truth when design-goal
+**Truth source:** `truth/manifest.json` is the independent, hand-authored
+correctness contract (not dumped from DuckDB). Update truth when design-goal
 facts change; rebuild the vault when source changes.
 
 API version for every `-meta.xml`: `<apiVersion>61.0</apiVersion>` where applicable.
@@ -204,8 +203,8 @@ These types have extractors on this branch but no demo-vault fixture yet:
 | --- | --- |
 | `GenAiFunction`, `GenAiPlugin`, `GenAiPromptTemplate` | Covered by BotVersion→GenAiPlannerBundle chain above; standalone stubs deferred |
 | `WaveDataflow` | CRMA dataflow JSON is large; WaveDashboard + WaveXmd cover the CRMA read path |
-| `AssignmentRule`, `AutoResponseRule`, `EscalationRule` | Exist in v1.3 builder fixtures; deferred as low-priority for demo story |
-| `CustomApplication`, `CustomTab`, `CustomLabel`, `StaticResource`, `PathAssistant`, `QuickAction` | Exist in v1.2/v1.3 builder fixtures; present in some builder synthetics but not yet ported to demo-vault |
+| `AssignmentRule`, `AutoResponseRule`, `EscalationRule` | Exist as extractor test fixtures; deferred as low-priority for demo story |
+| `CustomApplication`, `CustomTab`, `CustomLabel`, `StaticResource`, `PathAssistant`, `QuickAction` | Exist as extractor test fixtures; not yet ported to demo-vault |
 | `Letterhead`, `EmailTemplate` | Low demo-story priority |
 | `OmniUiCard` | OmniStudio tier partially covered; deferred |
 | `DuplicateRule`, `MatchingRule` | Low demo-story priority |

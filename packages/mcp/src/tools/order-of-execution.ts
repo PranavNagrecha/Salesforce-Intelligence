@@ -61,7 +61,6 @@ import { z } from 'zod';
 import type { Context } from '../server.js';
 
 import {
-  soeReceiverVerificationNote,
   verifyStepActionReceivers,
   type ApexReceiverVerification,
   type ReceiverVerifiableStep,
@@ -81,11 +80,7 @@ import {
   type SoeInactiveSummary,
   sortedInactiveConfigured,
 } from './soe-active.js';
-import {
-  composeSoeDisclosure,
-  evaluateSoeAdmission,
-  soeNotAdmittedMessage,
-} from './soe-admission.js';
+import { evaluateSoeAdmission, soeNotAdmittedMessage } from './soe-admission.js';
 import {
   buildDuplicateRuleStep,
   DUPLICATE_RULE_TYPES,
@@ -105,6 +100,7 @@ import {
   soeTruncationNote,
   tallyPhaseCounts,
 } from './soe-payload-bounds.js';
+import { buildSoePrimaryDisclosure } from './soe-primary-disclosure.js';
 import {
   buildSoeReentry,
   REENTRY_NOT_CHECKED,
@@ -117,12 +113,8 @@ import {
   rollupScanTruncationNote,
   type RollupRecalcStep,
 } from './soe-rollup-recalc.js';
-import {
-  bypassWarnings,
-  enrichTriggerStepsWithHandlerEffects,
-  SOE_HANDLER_EFFECTS_NOTE,
-  type SoeHandlerEffects,
-} from './soe-trigger-effects.js';
+import { annotateSoeTriggerBypass } from './soe-trigger-bypass-annotate.js';
+import { type SoeHandlerEffects } from './soe-trigger-effects.js';
 import {
   type AmbiguousPhaseForEvent,
   buildWithinPhaseOrderCaveat,
@@ -142,15 +134,6 @@ import { isTimeTriggeredEdge } from './time-triggered-write.js';
 // (ORDER-OF-EXECUTION-OVERSIZE-HARD-FAIL).
 export { AUTOMATION_PHASES, computePhasesOmitted, tallyPhaseCounts };
 export type { SoePhase, SoePhaseCounts, SoePhaseOmission };
-
-/**
- * The verbatim honesty-axis disclosure surfaced in every response.
- * BYTE-IDENTICAL to `what-happens-on-save.ts`'s `DISCLOSURE` — frozen here
- * so a caller-facing rephrasing during rendering is a code-review concern,
- * not a silent drift. The two SOE tools must stay in lockstep.
- */
-const DISCLOSURE =
-  "v2.0e composes the documented Salesforce order-of-execution instantiated against THIS org's extracted automation. Before-save record-triggered flows are modeled as the leading `before-save-flows` phase (they run BEFORE before-triggers). Duplicate rules are modeled as their own `duplicate-rules` phase, running after before-triggers and validation but BEFORE the save — evaluated on insert/update only, with the effective Block/Allow/Alert/Report operations surfaced per rule. Conditions ARE listed but NOT EVALUATED — the tool does not know whether this particular record satisfies them at runtime. Workflow field updates can re-fire before/after-update triggers (a second pass); this composition lists each automation once; `reentry` names the steps that write back to this object, what the documented second pass re-runs, and any visible recursion guard. A workflow rule's time-dependent actions (its workflowTimeTriggers) are SCHEDULED for an offset measured from a record field value the offline vault cannot evaluate; this composition lists the rule once in the synchronous post-save-workflows phase and does NOT claim its time-delayed actions fire at save. Parent Summary (roll-up) fields that aggregate this object recalculate in the `post-save-rollup-recalc` phase, capped to ONE level — a grandparent's own rollup on that recalculated parent is NOT walked — and the parent's own triggers/flows/workflows that its recalculated save would fire are NOT expanded (no re-entrancy). Entitlement-process and milestone-type METADATA is modeled elsewhere in the vault (R6-18: `EntitlementProcess`/`MilestoneType` nodes, queryable via `sfi.get_component` / `sfi.get_edges`, including each milestone's declared target `minutesToComplete` as of R7-C7) — but this composition does NOT simulate entitlement milestones as an order-of-execution phase: whether a specific record is currently on-track or breached against those target minutes is live, per-record timer data this offline vault cannot hold. Criteria-based sharing recalculation — the FINAL step in Salesforce's documented order-of-execution, evaluated after every phase modeled here (including post-save-async) — is also NOT modeled: a save that causes a record to newly match or stop matching a criteria-based sharing rule's criteria triggers a sharing recalculation this composition does not surface. Manual sharing, sharing sets, account teams, and Apex callouts after save are out of scope.";
 
 /**
  * The four DML events the generic SOE diagram surfaces. `upsert` is
@@ -1455,13 +1438,10 @@ export const composeSoeForEvents = async (
   // WOW-2. Follow each trigger into its handler/dispatcher Apex (shared with
   // what_happens_on_save) BEFORE receiver verification, so via-handler writes
   // are verified like any other action.
-  const handlerEnriched = await enrichTriggerStepsWithHandlerEffects(
+  const { handlerEnriched, triggerBypassWarnings } = await annotateSoeTriggerBypass(
     ctx.graph,
-    allComposedSteps as unknown as Parameters<typeof enrichTriggerStepsWithHandlerEffects>[1],
+    allComposedSteps as unknown as Parameters<typeof annotateSoeTriggerBypass>[1],
     objectApiName,
-  );
-  const triggerBypassWarnings = bypassWarnings(
-    allComposedSteps as unknown as Parameters<typeof bypassWarnings>[0],
   );
 
   const receiverVerification = await verifyStepActionReceivers(
@@ -1748,7 +1728,7 @@ export const orderOfExecutionHandler = async (
     // `attachEnvelopeHonesty`'s rebuild-from-base keeps it on every pass
     // instead of dropping it. Always appended: a zero census must read as
     // CHECKED, and a failed probe must read as NOT CHECKED.
-    disclosure: `${composeSoeDisclosure(DISCLOSURE, objectModeled)}${soeReceiverVerificationNote(receiverVerification)}${handlerEnriched ? ` ${SOE_HANDLER_EFFECTS_NOTE}` : ''}`,
+    disclosure: buildSoePrimaryDisclosure(objectModeled, receiverVerification, handlerEnriched),
   };
 
   // The org-wide Summary-field scan behind post-save-rollup-recalc hit the

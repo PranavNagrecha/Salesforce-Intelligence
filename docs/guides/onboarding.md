@@ -66,8 +66,9 @@ deploy, insert, update, delete, or mutate Salesforce data.
    - Runs `sfi status`.
    - Runs `sfi doctor`.
    - Calls `sfi.health_check`.
-   - Calls `sfi.capabilities`.
-   - Routes a known question through `sfi.route_question`.
+   - Calls `sfi.org_overview`.
+   - Asks a known metadata question and checks that the answer cites a
+     component id.
 
 6. **Ask the first question**
    - Recommended first prompt:
@@ -76,8 +77,8 @@ deploy, insert, update, delete, or mutate Salesforce data.
      What happens when Account is saved?
      ```
 
-   - The assistant should route first, run the recommended tool chain, and show
-     provenance/freshness.
+   - The assistant resolves the object, runs `sfi.what_happens_on_save`, and
+     shows provenance/freshness.
 
 7. **Finish with the ready state**
    - Shows the connected org, vault path, last refresh timestamp, and MCP status.
@@ -90,7 +91,8 @@ The user is ready when:
 - `sfi doctor` has no blocking failures.
 - `sfi status` shows a refreshed vault.
 - `sfi.health_check` reports the graph is readable.
-- `sfi.route_question` can route a normal metadata question.
+- `sfi.org_overview` names the org, and a normal metadata question gets a
+  cited answer.
 - The first answer includes vault provenance/freshness.
 
 ## Helpful commands after onboarding

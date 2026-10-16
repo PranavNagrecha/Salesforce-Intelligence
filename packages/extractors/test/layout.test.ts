@@ -133,8 +133,8 @@ describe('extractLayout', () => {
       // A field can be placed ONLY in the Highlights Panel (summaryLayout) or
       // the mini layout (miniLayout) and nowhere in the detail body. For FLS /
       // "is field X on this layout" questions those placements must still emit
-      // a usedInLayout edge. Related-list columns are fields of the RELATED
-      // object and must NOT be collected (they'd produce a wrong-object edge).
+      // a usedInLayout edge. Related-list columns are parked for import-time
+      // resolution — never as fields of this layout's object.
       const xml = `<?xml version="1.0"?>
 <Layout xmlns="http://soap.sforce.com/2006/04/metadata">
   <layoutSections>
@@ -188,6 +188,54 @@ describe('extractLayout', () => {
         expect(
           layoutEdgeTargets.some((t) => t.includes('RelatedOnly_Field__c')),
         ).toBe(false);
+        expect(node.properties.relatedListFieldRefs).toEqual([
+          {
+            relatedListApiName: 'SomeRelatedList',
+            fields: ['RelatedOnly_Field__c'],
+          },
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('parks relatedListFieldRefs for import-time resolution (V6-7)', async () => {
+      const xml = `<?xml version="1.0"?>
+<Layout xmlns="http://soap.sforce.com/2006/04/metadata">
+  <relatedLists>
+    <fields>Demo_Child_Column__c</fields>
+    <relatedList>Demo_Children__r</relatedList>
+  </relatedLists>
+  <relatedLists>
+    <fields>TASK.SUBJECT</fields>
+    <relatedList>RelatedActivityList</relatedList>
+  </relatedLists>
+  <relatedLists>
+    <relatedList>Demo_Empty_Children__r</relatedList>
+  </relatedLists>
+</Layout>`;
+      const { dir, path } = await writeLayoutXml(
+        'Demo_Parent__c-Demo Parent Layout.layout-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractLayout(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const node = result.value.nodes[0]!;
+        expect(node.properties.relatedListFieldRefs).toEqual([
+          {
+            relatedListApiName: 'Demo_Children__r',
+            fields: ['Demo_Child_Column__c'],
+          },
+          {
+            relatedListApiName: 'RelatedActivityList',
+            fields: ['TASK.SUBJECT'],
+          },
+        ]);
+        expect(
+          result.value.edges.filter((e) => e.edgeType === 'usedInLayout'),
+        ).toHaveLength(0);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

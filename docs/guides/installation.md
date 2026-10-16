@@ -200,7 +200,8 @@ never presented as current:
   week old. It is purely advisory (it never downgrades the health verdict on
   age alone); the nudge is the yellow flag that keeps a stale snapshot from
   being narrated as current.
-- **`sfi.live_drift_check`** goes further: for an object you name, it compares
+- **`sfi.live_drift_check`** (through `sfi.run_analysis`) goes further: for an
+  object you name, it compares
   the fields the vault recorded at the last refresh against a **live** describe
   of the org and reports `onlyInVault` (fields the snapshot has but the live org
   no longer returns — the high-signal "this vault is stale" indicator),
@@ -254,10 +255,14 @@ cat /path/to/dx-project/org-kb/meta/pulse.json   # graph deltas + watch-lines
 routine can run the refresh and summarize the result for you on the same
 cadence. The `/schedule` command creates a cron-scheduled remote agent; point it
 at a prompt that runs `sfi refresh`, then reads `org-kb/meta/pulse.json` and the
-`scoreDelta` from `sfi.tech_debt_score`, and posts the weekly digest.
+`scoreDelta` from `sfi.tech_debt_score` (through `sfi.run_analysis`), and posts
+the weekly digest.
 
-The output lives entirely under the gitignored `org-kb/` — nothing here is
-published or written back to the org.
+Nothing here is published or written back to the org. `sfi init` gitignores
+`org-kb/source/` and `org-kb/graph/` (regenerable). `org-kb/components/` and
+`org-kb/meta/` are not ignored: if you commit the vault, commit `components/`
+plus `meta/manifest.json`, `meta/config.json` and `meta/version.txt` only; the
+other `meta/` files (profile map, annotations, demand queue) hold org data.
 
 ## 5. Common install issues
 
@@ -280,7 +285,9 @@ published or written back to the org.
 
 If you hit something not on this table, run `sfi doctor` — it checks the `sf`
 CLI, the vault, target-org auth, freshness, and the graph file, and prints an
-actionable fix for each problem.
+actionable fix for each problem. Once the server connects, the errors a tool
+can return (`invalid-query`, `component-not-found`, an oversize answer, "not
+directly invokable") are explained in [`troubleshooting.md`](./troubleshooting.md).
 
 ## 6. What it does and doesn't do
 
@@ -318,12 +325,25 @@ for the vault layout and git policy, and
 [`asking-questions.md`](./asking-questions.md) for what to ask and how the
 resolver behaves.
 
-> **Using Claude Code as a plugin?** When `sf-intelligence` is loaded as a
-> Claude Code plugin, the `/sfi-onboard`, `/sfi-init`, `/sfi-refresh`, and
-> `/sfi-status` slash commands wrap the `sfi` CLI, and the coaching skills
-> auto-activate. The npm install above gives you the MCP tools and CLI; the
-> plugin layer adds those conveniences.
+> **Using Claude Code as a plugin?** Install it from the repo's marketplace,
+> inside Claude Code:
+>
+> ```text
+> /plugin marketplace add PranavNagrecha/Salesforce-Intelligence
+> /plugin install sf-intelligence@sf-intelligence
+> ```
+>
+> then `/reload-plugins` (or restart Claude Code). The plugin adds the
+> `/sfi-onboard`, `/sfi-init`, `/sfi-refresh`, `/sfi-status` and
+> `/sfi-field-audit` slash commands, which wrap the `sfi` CLI, and the
+> coaching skills that auto-activate on Salesforce vocabulary. It registers the
+> MCP server but passes no `--vault`, so either launch Claude Code from the
+> folder that holds `org-kb` or set `SFI_VAULT` to the absolute path of
+> `org-kb`. The npm install above gives you the MCP tools and CLI; the plugin
+> layer adds those conveniences.
 
 For a deeper read on the data flow, the DuckDB graph store, the MCP tools, and
 configuration, see [`architecture.md`](../architecture.md) and
-[`configuration.md`](../configuration.md).
+[`configuration.md`](../configuration.md). To move to a newer release, see
+[`upgrading.md`](./upgrading.md); every `sfi` command is in
+[`cli.md`](../cli.md).

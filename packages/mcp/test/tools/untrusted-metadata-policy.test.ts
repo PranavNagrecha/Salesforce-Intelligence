@@ -8,7 +8,10 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 
 import type { ExtractionResult, Node, VaultManifest } from '@sf-intelligence/contracts';
-import { ORG_METADATA_CONTENT_POLICY } from '@sf-intelligence/contracts';
+import {
+  ORG_METADATA_CONTENT_POLICY_DISCLOSURE,
+  ORG_METADATA_CONTENT_POLICY_MARKER,
+} from '@sf-intelligence/contracts';
 import {
   closeGraph,
   importExtractionResults,
@@ -19,6 +22,7 @@ import { escapeMarkdownInline } from '@sf-intelligence/renderers';
 import { componentPath } from '@sf-intelligence/vault';
 
 import type { Context } from '../../src/server.js';
+import { SERVER_INSTRUCTIONS } from '../../src/server.js';
 import { getComponentHandler } from '../../src/tools/get-component.js';
 import { dispatchTool } from '../../src/tools/index.js';
 import { resolveHandler } from '../../src/tools/resolve.js';
@@ -148,7 +152,8 @@ describe('AUDIT-F8 untrusted org text', () => {
         contentPolicy?: unknown;
         data?: { descriptionOrgText?: { value: string } };
       };
-      expect(envelope.contentPolicy).toEqual(ORG_METADATA_CONTENT_POLICY);
+      expect(envelope.contentPolicy).toBe(ORG_METADATA_CONTENT_POLICY_MARKER);
+      expect(SERVER_INSTRUCTIONS).toContain(ORG_METADATA_CONTENT_POLICY_DISCLOSURE);
       expect(envelope.data?.descriptionOrgText?.value).toBe(POISON);
 
       // Live tool still denied — org text is not consent.

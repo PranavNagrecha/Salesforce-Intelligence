@@ -9,7 +9,8 @@ npx -y sf-intelligence demo   # builds the demo vault with the CLI you are runni
 
 Each question is grounded in the demo org's real (synthetic) metadata and
 exercises a different part of the engine. The tool each one leans on is noted
-in `()` — you don't need to name it; the funnel routes for you.
+in `()` — you don't need to name it; your AI host picks it, and a tool outside
+the core set runs through `sfi.run_analysis`.
 
 ## Change safety — "what breaks if I…?"
 

@@ -85,7 +85,7 @@ Two layers:
 
    Tools without their own budget rely on the 45 KB backstop.
 
-The contract rule (BUILD-CONTRACT Validation Rules): **response-producing tools
+The contract rule: **response-producing tools
 must respect the MCP response limit through pagination or byte budgets.**
 
 ## Alternatives Considered

@@ -399,7 +399,7 @@ const diffCategory = (
 };
 
 const PROFILE_EDITION_DISCLOSURE =
-  'v0.1 cannot reliably detect Salesforce edition (Production, Developer, Enterprise). When vault A and vault B come from different editions, user-permission set drift may reflect edition differences not configuration drift.';
+  'The vault cannot reliably detect Salesforce edition (Production, Developer, Enterprise). When vault A and vault B come from different editions, user-permission set drift may reflect edition differences not configuration drift.';
 
 /**
  * Honesty disclosure surfaced when a compared vault has no `tabVisibilities`

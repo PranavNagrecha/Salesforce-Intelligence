@@ -71,12 +71,12 @@ Top profile (by grants): Verdant_Read_Only
 
 ## Key Contacts
 
-Key Contacts data depends on v1.7 enrichment. Run `sfi refresh --with-tooling-api` to populate `lastModifiedBy` for the enriched types.
+Key Contacts data depends on the Tooling API enrichment pass. Run `sfi refresh --with-tooling-api` to populate `lastModifiedBy` for the enriched types.
 
 ## Where To Go Next
 
 - Run `sfi.org_overview` for a structured tour of the org.
-- Run `sfi.unused_components` to find dead-weight components ripe for cleanup.
+- Ask "what is unused?" (`sfi.find_dead_code`) to find dead-weight components ripe for cleanup.
 - Run `sfi.field_access_audit` on a specific field to investigate who can see it.
 - Run `sfi.why_cant_user_see_record` when a user reports a missing record.
 

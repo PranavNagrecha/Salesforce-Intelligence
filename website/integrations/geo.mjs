@@ -165,7 +165,7 @@ export default function geo({ siteDir }) {
         const listed = sections.reduce((n, s) => n + s.tools.length, 0);
         const registered = toolsData.toolCount;
         const countPhrase = listed === registered ? `${registered}` : `${listed} listed, ${registered} registered`;
-        let cat = `\n## All tools (${countPhrase})\n\nEvery read-only tool in sf-intelligence ${toolsData.version ?? data.version}, grouped by the product's own capability categories. You never call these by name: an offline router surfaces a short list and your AI assistant picks which to run. Tools marked (core) are in the default \`core\` profile and listed directly by the server; the others run through \`sfi.run_analysis\`.`;
+        let cat = `\n## All tools (${countPhrase})\n\nEvery read-only tool in sf-intelligence ${toolsData.version ?? data.version}, grouped by the product's own capability categories. You never call these by name: your AI assistant picks from the short default list, and reaches everything else by name through \`sfi.run_analysis\`. Tools marked (core) are in the default \`core\` profile and listed directly by the server; the others run through \`sfi.run_analysis\`.`;
         if (listed !== registered) {
           const aliases = registered - listed;
           cat += ` ${registered} tools are registered in this build; ${aliases} back-compat alias${aliases === 1 ? "" : "es"} fold into their canonical tool and are not listed separately.`;

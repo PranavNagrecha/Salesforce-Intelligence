@@ -5,6 +5,25 @@ adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-10-16
+
+### Changed
+- **Scorecard in the gate.** The build now measures the default tool count, the size of the tool list, the median answer size on the demo org, the where-used and dead-code counts on real orgs, the number of known test failures carried, and the number of "keep in sync" comments in the code; a change that makes any of them worse fails. 0.5.0 → 0.6.0: median demo answer 8,294 → 8,038 bytes; known test failures carried 4 → 0.
+- **README and trust signals.** The README opens with what the tool answers and one cited demo answer; every public surface says open source (MIT).
+
+- **Docs for admins.** Three new guides: [upgrading](docs/guides/upgrading.md), [troubleshooting](docs/guides/troubleshooting.md) and a [CLI reference](docs/cli.md); a decision record for the 16-tool default (ADR-010); the README is a third shorter and opens with what the tool answers; the shipped skills and commands no longer tell an assistant to call tools it cannot reach directly; internal version labels are gone from tool output, skills and docs.
+
+### Fixed
+- **LWC and Aura field usage in component markup** — `lightning-input-field`, `lightning-output-field`, `lightning-record-*-form` field lists, Aura `force:recordData`, and `lightning:inputField` / `lightning:outputField` now produce graph edges when the object can be derived from `object-api-name` / `sobjectType` (or when the attribute names `Object.Field` directly). Usage and impact tools can see fields bound only in templates, not only in JavaScript imports. Unqualified bare field names with no object context are listed on the bundle as `unresolvedFieldBindings` and do not invent a `CustomField` edge.
+- `coverage_report` and `health_check` now derive the same **not modeled** type list from `summarizeCoverage().notModeledTypes`, fixing cross-tool honesty drift on real vaults (scorecard d/e).
+- `sfi.what_happens_on_save` and `sfi.order_of_execution` share one disclosure and one trigger-bypass annotation, so both report the same "this trigger may be switched off" warning. `sfi.tests_for_change` and `sfi.test_coverage_for_method` share one test-selection walk; direct coverers and trigger-mediated candidates stay in their separate tiers.
+- **Flow extractor:** Screen `<fields>` with `objectFieldReference` now emit `readsFrom` / `writesTo` edges to the bound `CustomField`; `extensionName` on a screen component emits a `references` edge to the LWC or Aura bundle. Non-Apex `<actionCalls>` (`emailAlert`, `quickAction`, `externalService`, `flow`) emit `references` edges to `WorkflowAlert`, `QuickAction`, `ExternalService`, or `Flow` targets so dependency walks and usage tools see screen-only field bindings and action dependencies.
+- Classic page layout related-list columns now resolve through the same child-relationship map as Lightning dynamic related lists. When the relationship is known, each column becomes a `usedInLayout` edge on the child object's field; standard or unretrieved relationships are recorded on the layout node instead of minting a wrong-object field id.
+- Fix dispatch arg normalization so `objectApiName` is not renamed onto `componentId` for Apex-scoped tools such as `sfi.crud_fls_audit` (regression a security-audit question in the regression bank).
+- Move the org-metadata untrusted-data disclosure from per-response `contentPolicy` objects to MCP `SERVER_INSTRUCTIONS`; success envelopes now stamp `contentPolicy: "org-metadata"` only.
+- Removed the last Commons Clause wording: the README's license summary, the website FAQ and the consultants page said a commercial licence was needed to sell; it is not, under MIT.
+- `CITATION.cff` is now pinned to the shipped version (it had said 0.2.4 since July) and names the MIT license.
+
 ## [0.5.0] — 2026-10-15
 
 ### Added

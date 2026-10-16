@@ -5,7 +5,7 @@ slug: /setup/vs-code-copilot
 targetQuery: "salesforce mcp server vscode copilot"
 persona: "Salesforce developer or admin using VS Code with GitHub Copilot"
 datePublished: 2026-10-10
-dateModified: 2026-10-10
+dateModified: 2026-10-16
 faq:
   - q: "Why does my MCP server not show up in VS Code?"
     a: "The most common cause is a .vscode/mcp.json that uses the mcpServers key copied from a Claude or Cursor guide. VS Code reads servers in that file. The file still parses, so you get no error, just no server."
@@ -18,6 +18,7 @@ faq:
   - q: "Can I use sf-intelligence and the Salesforce DX MCP server together?"
     a: "Yes. Add both under servers in the same mcp.json. Note that Salesforce says the DX MCP server reaches end of life on November 2, 2026."
 related:
+  - /setup/claude-code
   - /compare/salesforce-mcp-servers
   - /how-to/pre-deployment-impact-review
   - /errors/maximum-trigger-depth-exceeded
@@ -90,7 +91,7 @@ You need:
 
 4. **Check that it is running.** In **MCP: List Servers**, the server should show as running. If not, choose Show Output to see why.
 
-5. **Check that Copilot sees the tools.** Open Copilot Chat in Agent mode. Select the **Configure Tools** button in the chat input. You should see `sf-intelligence` with tools such as `sfi_route_question`, `sfi_what_happens_on_save` and `sfi_safe_to_delete_field`. VS Code swaps the dots in tool names for underscores and logs a warning for each. That is cosmetic.
+5. **Check that Copilot sees the tools.** Open Copilot Chat in Agent mode. Select the **Configure Tools** button in the chat input. You should see `sf-intelligence` with tools such as `sfi_find_component_usages`, `sfi_what_happens_on_save` and `sfi_safe_to_delete_field`. VS Code swaps the dots in tool names for underscores and logs a warning for each. That is cosmetic.
 
 6. **Ask a question.** For example: *"What happens when I save an Opportunity?"* The answer should name the triggers, flows and rules it found.
 

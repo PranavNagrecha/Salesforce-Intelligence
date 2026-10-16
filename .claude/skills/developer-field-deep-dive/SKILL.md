@@ -7,12 +7,12 @@ description: |
   for X", "where does this field's data come from", "what fires when
   this field changes", "show me the upstream + downstream walk for
   this field", and the same question one tier up: "show me
-  everything about the Contact object". Cascades the v3.0 synthesis
+  everything about the Contact object". Cascades the synthesis
   tools (`field_360`, `field_lineage`) plus the object-tier
-  counterpart `object_360`, over the v2.0a conditional-context tier
+  counterpart `object_360`, over the conditional-context tier
   (`firesWhen` edges, `ConditionalContext` nodes). Discloses the Q165
   honesty anchor verbatim (`dataNotAvailable[]` array of list-view
-  filters, reports, dashboards) and the v2.0a synthetic ConditionalContext
+  filters, reports, dashboards) and the synthetic ConditionalContext
   id-prefix classification brittleness.
 ---
 
@@ -20,29 +20,29 @@ description: |
 
 ## Overview
 
-This skill is the developer persona's companion to v3.0's
+This skill is the developer persona's companion to the
 synthesis tier — the headline `sfi.field_360` "show me EVERYTHING
 about this field" tool and the sibling `sfi.field_lineage`
-upstream/downstream walker — and the v2.0a Conditional Context
+upstream/downstream walker — and the Conditional Context
 foundation (`firesWhen` edges, `ConditionalContext` synthetic
-nodes) that v3.0 reads heavily.
+nodes) that reads heavily.
 
 The developer's first-line question is one of three shapes:
 
 1. **"Show me everything about `Account.Industry__c`."** /
-   **"Field profile for `Industry__c`."** — Use `sfi.field_360`,
-   the v3.0 synthesis tool. Surfaces validates, formulas, writers,
+   **"Field profile for `Industry__c`."** — Use `sfi.field_360` (via `sfi.run_analysis`),
+   the synthesis tool. Surfaces validates, formulas, writers,
    readers, UI, integrations, automations, emails, dependencies
    in one structured response.
 2. **"Where does this field's data come from?"** /
    **"What fires when this field changes?"** /
    **"Trace `Industry__c` upstream and downstream."** — Use
    `sfi.field_lineage` with `direction: 'upstream' | 'downstream'
-   | 'both'`. v2.7 cycle-detection + depth-bound discipline
+   | 'both'`. The cycle-detection + depth-bound discipline
    applies in both walks.
 3. **"What's `Industry__c` used in?"** /
    **"Who can see / edit `Industry__c`?"** — Defer to
-   `developer-find-anywhere` → `sfi.find_field_anywhere` for the
+   `developer-find-anywhere` → `sfi.find_field_anywhere` (via `sfi.run_analysis`) for the
    simpler universal inventory, or to
    `admin-sharing-troubleshooting` for the per-user FLS cascade.
    The field-360 tool composes these inventories into one
@@ -54,7 +54,7 @@ surfaces `dataNotAvailable: ['list-view-filters', 'reports',
 'dashboards']` verbatim on EVERY response, regardless of whether
 the user's question explicitly named the unavailable categories.**
 This is the Q165 honesty anchor — a synthesis tool that fails to
-disclose its omissions is a contract violation. v3.0 surfaces
+disclose its omissions is a contract violation. sf-intelligence surfaces
 incoming `references`, `readsFrom`, `writesTo`, `usedInLayout`,
 `firesWhen`, and friends. What each `dataNotAvailable` entry now
 means is narrower than its name — read the anchor below before
@@ -65,7 +65,7 @@ list-view filter PREDICATE EVALUATION, the literal value a report
 filters for, named credentials passing the field as a default
 argument, and managed-package callers.
 
-The v2.0a synthetic ConditionalContext id-prefix classification
+The synthetic ConditionalContext id-prefix classification
 brittleness: when `field_360` surfaces the `automations` section
 (every Flow/WorkflowRule/ValidationRule/ApprovalProcess whose
 `firesWhen` edge references the target field), the rendering
@@ -86,7 +86,7 @@ phrasing. Concrete triggers:
   `sfi.field_360`.
 - **The same question about an OBJECT** — "show me everything about
   `Contact`", "what is attached to this object", "what points at
-  `Invoice__c`". — Use `sfi.object_360` with `objectApiName`. Twelve
+  `Invoice__c`". — Use `sfi.object_360` (via `sfi.run_analysis`) with `objectApiName`. Twelve
   sections: what the object CONTAINS and would take with it (`owns`),
   what lives outside and points AT it (`usage`), `identity`, `brief`,
   `automations`, `permissions`, `relationships`, `recordTypes`,
@@ -113,9 +113,9 @@ phrasing. Concrete triggers:
   **"Downstream lineage for `Industry__c`."** — Use
   `sfi.field_lineage` with `direction: 'downstream'`.
 - **"Full lineage for `Industry__c`."** /
-  **"Upstream + downstream trace."** — Use `sfi.field_lineage`
+  **"Upstream + downstream trace."** — Use `sfi.field_lineage` (via `sfi.run_analysis`)
   with `direction: 'both'`.
-- **"Document `Account.Industry__c`."** — Use `sfi.field_360` and
+- **"Document `Account.Industry__c`."** — Use `sfi.field_360` (via `sfi.run_analysis`) and
   surface the structured response.
 
 ## When NOT to fire
@@ -127,10 +127,10 @@ Defer to another skill when:
   `sfi.list_components` / `sfi.get_component`.
 - **The user asks "do we have a field for customer health?"**
   Natural-language field discovery; defer to
-  `developer-find-anywhere` → `sfi.find_semantic_field`.
+  `developer-find-anywhere` → `sfi.find_semantic_field` (via `sfi.run_analysis`).
 - **The user asks "where is `Industry__c` used in Apex?"** Apex-
   scoped reference question; defer to `developer-apex-refactor`
-  → `sfi.find_code_usages`.
+  → `sfi.find_code_usages` (via `sfi.run_analysis`).
 - **The user asks "what breaks if I change `Industry__c`'s type?"**
   What-if projection; defer to
   `developer-impact-and-reachability` →
@@ -141,14 +141,14 @@ Defer to another skill when:
   `sfi.field_access_audit` for the per-grant inventory.
 - **The user asks for "what does `Industry__c` mean in our
   org?"** Vocabulary question; defer to `developer-find-anywhere`
-  → `sfi.field_meaning` for the per-field deep dive on the v2.9
+  → `sfi.field_meaning` (via `sfi.run_analysis`) for the per-field deep dive on the vocabulary
   classifications.
 - **The user asks "is this field dead?"** Hygiene question; defer
   to `developer-code-quality` → `sfi.find_dead_code` with
   `types: ['CustomField']`.
-- **The user wants to MODIFY the field.** v3.0 is read-only.
+- **The user wants to MODIFY the field.** sf-intelligence is read-only.
 - **The user asks about a FIELD on a non-CustomObject parent**
-  (e.g., a CustomMetadata field). The v3.0 tools accept
+  (e.g., a CustomMetadata field). The tools accept
   `CustomField:` ids; for `__mdt` parents, `sfi.explain_field`
   surfaces record values. Pick the right granularity.
 
@@ -158,9 +158,9 @@ Two synthesis tools — different shapes, complementary use cases.
 
 ### 1. `sfi.field_360` — the synthesis tool
 
-The v3.0 headline. Composes every prior tier's reads of a single
+The headline. Composes every prior tier's reads of a single
 CustomField into one structured response with per-section content
-cuts. Section composition table (per `PLAN-v3.0` §4):
+cuts. Section composition table:
 
 | Section | Backing edges | Confidence |
 |---|---|---|
@@ -170,7 +170,7 @@ cuts. Section composition table (per `PLAN-v3.0` §4):
 | `readers` | Incoming `readsFrom` from Apex / Flow / LWC / Aura / VF / SOQL string-literal scan | mixed (`heuristic`) |
 | `ui` | Incoming `usedInLayout` + frontend `readsFrom` to UI | `declared` / `heuristic` |
 | `integrations` | Incoming `references` / `exposes` from integration tier (NamedCredential / ExternalDataSource / ExternalService) | `declared` / `heuristic` |
-| `automations` | Incoming `firesWhen` ConditionalContext + v1.3 WorkflowRule criteria items | `declared` / `parsed` / `heuristic` |
+| `automations` | Incoming `firesWhen` ConditionalContext +  WorkflowRule criteria items | `declared` / `parsed` / `heuristic` |
 | `emails` | Incoming `references` from `EmailTemplate` with role `body-merge` | `parsed` |
 | `dependencies` | OUTGOING `references` for formula fields only | `parsed` |
 
@@ -241,7 +241,7 @@ THIS writer get its value FROM?":
 - Formula upstream.
 - WorkflowRule criteria items.
 - Integration-inbound external system (terminal).
-- v2.9 source-of-truth field (terminal — when the writer's
+- Source-of-truth field (terminal — when the writer's
   `properties.isSourceOfTruth` is set).
 
 Each source carries `sourceKind`:
@@ -256,7 +256,7 @@ Each source carries `sourceKind`:
 { "fieldId": "CustomField:Account.Tier__c", "direction": "downstream", "maxDepth": 3 }
 ```
 
-Starting from `fieldId`, walks incoming `firesWhen` (v2.0a) +
+Starting from `fieldId`, walks incoming `firesWhen` +
 `triggersOn` + `callsApex` from automation surfaces reading the
 field. Each effect carries `effectKind`:
 `'flow-decision-branch' | 'apex-if-clause' | 'workflow-fire' |
@@ -270,7 +270,7 @@ and writes its value onward into the fields listed in its
 depth + 1.
 
 Each effect carries `conditionId` when the effect was sourced
-from a v2.0a `ConditionalContext`, and the verbatim `firesWhen`
+from a `ConditionalContext`, and the verbatim `firesWhen`
 literal when the edge carries one.
 
 **Both walks**:
@@ -280,7 +280,7 @@ literal when the edge carries one.
 ```
 
 Cycle detection: keyed by `(fromId, toId, edgeType)` tuples.
-Truncation rules inherit v2.7's discipline.
+Truncation rules inherit the discipline.
 
 Fire `sfi.run_analysis` with `{ "name": "sfi.field_lineage", "args": { … } }` when the user asks the trace question
 specifically (where does data come from, what fires on change) —
@@ -292,7 +292,7 @@ the answer is the walk tree with per-step `sourceKind` /
 
 ### Q165 honesty anchor (verbatim — surface on EVERY field_360 / field_lineage response)
 
-> v3.0's synthesis layer reads what v0.1-v2.9 already extracted.
+> The synthesis layer reads what the extractors already extracted.
 > The following categories are NOT extracted and surface as
 > `dataNotAvailable`:
 >
@@ -353,7 +353,7 @@ the answer is the walk tree with per-step `sourceKind` /
 The `dataNotAvailable[]` array surfaces these categories
 verbatim on every response. Surface this; do NOT strip it.
 
-### v3.0 mixed-confidence rule
+### Mixed-confidence rule
 
 When the response's `confidence` is `'mixed'`, the sections span
 more than one edge-confidence level. State per-section confidence
@@ -365,10 +365,10 @@ tokenizer), and the `readers` section is mixed — Apex reads are
 parse-failure backfill), Flow record-lookups are `parsed`, and
 LWC/Aura/VF frontend reads stay `heuristic`.
 
-### v2.0a synthetic-id classification brittleness
+### Synthetic-id classification brittleness
 
 The `automations` section in `field_360` and the downstream walk
-in `field_lineage` surface `firesWhen` edges targeting v2.0a
+in `field_lineage` surface `firesWhen` edges targeting 
 `ConditionalContext` synthetic nodes. The synthetic id format is
 `ConditionalContext:{ParentComponentId}.condition-{index}` where
 `{ParentComponentId}` is the firer's full canonical id and
@@ -387,9 +387,9 @@ When the response surfaces a ConditionalContext synthetic id,
 state the parent firer it belongs to verbatim. Don't paraphrase
 the synthetic id; render it as-written.
 
-### v2.7 inheritance — cycle and depth discipline
+### Inheritance — cycle and depth discipline
 
-`sfi.field_lineage` inherits v2.7's cycle detection (keyed by
+`sfi.field_lineage` inherits the cycle detection (keyed by
 `(fromId, toId, edgeType)` tuples) and depth bound (default 3,
 max 5). When the walk truncates at `maxDepth`, surface the
 `truncatedAtDepth` flag and offer the user the option to widen.
@@ -397,7 +397,7 @@ When the walk detects a cycle, surface the cycle's start /
 end / length (e.g., a self-enqueueing Queueable that writes the
 field).
 
-### v3.0 field_360 cap discipline
+### field_360 cap discipline
 
 Per-section truncation is `maxRowsPerSection` (default 50, hard
 cap 200). When a section truncates, the `truncated` flag flips
@@ -418,7 +418,7 @@ User: *"Show me everything about `Account.Industry__c`."*
 
 Claude's flow:
 
-1. **Classify** → full profile, use `sfi.field_360`.
+1. **Classify** → full profile, use `sfi.field_360` (via `sfi.run_analysis`).
 2. **Fire** `sfi.run_analysis` with `{ "name": "sfi.field_360", "args": { … } }` with
    `{ "fieldId": "CustomField:Account.Industry__c" }`.
 3. **Receive** (illustrative):
@@ -467,7 +467,7 @@ Claude's flow:
     "confidence": "mixed",
     "dataNotAvailable": ["list-view-filters", "reports", "dashboards"],
     "boundaries": [
-      "v3.0 synthesis reads what v0.1-v2.9 already extracted. List-view filter EVALUATION, report/dashboard filter literals, named-credential default-argument plumbing, and managed-package callers are NOT extracted; this field may have references in those categories that are invisible to this report.",
+      "The synthesis layer reads what the extractors already extracted. List-view filter EVALUATION, report/dashboard filter literals, named-credential default-argument plumbing, and managed-package callers are NOT extracted; this field may have references in those categories that are invisible to this report.",
       "Section confidence is mixed — see per-section labels. Parsed Apex edges (source apex-ast) are high-confidence; the remaining heuristic edges (Apex recall-scanner backfill on parse-failure files, LWC scanner field reads) need source verification before refactoring."
     ]
   }
@@ -526,7 +526,7 @@ Claude's flow:
 > - `Flow:Notify_Industry_Change` (`declared`,
 >   `ConditionalContext:Flow:Notify_Industry_Change.condition-0`)
 >   — flow decision branch fires when
->   `Industry__c != PRIORVALUE(Industry__c)` (the v2.0a
+> `Industry__c != PRIORVALUE(Industry__c)` (the 
 >   conditional context expression). When you change a writer or
 >   the field type, this Flow's branch behavior may change.
 >
@@ -574,7 +574,7 @@ Claude's flow:
 > `{ direction: 'both', fieldId: 'CustomField:Account.Industry__c' }`.
 
 The response leads with shape, surfaces each section with its
-per-section confidence label, names the v2.0a ConditionalContext
+per-section confidence label, names the ConditionalContext
 synthetic id verbatim, and APPENDS the Q165 disclosure — the
 three-item `dataNotAvailable` array plus the two `boundaries[]`
 omissions — spelled out.
@@ -585,12 +585,12 @@ omissions — spelled out.
 |---|---|
 | Stripping `dataNotAvailable[]` from the response. | The Q165 anchor is constitutional. Without the disclosure, the developer treats the field-360 as exhaustive and misses the list-view / report / dashboard surface. Surface verbatim on EVERY response. |
 | Reducing `confidence: 'mixed'` to "high confidence" or "low confidence". | The mixed flag is a real signal — the sections span confidence levels. State per-section confidence so the developer knows which entries to verify (the `heuristic` Apex / LWC scanner reads) vs which are metadata-grounded (the `declared` validation rules, layouts). |
-| Treating an `automations` section result as "this Flow definitely fires when the field changes". | The ConditionalContext `firesWhen` literal IS the condition the Flow uses, but v3.0 does NOT semantically evaluate it. The Flow's decision branch may have an `OR` that includes a condition the synthesis layer can't read. Surface the `firesWhen` literal verbatim and let the user verify. |
-| Paraphrasing the v2.0a ConditionalContext synthetic id (`ConditionalContext:Flow:X.condition-0` → "the first condition of Flow X"). | The synthetic id is information. Render it verbatim so the user can trace it back to the source position. |
+| Treating an `automations` section result as "this Flow definitely fires when the field changes". | The ConditionalContext `firesWhen` literal IS the condition the Flow uses, but sf-intelligence does NOT semantically evaluate it. The Flow's decision branch may have an `OR` that includes a condition the synthesis layer can't read. Surface the `firesWhen` literal verbatim and let the user verify. |
+| Paraphrasing the  ConditionalContext synthetic id (`ConditionalContext:Flow:X.condition-0` → "the first condition of Flow X"). | The synthetic id is information. Render it verbatim so the user can trace it back to the source position. |
 | Defaulting `maxDepth` to 5 on `sfi.field_lineage`. | The default 3 is the right call. Wider walks generate more noise; the developer asks for 5 explicitly when they need it. |
-| Treating an `upstream` `source-of-truth-field` terminal as the END of the chain. | The walk terminates at v2.9 source-of-truth fields by DESIGN — the source-of-truth field IS the canonical source, no further upstream walk needed. State this explicitly so the developer knows the trace is complete, not truncated. |
+| Treating an `upstream` `source-of-truth-field` terminal as the END of the chain. | The walk terminates at the source-of-truth fields by DESIGN — the source-of-truth field IS the canonical source, no further upstream walk needed. State this explicitly so the developer knows the trace is complete, not truncated. |
 | Confusing `field_360` with `field_lineage`. | `field_360` is the BREADTH-first snapshot: every section in one shot. `field_lineage` is the DEPTH-first walk: provenance up, effects down, with cycle detection. Pick the right tool for the question. |
-| Skipping the v3.0 `truncated` flag when a section caps. | Truncation IS information — the developer needs to know the section may be incomplete. Surface the `truncated` flag and offer to widen `maxRowsPerSection`. |
+| Skipping the  `truncated` flag when a section caps. | Truncation IS information — the developer needs to know the section may be incomplete. Surface the `truncated` flag and offer to widen `maxRowsPerSection`. |
 | Surfacing a `field_lineage` cycle as "the data is corrupted". | A self-enqueueing Queueable that writes the field IS a cycle but is the textbook chunking pattern. State the cycle's start / length but don't editorialize. |
 | Calling `field_360` against a non-CustomField id. | The tool validates the `CustomField:` prefix and surfaces `invalid-query` otherwise. Translate the user's reference to the canonical form before firing. |
 
@@ -598,12 +598,12 @@ omissions — spelled out.
 
 - `developer-find-anywhere` — for the SIMPLER per-field universal
   inventory (`sfi.find_field_anywhere`) when the user just wants
-  "where is this used" without the full v3.0 synthesis. The
-  v3.0 `field_360` is the heavier composition; the v2.2 universal
+  "where is this used" without the full synthesis. The
+   `field_360` is the heavier composition; the universal
   search is the lighter inventory.
 - `developer-impact-and-reachability` — for what-if projection
   ("what breaks if I change `Industry__c`'s type") and call-graph
-  walks. v3.0 surfaces the current state; v2.3 projects the
+  walks. `field_360` surfaces the current state; the what-if composers project the
   changed state.
 - `developer-code-quality` — for hygiene scans
   (`sfi.find_dead_code` with `types: ['CustomField']`) once the
@@ -618,4 +618,4 @@ omissions — spelled out.
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

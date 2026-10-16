@@ -19,7 +19,7 @@ const ownerHandle = new URL(ownerProfile).pathname.slice(1);
 const title = "Is sf-intelligence Safe for Production Orgs?";
 const description =
   "Why sf-intelligence is safe on a production Salesforce org: it can't write, works offline, labels every answer, refuses to guess and is tested on every change.";
-const dateModified = "2026-10-10";
+const dateModified = "2026-10-16";
 
 const jsonld = [
   {
@@ -129,14 +129,15 @@ const faqs = [
     <div class="figures">
       <div class="figure"><span class="n">{atLeast}+</span><span class="l">automated test cases</span></div>
       <div class="figure"><span class="n">{pkgCount}</span><span class="l">tested packages</span></div>
-      <div class="figure"><span class="n">{gateCount}</span><span class="l">checks on every change</span></div>
-      <div class="figure"><span class="n">{integ}</span><span class="l">end-to-end suites</span></div>
+      <div class="figure"><span class="n">{gateCount}</span><span class="l">checks on every push</span></div>
+      <div class="figure"><span class="n">{integ}</span><span class="l">integration suites before each release</span></div>
     </div>
-    <p>Nothing ships unless every check passes. They include:</p>
+    <p>The public CI runs these checks on every push, and a release is tagged only from a commit where all of them passed:</p>
     <ul class="ticks narrow">
       {siteData.gates.map((g) => <li>{g}</li>)}
     </ul>
-    <p class="narrow">Speed limits are tested too: graph import, {budgets.graphImport}; a full refresh, {budgets.fullRefresh}; name lookup, {budgets.resolve}. Beyond the test suite, it’s exercised against real production orgs with deliberately hostile questions, and every bug found that way becomes a test. No customer org data is ever published: a leak scan fails the build if a real org name turns up.</p>
+    <p class="narrow">Speed limits are tested too: graph import, {budgets.graphImport}; a full refresh, {budgets.fullRefresh}; name lookup, {budgets.resolve}.</p>
+    <p class="narrow">Before each release, a second gate runs on the maintainer’s machine: the integration suites, plus checks of real verdicts against real production orgs, asked deliberately hostile questions. Every bug found that way becomes a test. Those orgs’ names and metadata are never published; a leak scan fails the build if a real org name turns up.</p>
   </section>
 
   <section class="block" aria-labelledby="limits">

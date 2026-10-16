@@ -346,3 +346,11 @@ export const findCoveringTests = async (
   }
   return ok(hits);
 };
+
+/** Depth cap shared by `tests_for_change` and `test_coverage_for_method`. */
+export const TEST_SELECTION_MAX_DEPTH = 3;
+
+/** Sorted test-class ids from a {@link findCoveringTests} result (class-level selection). */
+export const sortedCoveringTestIds = (
+  hits: ReadonlyMap<ComponentId, CoveringTestHit>,
+): readonly ComponentId[] => [...hits.keys()].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));

@@ -20,6 +20,7 @@ import {
 import {
   buildCoverageEntries,
   buildMixedFreshness,
+  notModeledCoverageEntries,
   rankUncoveredFamilies,
   readTombstones,
   retrievedNotParsedTypes,
@@ -419,25 +420,30 @@ export const coverageReportHandler = async (
   ctx: Context,
   input: CoverageReportInput,
 ): Promise<Result<McpResponse<CoverageReportOutput>, McpError>> => {
-  const entries = buildCoverageEntries(ctx.manifest).filter((entry) =>
-    input.type === undefined ? true : entry.type === input.type,
-  );
-  // UNUSED-CERTIFIED-ZERO-CONTRADICTED-BY-OWN-GRAPH, coverage_report's half.
-  // Candidates are ONLY the confirmed-clean-zero rows — the ones that would
-  // otherwise land in `covered` purely on `retrieveConfirmed === true` — so a
-  // vault with no such row never touches the graph at all (matches `entries`
-  // filtered by `input.type` when one is given).
-  // CH-2: `summary` is computed from the SAME enriched manifest, so it can no
-  // longer call a referenced-but-absent type covered while `partial[]` lists it.
+  // CH-2: graph-enriched manifest first so entries, summary and health_check
+  // read the same coverage registry (a4 I3 notModeled set agreement).
   const absentFamilies = await withReferencedButAbsent(ctx, input.type);
   if (!absentFamilies.ok) return err(absentFamilies.error);
+  const workingManifest = absentFamilies.value.manifest;
   const referencedButAbsent = absentFamilies.value.families;
-  const summary = summarizeCoverage(
-    absentFamilies.value.manifest,
-    input.type === undefined ? undefined : [input.type],
+  const involvedTypes =
+    input.type === undefined ? undefined : ([input.type] as readonly string[]);
+  const entries = buildCoverageEntries(workingManifest).filter((entry) =>
+    input.type === undefined ? true : entry.type === input.type,
   );
-  const { retrievedNotParsed, notRequested, referencedButAbsentEntries, ...partitions } =
-    partitionCoverage(entries, retrievedNotParsedTypes(ctx.manifest), referencedButAbsent);
+  const summary = summarizeCoverage(workingManifest, involvedTypes);
+  const notModeled = notModeledCoverageEntries(workingManifest, involvedTypes);
+  const {
+    notModeled: _notModeledFromPartition,
+    retrievedNotParsed,
+    notRequested,
+    referencedButAbsentEntries,
+    ...partitions
+  } = partitionCoverage(
+    entries,
+    retrievedNotParsedTypes(workingManifest),
+    referencedButAbsent,
+  );
   const missingCoverage = summary.missingCoverage;
   // `trust.completeness` is THIS tool's own honesty verdict over its own
   // `covered`/`partial` buckets. Since CH-2 `summary` already folds the
@@ -457,8 +463,6 @@ export const coverageReportHandler = async (
     TOP_UNCOVERED_FAMILIES_CAP,
   );
   const assignmentData = await buildAssignmentDataCoverage(ctx);
-  const involvedTypes =
-    input.type === undefined ? undefined : ([input.type] as readonly string[]);
   const freshness = buildMixedFreshness(ctx.manifest, involvedTypes);
   const tombstones = await readTombstones(ctx.vaultRoot, 50);
   // A shared-container member that never arrived is invisible in the standard
@@ -481,6 +485,7 @@ export const coverageReportHandler = async (
       coverageKnown: summary.coverageKnown,
       coverageComputedAt: ctx.manifest.coverageComputedAt ?? null,
       ...partitions,
+      notModeled,
       // Present ONLY when the vault actually has the condition, so a vault
       // whose containers were all dispatched serialises exactly as before.
       ...(retrievedNotParsed.length > 0 ? { retrievedNotParsed } : {}),

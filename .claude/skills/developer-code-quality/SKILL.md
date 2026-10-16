@@ -6,14 +6,14 @@ description: |
   hardcoded IDs / emails / usernames", "check CRUD / FLS enforcement",
   "what tests are missing / fake-covered", "find dead code", "review
   this Apex class", "what methods does this class have". Drives
-  the v2.1 quality-recognizer cascade (`code_quality_audit`,
+  the quality-recognizer cascade (`code_quality_audit`,
   `governor_limit_risks`, `find_hardcoded_values`, `crud_fls_audit`,
-  `test_coverage_gaps`), the v2.4 hygiene tool `find_dead_code`, and
+  `test_coverage_gaps`), the hygiene tool `find_dead_code`, and
   `apex_structure` for a question about ONE named class or trigger
   (parsed on demand; adds AST-only checks at `confidence: 'parsed'`).
   Every recognizer finding is `confidence: 'heuristic'` — pattern
   recognition is recognition, not declaration; only `apex_structure`'s
-  eight AST-only checks rise above that. Discloses the v2.1 boundary verbatim:
+  eight AST-only checks rise above that. Discloses the boundary verbatim:
   the recognizer pattern-matches on tokenized Apex source (not a compiler AST),
   so cross-class blindness, custom security utility helpers invisible, dynamic
   SOQL invisible, reflective field access invisible, custom test-assertion
@@ -25,8 +25,8 @@ description: |
 
 ## Overview
 
-This skill is the developer persona's companion to the v2.1 quality
-recognizer family and the v2.4 hygiene tools. The developer's
+This skill is the developer persona's companion to the quality
+recognizer family and the hygiene tools. The developer's
 first-line question is one of six shapes — "what's broken in this
 Apex", "where will I hit governor limits", "where are my hardcoded
 values", "what's missing a CRUD/FLS check", "what tests are fake or
@@ -83,10 +83,10 @@ constant-string `Database.query` literals ARE resolved into
 parsed-confidence edges by the default-on Apex AST pass, so a field
 used only inside such a query does not look dead.)
 
-## Baseline suppression (v4.0)
+## Baseline suppression
 
 When the user says a CRUD/FLS or governor-limit finding is a known false
-positive, call **`sfi.baseline_acknowledge`** with the exact `tool`, `rule`,
+positive, call **`sfi.baseline_acknowledge`** (via `sfi.run_analysis`) with the exact `tool`, `rule`,
 `componentId`, and `location` from the finding. Re-running
 `sfi.crud_fls_audit` or `sfi.governor_limit_risks` then excludes it and
 reports `suppressedFindingCount` / `suppressedRiskCount`. Use
@@ -124,7 +124,7 @@ Defer to another skill when:
 
 - **The user asks "what breaks if I change X?"** That's
   cross-component impact analysis. Defer to
-  `architect-impact-analysis` → `sfi.get_impact`.
+  `architect-impact-analysis` → `sfi.get_impact` (via `sfi.run_analysis`).
 - **The user asks "where is `X` used in Apex?"** That's a code
   reference question. Defer to `developer-apex-refactor` →
   `sfi.find_code_usages`.
@@ -133,11 +133,11 @@ Defer to another skill when:
   `developer-impact-and-reachability` →
   `sfi.test_coverage_for_method`.
 - **The user wants live data** ("how many SOQL queries did
-  `OpportunityService` make today?"). v2.1 is offline.
-- **The user wants the recognizer to FIX the issue.** v2.1 is
+  `OpportunityService` make today?"). sf-intelligence is offline.
+- **The user wants the recognizer to FIX the issue.** sf-intelligence is
   read-only; it surfaces findings but never writes a rewrite.
 - **The user wants frontend (LWC / Aura / VF) quality checks.**
-  v2.1 scopes to Apex + Flow. Frontend quality is deferred.
+  sf-intelligence scopes to Apex + Flow. Frontend quality is deferred.
 
 ## The cascade
 
@@ -258,7 +258,7 @@ to start with a known prefix; the heuristic confidence covers this.
 
 For broader literal search across all metadata corpora (Apex + Flow
 XML + metadata XML + formula expressions), defer to
-`sfi.find_hardcoded_values_anywhere` (v2.2's universal-search tool
+`sfi.find_hardcoded_values_anywhere` (the universal-search tool
 documented in `developer-find-anywhere`).
 
 ### 4. `sfi.crud_fls_audit` — security narrowing
@@ -314,7 +314,7 @@ audit of WHICH test classes have fake assertions, follow up with
 
 ### 6. `sfi.find_dead_code` — hygiene narrowing
 
-The v2.4 cross-cutting dead-code surface. Cascades over v2.7's
+The cross-cutting dead-code surface. Cascades over the
 `method_reachability` verdict, the entry-point taxonomy (REST /
 Aura / Invocable / Queueable / Batchable / Schedulable / triggers),
 and zero-usage detection. Returns one of three verdicts per
@@ -421,11 +421,11 @@ developer needs them to interpret findings honestly.
 
 - **Pattern recognition is heuristic.** Every finding carries
   `confidence: 'heuristic'`. The recognizer pattern-matches on the
-  v0.3 tokenization output (string-stripped Apex source). False
+  the tokenization output (string-stripped Apex source). False
   positives are expected; verify before refactoring.
 - **Severity is industry-consensus, not user-tuned.** The catalog
   severity (`critical`, `high`, `medium`, `low`, `info`) is fixed
-  in v2.1. A team that disagrees with the assignment cannot
+  . A team that disagrees with the assignment cannot
   override; per-org severity overrides are deferred to a future
   milestone.
 
@@ -465,10 +465,10 @@ developer needs them to interpret findings honestly.
   Arbitrary 15-character alphanumeric strings outside the allowlist
   are suppressed. Strings shaped like an ID that aren't IDs (session
   keys, hashes) may still match if they start with a known prefix.
-- **Numeric category not provided.** v2.1's hardcoded-value catalog
+- **Numeric category not provided.** The hardcoded-value catalog
   covers IDs, emails, usernames, and sandbox-test data; generic
   numeric / magic-number detection is NOT shipped (the FP rate is
-  too high without dataflow). Use `sfi.find_hardcoded_values_anywhere`
+  too high without dataflow). Use `sfi.find_hardcoded_values_anywhere` (via `sfi.run_analysis`)
   for cross-corpus literal search.
 
 ### CRUD / FLS specific (Q80 verbatim)
@@ -607,9 +607,9 @@ appends the verbatim boundary disclosures.
 
 | Mistake | Why it's wrong |
 |---|---|
-| Presenting a `heuristic` finding as ground truth. | Every v2.1 finding is `confidence: heuristic`. State it explicitly; the developer needs to know to verify before refactoring. |
+| Presenting a `heuristic` finding as ground truth. | Every  finding is `confidence: heuristic`. State it explicitly; the developer needs to know to verify before refactoring. |
 | Flattening severity into one bullet list. | The catalog's severity is the primary delivery axis. A `critical` SOQL-in-loop next to a `low` hardcoded-email reads as equal urgency; surface them separately. |
-| Silently dropping low / info findings. | Tell the user the count even if you suppress the details. The boundary disclosure is "v2.1 found N low / info findings; ask 'show low' to expand", not "no low findings." |
+| Silently dropping low / info findings. | Tell the user the count even if you suppress the details. The boundary disclosure is "sf-intelligence found N low / info findings; ask 'show low' to expand", not "no low findings." |
 | Treating a `hardcoded-id` in a test class as a bug. | The refusal-pattern disclosure exists for this reason: test classes legitimately hardcode IDs, emails, and sandbox URLs as fixtures. Surface the finding with the refusal-pattern note, not as an actionable bug. |
 | Treating a `missing-crud-check` finding as ground truth in an org with a custom security helper. | The Q80 disclosure says it: custom helpers are invisible. If the org uses `SecurityUtils.canCreate(...)`, every DML will flag. Tell the user the FP risk before acting. |
 | Claiming an `uncovered` class has no real test coverage. | The reachability walk caps at depth 3 and is invisible to dynamic dispatch. A class genuinely covered by `Type.forName(...).newInstance().testMe()` will surface as `uncovered`. Cite the boundary, then suggest verifying the test runner. |
@@ -624,12 +624,12 @@ appends the verbatim boundary disclosures.
   parser-grade AST by default (`parsed`) with a heuristic scanner
   backfill; the LWC/Aura/VF frontend tier stays `heuristic`.
 - `developer-impact-and-reachability` — for what-if questions and
-  dead-code drill-in via `method_reachability`. v2.3 + v2.7.
+  dead-code drill-in via `method_reachability`. 
 - `architect-impact-analysis` — for cross-component impact ("what
-  breaks if I delete this field"). v0.2 `sfi.get_impact`.
+  breaks if I delete this field"). `sfi.get_impact`.
 - `developer-find-anywhere` — for cross-corpus literal search
   (`sfi.find_hardcoded_values_anywhere`) and semantic field
-  discovery. v2.2.
+  discovery..
 
 ## Verification
 
@@ -660,4 +660,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

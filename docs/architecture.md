@@ -27,8 +27,9 @@ writes a byte back to Salesforce. It can emit deploy-ready *proposal artifacts*
 files on your machine** for you to review and feed to your own deploy tool; sfi
 itself never deploys them.
 
-The MCP server exposes the full `sfi.*` roster (see `sfi.capabilities` for the
-live tool count) over a typed component graph. Coverage spans
+The MCP server advertises a small core set of tools and reaches every other
+analysis through `sfi.run_analysis` (§5), all over a typed component graph.
+Coverage spans
 schema (objects, fields, validation rules), automation (Flows, Apex classes
 and triggers with call-graph and reachability analysis, legacy workflow /
 approval / assignment / escalation rules), the UI surface (layouts, record
@@ -240,8 +241,19 @@ DuckDB is embedded; there is no separate database server to run.
 
 ## 5. The MCP tool surface
 
-The MCP server exposes the full `sfi.*` roster (`sfi.capabilities` reports the
-live count). Every tool is read-only — nothing writes to your org. **Vault
+By default the MCP server advertises the **core profile**: the tools a host
+needs for everyday questions — `sfi.resolve`, `sfi.search_components`,
+`sfi.get_component`, `sfi.health_check`, `sfi.org_overview`, the verdict tools
+(`sfi.find_component_usages`, `sfi.safe_to_delete_field`,
+`sfi.what_happens_on_save`, `sfi.find_dead_code`,
+`sfi.why_cant_user_see_record`, `sfi.effective_permissions`, `sfi.flow_graph`),
+`sfi.live_consent`, and a catalog trio: `sfi.list_analyses`,
+`sfi.describe_analysis` and `sfi.run_analysis`, through which every other
+analysis runs with the same output. `SFI_TOOL_PROFILE=full` advertises the
+whole roster instead. The reasoning is recorded in
+[ADR-010](./decisions/ADR-010-core-profile-and-run-analysis.md).
+
+Every tool is read-only — nothing writes to your org. **Vault
 tools** never call Salesforce. **Live tools** (`sfi.live_*`) call the org
 read-only when explicitly enabled; they are a separate plane with
 `provenance: live_org`. Tools range from low-level graph primitives to
@@ -254,8 +266,9 @@ foundation the rest build on.
 Three tools form the conversational entry point so you don't need to know any
 API name up front:
 
-- `sfi.capabilities` — a no-arg self-description. "What can I ask?" returns the
-  live map of capability areas, no parameters required.
+- `sfi.list_analyses` and `sfi.describe_analysis` — the catalog. "What can I
+  ask?" is answered from the one-line summaries; `describe_analysis` returns a
+  tool's full contract on demand, and `sfi.run_analysis { name, args }` runs it.
 - `sfi.resolve` — a **typo-tolerant resolver**. It turns messy or misspelled
   phrasing into ranked candidates with a disposition: `exact` (one confident
   match), `ambiguous` (several plausible matches, returned with a ready-to-ask
@@ -268,6 +281,9 @@ API name up front:
   likely candidates rather than an empty list.
 
 ### The foundation tools
+
+Of these, `sfi.search_components`, `sfi.get_component` and `sfi.health_check`
+are core; the rest run through `sfi.run_analysis`.
 
 | Tool                                 | Input                                                | Output                                                  | Purpose                                                                 |
 | ------------------------------------ | ---------------------------------------------------- | ------------------------------------------------------- | ----------------------------------------------------------------------- |
@@ -334,7 +350,7 @@ unions. A sample of the foundational edges:
 | Edge type      | Source                                                                  |
 | -------------- | ----------------------------------------------------------------------- |
 | `parentOf`     | `CustomObject` → `CustomField` / `ValidationRule`.                      |
-| `usedInLayout` | `Layout` → `CustomField`.                                               |
+| `usedInLayout` | `Layout` → `CustomField` (detail body, Highlights Panel, mini layout at extract time; related-list columns on the child object at import time). |
 | `grantedBy`    | `PermissionSet` / `Profile` → field / object / Apex class.             |
 | `triggersOn`   | `ApexTrigger` / `Flow` → `CustomObject` (the event source).             |
 | `references`   | generic declared dependency between two components.                     |
@@ -410,21 +426,27 @@ SfIntelligence follows a simple forward-compat rule for vaults:
   team to a single `sf-intelligence` version per repo is the simplest way to
   avoid that. The `org-kb/meta/version.txt` file records the version that
   last refreshed the vault, so reviewers see version drift in PRs.
-- **What's in the manifest:**
+- **What's in the manifest** (`org-kb/meta/manifest.json`):
   - `version` — the SfIntelligence version that wrote the vault.
   - `refreshedAt` — ISO-8601 timestamp of the last successful refresh.
+  - `sourceOrg` — the Salesforce CLI alias the vault was retrieved from.
+  - `components` and `edges` — per-type counts.
   - `sourceTreeHash` — content hash of `org-kb/source/`. Mismatches with
     the on-disk source mean the vault and the source have drifted.
-  - `componentCounts` — per-type counts.
-  - `patternObservations` — naming-convention findings with confidence.
-  - `errors` — any per-component extraction errors logged during refresh
-    (so they show up in `/sfi-status` rather than getting swallowed).
+  - `coverage` (and `coverageComputedAt`) — one row per metadata family:
+    requested, retrieved count, errored, never modeled, pending or capped.
+    Per-file extraction failures are printed in the refresh summary, not
+    stored here.
+  - `toolingApiEnrichedAt` and `toolingApiEnrichmentScope` — when and what
+    the optional `--with-tooling-api` pass last enriched.
 
-When you upgrade SfIntelligence to a newer version:
+When you upgrade SfIntelligence to a newer version
+([`guides/upgrading.md`](./guides/upgrading.md) has the full walk-through):
 
-1. Update the plugin via your install path (`/plugin install` or git pull).
-2. Run `/sfi-refresh`. The new extractors and renderers populate the vault
-   with their richer output.
+1. Bump the pinned version in your MCP config (or reinstall the global CLI),
+   then restart the host so it starts the new server.
+2. Run `/sfi-refresh` (or `sfi refresh`). The new extractors and renderers
+   populate the vault with their richer output.
 3. Review the diff. New edges and types appear as additions on existing
    components, not as replacements. The manifest version will increment.
 
@@ -437,6 +459,9 @@ and metadata types that older vault was built with.
 - README in the repo root for install paths and a capability summary.
 - [`docs/README.md`](./README.md) — documentation index.
 - [`docs/configuration.md`](./configuration.md) — environment variables, live plane, audit log.
-- `docs/guides/installation.md` for the step-by-step install walk-through.
+- [`docs/cli.md`](./cli.md) — every `sfi` command.
+- `docs/guides/installation.md` for the step-by-step install walk-through;
+  [`guides/upgrading.md`](./guides/upgrading.md) and
+  [`guides/troubleshooting.md`](./guides/troubleshooting.md) for what comes after.
 - `docs/guides/first-refresh.md` for the first-refresh walk-through.
 - `docs/guides/asking-questions.md` for the question set and boundaries.

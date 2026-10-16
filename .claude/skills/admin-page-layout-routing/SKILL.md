@@ -10,9 +10,9 @@ description: |
   X". Call `sfi.run_analysis` with `{ "name": "sfi.layout_for_user", "args": { … } }` (cascade over profile lookup,
   layoutAssignment matching, recordType resolution) and explains
   the routing decision honestly: stages return `unknown` rather
-  than fabricating when v1.2's metadata model can't tell (e.g.,
+  than fabricating when the metadata model can't tell (e.g.,
   org-default layouts, permission-set layout assignments). Discloses
-  v1.2's boundary: only profile-based layout assignments are
+  the boundary: only profile-based layout assignments are
   resolved for Classic layouts; Lightning record pages come from
   activation metadata (org, app, app + record type + profile);
   permission-set layouts are noted for manual verification.
@@ -22,7 +22,7 @@ description: |
 
 ## Overview
 
-This skill is the admin persona's companion to v1.2's headline tool,
+This skill is the admin persona's companion to the headline tool,
 `sfi.layout_for_user`. The admin's first-line question is some shape
 of "user X reports they're seeing the wrong layout (or wrong record
 type, or missing fields) on object Y" — and the honest answer is a
@@ -35,12 +35,12 @@ to drive the tool, present the cascade, and turn `unknown` and
 `null` verdicts into manual-check recommendations rather than
 fabricated layout IDs.
 
-The cascade consumes three v1.2 edge types and two extracted Profile
+The cascade consumes three edge types and two extracted Profile
 properties. The edges are `parentOf` (`CustomObject` → `RecordType`,
-emitted by the v1.2 RecordType extractor), `references`
+emitted by the RecordType extractor), `references`
 (`RecordType` → `BusinessProcess`, when the record type binds to a
 stage progression on Lead/Opportunity/Case), and `parentOf`
-(`CustomObject` → `Layout`, emitted in v0.1). The Profile properties
+(`CustomObject` → `Layout`, emitted). The Profile properties
 are `layoutAssignments` and `recordTypeVisibilities` (with the
 `default=true` flag the cascade uses for default-record-type
 resolution). Both are extracted at `confidence: 'declared'`.
@@ -82,7 +82,7 @@ Fire this skill on layout-routing phrasing. Concrete triggers:
   Lead?".
 - **"What's the layout for record type Y?"** — "Which layout is
   assigned for `RecordType:Account.PartnerAccount` under
-  `Profile:System Administrator`?", "What layout fires for the
+  `Profile:Admin`?", "What layout fires for the
   New Business record type on Opportunity?".
 - **"User reports wrong layout."** — natural support-ticket
   phrasing. "User complaint: Account layout is missing the Industry
@@ -110,10 +110,10 @@ Defer to another skill when:
   why-can't-I-do-X intent or `answering-org-questions` →
   `sfi.get_edges` with `grantedBy` from the field.
 - **"What fields does this object have?"** — a schema lookup. Defer
-  to `answering-org-questions` → `sfi.list_components` or
+  to `answering-org-questions` → `sfi.list_components` (via `sfi.run_analysis`) or
   `sfi.get_component`.
 - **"What breaks if I change this layout?"** — cross-component
-  impact. Defer to `architect-impact-analysis` → `sfi.get_impact`.
+  impact. Defer to `architect-impact-analysis` → `sfi.get_impact` (via `sfi.run_analysis`).
 - **"Which Lightning record page does {profile} see for {object}?"**
   — FlexiPages ARE extracted (`FlexiPage:` nodes carry `sobjectType`,
   `pageType`, `masterLabel`, and an explicit `activationsModeled:
@@ -124,17 +124,17 @@ Defer to another skill when:
   served these pages". Half the question is answerable and half is
   not; say which half. Do not refuse the whole thing.
 - **"Which compact layout does this user see?"** — RecordType ships
-  `compactLayoutAssignment`, and v1.2 stores it as a node property,
+  `compactLayoutAssignment`, and sf-intelligence stores it as a node property,
   but the `sfi.layout_for_user` cascade is **full-page-layout only**.
   Note the boundary and offer to surface the property via
   `sfi.get_component` on the RecordType id.
 - **A specific record ID question** ("what layout does this
-  specific Opportunity `006xx0000012345` show?"). v1.2 has no
+  specific Opportunity `006xx0000012345` show?"). sf-intelligence has no
   record-level data; the answer needs the record's `recordTypeId`.
   Translate to the object + record type shape (asking for the
   record type explicitly) or refuse.
 - **The user wants Lead-conversion or implicit-conversion layouts**
-  — those are not modeled in v1.2. Refuse honestly; point to
+  — those are not modeled. Refuse honestly; point to
   **Setup → Lead Settings**.
 
 ## Steps
@@ -173,11 +173,11 @@ top level:
 If any required piece is missing — including the user supplying a
 user name instead of a profile id, or naming a record type by
 business label without an API hint — **ASK** before firing the
-tool. v1.2 does not extract `User` records, so the user-to-profile
+tool. sf-intelligence does not extract `User` records, so the user-to-profile
 mapping is not in the graph; the admin must look it up in
 **Setup → Users**. Good clarifying questions:
 
-- "What's the user's profile? v1.2 doesn't extract `User` records,
+- "What's the user's profile? sf-intelligence doesn't extract `User` records,
   so I can't translate from `jsmith@example.com` to a profile id."
 - "Which record type are they working with — or any? I can resolve
   the profile's default if you leave it open."
@@ -214,13 +214,13 @@ There is **no permission-set input**. Salesforce has no
 per-permission-set `layoutAssignments`, so the tool models no such axis
 — a `permissionSetIds` key is not part of the contract.
 
-The response shape (per the v1.2 contract):
+The response shape (per the tool contract):
 
 ```json
 {
   "data": {
     "appliedScope": {
-      "profileId": "Profile:System Administrator",
+      "profileId": "Profile:Admin",
       "objectApiName": "Account",
       "recordTypeId": "RecordType:Account.PartnerAccount"
     },
@@ -229,7 +229,7 @@ The response shape (per the v1.2 contract):
     "uiSurface": "lightning-flexipage",
     "recordTypeUsed": "Account.PartnerAccount",
     "reasoning": [
-      { "stage": "ProfileLookup",         "verdict": "matched", "reason": "profile resolved: Profile:System Administrator" },
+      { "stage": "ProfileLookup",         "verdict": "matched", "reason": "profile resolved: Profile:Admin" },
       { "stage": "LayoutAssignment",      "verdict": "matched", "reason": "layoutAssignment matches (object='Account', recordType='Account.PartnerAccount')" },
       { "stage": "RecordTypeResolution",  "verdict": "matched", "reason": "record type 'Account.PartnerAccount' resolved against profile layoutAssignment", "value": "Account.PartnerAccount" },
       { "stage": "LightningPageLookup",   "verdict": "matched", "reason": "FlexiPage 'FlexiPage:Account_Record_Page' models the Lightning record surface for 'Account'", "value": "FlexiPage:Account_Record_Page" }
@@ -312,17 +312,17 @@ plain language. Three shapes:
 - **Matched** (`layoutId` is non-null): "`Profile:Sales_User` on
   `Opportunity` with `RecordType:Opportunity.New_Business` sees
   `Layout:Opportunity.New Business Opportunity Layout`."
-- **Null with `unknown` step**: "v1.2 *cannot tell* which layout
+- **Null with `unknown` step**: "The tool *cannot tell* which layout
   `Profile:Marketing User` sees for `(Affiliate__c, Premium)` —
   no `layoutAssignments` entry was extracted for this tuple. Verify
   in Setup → Profiles → `Profile:Marketing User` → Page Layout
   Assignment for `Affiliate__c`."
 - **Null with no `unknown` step** (rare; the profile resolved and an
-  assignment list existed, but nothing targeted this object): "v1.2's
+  assignment list existed, but nothing targeted this object): "The
   extracted assignments do not
   cover `(Object, RecordType)` for this profile. Either the
   profile has no assigned layout (Salesforce will fall back to the
-  org-default layout — not modeled in v1.2) or the assignment was
+  org-default layout — not modeled) or the assignment was
   not extracted. Verify in Setup."
 
 Use canonical IDs in the bottom-line sentence so the admin can act
@@ -331,7 +331,7 @@ on them.
 ### Step 5 — When the verdict is non-null, surface the boundary too
 
 Even when `layoutId` is non-null and the trace looks complete,
-**always** append the v1.2 boundary disclosure (see *Boundary
+**always** append the boundary disclosure (see *Boundary
 disclosure* below). The admin's protection against the wrong
 mental model is naming what the cascade *doesn't* model.
 
@@ -360,8 +360,8 @@ id from a partial label; profile names are bespoke per org.
 
 ## Reporting format
 
-Worked example. Use the synthetic-v1.2 fixture conventions
-(`Profile:System Administrator`, `RecordType:Account.PartnerAccount`,
+Worked example. Use the synthetic fixture conventions
+(`Profile:Admin`, `RecordType:Account.PartnerAccount`,
 `Layout:Account.Partner Account Layout`,
 `RecordType:Opportunity.New_Business`,
 `RecordType:Affiliate__c.Premium`, `Profile:Marketing User`).
@@ -371,7 +371,7 @@ the Partner Account record type on Account?"*
 
 Claude's flow:
 
-1. **Parse** → `profileId: 'Profile:System Administrator'`,
+1. **Parse** → `profileId: 'Profile:Admin'`,
    `objectApiName: 'Account'`, `recordTypeId:
    'RecordType:Account.PartnerAccount'`. All three present.
 2. **Call** `sfi.run_analysis` with `{ "name": "sfi.layout_for_user", "args": { … } }` with the triple.
@@ -381,7 +381,7 @@ Claude's flow:
 {
   "data": {
     "appliedScope": {
-      "profileId": "Profile:System Administrator",
+      "profileId": "Profile:Admin",
       "objectApiName": "Account",
       "recordTypeId": "RecordType:Account.PartnerAccount"
     },
@@ -390,7 +390,7 @@ Claude's flow:
     "uiSurface": "classic-layout",
     "recordTypeUsed": "Account.PartnerAccount",
     "reasoning": [
-      { "stage": "ProfileLookup",        "verdict": "matched", "reason": "profile resolved: Profile:System Administrator" },
+      { "stage": "ProfileLookup",        "verdict": "matched", "reason": "profile resolved: Profile:Admin" },
       { "stage": "LayoutAssignment",     "verdict": "matched", "reason": "layoutAssignment matches (object='Account', recordType='Account.PartnerAccount')" },
       { "stage": "RecordTypeResolution", "verdict": "matched", "reason": "record type 'Account.PartnerAccount' resolved against profile layoutAssignment", "value": "Account.PartnerAccount" },
       { "stage": "LightningPageLookup",  "verdict": "unknown", "reason": "no FlexiPage in vault targets object 'Account'" }
@@ -401,10 +401,10 @@ Claude's flow:
 
 4. **Respond:**
 
-> Layout routing cascade for `Profile:System Administrator` on
+> Layout routing cascade for `Profile:Admin` on
 > `Account` with `RecordType:Account.PartnerAccount`:
 >
-> - **ProfileLookup** — `matched`. `Profile:System Administrator`
+> - **ProfileLookup** — `matched`. `Profile:Admin`
 >   resolved in the vault.
 > - **LayoutAssignment** — `matched`. A `layoutAssignments` entry
 >   targets `(Account, Account.PartnerAccount)` →
@@ -414,11 +414,11 @@ Claude's flow:
 > - **LightningPageLookup** — `unknown`. No FlexiPage in the vault
 >   targets `Account`, so `uiSurface` is `classic-layout`.
 >
-> **Bottom line:** `Profile:System Administrator` on `Account` with
+> **Bottom line:** `Profile:Admin` on `Account` with
 > the Partner Account record type sees
 > `Layout:Account.Partner Account Layout`.
 >
-> v1.2 layout routing covers profile `layoutAssignments`, profile
+> The layout routing covers profile `layoutAssignments`, profile
 > `recordTypeVisibilities` (for default-record-type resolution), and
 > the Master record-type fallback. It does **not** resolve layout
 > assignments through permission sets — Salesforce does not support
@@ -476,7 +476,7 @@ Claude's flow:
 > - **LightningPageLookup** — `unknown`. No FlexiPage in the vault
 >   targets `Affiliate__c` either, so `uiSurface` is `unknown` too.
 >
-> **Bottom line:** v1.2 cannot tell which layout
+> **Bottom line:** sf-intelligence cannot tell which layout
 > `Profile:Marketing User` sees for `(Affiliate__c,
 > RecordType:Affiliate__c.Premium)`. The profile's
 > `layoutAssignments` map has no entry for this tuple, and no
@@ -486,14 +486,14 @@ Claude's flow:
 >   for `Affiliate__c`** — confirm what's actually assigned for the
 >   Premium record type (and for `Master`).
 > - If the assignment is configured but the cascade reported
->   `unknown`, the v1.2 extraction may have missed it. File a
+> `unknown`, the extraction may have missed it. File a
 >   `/sfi-refresh` and re-run.
 >
-> v1.2 layout routing covers profile `layoutAssignments`, profile
+> The layout routing covers profile `layoutAssignments`, profile
 > `recordTypeVisibilities`, and the Master fallback. It does
 > **not** model permission-set layout assignments, Lightning
 > record pages, app-default routing, compact layouts, or
-> record-row data. `layoutId: null` is the honest answer — v1.2
+> record-row data. `layoutId: null` is the honest answer — the tool
 > cannot tell, and the admin must verify in Setup.
 
 The response names every step. Every `unknown` is
@@ -533,7 +533,7 @@ cascade.
 
 ## Boundary disclosure
 
-v1.2's layout routing has well-defined gaps. Surface this list
+The layout routing has well-defined gaps. Surface this list
 whenever the admin is about to act on the report, and **always**
 when any step returned `unknown` or the top-level `layoutId` is
 `null`:
@@ -547,7 +547,7 @@ when any step returned `unknown` or the top-level `layoutId` is
   *visibility*, but layout assignment stays with the profile.
 - **Org-default layouts.** Salesforce maintains a fallback layout
   per object that applies when no profile-specific assignment
-  matches. v1.2 does **not** model this fallback. When the
+  matches. sf-intelligence does **not** model this fallback. When the
   `LayoutAssignment` step returns `unknown`, the org default may
   still be displaying — check **Setup → Object Manager →
   {object} → Page Layouts → Page Layout Assignment** for the
@@ -565,31 +565,31 @@ when any step returned `unknown` or the top-level `layoutId` is
 - **App-default routing.** App defaults and app + record type +
   profile assignments ARE resolved — see `recordPageActivation.byApp`.
 - **Compact layouts.** RecordType ships
-  `compactLayoutAssignment`. v1.2 stores it as a property on the
+  `compactLayoutAssignment`. sf-intelligence stores it as a property on the
   RecordType node (`properties.compactLayoutAssignment`), but
   `sfi.layout_for_user` is **full-page-layout only**. If the
   admin wants the compact layout for a record type, fetch it via
   `sfi.get_component({ id: 'RecordType:...' })` and surface the
   property — do **not** route it through the cascade.
 - **Implicit-conversion layouts.** Lead conversion uses a Lead
-  Conversion Mappings model (`LeadConvertSettings`) that v1.2
+  Conversion Mappings model (`LeadConvertSettings`) that sf-intelligence
   does not extract. If the admin is investigating a Lead-convert
   layout question, refuse honestly; point to **Setup → Object
   Manager → Lead → Lead Settings → Lead Conversion**.
-- **User → Profile mapping.** v1.2 does not extract `User`
+- **User → Profile mapping.** sf-intelligence does not extract `User`
   records. When the admin supplies a user name, ask for the
   profile id directly or send them to **Setup → Users → {user} →
-  Profile**. v1.7's Tooling API tier may surface a synthetic
+  Profile**. The Tooling API tier may surface a synthetic
   mapping.
 - **Record-row routing.** "Which layout does *this specific
   Opportunity record* show?" needs the record's `recordTypeId` —
-  which is record-level data, out of scope for v1.x. Translate
+  which is record-level data, out of scope for the vault. Translate
   to `(object, recordType)` shape and disclose the shift, or
   refuse and point the admin at the record in Salesforce.
 - **Tab visibility per profile.** Profile carries
-  `tabVisibilities` (extracted in v1.0); v1.2 does not yet
+  `tabVisibilities` (extracted); sf-intelligence does not yet
   produce a tool that walks it. The Q28 inversion (tab-to-app)
-  via `belongsToApp` is the closest v1.2 capability.
+  via `belongsToApp` is the closest available capability.
 
 Treat **`unknown`** verdicts as a flag for manual investigation,
 not as denial — on `LayoutAssignment` it means "the profile's
@@ -599,7 +599,7 @@ still subject to the org-default-layout caveat above. Treat
 in the vault", never as "that profile has no layout". Treat
 **`fallback`** as a real match reached by a default rather than an
 explicit assignment — say which default. Treat a non-null
-**`layoutId`** as "v1.2 traced a declared profile assignment" — high
+**`layoutId`** as "sf-intelligence traced a declared profile assignment" — high
 trust, but still subject to the Lightning record page in
 `flexiPageId` / `uiSurface`, which the profile metadata does not
 govern.
@@ -608,13 +608,13 @@ govern.
 
 | Mistake | Why it's wrong |
 |---|---|
-| Presenting `layoutId: null` as "the profile has no layout assigned." | `null` means "v1.2 can't tell from the extracted metadata." The profile may have a layout assigned in Setup that the extractor missed or didn't model (org-default, Lightning page). Surface the null as a flag for the Setup check, never as a definitive negative. |
+| Presenting `layoutId: null` as "the profile has no layout assigned." | `null` means "sf-intelligence can't tell from the extracted metadata." The profile may have a layout assigned in Setup that the extractor missed or didn't model (org-default, Lightning page). Surface the null as a flag for the Setup check, never as a definitive negative. |
 | Guessing the org-default layout when the cascade returns `null`. | The PLAN's anti-rationalization #2 verbatim. Guessing fabricates a layout the admin will trust and act on. `layoutId: null` is the honest answer. |
 | Claiming "the permission set is overriding the layout." | Salesforce does not support per-permission-set `layoutAssignments`, and the tool has no permission-set input or stage. Don't introduce an override mechanism that doesn't exist in the metadata model. |
 | Naming a stage or verdict the tool never emits. | The stages are exactly `ProfileLookup` / `LayoutAssignment` / `RecordTypeResolution` / `LightningPageLookup` / `Default` (and `Default` is never emitted); the verdicts are exactly `matched` / `fallback` / `unknown` / `not-found`. Inventing `ProfileLayoutAssignment`, `MasterFallback`, `no-match` or `resolved` produces a trace the admin cannot reconcile with the tool output — and it reads as authoritative. Quote what came back. |
 | Wrapping the args in `recordContext` / `userContext`. | The input schema is FLAT. A nested envelope makes `objectApiName` missing at the top level and the whole call fails Zod — every "example" that nests is a call that never runs. |
-| Firing the tool without a `profileId`. | The cascade reads `layoutAssignments` from a Profile node; without the profile id there is no node to read. ASK the admin for the profile before firing — v1.2 has no `User` records to translate from. |
-| Translating a user name into a profile id by guessing. | v1.2 doesn't extract `User` records. Ask the admin to look up the user's profile in **Setup → Users**, or to supply the profile id directly. |
+| Firing the tool without a `profileId`. | The cascade reads `layoutAssignments` from a Profile node; without the profile id there is no node to read. ASK the admin for the profile before firing — sf-intelligence has no `User` records to translate from. |
+| Translating a user name into a profile id by guessing. | sf-intelligence doesn't extract `User` records. Ask the admin to look up the user's profile in **Setup → Users**, or to supply the profile id directly. |
 | Presenting a `flexiPageId` as the page the user is activated on. | FlexiPages ARE extracted, and `LightningPageLookup` resolves one per object — but the per-profile / per-app / per-record-type ACTIVATION matrix is not in the metadata. When an object has several record pages the pick is deterministic, not correct. Name it as a candidate and point to **Setup → Object Manager → {object} → Lightning Record Pages**. |
 | Reporting the Classic `layoutId` when `uiSurface` is `lightning-flexipage`. | The profile's `layoutAssignments` still resolve a Classic layout even when the org runs Lightning. `boundaryNote` says so explicitly; quote it and lead with the FlexiPage, or the admin edits a layout nobody sees. |
 | Silently dropping `unknown` or `not-found` steps from the trace. | Every step is load-bearing for the audit trail. Dropping an `unknown` step makes the trace look definitive when it isn't, and the admin will skip the Setup verification. |
@@ -631,7 +631,7 @@ for Account record type PartnerAccount?"*
 
 Claude's flow:
 
-1. **Parse** → `profileId: 'Profile:System Administrator'`,
+1. **Parse** → `profileId: 'Profile:Admin'`,
    `objectApiName: 'Account'`, `recordTypeId:
    'RecordType:Account.PartnerAccount'`.
 2. **Fire** `sfi.run_analysis` with `{ "name": "sfi.layout_for_user", "args": { … } }` with the triple.
@@ -682,7 +682,7 @@ Claude's flow:
 > `Layout:Opportunity.New Business Opportunity Layout`
 > (`uiSurface: classic-layout`).
 >
-> [v1.2 boundary disclosure follows.]
+> [Boundary disclosure follows.]
 
 Note the two `fallback` shapes `LayoutAssignment` can return, and say
 which one you got: a master assignment matched because the caller named
@@ -729,7 +729,7 @@ Claude's flow:
 > (`sfi.layout_for_user`) if that's the surface the rep is actually
 > on — it reports `uiSurface` so you can tell which one applies.
 
-The response names the v1.2 boundary, points to two concrete Setup
+The response names the boundary, points to two concrete Setup
 paths, and offers the in-scope alternative.
 
 ### Recovery — typo'd profile id
@@ -783,7 +783,7 @@ Before sending a response, confirm:
       compact layout, lead-conversion layout, or permission-set
       "layout override," I refused honestly and named the
       specific Setup screen.
-- [ ] I appended the v1.2 boundary disclosure — permission-set
+- [ ] I appended the boundary disclosure — permission-set
       layouts, org defaults, Lightning record pages, app-default
       routing, compact layouts, implicit-conversion layouts,
       user→profile mapping, record-row data, tab visibility.
@@ -793,4 +793,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

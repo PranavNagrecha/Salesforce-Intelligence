@@ -20,7 +20,7 @@ or a GitHub `vX.Y.Z` tag).
     "sf-intelligence": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "sf-intelligence@X.Y.Z", "mcp"]
+      "args": ["-y", "sf-intelligence@X.Y.Z", "mcp", "--vault", "/abs/path/to/org-kb"]
     }
   }
 }

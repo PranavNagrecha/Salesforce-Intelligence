@@ -34,7 +34,7 @@
 
 **Why it fails.** Population answers *how much data is in this field*. The decision needs *what breaks if the field disappears*. The two questions are unrelated, and they come apart hardest on exactly the fields that matter: formula fields, transient state flags, integration keys, and anything frozen. On dense, obviously-live fields the substitution produces the right answer anyway, which is what makes it feel reliable for the first thirty rows.
 
-**Worked example (illustrative).** `Custom_Object__c.Trigger_Case__c` is populated on **2 of ~750,000** records and was marked **Keep** — the only recorded justification was a permission-grant count. Its sole reference anywhere in the org is an Obsolete flow whose own description reads *"flow will be deleted along with field Trigger_Case__c"*. It is not on any layout, so no user can even tick it. Meanwhile `TL_Test_Case_Flag__c` at 0.00% was marked **Remove / No Risk**, and it carries strictly *more* deletion friction (one layout item plus seven report-type column entries). The Keep and the Remove were inverted relative to the actual work required.
+**Worked example (illustrative).** `Demo_Object__c.Demo_Trigger_Case__c` is populated on **2 of ~750,000** records and was marked **Keep** — the only recorded justification was a permission-grant count. Its sole reference anywhere in the org is an Obsolete flow whose own description reads *"flow will be deleted along with field Demo_Trigger_Case__c"*. It is not on any layout, so no user can even tick it. Meanwhile `TL_Test_Case_Flag__c` at 0.00% was marked **Remove / No Risk**, and it carries strictly *more* deletion friction (one layout item plus seven report-type column entries). The Keep and the Remove were inverted relative to the actual work required.
 
 **The check.**
 - For every field, write one line: **"X consumes this; if the field vanished, X would Y."** If you cannot fill it in, the field is not dispositioned yet, whatever the percentage says.
@@ -51,18 +51,18 @@
 
 | Field | Population | Recency finding | Verdict moved |
 |---|---|---|---|
-| `Legacy_App_Date__c` | 40.6% (~305k rows) | `MAX` = four years ago, zero values since | Looked alive, is frozen |
-| `Next_Cycle_Date__c` | 5.8% (44,283 rows) | `MAX` = six years ago; 38,275 of 44,283 fall in a three-year window that ended | Review → Deprecate-then-Remove |
-| `Conferral_Estimate__c` | 29.7% | **No future-dated value at all** | Contested; survived on designated intent, not liveness |
-| `Cleared_By_Date__c` | 0.68% | Yearly values decay 716 → 251 → 17; no record carries a future deadline | For a "by-date" field, that is the tell |
-| `Enrollment_Date__c` | 62.0% | `MAX` three weeks before the audit | Confirmed live |
+| `Demo_Legacy_Date__c` | 40.6% (~305k rows) | `MAX` = four years ago, zero values since | Looked alive, is frozen |
+| `Demo_Next_Cycle_Date__c` | 5.8% (44,283 rows) | `MAX` = six years ago; 38,275 of 44,283 fall in a three-year window that ended | Review → Deprecate-then-Remove |
+| `Demo_Estimate_Date__c` | 29.7% | **No future-dated value at all** | Contested; survived on designated intent, not liveness |
+| `Demo_Cleared_By_Date__c` | 0.68% | Yearly values decay 716 → 251 → 17; no record carries a future deadline | For a "by-date" field, that is the tell |
+| `Demo_Start_Date__c` | 62.0% | `MAX` three weeks before the audit | Confirmed live |
 
 Three queries — `MAX(field)`, count of values `> TODAY`, and `CreatedBy` on the newest writes — reclassified **5 of 46** fields, and in *both* directions. It is the cheapest high-yield check in the whole method and it is routinely skipped.
 
 **The check.**
-- `SELECT MAX(Some_Field__c) FROM Custom_Object__c`
-- `SELECT COUNT() FROM Custom_Object__c WHERE Some_Field__c > TODAY` (date/datetime fields only)
-- `SELECT CreatedById, COUNT(Id) FROM Custom_Object__c WHERE Some_Field__c != null AND CreatedDate = LAST_N_DAYS:180 GROUP BY CreatedById`
+- `SELECT MAX(Demo_Field__c) FROM Demo_Object__c`
+- `SELECT COUNT() FROM Demo_Object__c WHERE Demo_Field__c > TODAY` (date/datetime fields only)
+- `SELECT CreatedById, COUNT(Id) FROM Demo_Object__c WHERE Demo_Field__c != null AND CreatedDate = LAST_N_DAYS:180 GROUP BY CreatedById`
 
 **Corollary trap — the report that already fails closed.** A saved report named after a 0%-populated date field used it as a rolling "next 60 days" date filter. It runs, it errors on nothing, and it returns **zero rows every time**, showing its audience a permanent all-clear. Deleting the field would not have created that defect; it was already there. When a field is empty, check whether anything is *filtering* on it and quietly reporting nothing.
 
@@ -86,11 +86,11 @@ Three queries — `MAX(field)`, count of values `> TODAY`, and `CreatedBy` on th
 
 **Symptom.** A population figure you cannot reproduce when the object is named explicitly in the `FROM` clause.
 
-**Worked example (illustrative).** 32 of 46 field API names on the audited object also existed on at least one other object. `Source_Flag__c` was recorded at **6,539 records / 0.86%**. Object-scoped, the true value is **17 records / 0.0%** — wrong by roughly **385x**. The figure came from the same-named field on the parent object. Separately, `Delivery_Mode__c` was recorded with a population and a "possible data loss" risk; on the audited object it is **0%**, and the entire evidence base belonged to a namesake on a different object that is 85% populated. The correct verdict for `Source_Flag__c` (Keep) survived, but only by luck: it is a Keep because three active flows *write* it, not because it holds data.
+**Worked example (illustrative).** 32 of 46 field API names on the audited object also existed on at least one other object. `Demo_Source_Flag__c` was recorded at **6,539 records / 0.86%**. Object-scoped, the true value is **17 records / 0.0%** — wrong by roughly **385x**. The figure came from the same-named field on the parent object. Separately, `Delivery_Mode__c` was recorded with a population and a "possible data loss" risk; on the audited object it is **0%**, and the entire evidence base belonged to a namesake on a different object that is 85% populated. The correct verdict for `Demo_Source_Flag__c` (Keep) survived, but only by luck: it is a Keep because three active flows *write* it, not because it holds data.
 
 **The check.**
-- Object-scope **every** count: `SELECT COUNT(Id) FROM Custom_Object__c WHERE Some_Field__c != null`. Never accept a figure whose query you cannot see.
-- Object-scope **every grep**. `rg 'Some_Field__c'` is not evidence; `rg 'Custom_Object__c\.Some_Field__c'` plus the other grammars (T9) is.
+- Object-scope **every** count: `SELECT COUNT(Id) FROM Demo_Object__c WHERE Demo_Field__c != null`. Never accept a figure whose query you cannot see.
+- Object-scope **every grep**. `rg 'Demo_Field__c'` is not evidence; `rg 'Demo_Object__c\.Demo_Field__c'` plus the other grammars (T9) is.
 - In report and report-type XML, scope on the enclosing `<table>` / `<columns>` element, not on the field token alone.
 - Build the collision list **first**, as a column of the shared evidence index: for each field API name, which other objects carry it. This one column changes how you read every downstream number.
 - Under 1% and marked Keep, or over 50% and marked Remove? Re-derive before believing it.
@@ -103,12 +103,12 @@ Three queries — `MAX(field)`, count of values `> TODAY`, and `CreatedBy` on th
 
 **Worked example (illustrative).** The most dangerous call in the source audit.
 
-- `Mine__c` = `IF(Assigned_User__r.Id = $User.Id, TRUE, FALSE)` — measured **0% populated**, marked **Remove / No Risk**.
-- `My_Team_s__c` = a formula over `Assigned_User__c` and `Assigned_User__r.UserRole.Name` — measured **20.49%**, marked **Keep**.
+- `Demo_Mine__c` = `IF(Demo_Assigned_User__r.Id = $User.Id, TRUE, FALSE)` — measured **0% populated**, marked **Remove / No Risk**.
+- `Demo_My_Team__c` = a formula over `Demo_Assigned_User__c` and `Demo_Assigned_User__r.UserRole.Name` — measured **20.49%**, marked **Keep**.
 
-Both are computed from the same base field. `Assigned_User__c` is populated on **155,603** records; `My_Team_s__c` reported **155,604** TRUE — i.e. *every* record with an assignee, which happens only when the measuring identity satisfies the role branch. Same rows, same base field, a 20.49-point spread produced entirely by the identity holding the session.
+Both are computed from the same base field. `Demo_Assigned_User__c` is populated on **155,603** records; `Demo_My_Team__c` reported **155,604** TRUE — i.e. *every* record with an assignee, which happens only when the measuring identity satisfies the role branch. Same rows, same base field, a 20.49-point spread produced entirely by the identity holding the session.
 
-And `Mine__c` was not decorative: it is the **sole filter criterion** (`equals 1`) of two reports scoped `organization` that drive a "my team" dashboard. Report filters cannot natively compare a field to the running user, so that formula **is** the scoping mechanism. See T11 for what deleting it does.
+And `Demo_Mine__c` was not decorative: it is the **sole filter criterion** (`equals 1`) of two reports scoped `organization` that drive a "my team" dashboard. Report filters cannot natively compare a field to the running user, so that formula **is** the scoping mechanism. See T11 for what deleting it does.
 
 **The check.**
 - Grep every formula body for `$User`, `$UserRole`, `$Profile`, `$Organization`, `TODAY()`, `NOW()`. Any hit ⇒ the population number is a property of the querying identity, not of the data. Delete the number; do not "adjust" it.
@@ -163,7 +163,7 @@ And `Mine__c` was not decorative: it is the **sole filter criterion** (`equals 1
 - Keep two columns, never one: **saved reports** and **report types**.
 - Saved reports are evidence of use. Report types are a **pre-work checklist** for the deletion runbook, and nothing more.
 - Report types must also be object-scoped: a fuzzy name match across report-type files inflates counts wildly (T15).
-- Deleting a field can also destroy an **implicit** report type keyed on that field (`ParentEntity$Custom_Object__c@Custom_Object__c.Some_Field__c`) and orphan any report built on it. That belongs in the runbook, not the evidence column.
+- Deleting a field can also destroy an **implicit** report type keyed on that field (`ParentEntity$Demo_Object__c@Demo_Object__c.Demo_Field__c`) and orphan any report built on it. That belongs in the runbook, not the evidence column.
 
 ---
 
@@ -171,16 +171,16 @@ And `Mine__c` was not decorative: it is the **sole filter criterion** (`equals 1
 
 **Symptom.** A search returns zero. The field is certified safe. It was not safe.
 
-**Worked example (illustrative).** The audit brief documented **two** report reference grammars. The org actually used **four** — and the two undocumented ones carried *all* the references for two different fields. `Dismissal_Date__c` appears in **10 saved reports**, every one of them reachable only through the `FK_$Custom_Object__c.FIELD` traversal form. Searching the two documented patterns returns exactly **0**, which is precisely what the original analysis reported. One of those ten reports is named after the field and uses it as its rolling date filter.
+**Worked example (illustrative).** The audit brief documented **two** report reference grammars. The org actually used **four** — and the two undocumented ones carried *all* the references for two different fields. `Dismissal_Date__c` appears in **10 saved reports**, every one of them reachable only through the `FK_$Demo_Object__c.FIELD` traversal form. Searching the two documented patterns returns exactly **0**, which is precisely what the original analysis reported. One of those ten reports is named after the field and uses it as its rolling date filter.
 
 Illustrative grammar table (yours will differ — **derive it, do not copy it**):
 
 | Form | Where it appears |
 |---|---|
-| `Custom_Object__c.Some_Field__c` | reports built directly on the object |
-| `Custom_Objects__r$Some_Field__c` | child-relationship traversal from a parent-based report type |
-| `FK_$Custom_Object__c.Some_Field__c` | foreign-key traversal — carried 10 of 10 for one field |
-| `Custom_Object__c$Some_Field__c` | second traversal spelling — carried 5 of 5 for another |
+| `Demo_Object__c.Demo_Field__c` | reports built directly on the object |
+| `Custom_Objects__r$Demo_Field__c` | child-relationship traversal from a parent-based report type |
+| `FK_$Demo_Object__c.Demo_Field__c` | foreign-key traversal — carried 10 of 10 for one field |
+| `Demo_Object__c$Demo_Field__c` | second traversal spelling — carried 5 of 5 for another |
 
 And the tags matter as much as the prefixes. References live in `<field>`, `<column>`, `<sortColumn>`, `<dateColumn>`, `<secondaryGroupingColumn>`, `<groupingColumn>`, inside `<filters>`, and inside `timeFrameFilter/dateColumn`. Searching `<field>` alone was the difference between **55** and **62** reports for one field.
 
@@ -221,7 +221,7 @@ The same trap runs through every metadata family:
 
 **Symptom.** The sheet records *how many* references, never *what the field does* inside them. This is the single distinction that decides most verdicts.
 
-**Worked example (illustrative).** Deleting `Mine__c` — the running-user formula from T5 — does not empty the two reports that filter on it. It **fails them open**: "My Records" silently widens to every record in the org, on a dashboard that leadership reads as a personal work queue. Nothing errors. Nothing fails to deploy. Nobody files a ticket. Compare with deleting a display column, which is immediately visible and harmless.
+**Worked example (illustrative).** Deleting `Demo_Mine__c` — the running-user formula from T5 — does not empty the two reports that filter on it. It **fails them open**: "My Records" silently widens to every record in the org, on a dashboard that leadership reads as a personal work queue. Nothing errors. Nothing fails to deploy. Nobody files a ticket. Compare with deleting a display column, which is immediately visible and harmless.
 
 The same shape appears in the layout family: `Status_Changed_Date__c` is the `sortField` / `sortFieldAlias` on **all eight** related lists rendering this object (six layouts belonging to another object, plus two dynamic related lists on a flexipage). Delete it and every one of those pages silently loses its ordering.
 
@@ -244,7 +244,7 @@ The same shape appears in the layout family: `Status_Changed_Date__c` is the `so
 
 ### T12 — Reverse dependencies live on the *other* object's file
 
-**Symptom.** The layout count covers `layouts/Custom_Object__c-*` only. The formula search covers this object's formulas only. Every genuinely hard blocker is invisible.
+**Symptom.** The layout count covers `layouts/Demo_Object__c-*` only. The formula search covers this object's formulas only. Every genuinely hard blocker is invisible.
 
 **Worked example (illustrative).** The hardest blocker on the audited object was a three-hop chain that no per-field, same-object search can see:
 
@@ -348,9 +348,9 @@ Separately, two population figures ended the audit **actively in dispute** — 1
 
 | Family shape | What happened |
 |---|---|
-| **Verbatim-identical descriptions** | `Schedule_Cycle__c` (0%) sent to Remove while its twin `Next_Cycle_Date__c` (44,283 rows) was parked at Review — the two carry the same description word for word and were always one decision |
-| **Individual / manager tiers** | `Mine__c` sent to Remove, `My_Team_s__c` kept — the two tiers of one feature, over one base field |
-| **Expected / actual pairs** | `Conferral_Estimate__c` and `Completion_Date__c`, populations within 0.5pp; losing either destroys expected-versus-actual reporting entirely |
+| **Verbatim-identical descriptions** | `Schedule_Cycle__c` (0%) sent to Remove while its twin `Demo_Next_Cycle_Date__c` (44,283 rows) was parked at Review — the two carry the same description word for word and were always one decision |
+| **Individual / manager tiers** | `Demo_Mine__c` sent to Remove, `Demo_My_Team__c` kept — the two tiers of one feature, over one base field |
+| **Expected / actual pairs** | `Demo_Estimate_Date__c` and `Completion_Date__c`, populations within 0.5pp; losing either destroys expected-versus-actual reporting entirely |
 | **Code / label pairs** | `Type__c` and `Type_Code__c`, populations differing by exactly one record — the signature of an external feed writing both in lockstep; retiring one half breaks a contract that lives outside the platform |
 | **Co-written pairs** | Two fields whose live XOR returns **0 in both directions** — always retire together or not at all |
 

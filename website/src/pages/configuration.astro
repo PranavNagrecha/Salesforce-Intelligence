@@ -115,7 +115,7 @@ const sections = [
       <thead><tr><th scope="col">Variable</th><th scope="col">Default</th><th scope="col">Purpose</th></tr></thead>
       <tbody>
         <tr><td><code>SFI_MAX_RESPONSE_BYTES</code></td><td><code>40000</code></td><td>Byte budget per tool response. Lists are trimmed first and the trim is disclosed; an answer that still can’t fit returns an <code>oversize</code> error naming that tool’s narrowing options. Raise only if your client accepts larger results.</td></tr>
-        <tr><td><code>SFI_ROUTER_MODE</code></td><td>hybrid</td><td>By default <code>sfi.route_question</code> returns ranked suggestions and the host decides. <code>offline</code> makes its route authoritative, for CI and hosts with no model.</td></tr>
+        <tr><td><code>SFI_ROUTER_MODE</code></td><td>hybrid</td><td>By default <code>sfi.route_question</code> (run through <code>sfi.run_analysis</code> under the default profile) returns ranked suggestions and the host decides. <code>offline</code> makes its route authoritative, for CI and hosts with no model.</td></tr>
       </tbody>
     </table>
     <p>About 40 analysis tools accept a selector (a component id, an API name, a name fragment or a namespace) and echo back the <code>appliedScope</code> they used. If selectors disagree or none matches, the tool refuses with <code>invalid-query</code> instead of answering org-wide. Leave the selector off and you get the unscoped answer, unchanged.</p>

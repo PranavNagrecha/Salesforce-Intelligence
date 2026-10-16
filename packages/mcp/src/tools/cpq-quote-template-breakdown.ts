@@ -38,7 +38,7 @@ const CPQ_QUOTE_TEMPLATE_PREFIX = 'CpqQuoteTemplate:';
 const TEMPLATE_BREAKDOWN_DISCLOSURE =
   'Full quote template section detail requires extracting ' +
   '`SBQQ__TemplateSection__c` and `SBQQ__TemplateContent__c` ' +
-  'records, which v2.6a does NOT cover. The sections surfaced above ' +
+  'records, which the extractor does NOT cover. The sections surfaced above ' +
   "are derived from the template's top-level values mirror; a " +
   'complete breakdown requires opening the template in the CPQ ' +
   'Quote Template Editor.';

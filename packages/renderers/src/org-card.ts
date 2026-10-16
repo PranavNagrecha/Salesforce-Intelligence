@@ -225,7 +225,7 @@ const renderBody = (input: OrgCardInput, s: Sections): string => {
 
   lines.push('## How to ask');
   lines.push('');
-  lines.push('1. Vague question → `sfi.route_question` first; it names the right tool(s).');
+  lines.push('1. Vague question → `sfi.resolve` the name you mean, then ask; `sfi.list_analyses` shows what else is available.');
   lines.push('2. Informal component name → `sfi.resolve` first; never guess a canonical id.');
   lines.push('3. Cite canonical ids (`CustomObject:Account`, `CustomField:Account.Industry`).');
   lines.push('4. Check `sfi.coverage_report` before any absence-based claim (not modeled ≠ none).');

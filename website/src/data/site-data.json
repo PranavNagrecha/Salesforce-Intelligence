@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-10-15T12:55:21.224Z",
-  "version": "0.5.0",
+  "generatedAt": "2026-10-16T17:43:44.676Z",
+  "version": "0.6.0",
   "toolCount": 231,
   "coreToolCount": 16,
   "listedToolCount": 226,
@@ -15,13 +15,13 @@
     "packages": [
       {
         "name": "mcp",
-        "files": 365,
-        "cases": 7999
+        "files": 367,
+        "cases": 8005
       },
       {
         "name": "extractors",
         "files": 102,
-        "cases": 1308
+        "cases": 1313
       },
       {
         "name": "cli",
@@ -31,12 +31,12 @@
       {
         "name": "graph",
         "files": 30,
-        "cases": 399
+        "cases": 403
       },
       {
         "name": "parsers",
         "files": 12,
-        "cases": 258
+        "cases": 262
       },
       {
         "name": "patterns",
@@ -46,7 +46,7 @@
       {
         "name": "vault",
         "files": 12,
-        "cases": 159
+        "cases": 160
       },
       {
         "name": "renderers",
@@ -64,8 +64,8 @@
         "cases": 86
       }
     ],
-    "totalCases": 11239,
-    "totalFiles": 600,
+    "totalCases": 11259,
+    "totalFiles": 602,
     "packageCount": 10,
     "approx": 11200
   },
@@ -74,12 +74,12 @@
     "Type-check",
     "Lint",
     "Unit tests",
-    "Integration + golden tests",
+    "Docs match the product",
+    "Natural-language routing gate",
     "End-to-end smoke",
-    "Natural-language regression",
+    "Golden retrieval eval",
     "Analytical correctness eval",
     "Scale benchmarks",
-    "SAST",
     "Release guard",
     "Org-data leak scan"
   ],
@@ -92,14 +92,14 @@
   "packageDescriptions": [
     {
       "name": "mcp",
-      "files": 365,
-      "cases": 7999,
+      "files": 367,
+      "cases": 8005,
       "description": "The 231 read-only tools + router + grounding layer"
     },
     {
       "name": "extractors",
       "files": 102,
-      "cases": 1308,
+      "cases": 1313,
       "description": "Metadata parsing for every Salesforce component type"
     },
     {
@@ -111,13 +111,13 @@
     {
       "name": "graph",
       "files": 30,
-      "cases": 399,
+      "cases": 403,
       "description": "The DuckDB dependency-graph engine"
     },
     {
       "name": "parsers",
       "files": 12,
-      "cases": 258,
+      "cases": 262,
       "description": "Formula / SOQL / source tokenizers"
     },
     {
@@ -129,7 +129,7 @@
     {
       "name": "vault",
       "files": 12,
-      "cases": 159,
+      "cases": 160,
       "description": "Vault layout, manifest, freshness"
     },
     {
@@ -150,5 +150,7 @@
       "cases": 86,
       "description": "Optional Tooling-API enrichment"
     }
-  ]
+  ],
+  "newInVersion": "0.5.0",
+  "demoRecordedWith": "0.5.0"
 }

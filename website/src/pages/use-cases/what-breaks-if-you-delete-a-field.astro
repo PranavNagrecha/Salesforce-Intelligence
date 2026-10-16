@@ -10,7 +10,7 @@ const blocking = deleteField.groups[0]?.items.length ?? 0;
   description="Before you delete a Salesforce field, ask what depends on it. Get every flow, formula, roll-up and Apex class that uses it, plus what wasn't checked."
   path="/use-cases/what-breaks-if-you-delete-a-field"
   heading="What breaks if I delete this field?"
-  lede="Deleting a field can’t be undone, and the things that depend on it are spread across flows, formulas, code and permissions. Ask before you click Delete, and get the full list with each item named."
+  lede="A deleted field sits in the Recycle Bin for a short while, but everything that depends on it breaks straight away, and those dependents are spread across flows, formulas, code and permissions. Ask before you click Delete, and get the full list with each item named."
   crumb="Delete a field"
   audience="admins, developers and release managers"
   short={`Ask your AI assistant “can I delete this field?”. sf-intelligence checks your org’s metadata and answers yes or no, names every component that depends on the field, and lists the kinds of metadata it couldn’t check. On the demo org, Invoice Amount has ${blocking} blockers. It never deletes anything itself.`}
@@ -26,7 +26,8 @@ const blocking = deleteField.groups[0]?.items.length ?? 0;
     "<strong>Formulas and roll-ups</strong> that use the field",
     "<strong>Flows, workflow and validation rules</strong> that read or set it",
     "<strong>Apex</strong> that reads or writes it, from the parsed source",
-    "<strong>Page layouts and permissions</strong> that include it",
+    "<strong>Page layouts and permissions</strong> that include it, including columns of related lists on other objects’ layouts",
+    "<strong>Flow screens</strong> that show or edit it, and <strong>Lightning component markup</strong> that binds it",
     "<strong>Reports</strong>, when your refresh pulled them (the most-used 500 by default)",
     "<strong>Name-only mentions</strong> in Apex strings and OmniStudio paths, listed separately for you to check",
   ]}
@@ -58,11 +59,12 @@ const blocking = deleteField.groups[0]?.items.length ?? 0;
     },
   ]}
   cta={{ question: deleteField.question, related: { href: "/blog/delete-unused-salesforce-fields", label: "Read the field cleanup guide" } }}
-  dateModified="2026-10-10"
+  dateModified="2026-10-16"
 >
   <h2>Why a plain AI assistant gets this wrong</h2>
   <p>Ask a general chatbot whether you can delete a field and it lists the places fields are usually used: page layouts, reports, validation rules. It can’t know which of those exist in your org, so it either guesses or tells you to check everything yourself. sf-intelligence answers from your org’s actual metadata, so the list is your list, with each item named.</p>
   <h2>How to read the answer</h2>
   <p>The answer comes in three parts. <strong>Blocking</strong> items are things Salesforce will refuse the delete over, or that will break straight after it. <strong>What it checked</strong> shows where it looked and found something, where it looked and found nothing, and what it couldn’t look at. A short <strong>next step</strong> tells you what to change first.</p>
   <p>A clean answer means no dependents were found in the kinds of metadata that were checked. That is a narrower claim than “unused”, and the answer is worded that way on purpose.</p>
+  <p>Fields that appear only on a flow screen, only inside a Lightning component’s markup, or only as a column of a related list on another object’s layout count as used. If you upgraded from an older release, run <code>refresh</code> once so those references are in your snapshot.</p>
 </UseCaseLayout>

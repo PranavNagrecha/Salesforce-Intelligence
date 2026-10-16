@@ -178,12 +178,14 @@ An overturn with 2+ refutes gets reverted toward the prior call, and synthesis m
 If an offline Salesforce metadata knowledge base is available (this method was built against `sf-intelligence`, exposed over MCP), these are the relevant calls. **Load them by name rather than searching**, since the server may expose hundreds of tools:
 
 ```
-ToolSearch("select:mcp__sf-intelligence__sfi_field_360,mcp__sf-intelligence__sfi_safe_to_delete_field,mcp__sf-intelligence__sfi_find_field_anywhere")
+ToolSearch("select:mcp__sf-intelligence__sfi_safe_to_delete_field,mcp__sf-intelligence__sfi_find_component_usages,mcp__sf-intelligence__sfi_run_analysis")
 ```
+
+Under the server's default `core` profile only the core tools (`sfi_resolve`, `sfi_search_components`, `sfi_get_component`, `sfi_health_check`, `sfi_org_overview`, `sfi_find_component_usages`, `sfi_safe_to_delete_field`, `sfi_what_happens_on_save`, `sfi_find_dead_code`, `sfi_why_cant_user_see_record`, `sfi_effective_permissions`, `sfi_flow_graph`, `sfi_list_analyses`, `sfi_describe_analysis`, `sfi_run_analysis`, `sfi_live_consent`) are callable by name. Every other row below is reached through `sfi_run_analysis` with `{ "name": "sfi.<tool>", "args": { ... } }`, or by setting `SFI_TOOL_PROFILE=full` on the server.
 
 | Tool | Use |
 |---|---|
-| `sfi_org_card` | Orient first. Component counts, top objects by inbound refs, **declared coverage gaps** |
+| `sfi_org_overview` (or `sfi_org_card` via `sfi_run_analysis`) | Orient first. Component counts, top objects by inbound refs, **declared coverage gaps** |
 | `sfi_safe_to_delete_field` | Deletion verdict with reasoning. `format: 'checklist'` for ordered pre-work |
 | `sfi_field_360` | Full field profile across validation, formulas, writers, readers, UI, integrations |
 | `sfi_find_field_anywhere` | Every incoming edge, grouped by component type |
@@ -191,7 +193,7 @@ ToolSearch("select:mcp__sf-intelligence__sfi_field_360,mcp__sf-intelligence__sfi
 | `sfi_live_field_population` / `sfi_live_count` / `sfi_live_aggregate` | Live counts, `MAX()`, recency |
 | `sfi_coverage_report` | Was this metadata type actually retrieved? |
 | `sfi_automation_collisions` / `sfi_what_happens_on_save` | Order-of-execution risk for new automation |
-| `sfi_resolve` / `sfi_route_question` | Disambiguate an informally-named component before acting |
+| `sfi_resolve` (and `sfi_route_question` via `sfi_run_analysis`) | Disambiguate an informally-named component before acting |
 
 **Blind spots observed in the reference run — and their status now.** Each produced a wrong "safe to delete" that grep caught. Four have since been closed in the product; the table records both states, because a reader on an older vault still has the old behaviour.
 
@@ -203,7 +205,7 @@ ToolSearch("select:mcp__sf-intelligence__sfi_field_360,mcp__sf-intelligence__sfi
 | Flexipage `relatedListFieldAliases` not modelled | A field appearing twice on a record page returned zero referencers | **Closed.** Dynamic related-list columns are bare field names on the *related* object; they now resolve through the same relationship map |
 | Report pull capped at top-N by usage | 8 reports returned against 17 actual; **zero** returned for a field with 12 | **Open, and disclosed.** `SFI_REPORTS_CAP` defaults to **500**, usage-ranked. See the mitigation below — this one you must handle in the runbook |
 | Dashboard / Report / WorkflowRule declared partial or absent | Local grep is the only route. For classic workflow, grep is strictly better | Open. Read `sfi_coverage_report` and believe it |
-| Live-query budget caps per session (default 50) | When exhausted, go direct via `sf data query --target-org <alias>`. The cap is a client-side guard, not an org limit — check real headroom with `sfi_live_budget` | By design |
+| Live-query budget caps per session (default 50) | When exhausted, go direct via `sf data query --target-org <alias>`. The cap is a client-side guard, not an org limit — check real headroom with `sfi_live_budget` (via `sfi_run_analysis`) | By design |
 
 **Raise the report cap before you trust a report count.** This is a Phase 0 action, not a caveat to write up afterwards. Against an org with a few thousand reports the default pull covers a fraction of them, and a field's report count is one of the numbers an audit leans on hardest:
 
@@ -214,7 +216,7 @@ SFI_REPORTS_CAP=10000 sfi refresh          # or --no-pull to recompute from exis
 When the org holds more reports than the cap, Report/Dashboard coverage reads `pending` rather than `complete` — so a zero from a capped vault is honest about being uninformative. Check it before quoting any report figure:
 
 ```
-sfi_coverage_report        # Report/Dashboard: complete or pending?
+sfi_run_analysis { "name": "sfi.coverage_report", "args": {} }   # Report/Dashboard: complete or pending?
 ```
 
 **The rule all of this produces:** never let a knowledge-base zero stand on its own. Even with four of these closed, run your method against a field you *know* is referenced and confirm it can see anything at all. The closures narrow the gap; they do not remove the need for the control.

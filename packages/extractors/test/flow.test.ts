@@ -720,10 +720,15 @@ describe('extractFlow', () => {
             source: 'flow-extractor',
             properties: { operation: 'recordCreate' },
           },
+          {
+            fromId: flowId,
+            toId: 'WorkflowAlert:MyEmailAlert',
+            edgeType: 'references',
+            confidence: 'declared',
+            source: 'flow-extractor',
+            properties: { referenceKind: 'emailAlert', actionType: 'emailAlert' },
+          },
         ]);
-        // The emailAlert actionCall is deferred to v0.3 — it does not
-        // produce an edge and is not a warning (it's a normal Flow
-        // element, just not yet edge-emitting).
         expect(
           result.value.nodes[0]?.properties['flowExtractionWarnings'],
         ).toEqual([]);
@@ -1413,9 +1418,7 @@ describe('extractFlow', () => {
       }
     });
 
-    it('ignores non-apex action types without warning', async () => {
-      // emailAlert, chatterPost, etc. are normal Flow constructs that
-      // v0.2 explicitly defers. They produce no edge and no warning.
+    it('emits references for modeled non-apex action types; chatterPost still has no edge', async () => {
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Flow xmlns="http://soap.sforce.com/2006/04/metadata">
     <apiVersion>59.0</apiVersion>
@@ -1424,7 +1427,7 @@ describe('extractFlow', () => {
     <status>Active</status>
     <actionCalls>
         <name>Send</name>
-        <actionName>MyAlert</actionName>
+        <actionName>Demo_Obj__c.Demo_Alert</actionName>
         <actionType>emailAlert</actionType>
     </actionCalls>
     <actionCalls>
@@ -1438,10 +1441,207 @@ describe('extractFlow', () => {
         const result = await extractFlow(path);
         expect(result.ok).toBe(true);
         if (!result.ok) return;
-        expect(result.value.edges).toEqual([]);
+        expect(result.value.edges).toEqual([
+          {
+            fromId: 'Flow:NonApex',
+            toId: 'WorkflowAlert:Demo_Obj__c.Demo_Alert',
+            edgeType: 'references',
+            confidence: 'declared',
+            source: 'flow-extractor',
+            properties: { referenceKind: 'emailAlert', actionType: 'emailAlert' },
+          },
+        ]);
         expect(
           result.value.nodes[0]?.properties['flowExtractionWarnings'],
         ).toEqual([]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('V6-5 — screen fields and non-apex action references', () => {
+    it('mints NO field edge when the objectFieldReference prefix is not a declared record variable, and says so', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Demo Loose Screen Flow</label>
+    <processType>Flow</processType>
+    <status>Active</status>
+    <screens>
+        <name>Demo_Screen</name>
+        <label>Demo</label>
+        <fields>
+            <fieldType>ObjectProvided</fieldType>
+            <objectFieldReference>Demo_Undeclared.Demo_Field__c</objectFieldReference>
+        </fields>
+    </screens>
+</Flow>`;
+      const { dir, path } = await writeTempXml('Demo_Loose_Screen_Flow.flow-meta.xml', xml);
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.edges.filter((e) => e.toId.startsWith('CustomField:'))).toEqual([]);
+        const warnings =
+          (result.value.nodes[0]?.properties['flowExtractionWarnings'] as
+            | readonly string[]
+            | undefined) ?? [];
+        expect(warnings.some((w) => w.includes("prefix 'Demo_Undeclared' does not resolve"))).toBe(true);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+    it('emits screen field read/write edges and component references with Demo_ names', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Demo Screen Flow</label>
+    <processType>Flow</processType>
+    <status>Active</status>
+    <variables>
+        <name>Demo_Rec</name>
+        <dataType>SObject</dataType>
+        <isCollection>false</isCollection>
+        <isInput>true</isInput>
+        <isOutput>false</isOutput>
+        <objectType>Demo_Obj__c</objectType>
+    </variables>
+    <screens>
+        <name>Demo_Screen</name>
+        <label>Demo</label>
+        <fields>
+            <fieldType>ObjectProvided</fieldType>
+            <objectFieldReference>Demo_Rec.Demo_Field__c</objectFieldReference>
+        </fields>
+        <fields>
+            <fieldType>ComponentInstance</fieldType>
+            <name>Demo_Widget</name>
+            <extensionName>c:demoRatingWidget</extensionName>
+        </fields>
+        <fields>
+            <fieldType>RegionContainer</fieldType>
+            <name>Demo_Region_Box</name>
+            <fields>
+                <fieldType>InputField</fieldType>
+                <name>Demo_Notes</name>
+                <objectFieldReference>Demo_Rec.Demo_Notes__c</objectFieldReference>
+            </fields>
+        </fields>
+    </screens>
+    <actionCalls>
+        <name>Demo_Quick_Action</name>
+        <actionName>Demo_Obj__c.Demo_Action</actionName>
+        <actionType>quickAction</actionType>
+    </actionCalls>
+    <actionCalls>
+        <name>Demo_External_Call</name>
+        <actionName>Demo_External_Service</actionName>
+        <actionType>externalService</actionType>
+    </actionCalls>
+    <actionCalls>
+        <name>Demo_Subflow_Action</name>
+        <actionName>Demo_Child_Flow</actionName>
+        <actionType>flow</actionType>
+    </actionCalls>
+</Flow>`;
+      const { dir, path } = await writeTempXml(
+        'Demo_Screen_Flow.flow-meta.xml',
+        xml,
+      );
+      try {
+        const result = await extractFlow(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const flowId = 'Flow:Demo_Screen_Flow';
+        expect(result.value.edges).toEqual([
+          {
+            fromId: flowId,
+            toId: 'CustomField:Demo_Obj__c.Demo_Field__c',
+            edgeType: 'readsFrom',
+            confidence: 'declared',
+            source: 'flow-extractor',
+            properties: {
+              operation: 'screenField',
+              objectFieldReference: 'Demo_Rec.Demo_Field__c',
+              resolvedVia: 'recordVariable',
+            },
+          },
+          {
+            fromId: flowId,
+            toId: 'CustomField:Demo_Obj__c.Demo_Field__c',
+            edgeType: 'writesTo',
+            confidence: 'declared',
+            source: 'flow-extractor',
+            properties: {
+              operation: 'screenField',
+              objectFieldReference: 'Demo_Rec.Demo_Field__c',
+              resolvedVia: 'recordVariable',
+            },
+          },
+          {
+            fromId: flowId,
+            toId: 'CustomField:Demo_Obj__c.Demo_Notes__c',
+            edgeType: 'readsFrom',
+            confidence: 'declared',
+            source: 'flow-extractor',
+            properties: {
+              operation: 'screenField',
+              objectFieldReference: 'Demo_Rec.Demo_Notes__c',
+              resolvedVia: 'recordVariable',
+            },
+          },
+          {
+            fromId: flowId,
+            toId: 'CustomField:Demo_Obj__c.Demo_Notes__c',
+            edgeType: 'writesTo',
+            confidence: 'declared',
+            source: 'flow-extractor',
+            properties: {
+              operation: 'screenField',
+              objectFieldReference: 'Demo_Rec.Demo_Notes__c',
+              resolvedVia: 'recordVariable',
+            },
+          },
+          {
+            fromId: flowId,
+            toId: 'ExternalService:Demo_External_Service',
+            edgeType: 'references',
+            confidence: 'declared',
+            source: 'flow-extractor',
+            properties: {
+              referenceKind: 'externalService',
+              actionType: 'externalService',
+            },
+          },
+          {
+            fromId: flowId,
+            toId: 'Flow:Demo_Child_Flow',
+            edgeType: 'references',
+            confidence: 'declared',
+            source: 'flow-extractor',
+            properties: { referenceKind: 'flowAction', actionType: 'flow' },
+          },
+          {
+            fromId: flowId,
+            toId: 'LightningComponentBundle:c:demoRatingWidget',
+            edgeType: 'references',
+            confidence: 'declared',
+            source: 'flow-extractor',
+            properties: {
+              referenceKind: 'flowScreenComponent',
+              extensionName: 'c:demoRatingWidget',
+            },
+          },
+          {
+            fromId: flowId,
+            toId: 'QuickAction:Demo_Obj__c.Demo_Action',
+            edgeType: 'references',
+            confidence: 'declared',
+            source: 'flow-extractor',
+            properties: { referenceKind: 'quickAction', actionType: 'quickAction' },
+          },
+        ]);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

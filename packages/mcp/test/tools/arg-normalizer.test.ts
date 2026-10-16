@@ -14,6 +14,7 @@ import {
   normalizeToolArgs,
   schemaShape,
 } from '../../src/tools/arg-normalizer.js';
+import { crudFlsAuditInputSchema } from '../../src/tools/crud-fls-audit.js';
 import { dispatchTool } from '../../src/tools/index.js';
 
 /**
@@ -141,6 +142,16 @@ describe('normalizeToolArgs (pure)', () => {
     expect(r.ignored).toEqual(['colour']);
   });
 
+  it('does not bridge objectApiName onto componentId for Apex-scoped tools (R0901 / crud_fls_audit)', () => {
+    const r = normalizeToolArgs(crudFlsAuditInputSchema, {
+      objectApiName: 'Contact',
+      limit: 30,
+    });
+    expect(r.args).toEqual({ objectApiName: 'Contact', limit: 30 });
+    expect(r.renamed).toEqual([]);
+    expect(r.ignored).toEqual(['objectApiName']);
+  });
+
   it('sees through ZodEffects (refine) wrappers', () => {
     const t = z.object({ a: z.string().optional() }).refine(() => true);
     expect(Object.keys(schemaShape(t) ?? {})).toEqual(['a']);
@@ -173,6 +184,15 @@ describe('dispatch (runTool) — real tools', () => {
     const body = await call('sfi.field_access_audit', { fieldApiName: 'Invoice__c.Amount__c' });
     const error = body['error'] as { kind: string; message: string } | undefined;
     expect(error?.message ?? '').not.toContain("must start with 'CustomField:'");
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: crud_fls_audit ignores objectApiName instead of binding CustomObject (R0901)', async () => {
+    const body = await call('sfi.crud_fls_audit', { objectApiName: 'Contact', limit: 30 });
+    const error = body['error'] as { kind: string; message: string } | undefined;
+    expect(error?.message ?? '').not.toContain('not an ApexClass');
+    expect(body['error']).toBeUndefined();
+    const notes = body['argumentNotes'] as { ignored?: string[] };
+    expect(notes.ignored).toContain('objectApiName');
   });
 
   it('FAIL-BEFORE/PASS-AFTER: an invalid-query after a rename names the rename', async () => {

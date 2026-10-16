@@ -11,7 +11,7 @@ For install and first run, start with [`guides/installation.md`](./guides/instal
 
 The live plane is **off by default**. Vault tools never call Salesforce.
 
-### Enablement (AUDIT-F3)
+### Enablement
 
 | Method | Scope | How |
 | --- | --- | --- |
@@ -146,7 +146,7 @@ See [`guides/asking-questions.md`](./guides/asking-questions.md) § live data.
 
 ---
 
-## Network policy (AUDIT-F2)
+## Network policy
 
 Outbound network is governed by one mode (`SFI_NETWORK_MODE`):
 
@@ -180,8 +180,7 @@ Separately — and with **no network at all** — `sfi.health_check` compares th
 plugin version that BUILT the current vault (`manifest.version`) against the
 running plugin. When the running plugin is newer, the freshness `nudge` advises
 `/sfi-refresh`, so a vault built by an older version (which may lack newer
-extractors — e.g. the CustomPermission / permission-set record-type work in
-0.1.19) is rebuilt rather than silently under-reporting. It is a pure local
+extractors) is rebuilt rather than silently under-reporting. It is a pure local
 version comparison: no network, no org data.
 
 ### Opt in (required)
@@ -271,7 +270,7 @@ field.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `SFI_MAX_RESPONSE_BYTES` | `40000` | Byte budget for a serialized tool response (floor `2000`). Raise it only if your MCP client tolerates larger results; per-tool budgets (e.g. the 28 KB graph slices) stay primary. |
+| `SFI_MAX_RESPONSE_BYTES` | `40000` | Byte budget for a serialized tool response (floor `2000`, ceiling `45000`: a larger value is clamped to 45,000). Raise it only if your MCP client tolerates larger results; per-tool budgets (e.g. the 28 KB graph slices) stay primary. |
 
 ## Tool profile (advertised roster)
 
@@ -283,7 +282,7 @@ advertises. That second half is DERIVED from `ADVERTISED_QUESTION_TOOLS`
 page advertises its tools too, and a question with no tool behind it fails the
 build rather than the user. The full non-hidden roster is 226 schemas and costs
 tens of thousands of context tokens in MCP clients that do not defer tool
-definitions. **Default is `core`** (AUDIT-F6): only that 16-schema roster is
+definitions. **Default is `core`**: only that 16-schema roster is
 advertised and directly invokable. Everything else stays reachable via
 `sfi.run_analysis` with byte-identical output. Set `SFI_TOOL_PROFILE=full` to
 advertise and directly invoke the entire roster. The profile is fixed at
@@ -299,7 +298,8 @@ Many analysis tools accept a **scope selector** so an answer can be narrowed to
 one component, object, profile, or namespace instead of scanning the whole org.
 This is not a hidden env var — it is a per-call input contract worth
 understanding, because it is deliberately built to fail loudly rather than
-answer the wrong question. Around 40 tools carry it today.
+answer the wrong question. Many tools carry it; `sfi.describe_analysis` shows
+the selectors a given tool accepts.
 
 ### Natural selectors (the alias contract)
 
@@ -398,9 +398,9 @@ node packages/mcp/scripts/build-static-embedding-index.mjs
 The gate degrades to the lexical path when the assets are absent, so `=1` on a
 published install (which does not carry the assets) is a safe no-op.
 
-**Why off by default:** the measured lift is real but marginal — generalization
-recall@8 +0.9 pt (90.5→91.4) and recall@3 +0.4 pt, goldset recall@8 flat, with
-zero regression on the goldset tripwire. That is just under the ship bar and
+**Why off by default:** the measured lift is real but marginal — on fresh
+questions recall@8 +0.9 pt (90.5→91.4) and recall@3 +0.4 pt, flat on the tuning
+set, with zero regression. That is just under the ship bar and
 does not justify a ~12× package-size increase, so the shipped default stays
 lexical. The code is kept, deterministic, for a future iteration.
 
@@ -559,8 +559,8 @@ refresh. Humans write via `sfi annotate <id> --key <k> --value <v>` (and
 `confirm` / `list` / `orphans`); AI proposes via `sfi.propose_annotation`
 (always `source: 'ai', confirmed: false`, session-capped). Consumers
 (`sfi.annotations`, `get_component`, `field_360`, `explain_*`) serve it with
-provenance `annotation` — never `offline_snapshot` — and `synthesize_answer`
-flags lifecycle claims with no backing annotation
+provenance `annotation` — never `offline_snapshot` — and `sfi.synthesize_answer`
+(through `sfi.run_analysis`) flags lifecycle claims with no backing annotation
 (`ungroundedAnnotationClaims`). Orphans (annotated ids whose component left
 the graph) surface in the refresh pulse and `sfi annotate orphans`.
 
@@ -641,7 +641,8 @@ the offline engine for a mapping gap. `profileId` is the always-available escape
 hatch and works with no map at all.
 
 Skipped on `--no-pull` (no org contact in that mode); any previous map stays.
-It contains org data and lives in the gitignored vault — never a tracked file.
+It contains org data and lives in `org-kb/meta/`, which `sfi init` does not
+gitignore: keep it out of git (see the first-refresh guide for what to commit).
 
 ## Permission dependencies (`meta/permission-dependencies.json`)
 
@@ -749,6 +750,23 @@ missing from the answer). The model is described in
 [docs/omnistudio](omnistudio/README.md#6-managed-package-vlocity-omnistudio).
 
 ---
+
+## Salesforce CLI timeouts and the auth preflight
+
+Every call to the `sf` CLI runs under a timeout, so a hung `sf` process (an
+interactive auth prompt, a wedged retrieve) can never block a refresh, the
+watcher or `sfi doctor` forever. On timeout the child gets `SIGTERM`, then
+`SIGKILL` after a grace period. A large org whose retrieve legitimately runs
+longer than ten minutes is the usual reason to raise the first one.
+
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `SFI_SF_RETRIEVE_TIMEOUT_MS` | `600000` (10 min) | `sf project retrieve` during `sfi refresh`. Raise it when a large org's retrieve runs longer. |
+| `SFI_SF_QUERY_TIMEOUT_MS` | `120000` (2 min) | `sf data query` and metadata-type probes during refresh, and the `sf` probes `sfi doctor` runs. |
+| `SFI_SF_ORG_LIST_TIMEOUT_MS` | `5000` | `sf org list` (a local file read, kept short so setup-mode startup stays inside host startup limits). |
+| `SFI_SF_EXEC_TIMEOUT_MS` | `600000` | Backstop for every other `sf` call (live plane, Tooling API auth); when set lower, it also caps the org-list timeout. |
+| `SFI_SF_EXEC_KILL_GRACE_MS` | `5000` | Grace between `SIGTERM` and `SIGKILL`. |
+| `SFI_SKIP_AUTH_PREFLIGHT` | *(unset)* | `1` skips the local check that the `--target-org` alias appears in `sf org list` before a refresh. Only for auth the local list cannot see, such as an access token supplied through the environment. |
 
 ## Choosing the vault (`--vault`)
 
@@ -859,7 +877,7 @@ LIVE sweep, so two safeties apply per the live-plane rules above:
 - **The session budget bounds the sweep.** Every per-org staleness query
   decrements the same `SFI_LIVE_QUERY_BUDGET` (default 50) the hybrid plane uses.
   One org costs one query per checked metadata type — 15 staleness checks today,
-  the full `STALE_CHECK_TYPES` set in `packages/mcp/src/tools/live-plane.ts` — so
+  the full `STALE_CHECK_TYPES` set in `packages/mcp/src/tools/stale-check-types.ts` — so
   N orgs × 15 staleness checks can exhaust it, and a vault the budget can't cover
   degrades to a `budget-exhausted` skip. Raise `SFI_LIVE_QUERY_BUDGET`, pass a
   `vaults` subset, or start a new session to reset.
@@ -904,37 +922,19 @@ written to disk and the response reports `gapLogged: false`.
 
 ## Maintainer / CI only
 
-These variables are used in development, eval, and release gates — not in
-normal Claude Code sessions.
-
-| Variable | Used by | Purpose |
-| --- | --- | --- |
-| `EVAL_STRICT=1` | `pnpm eval`, `pnpm eval:analytical` | Fail eval on any regression |
-| `SF_INTELLIGENCE_REGISTRY_PATH` | eval scripts, `pnpm fleet` | Point eval at CI vault registry |
-| `SF_INTELLIGENCE_VAULT_ROOT` | `pnpm sast` | Override vault root for SAST gate |
-| `SCALE_BUDGET_MS` | `pnpm eval:scale` | Resolve benchmark time budget (default 2000) |
-| `SCALE_IMPORT_BUDGET_MS` | scale-import test | Import time budget (default 90000) |
-| `SCALE_REFRESH_FIELD_COUNT` | scale-refresh test | Synthetic field count (default 1000) |
-| `SCALE_REFRESH_BUDGET_MS` | scale-refresh test | Full refresh time budget (default 600000) |
-| `EVAL_REPORT_PATH` | `pnpm eval:analytical` | Write JSON scoreboard to path |
-| `SAST_MAX_FINDINGS` | `pnpm sast` | Max findings before gate fails |
-| `SAST_FAIL_ON` | `pnpm sast` | Severities that fail the gate (default `critical,high`) |
-| `NL_ROUTING_ONLY=1` | routing eval | Skip live calls in NL harness |
-| `NL_VAULTS` / `STRESS_VAULTS` | stress / NL harness | Comma-separated `name=path` vault list |
-| `STRESS_COMPONENTS` | stress test | Sample size (default 250) |
-| `SFI_WRITE_SMOKE_REPORT=1` | integration deep-smoke | Write smoke report markdown |
-
-Graph import batch size is a **constant** (`IMPORT_BATCH_SIZE=500` in
-`packages/graph/src/import.ts`), not an env var.
+Variables read only by the eval, test and release scripts (never in a normal
+session) are listed in
+[`contributing/maintainer-variables.md`](./contributing/maintainer-variables.md).
 
 ---
 
 ## MCP server registration
 
-Register the server from npm with your MCP client. With Claude Code:
+Register the server from npm with your MCP client. With Claude Code, from
+your Salesforce DX repo:
 
 ```sh
-claude mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-intelligence mcp
+claude mcp add --transport stdio --scope project sf-intelligence -- npx -y sf-intelligence mcp --vault "$PWD/org-kb"
 ```
 
 or add it to the client's MCP config directly:
@@ -945,14 +945,18 @@ or add it to the client's MCP config directly:
     "sf-intelligence": {
       "type": "stdio",
       "command": "npx",
-      "args": ["-y", "sf-intelligence", "mcp"]
+      "args": ["-y", "sf-intelligence", "mcp", "--vault", "/abs/path/to/org-kb"]
     }
   }
 }
 ```
 
-The MCP server resolves the vault as `org-kb/` relative to the **current
-working directory** (your Salesforce DX repo), not the plugin install path.
+Always pass an absolute `--vault` path. Without it the server resolves
+`./org-kb` against **its own working directory**, which most hosts choose for
+you (Claude Desktop never runs inside your project). Precedence is `--vault` >
+`SFI_VAULT` > `./org-kb`. The exact file and key for each host (VS Code uses
+`servers`, not `mcpServers`; Codex uses TOML) is in
+[`guides/mcp-hosts.md`](./guides/mcp-hosts.md).
 
 Local development from this monorepo can use a project-scoped `.mcp.json`
 pointing at `node packages/cli/bin/sfi.js mcp`.
@@ -962,4 +966,7 @@ pointing at `node packages/cli/bin/sfi.js mcp`.
 ## Related docs
 
 - [`architecture.md`](./architecture.md) — data flow and trust boundaries
+- [`cli.md`](./cli.md) — every `sfi` command and its options
+- [`guides/troubleshooting.md`](./guides/troubleshooting.md) — what each error a tool returns means
+- [`guides/upgrading.md`](./guides/upgrading.md) — moving to a newer release
 - [`SECURITY.md`](../SECURITY.md) — vulnerability reporting

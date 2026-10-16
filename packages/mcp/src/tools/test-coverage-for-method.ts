@@ -81,13 +81,18 @@ import type { Context } from '../server.js';
 import { firstNonEmpty } from './input-aliases.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import { soundnessForReachabilityWalk, type Soundness } from './soundness.js';
-import { testsWritingTriggerObjects } from './test-coverage-reach.js';
+import {
+  type CoveringTestHit,
+  findCoveringTests,
+  TEST_SELECTION_MAX_DEPTH,
+  testsWritingTriggerObjects,
+} from './test-coverage-reach.js';
 
 /**
  * BFS depth cap. Matches the v2.1 `sfi.test_coverage_gaps`
  * `MAX_COVERAGE_DEPTH` and the v0.3 `find_apex_usages` BFS budget.
  */
-const COVERAGE_BFS_DEPTH = 3;
+const COVERAGE_BFS_DEPTH = TEST_SELECTION_MAX_DEPTH;
 
 /**
  * Incoming edge types the upstream coverage walk follows. `callsApex`
@@ -704,13 +709,15 @@ export const testCoverageForMethodHandler = async (
     return err({ kind: 'internal', message: `graph query failed: ${targetId}` });
   }
 
-  const walkRes = await upstreamWalk(
-    ctx,
-    targetId,
-    COVERAGE_BFS_DEPTH,
-    input.methodName,
-    loadNode,
-  );
+  const hasMethod = input.methodName !== undefined;
+  const verbCache = new Map<ComponentId, ReadonlySet<string> | null>();
+  const walkRes = hasMethod
+    ? await upstreamWalk(ctx, targetId, COVERAGE_BFS_DEPTH, input.methodName, loadNode)
+    : await findCoveringTests(ctx.graph, targetId, {
+        maxDepth: COVERAGE_BFS_DEPTH,
+        vaultRoot: ctx.vaultRoot,
+        verbCache,
+      });
   if (!walkRes.ok) {
     return err({
       kind: 'internal',
@@ -719,34 +726,60 @@ export const testCoverageForMethodHandler = async (
   }
 
   // Callout-mock cross-reference: only when the TARGET class makes callouts.
-  // For each covering test we surface whether it installs a mock interface, and
-  // roll up whether the callout code is covered ONLY by mock-less tests.
   const targetMakesCallout = makesCallout(targetNode);
 
-  const hasMethod = input.methodName !== undefined;
   const covering: CoveringTestClass[] = [];
   let mockSettingTestCount = 0;
   let mockLessTestCount = 0;
-  for (const [id, { depth, exercisesMethod }] of walkRes.value) {
-    const r = await loadNode(id);
-    if (!r.ok) {
-      return err({ kind: 'internal', message: `graph query failed: ${r.error}` });
+  if (hasMethod) {
+    for (const [id, { depth, exercisesMethod }] of walkRes.value as Map<
+      ComponentId,
+      { depth: number; exercisesMethod: boolean }
+    >) {
+      const r = await loadNode(id);
+      if (!r.ok) {
+        return err({ kind: 'internal', message: `graph query failed: ${r.error}` });
+      }
+      const node = r.value;
+      if (node === null || !isTestClass(node)) continue;
+      const testSetsMock = setsMock(node);
+      if (targetMakesCallout) {
+        if (testSetsMock) mockSettingTestCount += 1;
+        else mockLessTestCount += 1;
+      }
+      covering.push({
+        id: node.id,
+        apiName: node.apiName,
+        depth,
+        exercisesMethod,
+        ...(targetMakesCallout ? { setsMock: testSetsMock } : {}),
+      });
     }
-    const node = r.value;
-    if (node === null) continue;
-    if (!isTestClass(node)) continue;
-    const testSetsMock = setsMock(node);
-    if (targetMakesCallout) {
-      if (testSetsMock) mockSettingTestCount += 1;
-      else mockLessTestCount += 1;
+  } else {
+    for (const hit of (walkRes.value as Map<ComponentId, CoveringTestHit>).values()) {
+      // The shared walk also returns trigger-hop hits (a test that only does
+      // DML on the trigger's object). Those are NOT direct coverers: they are
+      // reported separately, as heuristic, in `triggerMediatedCoverage`, so the
+      // two tiers stay distinct even though both tools now share one walk.
+      if (hit.via === 'via-trigger') continue;
+      const r = await loadNode(hit.testId);
+      if (!r.ok) {
+        return err({ kind: 'internal', message: `graph query failed: ${r.error}` });
+      }
+      const node = r.value;
+      if (node === null || !isTestClass(node)) continue;
+      const testSetsMock = setsMock(node);
+      if (targetMakesCallout) {
+        if (testSetsMock) mockSettingTestCount += 1;
+        else mockLessTestCount += 1;
+      }
+      covering.push({
+        id: node.id,
+        apiName: node.apiName,
+        depth: hit.depth,
+        ...(targetMakesCallout ? { setsMock: testSetsMock } : {}),
+      });
     }
-    covering.push({
-      id: node.id,
-      apiName: node.apiName,
-      depth,
-      ...(hasMethod ? { exercisesMethod } : {}),
-      ...(targetMakesCallout ? { setsMock: testSetsMock } : {}),
-    });
   }
 
   // Sort by id ASC for determinism.
@@ -767,12 +800,23 @@ export const testCoverageForMethodHandler = async (
   // TCFM-CERTIFIED-ZERO: the coverage the CALL walk cannot see. Bounded by the
   // triggers the walk already found — the target itself when it IS a trigger,
   // plus every trigger relay upstream of it.
-  const triggerIds = [
-    ...new Set<ComponentId>([
-      ...(targetId.startsWith(APEX_TRIGGER_PREFIX) ? [targetId] : []),
-      ...[...walkRes.value.keys()].filter((id) => id.startsWith(APEX_TRIGGER_PREFIX)),
-    ]),
-  ].sort();
+  const triggerIds = hasMethod
+    ? [
+        ...new Set<ComponentId>([
+          ...(targetId.startsWith(APEX_TRIGGER_PREFIX) ? [targetId] : []),
+          ...[...(walkRes.value as Map<ComponentId, { depth: number }>).keys()].filter((id) =>
+            id.startsWith(APEX_TRIGGER_PREFIX),
+          ),
+        ]),
+      ].sort()
+    : [
+        ...new Set<ComponentId>([
+          ...(targetId.startsWith(APEX_TRIGGER_PREFIX) ? [targetId] : []),
+          ...[...(walkRes.value as Map<ComponentId, CoveringTestHit>).values()]
+            .map((h) => h.viaTrigger)
+            .filter((id): id is ComponentId => id !== undefined),
+        ]),
+      ].sort();
   const triggerMediatedRes = await buildTriggerMediatedCoverage(
     ctx,
     triggerIds,

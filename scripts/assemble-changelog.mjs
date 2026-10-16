@@ -93,7 +93,17 @@ if (files.length === 0) {
 
 const maps = files.map((f) => {
   const content = readFileSync(join(fragmentsDir, f), 'utf8');
-  return parseFragment(content);
+  const parsed = parseFragment(content);
+  const bullets = Object.values(parsed).reduce((n, arr) => n + arr.length, 0);
+  if (bullets === 0) {
+    // A fragment with no `### Section` heading or no `- ` bullet used to vanish
+    // silently (4 of 7 did at 0.6.0). Refuse instead: the shape is documented in
+    // changelog.d/README.md.
+    throw new Error(
+      `[assemble-changelog] ${f} has no bullets under a ### heading — fragments must be Keep-a-Changelog subsections with "- " bullets (see changelog.d/README.md)`,
+    );
+  }
+  return parsed;
 });
 
 const merged = mergeFragments(maps);

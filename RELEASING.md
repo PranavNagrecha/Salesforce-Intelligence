@@ -70,7 +70,7 @@ running, run `npm run crawl-test`.
 ### 3. Squash onto `main` (privacy)
 
 `main` is public. Ship the release as **one squashed commit** on top of `origin/main`, so no
-intermediate commit (WIP messages, scratch notes, anything that once named a customer) becomes
+intermediate commit (WIP messages, scratch notes, anything that names a real org) becomes
 public history:
 
 ```bash

@@ -38,7 +38,7 @@ const jsonld = [
     author: { "@id": `${site.url}/#org` },
     publisher: { "@id": `${site.url}/#org` },
     datePublished: "2026-07-28",
-    dateModified: "2026-07-28",
+    dateModified: "2026-10-16",
     inLanguage: "en",
     keywords:
       "delete Salesforce field, unused fields Salesforce, Salesforce field cleanup, safe to delete field, Salesforce technical debt, field usage audit, deprecate custom field",
@@ -69,7 +69,7 @@ const jsonld = [
   jsonld={jsonld}
   ogType="article"
   datePublished="2026-07-28"
-  dateModified="2026-07-28"
+  dateModified="2026-10-16"
 >
   <section style="padding-top:clamp(20px,3vw,28px);">
     <div class="container">
@@ -131,6 +131,7 @@ SELECT CreatedById, COUNT(Id) FROM Custom_Object__c
           <li><strong>Related lists on other objects' layouts</strong> - including the lookup that <em>keys</em> the related list, whose deletion removes the whole list rather than a column.</li>
           <li><strong>Flow entry criteria</strong> and <code>PRIORVALUE()</code> expressions, which many dependency indexers model as a different kind of edge than a field read.</li>
           <li><strong>Lookup filters, dependent-picklist bindings and default-value formulas</strong> on other fields entirely.</li>
+          <li><strong>Flow screens, Lightning component markup and related-list columns</strong> - a field edited only on a flow screen, bound only in a Lightning web component or Aura template, or shown only as a column of a related list on another object's layout has no reference in the places a per-field search looks.</li>
         </ul>
 
         <h2 id="four-verdicts">Four verdicts, not three</h2>
@@ -173,6 +174,7 @@ SELECT CreatedById, COUNT(Id) FROM Custom_Object__c
           <li><code>sfi.find_field_anywhere</code> - every incoming edge, grouped by component type.</li>
           <li><code>sfi.safe_to_delete_field</code> - a verdict with its reasoning chain, and a <code>coverageCaveat</code> when the families it depends on are not fully covered. Render that caveat before the verdict, never as a footnote.</li>
         </ul>
+        <p>Fields on flow screens, fields bound in Lightning web component and Aura markup, and related-list columns on Classic page layouts count as references in all of these. They are read at refresh time, so after an upgrade run <code>sfi refresh</code> once before trusting a verdict.</p>
         <p>Claude Code users get the whole method as a plugin skill (<code>salesforce-field-audit</code>); other MCP hosts get it as the <code>sfi.field_audit</code> prompt. One prerequisite worth knowing, and it is the fifth gap from the list above - the one still open rather than closed: the default refresh pulls the top 500 reports and dashboards ranked by usage, so on a large org a field's report count is drawn from a fraction of the corpus. Raise <code>SFI_REPORTS_CAP</code> before an audit, and check that Report coverage reads <code>complete</code> rather than <code>pending</code> before quoting any report figure.</p>
 
         <h2 id="faq">FAQ</h2>

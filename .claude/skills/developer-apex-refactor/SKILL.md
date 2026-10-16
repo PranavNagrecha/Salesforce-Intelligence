@@ -2,7 +2,7 @@
 name: developer-apex-refactor
 description: |
   Answers code-source-focused developer questions across the full
-  org code surface: Apex classes, Apex triggers, and the v1.4 frontend
+  org code surface: Apex classes, Apex triggers, and the frontend
   tier (LWC, Aura, Visualforce). Triggers: "where is field X used in
   Apex", "find LWC components reading this field", "what calls this
   Apex from VF", "Aura references to this object", "who reads/writes
@@ -13,8 +13,7 @@ description: |
   ApexClass, ApexTrigger, LightningComponentBundle,
   AuraDefinitionBundle, VisualforcePage, or VisualforceComponent
   nodes) — the single code-usage tool. For strictly Apex-only
-  questions, narrow it with `nodeTypes: ['ApexClass','ApexTrigger']`
-  (the former `find_apex_usages` Apex-only view, now folded in).
+  questions, narrow it with `nodeTypes: ['ApexClass','ApexTrigger']`.
   Optionally follows up with `sfi.search_apex_source` to
   surface the actual lines. Discloses the heuristic-confidence
   boundary explicitly: string-BUILT dynamic SOQL, dynamic field
@@ -43,7 +42,7 @@ vault" — NEVER "nothing uses this".
 The developer persona has **one** headline tool, `sfi.find_code_usages`,
 with an Apex-only narrowing MODE.
 
-- **`sfi.find_code_usages`** (v1.4 broaden) is the default. Given a
+- **`sfi.find_code_usages`** is the default. Given a
   `targetId`, it walks **incoming** edges of type `readsFrom`,
   `writesTo`, `callsApex`, or `references` whose source node is any
   of `ApexClass`, `ApexTrigger`, `LightningComponentBundle`,
@@ -53,9 +52,7 @@ with an Apex-only narrowing MODE.
   component?".
 - **Apex-only narrowing.** Pass `nodeTypes: ['ApexClass','ApexTrigger']`
   (and, if desired, `edgeTypes: ['readsFrom','writesTo','callsApex']`)
-  to get the Apex-source-only view — the same answer the former
-  `sfi.find_apex_usages` tool gave (now folded into this tool as a
-  hidden back-compat alias). Use when the user's question is explicitly
+  to get the Apex-source-only view. Use when the user's question is explicitly
   Apex-scoped ("where is X used **in Apex**", "refactor Apex method",
   "Apex callers only") — the smaller result list keeps the surface
   focused.
@@ -83,16 +80,16 @@ scanner saw these matches; verify before refactoring," not "these are
 the only places this is referenced." The *Boundary disclosure*
 section below names what the scanners cannot see.
 
-## v1.4 broadens to LWC/Aura/VF
+## LWC, Aura and Visualforce coverage
 
-`sfi.find_code_usages` is the v1.4 broader tool. Use it for any
+`sfi.find_code_usages` is the broader tool. Use it for any
 code-persona question that is not explicitly Apex-scoped — and even
 in many Apex-scoped questions, the broad (default) result is the
 "right" answer because real refactors care about LWC and VF callers
 too. Narrow to `nodeTypes: ['ApexClass','ApexTrigger']` only when the
 user pins the answer to Apex.
 
-Key confidence rules to cite when reporting v1.4 results:
+Key confidence rules to cite when reporting results:
 
 - **LWC apex imports are `declared`.** A statement like
   `import processOpportunity from '@salesforce/apex/OpportunityService.process'`
@@ -101,7 +98,7 @@ Key confidence rules to cite when reporting v1.4 results:
   `ApexClass:OpportunityService` at `confidence: 'declared'` — the
   import path is the declaration; there is no inference. Cite as
   such.
-- **LWC field reads are `heuristic`.** Per the v1.4 R3a report, the
+- **LWC field reads are `heuristic`.** The
   scanner does not distinguish a schema-import field (e.g.,
   `import FIELD from '@salesforce/schema/Account.Industry'`) from a
   body-text field reference; both default to `heuristic`. State the
@@ -133,21 +130,21 @@ Fire on developer-flavored phrasing. Concrete triggers:
 
 - **"Where is X used in Apex…"** — "where is `Account.Industry__c`
   used in Apex?", "where do we read/write this field from code?",
-  "what Apex code touches this object?". → `sfi.find_code_usages`.
+  "what Apex code touches this object?". → `sfi.find_code_usages` (via `sfi.run_analysis`).
 - **"Where is X used in code…"** — "where is `Industry__c` touched
   from the codebase?", "what reads this field anywhere in code?",
-  "every code reference to `MyClass`". → `sfi.find_code_usages`.
+  "every code reference to `MyClass`". → `sfi.find_code_usages` (via `sfi.run_analysis`).
 - **"Find LWC / Aura / VF referrers…"** — "find LWC components
   reading this field", "which LWC bundles call this Apex method?",
   "what Aura components reference this object?", "what VF pages
   touch this field?", "what Visualforce uses
-  `OpportunityController`?". → `sfi.find_code_usages` with
+  `OpportunityController`?". → `sfi.find_code_usages` (via `sfi.run_analysis`) with
   `nodeTypes` narrowed (e.g.,
   `['LightningComponentBundle']`).
 - **"Who reads / writes / calls…"** — "who reads
   `Contact.Tier__c`?", "what classes write to `Industry__c`?", "what
   classes call `OpportunityService.process`?", "who invokes
-  `MyClass.run`?". → `sfi.find_code_usages` (default broad answer)
+  `MyClass.run`?". → `sfi.find_code_usages` (via `sfi.run_analysis`) (default broad answer)
   or narrow to `nodeTypes: ['ApexClass','ApexTrigger']` if the user
   pins to Apex.
 - **"What Apex/code references / touches…"** — "find all Apex
@@ -155,7 +152,7 @@ Fire on developer-flavored phrasing. Concrete triggers:
   "what references `MyClass`?". → broad vs. narrow split as above.
 - **"Is it safe to rename…"** — "is it safe to rename this Apex
   method?", "can I rename `processOpportunity`?", "what breaks in
-  code if I rename this field?". → `sfi.find_code_usages` is the
+  code if I rename this field?". → `sfi.find_code_usages` (via `sfi.run_analysis`) is the
   safer default because a rename breaks LWC `@salesforce/apex`
   imports and VF controller attributes too, not just Apex callers.
 - **"Refactor / trace…"** — "refactor `Industry__c` across Apex",
@@ -173,7 +170,7 @@ Defer to another skill when:
   `sfi.get_impact`.
 - **The user asks a schema lookup question** ("what fields does
   Account have?", "what's the type of `Industry__c`?"). Defer to
-  `answering-org-questions` → `sfi.list_components` or
+  `answering-org-questions` → `sfi.list_components` (via `sfi.run_analysis`) or
   `sfi.get_component`.
 - **The user asks about a naming pattern or convention** ("what's our
   convention for status fields?"). Defer to
@@ -201,8 +198,8 @@ not the target. Common targets:
 - `CustomField:{Object}.{Field}` — e.g.,
   `CustomField:Account.Industry__c`.
 - `ApexClass:{ClassName}` — e.g., `ApexClass:OpportunityService`. The
-  v1.4 broadening means LWC `@salesforce/apex` callers and VF
-  `controller=` references will now surface here too.
+  LWC `@salesforce/apex` callers and VF
+  `controller=` references surface here too.
 - `ApexTrigger:{TriggerName}` — e.g., `ApexTrigger:AccountTrigger`.
 - `CustomObject:{ApiName}` — e.g., `CustomObject:Account` (returns
   code referrers of the object itself; rare).
@@ -217,7 +214,7 @@ and confirm the top match with the user before proceeding.
 
 ### Step 2 — Call `sfi.run_analysis` with `{ "name": "sfi.find_code_usages", "args": { … } }`
 
-Default invocation (broad — the v1.4 tool):
+Default invocation (broad — the tool):
 
 ```json
 { "targetId": "CustomField:Account.Industry__c" }
@@ -234,8 +231,7 @@ LWC-only narrowing:
 
 Apex-only question (narrow `nodeTypes` for the smaller, Apex-scoped
 surface — same parsed-plus-heuristic edges, just filtered to
-ApexClass/ApexTrigger referrers; this is the folded-in
-`find_apex_usages` view):
+ApexClass/ApexTrigger referrers):
 
 ```json
 {
@@ -256,15 +252,8 @@ Optional parameters (`sfi.find_code_usages`):
 - **`nodeTypes`** — defaults to all six code node types. Narrow to a
   single tier when the user pins it (`['LightningComponentBundle']`
   for LWC-only, `['VisualforcePage', 'VisualforceComponent']` for VF,
-  `['ApexClass', 'ApexTrigger']` for the Apex-only view — the folded-in
-  `find_apex_usages` behavior). An empty array is allowed and returns an
-  empty result.
-
-The hidden `sfi.find_apex_usages` back-compat alias still resolves by
-exact name (it delegates here with `nodeTypes` fixed to
-`['ApexClass','ApexTrigger']` and `edgeTypes` restricted to the Apex
-triad), but it is un-advertised — prefer `sfi.find_code_usages` with
-the narrowing above.
+  `['ApexClass', 'ApexTrigger']` for the Apex-only view). An empty array
+  is allowed and returns an empty result.
 
 The response shape:
 
@@ -421,7 +410,7 @@ this list whenever the developer is about to act on the result.
   scanner, which emits a `heuristic` edge keyed on the variable name
   (`CustomField:acc.Industry__c`) — treat those as approximate.
 
-### LWC scanner (v1.4) limits
+### LWC scanner limits
 
 - **LWC `record[fieldName]` dynamic field access is invisible.**
   `record[this.fieldName]` and `record[someVar]` are computed
@@ -434,13 +423,13 @@ this list whenever the developer is about to act on the result.
   fields list is built dynamically (`fields: this.fieldsToFetch`),
   the scanner sees no field reference.
 - **LWC field-import vs. body-text reads are not distinguished.**
-  Per the v1.4 R3a report, both default to `confidence: 'heuristic'`.
+  Both default to `confidence: 'heuristic'`.
   A schema-import field that is *only ever imported* (not used in the
   body) still produces a heuristic edge; consumers cannot use
   confidence alone to separate "imported but unused" from "imported
   and read."
 
-### Aura scanner (v1.4) limits
+### Aura scanner limits
 
 - **Aura framework-internal `v.{attr}` is intentionally NOT
   extracted.** `v.recordId`, `v.records`, and other component-local
@@ -452,7 +441,7 @@ this list whenever the developer is about to act on the result.
   and `{!v.record[expr]}` are runtime-evaluated; the scanner does not
   resolve them.
 
-### Visualforce scanner (v1.4) limits
+### Visualforce scanner limits
 
 - **VF expressions inside HTML attribute strings work.** A binding
   like `<apex:inputField value="{!account.Industry__c}"/>` produces a
@@ -484,7 +473,7 @@ contract.
 | Blanket-labeling every Apex edge `heuristic`. | Read the per-edge confidence. Most Apex reads/writes/calls on a current vault are `parsed` (`source: apex-ast`) — the AST resolved the receiver. Only the recall-scanner backfill (`source: apex-scanner`) is `heuristic`. Cite each edge's own tier; don't demote a `parsed` edge. |
 | Presenting a `heuristic` scanner edge as ground truth ("`OpportunityService` writes to this field"). | A `heuristic` (`apex-scanner`) edge is a fallback pattern match. Say so: "the scanner saw `OpportunityService` write to a `.Industry__c` literal but couldn't resolve the receiver — verify the variable is an `Account` reference before acting." (A `parsed` `apex-ast` edge already resolved the receiver — cite it as high-confidence.) |
 | Omitting the `sfi.search_apex_source` follow-up on a non-trivial match. | The scanner gives the file; the grep gives the line. A developer who is about to rename a method needs the exact call sites, not just a list of files. |
-| Conflating Apex referrers with Flow referrers. | `sfi.find_code_usages` excludes Flow-emitted `callsApex` edges by design (in any node-type narrowing). If the user wants "what calls this Apex from anywhere including Flow," route to `architect-impact-analysis` → `sfi.get_impact`. |
+| Conflating Apex referrers with Flow referrers. | `sfi.find_code_usages` excludes Flow-emitted `callsApex` edges by design (in any node-type narrowing). If the user wants "what calls this Apex from anywhere including Flow," route to `architect-impact-analysis` → `sfi.get_impact` (via `sfi.run_analysis`). |
 | Narrowing to `nodeTypes: ['ApexClass','ApexTrigger']` when the user's question is code-broad. | The Apex-only narrowing returns only ApexClass/ApexTrigger referrers. A rename that breaks an LWC `@salesforce/apex` import or a VF `controller=` attribute will not show up. Default to the BROAD `sfi.find_code_usages` (all node types) for any "where is X used in code" or "is it safe to rename" question; only narrow when the user pins to Apex. |
 | Citing an LWC `callsApex` edge as `heuristic`. | LWC's `@salesforce/apex/Class.method` imports produce `confidence: 'declared'` edges. Cite them as such — the import path IS the declaration. Same for VF `controller=` and `extensions=` attribute references. |
 | Claiming "no code references this" when the result is empty. | An empty list means "the static passes saw nothing" (the parsed AST pass covers dot-access + inline static SOQL + constant-string `Database.query`; the regex scanners cover the rest). String-BUILT dynamic SOQL, dynamic access, reflective calls, LWC `record[fieldName]`, Aura `v.{attr}`, and VF JS string expressions are all invisible. Restate the boundary; suggest `sfi.search_apex_source` to grep raw source. |
@@ -529,7 +518,7 @@ Claude's flow:
 > indirect invocation (`Type.forName(...).newInstance()`, reflective
 > dispatch), which no static pass sees.
 
-### Example interaction — code-broad field rename (v1.4)
+### Example interaction — code-broad field rename
 
 User: *"I want to rename `Account.Industry__c` to
 `Account.IndustrySegment__c`. What touches this field anywhere in
@@ -570,7 +559,7 @@ Claude's flow:
 > The Apex read is `parsed` (high-confidence); the two frontend
 > edges are `heuristic`. Before renaming:
 > - The LWC `@wire(getRecord)` schema import must be updated; the
->   v1.4 scanner could not distinguish schema-import from body-text
+> the scanner could not distinguish schema-import from body-text
 >   reads, so check `accountTile/accountTile.js` for an
 >   `@salesforce/schema/Account.Industry` import line.
 > - The VF binding `{!account.Industry__c}` in
@@ -584,7 +573,7 @@ Claude's flow:
 >   concatenated SOQL strings, and do a manual grep across
 >   LWC/Aura/VF source for bracket and template-string references.
 
-### Example interaction — LWC-only narrowing (v1.4)
+### Example interaction — LWC-only narrowing
 
 User: *"Which LWC components read `Account.Industry__c`?"*
 
@@ -597,7 +586,7 @@ Claude's flow:
 3. **Receive** (hypothetical): one LWC bundle.
 4. **Respond:**
 
-> LWC bundles reading `CustomField:Account.Industry__c` (v1.4
+> LWC bundles reading `CustomField:Account.Industry__c` (LWC
 > scanner, `confidence: heuristic`, filtered to
 > `nodeTypes: ['LightningComponentBundle']` and
 > `edgeTypes: ['readsFrom']`):
@@ -607,7 +596,7 @@ Claude's flow:
 >   lwc-aura-vf-scanner`, `confidence: heuristic`, `properties: {
 >   wirePath: 'Account.Industry' }`.
 >
-> Heuristic boundary: the v1.4 LWC scanner cannot distinguish a
+> Heuristic boundary: the LWC scanner cannot distinguish a
 > schema-import field that is imported-but-unused from one that is
 > imported-and-read in the template/JS body. The edge may be a
 > false positive if the bundle imports
@@ -661,4 +650,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

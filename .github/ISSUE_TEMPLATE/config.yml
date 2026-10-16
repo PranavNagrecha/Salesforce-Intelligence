@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/PranavNagrecha/Salesforce-Intelligence/security/advisories/new
+    about: Report privately through a GitHub security advisory. Never open a public issue for a vulnerability.
+  - name: Setup help
+    url: https://sfi.auditforce.cloud/getting-started
+    about: Install steps for every host, with troubleshooting. Run `sfi doctor` first; it names the fix.

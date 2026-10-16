@@ -1,6 +1,12 @@
 ---
 import site from "../data/site.ts";
+import guidesData from "../data/guides.json";
 import Wordmark from "./Wordmark.astro";
+
+/* The newest release post, from the card index, so the link never needs a hand edit. */
+const latestRelease = guidesData.guides
+  .filter((g) => g.kind === "release")
+  .sort((a, b) => b.date.localeCompare(a.date))[0];
 
 /* Column headings are <p>, not h4: a footer heading that skips levels breaks
    the page's heading order for screen readers. */
@@ -34,6 +40,7 @@ const columns = [
       { href: "/how-to/find-what-is-updating-a-field", label: "What is updating this field?" },
       { href: "/how-to/pre-deployment-impact-review", label: "Is this deployment risky?" },
       { href: "/blog/salesforce-order-of-execution", label: "Order of execution" },
+      ...(latestRelease ? [{ href: latestRelease.href, label: `Latest release: ${latestRelease.title.split(":")[0]}` }] : []),
       { href: "/blog", label: "All guides and release notes" },
     ],
   },

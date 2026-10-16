@@ -1,7 +1,7 @@
 ---
 name: sfi-component-qa
 description: |
-  Adversarially QAs one sf-intelligence component that has already been built and reviewed — runs it, tries to break it, and checks that the disclosures it advertises actually fire. Spawned after sfi-component-reviewer returns SHIP or SHIP-WITH-FIXES, one per component. Use when a component is claimed done, when a builder self-reports green, or when a tool's honesty boundary needs proving rather than reading.
+  Maintainer-only. For people working on the sf-intelligence codebase itself, not for answering questions about a Salesforce org; not shipped in the plugin. Adversarially QAs one sf-intelligence component that has already been built and reviewed — runs it, tries to break it, and checks that the disclosures it advertises actually fire. Spawned after sfi-component-reviewer returns SHIP or SHIP-WITH-FIXES, one per component. Use when a component is claimed done, when a builder self-reports green, or when a tool's honesty boundary needs proving rather than reading.
 
   Executes and observes. Never fixes what it finds, and never marks work complete — it produces the evidence that decides whether the claim survives.
 tools: Read, Grep, Glob, Bash

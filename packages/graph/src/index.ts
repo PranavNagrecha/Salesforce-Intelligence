@@ -46,7 +46,9 @@ export {
   buildRelationshipMaps,
   mintRelationshipTraversalEdges,
   RELATIONSHIP_RESOLVER_SOURCE,
+  resolveRelatedListChildObject,
 } from './relationship-refs.js';
+export type { RelatedListFieldRef } from './relationship-refs.js';
 export {
   applyChangeSet,
   changeSetSize,

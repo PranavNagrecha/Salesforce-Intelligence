@@ -102,6 +102,7 @@ const NAME_FAMILY: ReadonlyArray<readonly [RegExp, (type: string) => boolean]> =
   [/^objects?$/, (t) => t === 'CustomObject'],
   [/^triggers?$/, (t) => t === 'ApexTrigger'],
   [/^(?:apex|class|classes|method)$/, (t) => t === 'ApexClass' || t === 'ApexTrigger'],
+  [/^(?:crud|fls)$/, (t) => t === 'ApexClass' || t === 'ApexTrigger'],
   [/^omni\w*$|^omniscript$|^datatransform$/, (t) => t.startsWith('Omni')],
   [/^profiles?$/, (t) => t === 'Profile'],
   [/^(?:permset|permission)$/, (t) => t === 'PermissionSet' || t === 'Profile'],

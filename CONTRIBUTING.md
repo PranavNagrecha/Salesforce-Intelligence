@@ -1,6 +1,6 @@
 # Contributing to sf-intelligence
 
-Thank you for helping improve SfIntelligence. This project is MIT;
+Thank you for helping improve sf-intelligence. This project is MIT;
 by contributing you agree your contributions are licensed under the same
 terms.
 
@@ -17,7 +17,7 @@ terms.
 
 ```sh
 git clone https://github.com/PranavNagrecha/Salesforce-Intelligence.git
-cd sf-intelligence
+cd Salesforce-Intelligence
 pnpm install
 pnpm build
 ```
@@ -54,13 +54,14 @@ still builds and runs; those skipped assertions simply do not execute.
 | `pnpm lint` | ESLint |
 | `pnpm eval` | Retrieval golden eval |
 | `pnpm eval:analytical` | Analytical tool eval |
-| `pnpm v4-gate` | Full release gate (lint, test, eval, scale, guard) |
+| `pnpm release:check` | Maintainers: every CI step locally, before tagging (needs the private org blocklist) |
 | `pnpm guard` | Privacy scan of shipping set (needs org blocklist, or `SFI_ALLOW_NO_BLOCKLIST=1`) |
 | `pnpm e2e` | MCP transport smoke (graph-level vault) |
 | `pnpm onboard:smoke` | New-user onboarding chain on a synthetic fixture (init → refresh → doctor → samples) |
 
-Run `pnpm v4-gate` before opening a PR that touches MCP tools, extractors, or
-release artifacts.
+Run `pnpm lint && pnpm test` before opening a PR. CI runs the rest on the pull
+request (privacy scans, routing gate, evals, scale gates); the private fixtures
+those need are not required to contribute.
 
 ## Adding or changing MCP tools
 
@@ -144,6 +145,8 @@ User-facing doc changes belong in:
 - `docs/guides/` — step-by-step user guides
 - `docs/architecture.md` — technical depth
 - `docs/configuration.md` — env vars and live plane
+- `docs/contributing/maintainer-variables.md` — CI and maintainer-only variables
+- `docs/contributing/extractor-gaps.md` — how to report and fix an extractor gap
 
 Update [`docs/README.md`](./docs/README.md) when adding new doc files.
 
@@ -195,6 +198,8 @@ example file to copy).
 
 ## Pull request checklist
 
+The same list is the PR template in `.github/PULL_REQUEST_TEMPLATE.md`.
+
 - [ ] `pnpm lint` passes
 - [ ] `pnpm test` passes (builds first, then unit tests)
 - [ ] New behavior has tests (unit or eval cases where appropriate)
@@ -225,7 +230,7 @@ published only by pushing a `vX.Y.Z` tag, never by `npm publish` from a laptop.
 As a last line of defence, before any publish of `packages/cli` the **`prepublishOnly`** hook runs
 `scripts/prepublish-check.mjs` (`pnpm scan:leaks` + `pnpm guard` +
 `pnpm check:version-consistency`). Publish aborts if any check fails — fix
-leaks, complete Phase 1 SCRUB work, or reconcile versions first.
+leaks or reconcile versions first.
 
 **Version source of truth:** `packages/cli/package.json` is the published
 product version. It must match `packages/cli/server.json` and the shipped MCP

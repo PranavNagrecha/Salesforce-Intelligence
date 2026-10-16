@@ -512,3 +512,16 @@ console.log(
     (headingMatch ? ` CHANGELOG=${headingMatch[1]}` : ' CHANGELOG=exempt(--metadata-only)'),
 );
 for (const n of notes) console.log(`version-consistency: note — ${n}`);
+
+// CITATION.cff is cited verbatim by scholars and answer engines; it sat at 0.2.4
+// through five releases because nothing checked it. Pin it to the shipped version.
+{
+  const citationPath = join(root, 'CITATION.cff');
+  if (existsSync(citationPath)) {
+    const m = /^version:\s*(\S+)\s*$/m.exec(readFileSync(citationPath, 'utf8'));
+    const cited = m?.[1] ?? null;
+    if (cited !== cliPkg.version) {
+      fail(`CITATION.cff version is ${cited ?? 'missing'} but the release is ${cliPkg.version}`);
+    }
+  }
+}

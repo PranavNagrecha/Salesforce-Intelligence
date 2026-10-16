@@ -1,8 +1,8 @@
-# Finding #35 — `format: 'proposal'` tool coverage
+# `format: 'proposal'` tool coverage
 
-**Status: ALREADY-DONE** (R7-DIFF-01-FOLLOWUP verify, tip of this branch).
-
-Verified against advertised MCP input schemas in `packages/mcp/src/tools/index.ts`
+Which tools can emit a deploy-ready proposal bundle: a local `package.xml` /
+`destructiveChanges.xml` for your own deploy tool, never a deploy. Verified
+against the MCP input schemas under `packages/mcp/src/tools/`
 plus implementations/tests under `packages/mcp/src/tools/` and
 `packages/mcp/test/tools/`.
 
@@ -14,4 +14,3 @@ plus implementations/tests under `packages/mcp/src/tools/` and
 | `sfi.permission_risk_report` | **Not present — intentional** | Decision-record **NO BUILD**: report-only; no deployable proposal shape |
 
 Payload shape: [`proposal.schema.json`](./proposal.schema.json).
-No code change required for R7-DIFF-01-FOLLOWUP.

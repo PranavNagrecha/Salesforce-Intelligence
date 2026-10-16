@@ -9,10 +9,17 @@ import type {
   Result,
 } from '@sf-intelligence/contracts';
 import { err, ok } from '@sf-intelligence/core';
-import { scanFrontendSource, type FrontendResourceRef } from '@sf-intelligence/parsers';
+import {
+  scanAuraMarkupFields,
+  scanFrontendSource,
+  type FrontendFieldAccess,
+  type FrontendResourceRef,
+  type FrontendUnresolvedFieldBinding,
+} from '@sf-intelligence/parsers';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 import { buildResourceRefEdges, mergeAndSortEdges } from './apex-edges.js';
+import { buildMarkupFieldBindingEdges } from './frontend-markup-field-edges.js';
 import { deriveBundleApiName } from './path-utils.js';
 
 const ROOT_ELEMENT = 'AuraDefinitionBundle';
@@ -277,6 +284,8 @@ interface AuraScanResult {
   readonly resourceRefs: readonly FrontendResourceRef[];
   /** `component.get('c.method')` server-action method names, in source order. */
   readonly serverActions: readonly string[];
+  readonly markupFieldAccesses: readonly FrontendFieldAccess[];
+  readonly unresolvedFieldBindings: readonly FrontendUnresolvedFieldBinding[];
   readonly warnings: readonly string[];
 }
 
@@ -294,17 +303,26 @@ const scanOne = (source: string, label: string): AuraScanResult => {
       componentRefs: [],
       resourceRefs: [],
       serverActions: [],
+      markupFieldAccesses: [],
+      unresolvedFieldBindings: [],
       warnings: [
         `aura-scanner[${label}]: ${result.error.kind} at offset ${result.error.offset}: ${result.error.message}`,
       ],
     };
   }
+  const markupFieldAccesses = result.value.fieldAccesses.filter((a) =>
+    a.origin === 'aura-markup' || a.origin === 'markup-qualified',
+  );
+  const unresolvedFieldBindings =
+    label === 'markup' ? scanAuraMarkupFields(source).unresolvedFieldBindings : [];
   return {
     componentRefs: result.value.componentRefs.map((r) => r.componentName),
     serverActions: result.value.apexCalls
       .filter((c) => c.className === 'c')
       .map((c) => c.methodName),
     resourceRefs: result.value.resourceRefs,
+    markupFieldAccesses,
+    unresolvedFieldBindings,
     warnings: [],
   };
 };
@@ -327,8 +345,11 @@ const scanOne = (source: string, label: string): AuraScanResult => {
  *
  *   - One `references` edge per component reference to
  *     `AuraDefinitionBundle:{Name}` at `confidence: 'heuristic'`. (The
- *     v1.4 Aura scanner does not emit field accesses or apex calls;
- *     those patterns will land in a later milestone.)
+ *     Markup `force:recordData` / `lightning:inputField` /
+ *     `lightning:outputField` bindings emit `readsFrom` / `writesTo` or
+ *     `references` at `confidence: 'declared'` when the object is known or
+ *     the field is `Object.Field` qualified; bare names land in
+ *     `properties.unresolvedFieldBindings` with no edge.)
  *   - One `references` edge to `ApexClass:{controller}` with
  *     `properties: { role: 'controller' }` at `confidence: 'declared'`
  *     when the root markup tag declares `controller="ApexClass"` — the
@@ -424,6 +445,8 @@ export const extractAuraDefinitionBundle = async (
   const resourceRefs: FrontendResourceRef[] = [];
   const warnings: string[] = [];
   const serverActions = new Set<string>();
+  const markupFieldAccesses: FrontendFieldAccess[] = [];
+  const unresolvedMarkup: FrontendUnresolvedFieldBinding[] = [];
   const scans: { readonly label: string; readonly source: string | null }[] = [
     { label: 'markup', source: markup.source },
     { label: 'controller', source: controllerResult.value },
@@ -447,8 +470,17 @@ export const extractAuraDefinitionBundle = async (
     // Server actions live in the JS files only; markup `{!c.x}` is a CLIENT
     // controller action and never takes the `.get('c.x')` shape anyway.
     if (label !== 'markup') for (const m of scanned.serverActions) serverActions.add(m);
+    markupFieldAccesses.push(...scanned.markupFieldAccesses);
+    unresolvedMarkup.push(...scanned.unresolvedFieldBindings);
     if (scanned.warnings.length > 0) warnings.push(...scanned.warnings);
   }
+
+  const markupEdges = buildMarkupFieldBindingEdges(
+    ownerId,
+    EDGE_SOURCE,
+    markupFieldAccesses,
+    unresolvedMarkup,
+  );
 
   const rawEdges: Edge[] = refs.map((ref) => ({
     fromId: ownerId,
@@ -493,6 +525,7 @@ export const extractAuraDefinitionBundle = async (
   // $Label.c.X / $Resource.X value-provider tokens → references edges
   // (heuristic: regex tokens, not declarative imports).
   rawEdges.push(...buildResourceRefEdges(ownerId, resourceRefs, EDGE_SOURCE, 'heuristic'));
+  rawEdges.push(...markupEdges.edges);
   const edges = mergeAndSortEdges(rawEdges);
 
   const baseProperties = {
@@ -512,6 +545,9 @@ export const extractAuraDefinitionBundle = async (
     // edge is minted — disclosed here instead of silently dropped.
     ...(apexController === null && serverActions.size > 0
       ? { unresolvedServerActions: [...serverActions].sort() }
+      : {}),
+    ...(markupEdges.unresolvedFieldBindings.length > 0
+      ? { unresolvedFieldBindings: markupEdges.unresolvedFieldBindings }
       : {}),
   };
   const properties =

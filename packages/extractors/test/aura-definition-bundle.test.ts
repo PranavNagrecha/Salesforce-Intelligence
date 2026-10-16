@@ -398,6 +398,47 @@ describe('extractAuraDefinitionBundle', () => {
       }
     });
 
+    it('V6-6: emits declared markup field edges for force:recordData and lightning fields', async () => {
+      const markup = `<aura:component>
+  <force:recordData sobjectType="Demo_Obj__c" fields="Demo_Field__c"/>
+  <lightning:inputField fieldName="Demo_Input__c" objectApiName="Demo_Obj__c"/>
+  <lightning:outputField fieldName="Demo_Output__c" objectApiName="Demo_Obj__c"/>
+  <lightning:inputField fieldName="Demo_Bare__c"/>
+</aura:component>`;
+      const { tempDir, bundleDir } = await writeTempAuraBundle('Demo_Markup', {
+        markupBody: markup,
+      });
+      try {
+        const result = await extractAuraDefinitionBundle(bundleDir);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const owner = 'AuraDefinitionBundle:Demo_Markup';
+        expect(result.value.edges).toEqual(
+          expect.arrayContaining([
+            expect.objectContaining({
+              fromId: owner,
+              toId: 'CustomField:Demo_Obj__c.Demo_Field__c',
+              edgeType: 'readsFrom',
+              confidence: 'declared',
+            }),
+            expect.objectContaining({
+              toId: 'CustomField:Demo_Obj__c.Demo_Input__c',
+              edgeType: 'writesTo',
+            }),
+            expect.objectContaining({
+              toId: 'CustomField:Demo_Obj__c.Demo_Output__c',
+              edgeType: 'readsFrom',
+            }),
+          ]),
+        );
+        expect(result.value.nodes[0]?.properties['unresolvedFieldBindings']).toEqual([
+          'Demo_Bare__c',
+        ]);
+      } finally {
+        await rm(tempDir, { recursive: true, force: true });
+      }
+    });
+
     it('returns malformed-input when <apiVersion> is missing', async () => {
       const { tempDir, bundleDir } = await writeTempAuraBundle('NoApi', {
         metaXml:

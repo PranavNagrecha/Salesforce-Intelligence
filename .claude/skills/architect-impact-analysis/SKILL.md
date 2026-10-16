@@ -111,7 +111,7 @@ Defer to another skill when:
   the vault has no record-level data. Tell them to query their org
   directly.
 - **The user wants to modify metadata** ("rename this field for me").
-  SfIntelligence is read-only. Tell them to use `sf project deploy`
+  sf-intelligence is read-only. Tell them to use `sf project deploy`
   themselves.
 - **The user names a metadata type the refresh didn't model.** Call
   `sfi.coverage_report` to see which families this vault retrieved, say
@@ -151,7 +151,7 @@ to the canonical form:
 - `Layout:{Object}-{LayoutName}` — e.g.,
   `Layout:Account-Account Layout`.
 - `PermissionSet:{ApiName}` — e.g., `PermissionSet:Sales_Manager`.
-- `Profile:{ApiName}` — e.g., `Profile:System Administrator`.
+- `Profile:{ApiName}` — e.g., `Profile:Admin`.
 
 If the user's phrasing maps unambiguously to one of these, use it
 directly. If it could match multiple components (e.g., "the status
@@ -164,8 +164,8 @@ top matches for them to disambiguate.
 Do not skip this step, even when you derived the ID by translation in
 Step 1. `sfi.get_impact` now fails closed on an id it cannot place: an
 id matched by no node AND no referring edge returns
-`error.kind: 'component-not-found'` naming the id, rather than the
-empty slice it used to return — that empty slice was byte-identical to
+`error.kind: 'component-not-found'` naming the id, rather than an
+empty slice, which would be byte-identical to
 a real "nothing depends on this", so a typo read as a clean bill of
 health. Do not narrate a `component-not-found` as "nothing depends on
 this"; it means the walk never happened. Re-check the type prefix and
@@ -245,7 +245,7 @@ references but the refresh never retrieved — has no node row, so it is
 absent from its own `impact.nodes`. Measured on a real vault: an impact
 walk on a phantom standard object returned 14 nodes and 0 edges, none of
 the 14 being the root. Those 14 were its access-granting containers,
-connected to nothing. The tool no longer calls that slice complete —
+connected to nothing. The tool does not call that slice complete —
 `truncated` is `true`, the disclosure reports it as PARTIAL, names the
 phantom root, counts the collected edges it dropped for a missing
 endpoint, and points at `sfi.find_component_usages` — but the check is
@@ -499,7 +499,7 @@ a `parsed` edge is not).
 | "`parsed` edges from the formula tokenizer are basically `declared`; I'll call them that for clarity." | `parsed` and `declared` mean different things. Don't blur them — the difference is the architect's trust signal. The tokenizer is solid, but it isn't metadata. |
 | "I'll go straight to `hops: 3` to be thorough." | Hop 3 typically pulls in distant components that aren't actionable (e.g., the permission set that grants the validation rule that references the field — the architect cares about the validation rule, not the permission set on top of it). Use 2 by default; go to 3 only when explicitly asked. |
 | "The user said 'find formulas'; I'll skip `get_impact` and only call `find_formula_references`." | Formula-focused phrasing usually still expects the full picture as context. Run both: `get_impact` for the type-by-type view, `find_formula_references` for the per-formula detail with `tokenizedFromField` and `formulaLength`. |
-| "The user asked about a method, not a field; I'll still call `get_impact` on the class and report the class-level dependents." | `get_impact` is class-granular and the Apex `callsApex` edges are heuristic — they catch direct class-to-class calls but can miss dynamic dispatch (`Type.forName` + invoke) and framework-wrapper indirection. Be upfront: "this is class-level and heuristic — for method-precise callers of `MyClass.process` use `sfi.call_graph` / `sfi.method_reachability`, and spot-check with `sfi.search_apex_source`." |
+| "The user asked about a method, not a field; I'll still call `get_impact` on the class and report the class-level dependents." | `get_impact` is class-granular and the Apex `callsApex` edges are heuristic — they catch direct class-to-class calls but can miss dynamic dispatch (`Type.forName` + invoke) and framework-wrapper indirection. Be upfront: "this is class-level and heuristic — for method-precise callers of `MyClass.process` use `sfi.call_graph` (via `sfi.run_analysis`) / `sfi.method_reachability`, and spot-check with `sfi.search_apex_source`." |
 | "There are 47 components in the impact set; I'll truncate to 10 silently." | Either show all, or state explicitly that you're showing the top N. Silent truncation is misinformation. |
 | "The user said 'is it safe to deprecate?'; I'll just say 'yes' if the impact set is empty." | Empty impact is a coverage gap signal, not safety clearance. Honest answer: "the graph shows zero dependents, but Apex/frontend edges are heuristic and dynamic SOQL/reflective access are invisible. Before deprecating, grep Apex source with `sfi.search_apex_source`." |
 | "The vault is one week old; probably fine for impact analysis." | If `sfi.health_check` reports `freshness.stale: true` or `status: 'degraded'`, stop. A field added last week wouldn't appear. Route to `/sfi-refresh` first. |
@@ -571,4 +571,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

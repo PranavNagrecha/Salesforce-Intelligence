@@ -153,7 +153,7 @@ export const registerRegisterVaultCommand = (program: Command): void => {
   program
     .command('register-vault <alias> <path>')
     .description(
-      'Register a Salesforce vault alias under the co-resident root for v3.1 cross-vault tools',
+      'Register a Salesforce vault alias under the co-resident root for the cross-vault tools',
     )
     .option('--force', 'Overwrite an existing alias instead of refusing')
     .option(

@@ -1,6 +1,7 @@
 /// <reference types="vitest/globals" />
 
 import type { McpError, McpResponse } from '@sf-intelligence/contracts';
+import { ORG_METADATA_CONTENT_POLICY_MARKER } from '@sf-intelligence/contracts';
 import { err, ok } from '@sf-intelligence/core';
 import { z } from 'zod';
 
@@ -67,17 +68,13 @@ describe('jsonResult global response budget', () => {
     const text = envelopeText(jsonResult(body));
     const parsed = JSON.parse(text) as {
       readonly data: unknown;
-      readonly contentPolicy: {
-        readonly orgMetadata: string;
-        readonly disclosure: string;
-      };
+      readonly contentPolicy: string;
       readonly estimatedPayloadBytes: number;
     };
     expect(parsed.data).toEqual(body.data);
-    expect(parsed.contentPolicy.orgMetadata).toBe('untrusted-data');
-    expect(parsed.contentPolicy.disclosure).toContain('untrusted DATA');
+    expect(parsed.contentPolicy).toBe(ORG_METADATA_CONTENT_POLICY_MARKER);
     // estimatedPayloadBytes is the stamped payload (incl. contentPolicy), not
-    // the bare handler body — contentPolicy alone is ~286 bytes.
+    // the bare handler body.
     const stampedWithoutEstimate = {
       ...body,
       contentPolicy: parsed.contentPolicy,

@@ -1,7 +1,7 @@
 ---
 name: refreshing-the-org-vault
 description: |
-  Refreshes the SfIntelligence vault from a live Salesforce org. Use
+  Refreshes the sf-intelligence vault from a live Salesforce org. Use
   when the user invokes `/sfi-refresh`, or says "refresh", "refresh
   the vault", "pull latest", "pull the latest from my org", "rebuild
   the vault", "rebuild the index", "my data is stale", "the vault is
@@ -204,10 +204,15 @@ Stop and ask the user when:
   type**, not by individual component. Tell them: refresh is
   all-or-nothing within a type.
 - The user asks you to commit the regenerated vault. That's their
-  call — don't `git add` / `git commit` on their behalf. Mention
-  that `org-kb/components/`, `org-kb/meta/manifest.json`, and
-  `org-kb/graph/graph.duckdb` are the typical commit targets if they
-  want a diff-able snapshot.
+  call — don't `git add` / `git commit` on their behalf. If they
+  want a diff-able snapshot, the files to commit are
+  `org-kb/components/`, `org-kb/meta/manifest.json`,
+  `org-kb/meta/config.json` and `org-kb/meta/version.txt` — and
+  nothing else. Never commit `org-kb/graph/` (the DuckDB file is
+  rebuilt on every refresh) or `org-kb/source/` (the raw retrieve);
+  `sfi init` gitignores both. The other files under `org-kb/meta/`
+  hold org data (profile ids and labels, annotations, the demand
+  queue), so leave them out too.
 
 ## Verification
 
@@ -228,4 +233,4 @@ Before telling the user the refresh is done, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

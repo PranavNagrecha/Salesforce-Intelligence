@@ -1,5 +1,7 @@
 import { err, ok, type Result } from '@sf-intelligence/core';
 
+import { scanAuraMarkupFields } from './frontend-markup-scanner.js';
+
 /**
  * The three frontend tiers the scanner family covers. `lwc` runs over
  * Lightning Web Component bundles (`.js`, `.html`), `aura` over Aura
@@ -42,12 +44,21 @@ export interface FrontendScannerError {
  *     `CustomField:{local}.{prop}` edges (LWC-JS-RECEIVER-FIELD-PHANTOMS).
  *   - `vf-merge` — a Visualforce `{!Object.Field}` merge token. `object`
  *     is the controller-context object (kept as-is by the VF extractor).
+ *   - `lwc-markup` / `aura-markup` — a declarative `field-name` /
+ *     `fieldName` / `fields` binding on a base Lightning component with
+ *     a resolved enclosing `object-api-name` / `sobjectType`.
+ *   - `markup-qualified` — `Object.Field` appears in the attribute
+ *     without a resolvable enclosing object (extractor may emit a
+ *     `references` edge to `CustomField:{Object}.{Field}`).
  */
 export type FrontendFieldAccessOrigin =
   | 'schema-import'
   | 'wire-fields'
   | 'js-member'
-  | 'vf-merge';
+  | 'vf-merge'
+  | 'lwc-markup'
+  | 'aura-markup'
+  | 'markup-qualified';
 
 /**
  * One field access detected by the heuristic frontend scanner.
@@ -600,6 +611,7 @@ const scanLwc = (source: string): ScannerLists => {
  * `$Label.c.X` / `$Resource.X` value-provider tokens.
  */
 const scanAura = (stripped: string): ScannerLists => {
+  const fieldCtx: FieldAccessContext = { accesses: [], seen: new Set<string>() };
   const refCtx: ComponentRefContext = { refs: [], seen: new Set<string>() };
   const resourceCtx: ResourceRefContext = { refs: [], seen: new Set<string>() };
 
@@ -629,8 +641,21 @@ const scanAura = (stripped: string): ScannerLists => {
   sweepResourcePattern(resourceCtx, AURA_LABEL_REF, 'label', stripped);
   sweepResourcePattern(resourceCtx, RESOURCE_TOKEN_REF, 'staticResource', stripped);
 
+  const auraMarkup = scanAuraMarkupFields(stripped);
+  for (const access of auraMarkup.fieldAccesses) {
+    emitFieldAccess(
+      fieldCtx,
+      access.type,
+      access.object,
+      access.field,
+      access.offset,
+      access.length,
+      access.origin,
+    );
+  }
+
   return {
-    fieldAccesses: [],
+    fieldAccesses: fieldCtx.accesses,
     apexCalls: callCtx.calls,
     componentRefs: refCtx.refs,
     resourceRefs: resourceCtx.refs,
@@ -765,3 +790,9 @@ export const scanFrontendSource = (
 
   return ok({ dialect, ...lists });
 };
+
+export { scanAuraMarkupFields, scanLwcHtml } from './frontend-markup-scanner.js';
+export type {
+  FrontendMarkupScanOutput,
+  FrontendUnresolvedFieldBinding,
+} from './frontend-markup-scanner.js';

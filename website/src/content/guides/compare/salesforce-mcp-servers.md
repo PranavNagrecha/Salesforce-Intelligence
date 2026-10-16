@@ -30,7 +30,7 @@ schemaType: TechArticle
 cta:
   question: "Is it risky to delete Invoice__c.Amount__c?"
 ---
-*Last verified 2026-10-10. This page is published by sf-intelligence, one of the products listed. Every claim about another product links to that vendor's own page. If something is out of date, [open an issue](https://github.com/PranavNagrecha/Salesforce-Intelligence/issues) and we will fix it.*
+*Last verified on the date shown at the top of this page. This page is published by sf-intelligence, one of the products listed. Every claim about another product links to that vendor's own page. If something is out of date, [open an issue](https://github.com/PranavNagrecha/Salesforce-Intelligence/issues) and we will fix it.*
 
 ## The six servers at a glance
 

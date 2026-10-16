@@ -83,6 +83,24 @@
       "text": "Where the config file goes, why the path matters, and how to reload the server after an edit."
     },
     {
+      "href": "/setup/claude-code",
+      "section": "setup",
+      "kind": "guide",
+      "date": "2026-10-16",
+      "home": false,
+      "title": "Salesforce MCP in Claude Code",
+      "text": "One command or the plugin, where the vault path comes from, and the Windows notes."
+    },
+    {
+      "href": "/setup/claude-desktop",
+      "section": "setup",
+      "kind": "guide",
+      "date": "2026-10-16",
+      "home": false,
+      "title": "Salesforce MCP in Claude Desktop",
+      "text": "Which file to edit, why the full path to org-kb is required, and the restart that makes it load."
+    },
+    {
       "href": "/blog/delete-unused-salesforce-fields",
       "section": "blog",
       "kind": "guide",
@@ -117,6 +135,15 @@
       "home": false,
       "title": "How to create a Salesforce data dictionary",
       "text": "Generate one from your org’s real metadata instead of a spreadsheet that goes stale."
+    },
+    {
+      "href": "/blog/sf-intelligence-0-6-0",
+      "section": "blog",
+      "kind": "release",
+      "date": "2026-10-16",
+      "home": false,
+      "title": "0.6.0: more right, not more",
+      "text": "No new tools. Flow screens, non-Apex flow actions, component markup and related-list columns now count as use, two pairs of tools agree, and a scorecard in the build stops regressions."
     },
     {
       "href": "/blog/sf-intelligence-0-5-0",

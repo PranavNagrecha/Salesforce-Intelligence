@@ -58,7 +58,7 @@
     "skill-gateway": "node scripts/check-skill-gateway.mjs",
     "sbom": "node scripts/generate-sbom.mjs",
     "snapshot": "node scripts/release-snapshot.mjs",
-    "release": "pnpm -r build && pnpm -r publish --access public",
+    "release": "node -e \"console.error('Publishing is tag-driven CI. See RELEASING.md.'); process.exit(1)\"",
     "release:check": "node scripts/release-check.mjs",
     "sast": "node scripts/sast-gate.mjs",
     "fleet": "node scripts/fleet-find.mjs",

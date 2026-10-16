@@ -90,7 +90,7 @@ Not captured — run `sfi refresh --with-data-shape` (opt-in live plane) to capt
 
 ## How to ask
 
-1. Vague question → `sfi.route_question` first; it names the right tool(s).
+1. Vague question → `sfi.resolve` the name you mean, then ask; `sfi.list_analyses` shows what else is available.
 2. Informal component name → `sfi.resolve` first; never guess a canonical id.
 3. Cite canonical ids (`CustomObject:Account`, `CustomField:Account.Industry`).
 4. Check `sfi.coverage_report` before any absence-based claim (not modeled ≠ none).

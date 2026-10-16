@@ -56,7 +56,7 @@ const CPQ_PRICE_RULE_PREFIX = 'CpqPriceRule:';
  * alongside the chain order.
  */
 const RULE_CHAIN_DISCLOSURE =
-  'The rule chain reflects the v2.6a-extracted CPQ records only. ' +
+  'The rule chain reflects the extracted CPQ records only. ' +
   'Apex-customized CPQ rule firing logic (custom ' +
   '`SBQQ.QuoteCalculatorPlugin` implementations) is invisible. ' +
   'Runtime re-ordering via the CPQ pricing API is invisible. ' +

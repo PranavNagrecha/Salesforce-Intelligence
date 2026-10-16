@@ -7,7 +7,7 @@ description: |
   "what's the SLA on this case", "how are cases routed to agents",
   "is this field required", "what's this object for", "how is this
   calculated". Classifies the intent and routes to the right `sfi.*`
-  tool, OR honestly refuses when v1.x doesn't yet model the answer
+  tool, OR honestly refuses when the vault doesn't yet model the answer
   (record-level data, reports, dashboards, live entitlement-milestone
   status/timers, flow-to-narrative). R6-18 extracts
   EntitlementProcess/MilestoneType (which milestones apply, business
@@ -16,7 +16,7 @@ description: |
   entitlement and case-routing questions get a real partial answer
   now, not a blanket refusal. Bridges the vocabulary gap between
   business-user phrasing and the architect/admin tools the product
-  already ships. v1.6 broadens to record-value lookups for Custom
+  already ships. Also answers record-value lookups for Custom
   Metadata Type records and Custom Setting records via
   `sfi.lookup_record` + `sfi.explain_field`.
 ---
@@ -45,10 +45,10 @@ ask in their job's vocabulary, not in `__c` / `parentOf` /
 "traverse the `grantedBy` edge from `PermissionSet:Sales_Rep`."
 
 This skill is the **translation layer**. It classifies a question
-into one of nine intents (eight from v1.0, plus a v1.6 "what does
+into one of nine intents (eight, plus a "what does
 this config value mean" tier), routes the answerable ones to the
-existing `sfi.*` tools (v1.6 adds `sfi.lookup_record` and
-`sfi.explain_field` for the record-value tier), surfaces the
+existing `sfi.*` tools (`sfi.lookup_record` and
+`sfi.explain_field` serve the record-value tier), surfaces the
 result in plain English (translates `Boolean` → "yes/no", strips
 `__c` suffixes from labels, hides canonical IDs unless the user
 asked), and **honestly refuses** the unanswerable ones. The
@@ -56,14 +56,14 @@ honest-refusal axis is the load-bearing one for this persona: a
 business user has no way to spot a fabricated answer about their
 own org, because everything Claude says sounds plausible. The
 guard rail is: **do not answer with general Salesforce-product
-knowledge when the question is about *this* org**. If v1.x can't
+knowledge when the question is about *this* org**. If the vault can't
 tell, say so plainly and direct the user to the Salesforce UI or
 to an admin.
 
-## v1.6 broadens to record values
+## Record values
 
-The v1.0 skill ships an **honest refusal** for "what does this config
-value mean" — but only when the record data isn't extracted. v1.6
+The skill ships an **honest refusal** for "what does this config
+value mean" — but only when the record data isn't extracted. sf-intelligence
 extracts CustomMetadataType records (`__mdt`) and CustomSetting
 records into the graph, so the skill can now answer:
 
@@ -90,7 +90,7 @@ records into the graph, so the skill can now answer:
   `sfi.lookup_record` returns `component-not-found`, suggest the user
   query the running org with `sf data query`.
 - Record-level data (the specific instance the user is looking at) is
-  STILL not in the graph. v1.6 surfaces all extracted records, not
+  STILL not in the graph. sf-intelligence surfaces all extracted records, not
   "the one Account this user is currently viewing".
 
 ## Question intents
@@ -102,14 +102,14 @@ another skill, or refuse honestly.
 
 | Intent | Sample phrasings | Routing decision |
 |---|---|---|
-| **Field meaning** | "What does the Product Name field mean?" / "What is `Industry__c` for?" / "What's this field?" / "Can you explain this field to me?" | Use `sfi.search_components` to normalize the user's phrase into a canonical `CustomField:` ID, then `sfi.get_component`. Surface `properties.description`. Fall back to `properties.label` + `properties.inlineHelpText` if `description` is null. If all three are empty, **say so honestly** — do not invent meaning from the API name. For `__mdt` parent types (CustomMetadataDefinition), prefer `sfi.explain_field({ fieldId, includeRecordValues: true })` instead — it returns label/description/type/required AND the record values across all records of that type in one call. For "what values are in the X picklist?" use `sfi.explain_field` on the resolved field — `picklistValues` carries the declared value set (resolved through the `usesValueSet` edge for GlobalValueSet-driven fields on 0.1.10+ vaults, cited via `picklistValuesSource`; `null` + `picklistValuesNote` only when the link cannot resolve — never read `null` as "no values"). |
+| **Field meaning** | "What does the Product Name field mean?" / "What is `Industry__c` for?" / "What's this field?" / "Can you explain this field to me?" | Use `sfi.search_components` to normalize the user's phrase into a canonical `CustomField:` ID, then `sfi.get_component`. Surface `properties.description`. Fall back to `properties.label` + `properties.inlineHelpText` if `description` is null. If all three are empty, **say so honestly** — do not invent meaning from the API name. For `__mdt` parent types (CustomMetadataDefinition), prefer `sfi.explain_field({ fieldId, includeRecordValues: true })` instead — it returns label/description/type/required AND the record values across all records of that type in one call. For "what values are in the X picklist?" use `sfi.explain_field` (via `sfi.run_analysis`) on the resolved field — `picklistValues` carries the declared value set (resolved through the `usesValueSet` edge for GlobalValueSet-driven fields on 0.1.10+ vaults, cited via `picklistValuesSource`; `null` + `picklistValuesNote` only when the link cannot resolve — never read `null` as "no values"). |
 | **Required / optional check** | "Is this field required?" / "Do I have to fill this in?" / "Is the Email field mandatory?" | `sfi.search_components` then `sfi.get_component` on the field. Surface `properties.required` as "yes" or "no". Note: `required` here is the metadata-level "always required" flag — validation rules can also make a field effectively required; if the user asks "is this required" and the answer is no, also list any `ValidationRule` nodes on the parent object (via `sfi.get_edges` `parentOf` from the object) before concluding. |
-| **What-happens-when** | "What happens when I close this opportunity?" / "What runs when I save a case?" / "What fires when I update an Account?" | List the metadata that fires on save/update/close events for the relevant object. `sfi.list_components({ type: 'Flow', parentId: 'CustomObject:Account' })` and `sfi.list_components({ type: 'ApexTrigger', parentId: 'CustomObject:Account' })` and `sfi.list_components({ type: 'ValidationRule', parentId: 'CustomObject:Account' })`. **Important: v1.x cannot narrate what each Flow or Trigger *does*** — it can only list what fires. Disclose that boundary. |
+| **What-happens-when** | "What happens when I close this opportunity?" / "What runs when I save a case?" / "What fires when I update an Account?" | List the metadata that fires on save/update/close events for the relevant object. `sfi.list_components({ type: 'Flow', parentId: 'CustomObject:Account' })` and `sfi.list_components({ type: 'ApexTrigger', parentId: 'CustomObject:Account' })` and `sfi.list_components({ type: 'ValidationRule', parentId: 'CustomObject:Account' })`. **Important: the vault cannot narrate what each Flow or Trigger *does*** — it can only list what fires. Disclose that boundary. |
 | **Why-can't-I-do-X** | "Why can't I edit this record?" / "Why doesn't this button work?" / "Why am I seeing 'insufficient privileges'?" / "Why is this read-only?" | If the user is asking about *record visibility* ("see this record", "open this record"), defer to `admin-sharing-troubleshooting`. If the user is asking about *field-level* permission ("why is this field grayed out", "why can't I edit this field"), call `sfi.run_analysis` with `{ "name": "sfi.get_edges", "args": { … } }` with `nodeId: 'CustomField:...'` and `direction: 'in'` and `edgeType: 'grantedBy'` to list the permission sets and profiles that grant access — then ask whether the user's profile/permset is in that list. |
-| **Process explanation** | "Explain this process to me in English." / "What does this flow do?" / "Walk me through this approval." | List the relevant `Flow` or `ApexClass` nodes via `sfi.get_component`. **Honestly refuse to narrate Flow XML or Apex source as plain-English prose** — v1.x stores them as text but does not translate them to narrative. Offer to surface the source (or to list the actions/decisions/record updates the Flow contains, which are extracted as edges), and direct the user to their admin for a narrative walkthrough. |
-| **Org-wide vocabulary lookup** | "What's a `Order_Line__c`?" / "What's this object for?" / "What does this object represent?" | `sfi.get_component` on the `CustomObject:` ID. Surface `properties.description` (object-level) and the count of `CustomField` children via `sfi.list_components({ type: 'CustomField', parentId: 'CustomObject:...' })` as a "fields it tracks" summary. Refuse if the object-level description is null and the object name is opaque (`Order_Line__c` with no description and no admin annotation means "v1.x can't tell you what this is for"). |
+| **Process explanation** | "Explain this process to me in English." / "What does this flow do?" / "Walk me through this approval." | List the relevant `Flow` or `ApexClass` nodes via `sfi.get_component`. **Honestly refuse to narrate Flow XML or Apex source as plain-English prose** — the vault stores them as text but does not translate them to narrative. Offer to surface the source (or to list the actions/decisions/record updates the Flow contains, which are extracted as edges), and direct the user to their admin for a narrative walkthrough. |
+| **Org-wide vocabulary lookup** | "What's a `Order_Line__c`?" / "What's this object for?" / "What does this object represent?" | `sfi.get_component` on the `CustomObject:` ID. Surface `properties.description` (object-level) and the count of `CustomField` children via `sfi.list_components({ type: 'CustomField', parentId: 'CustomObject:...' })` as a "fields it tracks" summary. Refuse if the object-level description is null and the object name is opaque (`Order_Line__c` with no description and no admin annotation means "The vault can't tell you what this is for"). |
 | **Where do I find** | "Where do I find the Pipeline report?" / "How do I run the Won Deals dashboard?" / "Where's the list view called 'My Cases'?" | **Partly answerable.** Report/dashboard nodes carry their LEAF FOLDER (`Report:{LeafFolder}/{Name}`), so `sfi.list_components({ type: 'Report' })` can name where a report lives — but UI navigation paths are not in the vault, and the node set is capped per type (a `pending` Report coverage row means the list is a subset). For **field usage** questions ("is this field used in a report?"), check the field's folded `usedInReport` / `usedInDashboard` properties (default capped pull) or run `sfi refresh --with-reports` for full coverage. ListView **column field refs** are extracted as graph edges (`sfi.find_field_anywhere`, `sfi.list_components({ type: 'ListView' })`); list-view **filter evaluation** and UI picker paths are not composed in field tools. |
-| **What does this config value mean** | "What's the value of Number_Of_Retries for Marketo_Api_Setting Default?" / "Show me the values for all Clinical_Instruction records" / "What does the Industry field hold across records?" / "Is this CMD record protected?" | **v1.6+.** Route to `sfi.lookup_record({ recordId: 'CustomMetadataRecord:Type.Record' })` (or `CustomSettingRecord:Type.Record`) when the user names a specific record; route to `sfi.explain_field({ fieldId: 'CustomField:Type.Field', includeRecordValues: true })` when the user wants the value of a field across all records of a `__mdt` type. Both tools pass `{ value: null, isMasked: true }` through verbatim for masked (`***`) values — surface the masked status to the user; **never fabricate** the underlying value. If `sfi.lookup_record` returns `component-not-found` for a `CustomSettingRecord:` id, that's the v1.6 boundary on CustomSetting serialization — suggest `sf data query` against the running org. |
+| **What does this config value mean** | "What's the value of Number_Of_Retries for Marketo_Api_Setting Default?" / "Show me the values for all Clinical_Instruction records" / "What does the Industry field hold across records?" / "Is this CMD record protected?" | Route to `sfi.lookup_record({ recordId: 'CustomMetadataRecord:Type.Record' })` (or `CustomSettingRecord:Type.Record`) when the user names a specific record; route to `sfi.explain_field({ fieldId: 'CustomField:Type.Field', includeRecordValues: true })` when the user wants the value of a field across all records of a `__mdt` type. Both tools pass `{ value: null, isMasked: true }` through verbatim for masked (`***`) values — surface the masked status to the user; **never fabricate** the underlying value. If `sfi.lookup_record` returns `component-not-found` for a `CustomSettingRecord:` id, that's the boundary on CustomSetting serialization — suggest `sf data query` against the running org. |
 | **SLA / entitlement / routing** | "What's the SLA on this case?" / "When does this case escalate?" / "What's the entitlement on this account?" / "How are cases routed to agents?" | **Partial answer + honest refusal (R6-18).** `EntitlementProcess` (name, active, `SObjectType`, version, business hours, and the `MilestoneType` names it references) and `MilestoneType` (description, recurrence) are extracted — normalize via `sfi.search_components` then `sfi.get_component` / `sfi.get_edges` to list which milestones apply and whether the process is active. For routing: `ServiceChannel` (related object, capacity model) and `QueueRoutingConfig` (routing model, capacity weight, push timeout, overflow queue — a `references` edge from the owning `Queue`) are extracted; `sfi.get_component` on the `Queue:` id surfaces its routing config. **Then honestly refuse the still-unmodeled parts:** per-milestone target minutes, whether a SPECIFIC case is on-track or breached, and real-time agent capacity/availability are live-only — direct the user to the Salesforce UI's **Entitlement**/**Milestones** related lists. The record-level `Entitlement` assignment and `ServiceContract` remain entirely unmodeled. Do **not** invent SLA numbers from general Salesforce-product knowledge. |
 
 A few cues to break ties:
@@ -208,9 +208,9 @@ Defer to another skill or refuse honestly when:
   are viewing** ("what's the current value of THIS account's
   Industry?", "how many cases are open?"). Record-level lookups
   work for `__mdt` records and CustomSetting records via
-  `sfi.lookup_record` (v1.6+). **HOWEVER:** record-level data for
+  `sfi.lookup_record`. **HOWEVER:** record-level data for
   the specific instance the user is viewing (e.g., "this Account I'm
-  looking at") is still NOT in the graph. v1.6 surfaces all
+  looking at") is still NOT in the graph. sf-intelligence surfaces all
   *extracted* records, not the one the user is currently viewing.
   Tell the user plainly; suggest they query their org or check the
   record directly in the UI.
@@ -315,18 +315,18 @@ job vocabulary. Apply these rules:
   written by an admin for exactly this purpose. Don't paraphrase
   or "improve" it. If empty, fall back to `properties.label` +
   `properties.inlineHelpText`. If both are empty, **honestly admit
-  v1.x can't tell** (see Step 5 / Anti-patterns).
+  the vault can't tell** (see Step 5 / Anti-patterns).
 
-### Step 5 — Refuse honestly when v1.x can't tell
+### Step 5 — Refuse honestly when the vault can't tell
 
 Seven refusal conditions, each with a fixed-form response:
 
 1. **Description is null AND label is opaque** — "The metadata for
-   this field has no description and no help text. v1.x can't
+   this field has no description and no help text. The vault can't
    describe what it's for beyond the label `{label}`. Ask your
    admin, or check the field's setup page in Salesforce."
 2. **User asked for a report, dashboard, or list view** — "Reports,
-   dashboards, and list views aren't extracted in v1.x. Try the
+   dashboards, and list views aren't extracted in the vault. Try the
    **Reports** tab or **Dashboards** tab in the Salesforce UI for
    `{org}`."
 3. **User asked for SLA target minutes or live entitlement/milestone
@@ -338,19 +338,19 @@ Seven refusal conditions, each with a fixed-form response:
    and **Milestones** related lists in Salesforce, or ask your
    admin."
 4. **User asked for process narration (Flow XML → English)** —
-   "v1.x stores Flow XML and Apex source as text, but it doesn't
+   "The vault stores Flow XML and Apex source as text, but it doesn't
    translate them to a plain-English narrative. I can list what
    the flow contains (decisions, record-updates, action-calls),
    surface the source text, or you can ask your admin to walk you
    through it."
 5. **User asked for record-level data on the specific instance
-   they are viewing** — "v1.6 extracts Custom Metadata Type and
-   Custom Setting records (use `sfi.lookup_record` /
+   they are viewing** — "sf-intelligence extracts Custom Metadata Type and
+   Custom Setting records (use `sfi.lookup_record` (via `sfi.run_analysis`) /
    `sfi.explain_field` for those), but it does NOT read the
    specific Account / Case / Opportunity record you are looking
    at. To answer what *this specific* record looks like, open it
    in Salesforce or query with `sf data query`."
-6. **Record value comes back masked (v1.6)** — `sfi.lookup_record`
+6. **Record value comes back masked** — `sfi.lookup_record`
    or `sfi.explain_field` returned an entry with `value: null,
    isMasked: true`. Tell the user: "That field is protected by
    Salesforce — the value is serialized as `***` in the metadata
@@ -358,10 +358,10 @@ Seven refusal conditions, each with a fixed-form response:
    value. To see the actual value, open the record in **Setup →
    Custom Metadata Types** in Salesforce, or ask the package
    owner / admin." Do NOT guess the underlying value.
-7. **CustomSetting record returns `component-not-found` (v1.6)** —
+7. **CustomSetting record returns `component-not-found`** —
    CustomSettings are rarely serialized via `sf project retrieve`.
    Tell the user: "CustomSetting records often live in the running
-   org's data layer rather than in DX metadata, so v1.6 didn't
+   org's data layer rather than in DX metadata, so sf-intelligence didn't
    extract this one. Query the org directly with `sf data query`
    against the CustomSetting's `__c` table, or check **Setup →
    Custom Settings → Manage** in Salesforce."
@@ -446,8 +446,8 @@ refuses the live number instead of fabricating "24 hours."
 
 ## Boundary disclosure
 
-v1.x's coverage for the business-user persona has well-defined
-gaps. Surface this list when the user asks something v1.x can't
+The vault's coverage for the business-user persona has well-defined
+gaps. Surface this list when the user asks something the vault can't
 answer, and **always** include the relevant subset when refusing:
 
 - **Reports, dashboards, list views.**
@@ -461,15 +461,15 @@ answer, and **always** include the relevant subset when refusing:
     modeled.
   - **List views:** column field refs are extracted (`ListView` nodes +
     `references` edges); filter evaluation and UI picker paths are not composed
-    in `field_360`. Use `sfi.find_field_anywhere` / `sfi.list_components`.
-- **Record-level data.** v1.6 added CustomMetadataRecord and
-  CustomSettingRecord extraction (use `sfi.lookup_record` /
+    in `field_360`. Use `sfi.find_field_anywhere` (via `sfi.run_analysis`) / `sfi.list_components`.
+- **Record-level data.** CustomMetadataRecord and
+  CustomSettingRecord records are extracted (use `sfi.lookup_record` (via `sfi.run_analysis`) /
   `sfi.explain_field`). Questions about the specific Account /
   Case / Opportunity record the user is currently viewing ("what
   does THIS account's `Industry` field say?") are still NOT
-  covered — v1.6 surfaces extracted config records, not live
+  covered — sf-intelligence surfaces extracted config records, not live
   transactional data. Direct the user to `sf data query` for those.
-- **Flow-to-narrative translation.** v1.x stores Flow XML as text
+- **Flow-to-narrative translation.** The vault stores Flow XML as text
   and extracts its readsFrom / writesTo / triggersOn / callsApex
   edges, but it does **not** narrate the Flow's behavior in plain
   English. The user gets a list of what the flow touches, not a
@@ -486,8 +486,7 @@ answer, and **always** include the relevant subset when refusing:
   record-level `Entitlement` assignment, and `ServiceContract` are
   still NOT modeled (live/record-level only). (`EscalationRule` was
   listed here as unmodeled in an earlier revision of this skill —
-  that was stale; it has been an extracted ComponentType since
-  v1.3.)
+  that was stale; it is an extracted ComponentType.)
 - **Omni-Channel routing (R6-18).** `ServiceChannel` (related
   object via `relatedEntityType`, capacity model) and
   `QueueRoutingConfig` (routing model, capacity weight, push
@@ -496,7 +495,7 @@ answer, and **always** include the relevant subset when refusing:
   capacity/availability/presence is still live-only.
 - **Quote, Order, Contract approval routing (R7-W8-skill: corrected —
   ApprovalProcess was listed here as uncovered; that was stale).**
-  `ApprovalProcess` IS an extracted ComponentType (since v1.3, object-agnostic
+  `ApprovalProcess` IS an extracted ComponentType (object-agnostic
   — Opportunity, Quote, Order, Contract, or any custom object): approval
   steps and their approver chains (user / role / role-subordinates / queue /
   group / hierarchy-field variants), entry-criteria conditions, field-update
@@ -507,14 +506,13 @@ answer, and **always** include the relevant subset when refusing:
   long it's been sitting, its history) — that's live/record-level data, same
   boundary as the Entitlements bullet above.
 - **Live state.** Queue depth, recent errors, governor-limit
-  consumption, currently-running jobs — none of this is in v1.x.
+  consumption, currently-running jobs — none of this is in the vault.
   The vault is a snapshot at refresh time.
 - **Record data.** Field values, record counts, who owns what, when a
   record last changed. The vault holds schema and source, not rows.
   Route record questions to the opt-in live plane or the UI.
 
-The three families this list used to name as "not yet covered" are all
-MODELED component types today — do not refuse them: record types and
+These families are MODELED component types — do not refuse them: record types and
 page-layout assignment by record type (route to
 `admin-page-layout-routing`); UI tabs, apps, quick actions, paths,
 global value sets, custom labels, static resources; and email
@@ -531,9 +529,9 @@ fabricated answers is naming the gap explicitly.
 |---|---|
 | Answering "what does this field mean" with generic Salesforce documentation when `properties.description` is empty. | Silent fabrication. The user has no way to tell the answer wasn't grounded in their org. Refuse honestly — "the description is empty in this org's metadata; ask your admin" — and stop. |
 | Translating `Product_Name__c` to "Product Name" as a *guess* at the label instead of reading `properties.label`. | API-name-to-label translation is unreliable: an admin may have set the label to "Class Title" while the field is still named `Product_Name__c`. Always read `properties.label`. |
-| Confidently answering "the SLA on this case is 24 hours" because that's a common default. | v1.x models WHICH milestones apply (EntitlementProcess/MilestoneType) but not their target minutes. Surface the milestone names/process, then refuse the number and point to the Entitlement related list — any specific SLA number you state is fabricated. |
+| Confidently answering "the SLA on this case is 24 hours" because that's a common default. | the vault models WHICH milestones apply (EntitlementProcess/MilestoneType) but not their target minutes. Surface the milestone names/process, then refuse the number and point to the Entitlement related list — any specific SLA number you state is fabricated. |
 | Forwarding the user's literal question to a tool input ("`sfi.get_component({ id: 'the customer field' })`"). | The tool requires a canonical ID. The right move is `sfi.search_components({ query: 'the customer field' })` first, then `sfi.get_component` on the top match. |
-| Narrating a Flow as plain-English prose by reading the XML. | v1.x doesn't have a Flow-to-narrative renderer. The honest answer is "I can list what the flow contains, but I don't translate Flow XML to a story." Offer the structured list; refuse the prose. |
+| Narrating a Flow as plain-English prose by reading the XML. | The vault doesn't have a Flow-to-narrative renderer. The honest answer is "I can list what the flow contains, but I don't translate Flow XML to a story." Offer the structured list; refuse the prose. |
 | Defaulting to `admin-sharing-troubleshooting` for every "why can't I" question. | The routing distinction matters: record-level visibility ("can the user open this record at all") is admin-sharing. Field-level permission ("why is this field grayed out") is this skill's why-can't-I-do-X intent with field-permission flavor. Picking the wrong route loads the wrong tool. |
 | Mixing the user's question with another org's conventions. | Each org is private and specific. Even if 95% of orgs use Stage on Opportunity for sales pipeline, *this* org may have customized it. Always read from `properties.description`; never blend with generic Salesforce-product knowledge. |
 | Hiding `unknown` or empty-description outcomes to make the answer look complete. | The user makes a downstream decision (filling out a field, telling a customer an SLA). An incomplete answer presented as complete causes a worse outcome than a complete refusal. Surface the gap. |
@@ -625,12 +623,12 @@ Claude's flow:
 > - writes `CustomField:Opportunity.Close_Approved__c`
 > - calls `ApexClass:OpportunityApprovalRouter`
 >
-> v1.x stores Flow XML as text and extracts these edges, but it
+> The vault stores Flow XML as text and extracts these edges, but it
 > does **not** translate the flow's decision tree into a story.
 > For a narrative walkthrough — what each decision branch does,
 > in plain English — ask your admin or open the flow in Setup.
 
-The response gives the structured partial (the edges v1.x *does*
+The response gives the structured partial (the edges the vault *does*
 extract), names the boundary, and points to the manual path for
 the prose.
 
@@ -656,7 +654,7 @@ Claude's flow:
 >
 > - `PermissionSet:Sales_Manager`
 > - `PermissionSet:Finance_Reviewer`
-> - `Profile:System Administrator`
+> - `Profile:Admin`
 >
 > If you're not on one of those, that's why the field is
 > read-only for you. Ask your admin for one of these permission
@@ -673,14 +671,14 @@ The response names the granting permission sets by canonical ID
 disambiguates field-level from record-level (because users often
 conflate the two).
 
-### Record value — Custom Metadata Type record (v1.6)
+### Record value — Custom Metadata Type record
 
 User: *"What's the Number_Of_Retries for the Marketo_Api_Setting
 Default record?"*
 
 Claude's flow:
 
-1. **Classify** → "what does this config value mean" intent (v1.6).
+1. **Classify** → "what does this config value mean" intent.
 2. **Call** `sfi.lookup_record({ recordId:
    'CustomMetadataRecord:Marketo_Api_Setting__mdt.Default' })`.
 3. **Read** the `values` array. The entry
@@ -704,7 +702,7 @@ the lookup result so the business user understands the type as
 well as the value; discloses `protected = false`; hides the
 canonical ID in a "for your admin" footer.
 
-### Record value — masked value (v1.6)
+### Record value — masked value
 
 User: *"What's the Weekend value for the Clinical_Instruction
 Module_2 record?"*
@@ -717,14 +715,14 @@ Claude's flow:
 3. **Read** the `values` array. The entry for `Weekend__c` comes
    back as `{ field: 'Weekend__c', value: null, valueType:
    'String', isMasked: true }` — Salesforce serialized the value
-   as the literal `***`, and the v1.6 R2 extractor honestly
+   as the literal `***`, and the extractor honestly
    collapsed it to `value: null, isMasked: true`.
 4. **Refuse-the-fabrication and respond:**
 
 > The **Weekend** field on the *Module 2 Schedule* record is
 > **masked** in this org's metadata — Salesforce serialized the
 > value as `***`, which is the marker for a managed-package or
-> protected value. v1.6 honestly passes that through as "no value
+> protected value. sf-intelligence honestly passes that through as "no value
 > visible"; it does NOT guess the underlying value. Open **Setup →
 > Custom Metadata Types → Manage Records → Module 2** to see the
 > actual value, or ask the package owner. (This record is
@@ -732,7 +730,7 @@ Claude's flow:
 
 The response names the masked status, points to a manual-check
 path, and refuses to fabricate — the load-bearing honesty axis
-for v1.6's record-value tier.
+for the record-value tier.
 
 For a *cross-record* field-value question — "what does
 Notifications_On hold across the Marketo_Api_Setting records?" —
@@ -741,7 +739,7 @@ use `sfi.explain_field({ fieldId:
 includeRecordValues: true })` instead. Because the parent ends in
 `__mdt`, the tool returns the field's intrinsic metadata AND the
 `recordValues` array (one entry per CustomMetadataRecord child
-with a value). Records without a value are omitted — v1.6 does
+with a value). Records without a value are omitted — sf-intelligence does
 NOT guess `null` for unset values.
 
 ## Verification
@@ -749,10 +747,10 @@ NOT guess `null` for unset values.
 Before sending a response, confirm:
 
 - [ ] I classified the question into exactly one of the nine
-      intents (the original eight, plus v1.6's "what does this
+      intents (the original eight, plus the "what does this
       config value mean").
 - [ ] If the intent was where-do-I-find, I refused honestly — named
-      what v1.x doesn't model, and directed the user to the
+      what the vault doesn't model, and directed the user to the
       Salesforce UI or to their admin, without calling a tool to
       fish for an answer. If the intent was SLA / entitlement /
       routing or process-explanation, I surfaced the extracted
@@ -772,7 +770,7 @@ Before sending a response, confirm:
       CustomMetadataRecord / CustomSettingRecord value;
       `sfi.explain_field` for a field's metadata plus its
       cross-record values on `__mdt` parents).
-- [ ] For v1.6 record-value answers: I surfaced `isMasked: true`
+- [ ] For the record-value answers: I surfaced `isMasked: true`
       entries as masked (with a "check Setup" or "ask the package
       owner" pointer) rather than fabricating the underlying value.
 - [ ] I translated the result into business-user English:
@@ -790,11 +788,11 @@ Before sending a response, confirm:
 - [ ] I did not answer with general Salesforce-product knowledge
       as a stand-in for `properties.description` on the org's
       actual metadata.
-- [ ] When I refused, I named the v1.x boundary explicitly
+- [ ] When I refused, I named the boundary explicitly
       (Reports, dashboards, live entitlement/milestone status and
       agent presence, Flow-to-narrative, record-level data, etc.)
       and offered the closest concrete manual-check path.
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

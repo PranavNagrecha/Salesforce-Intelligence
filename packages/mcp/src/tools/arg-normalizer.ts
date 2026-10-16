@@ -235,6 +235,27 @@ const adaptValue = (
   return v;
 };
 
+const OBJECT_MEMBERS = new Set(
+  (FAMILIES.find((f) => f.name === 'object')?.members ?? []) as readonly string[],
+);
+const APEX_CLASS_MEMBERS = new Set(
+  ['classApiName', 'className', 'classId', 'classRef'] as const,
+);
+
+/**
+ * Tools whose `componentId` is an Apex-class scope (they declare `classApiName`
+ * or siblings) but not an object scope must not accept `objectApiName` bridged
+ * onto `componentId` — that produced `CustomObject:` ids on `sfi.crud_fls_audit`.
+ */
+const blocksObjectBridgeOntoGenericNode = (
+  shape: Readonly<Record<string, z.ZodTypeAny>>,
+): boolean => {
+  const hasGenericNode = FAMILIES[0]!.members.some((m) => m in shape);
+  const hasObjectMember = [...OBJECT_MEMBERS].some((m) => m in shape);
+  const hasApexClassMember = [...APEX_CLASS_MEMBERS].some((m) => m in shape);
+  return hasGenericNode && hasApexClassMember && !hasObjectMember;
+};
+
 /** Pick the ONE declared member a dropped key should be renamed to, or undefined. */
 const renameTarget = (
   key: string,
@@ -272,6 +293,9 @@ const renameTarget = (
   }
   // 3. Typed name (object/field/class/...) → the tool's generic node id.
   if (from.idPrefix !== undefined) {
+    if (from.name === 'object' && blocksObjectBridgeOntoGenericNode(shape)) {
+      return undefined;
+    }
     const node = FAMILIES[0] as AliasFamily;
     const any = declaredAny(node);
     const free = declaredFree(node);

@@ -4,8 +4,8 @@
 
 | Version | Supported |
 | --- | --- |
-| 0.5.x (current public release) | Yes |
-| 0.4.x and earlier | No |
+| 0.6.x (current public release) | Yes |
+| 0.5.x and earlier | No |
 | Pre-0.1 / maintainer-only snapshots | No |
 
 <!-- The first row's minor line is asserted against packages/cli/package.json by
@@ -41,7 +41,7 @@ timeline within **7 days** for confirmed issues.
 
 In scope:
 
-- The `@sf-intelligence/*` packages and MCP server shipped from this repository
+- The `sf-intelligence` npm package (the `sfi` CLI and the MCP server) built from this repository
 - Privacy leaks in the release snapshot (`pnpm guard`)
 - Unauthorized org access via the live read-only plane
 - Credential or token exposure in logs, errors, or audit output
@@ -50,12 +50,12 @@ Out of scope:
 
 - Vulnerabilities in Salesforce itself or the `sf` CLI
 - Issues that require the reporter to already have full shell access to the
-  machine running SfIntelligence
+  machine running sf-intelligence
 - Social engineering against org admins
 
 ## Security model (summary)
 
-SfIntelligence is **local-first**:
+sf-intelligence is **local-first**:
 
 - **Vault tools** never call Salesforce during a conversation.
 - **Live tools** (`sfi.live_*`) are **opt-in and fail-closed**. They run

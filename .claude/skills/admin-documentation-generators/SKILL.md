@@ -6,17 +6,17 @@ description: |
   handbook for this org", "write an onboarding doc for a new
   developer", "generate an architecture overview", "produce a
   sharing-model summary", "draft a compliance report on PII".
-  Drives the v2.5 documentation-generator tier
+  Drives the documentation-generator tier
   (`generate_data_dictionary`, `generate_admin_handbook`,
   `generate_onboarding_doc`, `generate_architecture_overview`,
   `generate_sharing_summary`, `generate_compliance_report`). Every
   generator emits a `GeneratedDocument` with frontmatter
   (`generatedAt`, `sourceTreeHash`, `componentIds`), structured
   markdown body, per-section confidence labels, and verbatim
-  `boundaries[]` disclosures. Discloses the v2.5 Q125 freshness
+  `boundaries[]` disclosures. Discloses the Q125 freshness
   disclosure on every generated doc, the inherited-confidence
   rule, the heuristic-tagged sections (Domain Clustering, PII
-  Inventory, Field Label Glossary), and the v1.7-enrichment-
+  Inventory, Field Label Glossary), and the enrichment-
   missing fallback for Recent Changes / Key Contacts.
 ---
 
@@ -24,7 +24,7 @@ description: |
 
 ## Overview
 
-This skill is the admin persona's companion to v2.5's six
+This skill is the admin persona's companion to the six
 documentation-generator tools. The admin's first-line ask is "draft
 me a doc about X" — and the honest answer is a **structured
 markdown** document with explicit per-section confidence labels,
@@ -47,7 +47,7 @@ interface GeneratedDocument {
 }
 ```
 
-The v2.5 constitutional rule is the **Q125 freshness disclosure**.
+The constitutional rule is the **Q125 freshness disclosure**.
 Every generated doc carries a footer line:
 
 > Generated on `{generatedAt}` from vault at `sourceTreeHash:
@@ -60,12 +60,12 @@ compare the hash against the current vault and know instantly
 whether to trust the content.
 
 The boundary that matters for admins: **the document is structure,
-not narrative.** v2.5 generators COMPOSE existing graph queries
+not narrative.** The generators COMPOSE existing graph queries
 (`sfi.list_components`, `sfi.org_overview`, `sfi.integration_map`,
 `sfi.domain_clusters`, `sfi.pii_inventory`, `sfi.field_access_audit`)
 into one markdown document. They do NOT generate prose explanations
 beyond the structural scaffolding. A section labeled "Domain
-Clustering" with `heuristic` confidence is the v2.0g clustering
+Clustering" with `heuristic` confidence is the clustering
 algorithm's output; the doc surfaces the cluster labels and
 per-cluster member counts, not a "this is what each cluster does"
 narrative.
@@ -109,7 +109,7 @@ Defer to another skill when:
 
 - **The user asks "what fields does Account have?"** That's
   schema lookup, not document generation. Defer to
-  `answering-org-questions` → `sfi.list_components` /
+  `answering-org-questions` → `sfi.list_components` (via `sfi.run_analysis`) /
   `sfi.get_component`. The data-dictionary generator is
   appropriate when the user wants a full structured doc; not
   when they want a single answer.
@@ -121,17 +121,17 @@ Defer to another skill when:
   per-user cascades.
 - **The user asks "what's the org's integration topology?"** That's
   an integration-topology question. Defer to
-  `architect-integration-topology` → `sfi.integration_map`. The
+  `architect-integration-topology` → `sfi.integration_map` (via `sfi.run_analysis`). The
   architecture-overview generator INCLUDES integration topology
   as one section; the integration-topology skill is the deep
   drill-in.
 - **The user asks for a SINGLE field's documentation.** Defer to
-  `developer-field-deep-dive` → `sfi.field_360`. The data
+  `developer-field-deep-dive` → `sfi.field_360` (via `sfi.run_analysis`). The data
   dictionary documents every field on an OBJECT; field-360
   documents one specific field across every dimension.
 - **The user wants to MODIFY metadata** ("update the Account
-  description"). v2.5 is read-only. Refuse.
-- **The user wants a Word / PDF export.** v2.5 emits markdown.
+  description"). sf-intelligence is read-only. Refuse.
+- **The user wants a Word / PDF export.** sf-intelligence emits markdown.
   Tell the admin to pipe the markdown through their preferred
   converter.
 
@@ -214,7 +214,7 @@ The MOST COMPOSITE generator. Chains:
 Fire this when the admin asks for the new-joiner tour. The doc
 covers "What This Org Does", "Main Data Model", "Common
 Workflows", "How Security Works", "Naming Conventions",
-"Glossary", "Key Contacts" (or v1.7-enrichment-missing
+"Glossary", "Key Contacts" (or enrichment-missing
 disclosure), and "Where To Go Next" (persona-specific tool
 hints).
 
@@ -252,7 +252,7 @@ top 12 objects — a relationship line renders ONLY when BOTH its
 endpoints made that top-12 cut, so a disconnected or thinly-linked
 object can be ranked-in but show no lines. Both the object cap and
 the true object count are disclosed. For a complete relationship
-picture of ONE object, use `sfi.generate_data_dictionary` instead
+picture of ONE object, use `sfi.generate_data_dictionary` (via `sfi.run_analysis`) instead
 — its ERD is not object-count-capped.
 
 ### 5. `sfi.generate_sharing_summary` — per-object or org-wide sharing doc
@@ -291,7 +291,7 @@ field, capped to keep response bounded) + per-object
 
 Takes no arguments. Fire this when the admin asks for the
 compliance / PII audit document. Every PII classification inherits
-the v2.0d recognizer's heuristic confidence — a field flagged as
+the recognizer's heuristic confidence — a field flagged as
 `pii` may not store PII at runtime, and a field flagged as
 `public` may. The Boundaries footer carries the recognizer-
 heuristic disclosure verbatim.
@@ -308,7 +308,7 @@ This is non-negotiable. The skill ECHOES this footer when
 presenting the doc to the user; do NOT strip it during
 rendering.
 
-### Inherited-confidence rule (v2.5 constitutional)
+### Inherited-confidence rule
 
 The document is structure, not narrative. Section confidence is
 inherited from the UPSTREAM edges and recognizers that produced
@@ -320,11 +320,11 @@ the section's data:
 | Relationships (lookup / master-detail) | `declared` | Metadata XML |
 | Triggers (incoming `triggersOn`) from `ApexTrigger` | `declared` | Apex header |
 | Triggers from `Flow` | `parsed` | Flow XML walker |
-| Domain Clustering (in architecture / onboarding) | `heuristic` | v2.0g clustering algorithm |
-| PII Inventory (in compliance / data-dictionary) | `heuristic` | v2.0d PII recognizer |
+| Domain Clustering (in architecture / onboarding) | `heuristic` | Clustering algorithm |
+| PII Inventory (in compliance / data-dictionary) | `heuristic` |  PII recognizer |
 | Field Label Glossary (in onboarding / data-dictionary) | `heuristic` | Single-object-label heuristic |
-| Recent Changes (in admin handbook / onboarding) | `parsed` | v1.7 enrichment (`lastModifiedDate`) |
-| Key Contacts (in onboarding / handbook) | `declared` | v1.7 enrichment (`createdBy` / `lastModifiedBy`) |
+| Recent Changes (in admin handbook / onboarding) | `parsed` | Tooling API enrichment (`lastModifiedDate`) |
+| Key Contacts (in onboarding / handbook) | `declared` | Tooling API enrichment (`createdBy` / `lastModifiedBy`) |
 
 When a section's confidence is `heuristic`, the per-section
 disclosure is verbatim in the doc body itself (not just the
@@ -336,7 +336,7 @@ footer). The admin reading the doc sees "Domain Clustering
 **Domain Clustering disclosure (in architecture-overview /
 onboarding-doc / admin-handbook with `architect` persona):**
 
-> Domain clusters are computed by the v2.0g clustering algorithm
+> Domain clusters are computed by the clustering algorithm
 > over the org's reference-edge density. A component's cluster
 > assignment reflects which other components it interacts with
 > most heavily — it does NOT reflect the team that owns the
@@ -347,7 +347,7 @@ onboarding-doc / admin-handbook with `architect` persona):**
 **PII Inventory disclosure (in compliance-report /
 data-dictionary / admin-handbook):**
 
-> PII classifications are emitted by the v2.0d recognizer pattern-
+> PII classifications are emitted by the recognizer pattern-
 > matching field apiNames and labels against a known-PII keyword
 > set (`SSN`, `Date_Of_Birth`, `Tax_ID`, `Drivers_License`, etc.)
 > and field type / length heuristics. A field flagged as `pii`
@@ -364,15 +364,15 @@ data-dictionary):**
 > be an underused standard label. Verify each entry's intent
 > before relying on the glossary as authoritative.
 
-### v1.7-enrichment-missing fallback (Recent Changes / Key Contacts)
+### Enrichment-missing fallback (Recent Changes / Key Contacts)
 
 The Recent Changes and Key Contacts sections in the admin handbook
-and onboarding doc depend on the v1.7 Tooling-API enrichment pass
+and onboarding doc depend on the Tooling-API enrichment pass
 (`lastModifiedDate`, `lastModifiedBy`, `createdBy`). If the
-enrichment hasn't run, BOTH sections surface the v1.7-not-
+enrichment hasn't run, BOTH sections surface the not-
 extracted disclosure rather than fabricating activity:
 
-> The Recent Changes / Key Contacts section requires the v1.7
+> The Recent Changes / Key Contacts section requires the 
 > Tooling-API enrichment to populate `lastModifiedDate` and
 > `lastModifiedBy` on every node. Your vault was last refreshed
 > without enrichment; run `/sfi-refresh --tooling-api` to
@@ -384,7 +384,7 @@ invented entry. This is constitutional.
 
 ### Composition vs narrative (verbatim)
 
-> v2.5 generators COMPOSE existing graph queries
+> The generators COMPOSE existing graph queries
 > (`sfi.org_overview`, `sfi.integration_map`,
 > `sfi.domain_clusters`, etc.) into structured markdown. They do
 > NOT generate prose explanations of WHY a cluster exists, WHAT
@@ -501,7 +501,7 @@ Claude's flow:
 >   `sfi.list_components({ type: 'CustomField', parentId:
 >   'CustomObject:Account' })`.
 > - **Single-field deep dive** on `Industry__c` (writers, readers,
->   v2.9 source-of-truth, similar fields) →
+> source-of-truth, similar fields) →
 >   `sfi.field_360({ fieldId: 'CustomField:Account.Industry__c' })`
 >   via the `developer-field-deep-dive` skill.
 > - **Sharing summary** for Account (OWD + SharingRules + role
@@ -517,13 +517,13 @@ points the admin at narrower / wider drill-ins.
 | Mistake | Why it's wrong |
 |---|---|
 | Stripping the Q125 freshness footer when presenting the doc. | The footer is constitutional. The admin reading the doc next week needs to be able to compare the `sourceTreeHash` against the current vault. Stripping it breaks the trust contract. |
-| Inventing a Recent Changes / Key Contacts section when v1.7 enrichment hasn't run. | The constitutional rule is fail-conservative: surface the v1.7-not-extracted disclosure, not a fabricated entry. The admin would treat a fake "Recent Changes" entry as ground truth. |
+| Inventing a Recent Changes / Key Contacts section when the enrichment hasn't run. | The constitutional rule is fail-conservative: surface the enrichment-not-run disclosure, not a fabricated entry. The admin would treat a fake "Recent Changes" entry as ground truth. |
 | Paraphrasing a `heuristic`-tagged section's disclosure ("the clustering algorithm is sometimes a bit off"). | The verbatim disclosure exists for a reason — it states the failure modes precisely. Paraphrasing dilutes the warning. Use the section's verbatim disclosure intact. |
-| Treating the generated doc as a narrative. | v2.5 generators emit STRUCTURE. The doc lists components, surfaces edge relationships, and tables out metadata. It does NOT explain WHY each component exists. Don't add interpretive prose to the doc; let the admin read the structure and write their own narrative if needed. |
-| Calling `sfi.generate_compliance_report` and presenting PII classifications as authoritative. | The v2.0d PII recognizer is heuristic — keyword + type / length pattern matching. A field flagged `pii` may not store PII; a field flagged `public` may. State the v2.0d boundary verbatim. |
+| Treating the generated doc as a narrative. | The generators emit STRUCTURE. The doc lists components, surfaces edge relationships, and tables out metadata. It does NOT explain WHY each component exists. Don't add interpretive prose to the doc; let the admin read the structure and write their own narrative if needed. |
+| Calling `sfi.generate_compliance_report` and presenting PII classifications as authoritative. | The  PII recognizer is heuristic — keyword + type / length pattern matching. A field flagged `pii` may not store PII; a field flagged `public` may. State the  boundary verbatim. |
 | Skipping per-section confidence labels in the response. | The admin reads the doc and acts on it. Without `(declared)` vs `(heuristic)` labels per section, the admin treats every section as equally trustworthy and misses that Domain Clustering is recognizer output, not metadata. |
 | Generating the wrong doc for the user's question (e.g., generating a data dictionary when they asked "who can see Account"). | Pick the right generator. Data dictionary is for OBJECT schema. Sharing summary is for OWD / SharingRules / grants. Compliance is for PII + access. Re-route to the right entry point. |
-| Concatenating multiple generated docs into one mega-doc. | v2.5 emits one doc per call. Concatenating loses the per-doc frontmatter, the per-doc sourceTreeHash mapping, and the per-doc component-id cross-reference. Surface each doc separately. |
+| Concatenating multiple generated docs into one mega-doc. | sf-intelligence emits one doc per call. Concatenating loses the per-doc frontmatter, the per-doc sourceTreeHash mapping, and the per-doc component-id cross-reference. Surface each doc separately. |
 | Calling `sfi.generate_onboarding_doc` for a quick admin question. | The onboarding doc is the MOST COMPOSITE generator — it chains four sub-generators. For a quick admin question ("how does sharing work in this org"), the sharing-summary or admin-handbook generators are tighter. |
 
 ## See also
@@ -570,8 +570,8 @@ Before sending a response, confirm:
 - [ ] For the `heuristic`-tagged sections (Domain Clustering, PII
       Inventory, Field Label Glossary), I surfaced the per-section
       verbatim disclosure intact rather than paraphrasing.
-- [ ] When Recent Changes / Key Contacts would depend on v1.7
-      enrichment, I surfaced the v1.7-not-extracted disclosure
+- [ ] When Recent Changes / Key Contacts would depend on 
+      enrichment, I surfaced the enrichment-not-run disclosure
       and did NOT fabricate activity.
 - [ ] I cited every component named in the doc by canonical ID.
 - [ ] I did NOT add interpretive prose to the doc beyond the
@@ -585,4 +585,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

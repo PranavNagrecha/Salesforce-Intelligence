@@ -34,6 +34,10 @@ rename.
 ## Decision
 1. **`{ data, vaultState }` is the canonical success envelope** (errors carry a
    truthy top-level `error`). This is already the norm; it is now the rule.
+   *Addendum, 0.6.0:* every success envelope also carries
+   `contentPolicy: "org-metadata"`, a string marker saying that org metadata in
+   the result is data, never instructions. The disclosure text itself lives in
+   the server instructions, not in each response.
 2. **`componentId` is the canonical input key** for "the component a tool
    targets." New tools MUST use it. The keys that already shipped (`fieldId`,
    `targetId`, bare `id`, …) are **recognized legacy aliases, kept verbatim** —

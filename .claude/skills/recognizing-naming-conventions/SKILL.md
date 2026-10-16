@@ -1,7 +1,7 @@
 ---
 name: recognizing-naming-conventions
 description: |
-  Surfaces observed naming-convention patterns from the SfIntelligence
+  Surfaces observed naming-convention patterns from the sf-intelligence
   vault. Use when the user asks "what's our convention", "what's the
   naming standard", "do we always …", "is this consistent with the
   rest of the org", or proposes a new component name and wants it
@@ -52,7 +52,7 @@ say so honestly. Don't fill the gap with a guess.
   pattern detection). Defer to `answering-org-questions` →
   `sfi.list_components` or `sfi.get_component`.
 - The user asks Claude to **rename** a field or **enforce** a
-  convention across the org. v0.1 is read-only; the recognizer
+  convention across the org. sf-intelligence is read-only; the recognizer
   observes, it does not write or deploy. Tell the user to use
   `sf project deploy` themselves.
 - The user wants the vault **refreshed** ("rebuild the index", "pull
@@ -224,13 +224,13 @@ Stop and ask the user, or surface a limit, when:
 - **The recognizer returns `internal`** (a graph error). Don't retry
   blindly — fire `pre-flight-checks` to see if the vault is healthy.
 - **The user proposes a name for a metadata type the recognizer
-  doesn't cover.** v0.1's recognizer is custom-fields-only. For
+  doesn't cover.** The recognizer is custom-fields-only. For
   CustomObject, ValidationRule, Flow, ApexClass, ApexTrigger, Layout,
-  PermissionSet, or Profile naming, say so plainly: "The v0.1
+  PermissionSet, or Profile naming, say so plainly: "The 
   recognizer only reports patterns for custom fields. Manual review
   recommended for {type} naming."
 - **The user wants the recognizer to **enforce** a pattern** (block a
-  deploy if a name doesn't match). v0.1 observes; it does not
+  deploy if a name doesn't match). sf-intelligence observes; it does not
   enforce. Say so.
 - **The observed pattern has low adherence** (e.g., 60% — just over
   the bar). Don't present a 60% match as if it were 95%. Cite the
@@ -264,4 +264,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

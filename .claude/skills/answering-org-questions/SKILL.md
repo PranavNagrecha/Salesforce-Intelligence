@@ -91,8 +91,8 @@ Defer to another skill or to general knowledge when:
   at how their org uses the concept.
 - **The user wants live data and the live plane is off.** "How many
   Accounts closed today?" Offer to enable the live plane once
-  (`sfi.live_consent { grant: true }`), then use `sfi.live_count` /
-  `sfi.live_sample`; otherwise name the boundary and point to `sf data query`.
+  (`sfi.live_consent { grant: true }`), then run `sfi.live_count` / `sfi.live_sample` through `sfi.run_analysis`;
+  otherwise name the boundary and point to `sf data query`.
 - **The question needs runtime Apex semantics** (dynamic dispatch, values
   only known at run time). Use static tools (`sfi.explain_apex_method`,
   `sfi.call_graph`) and say what is not provable offline.
@@ -101,8 +101,8 @@ Defer to another skill or to general knowledge when:
 
 ## Route first (the front door)
 
-Before the manual classification below, call **`sfi.route_question`** with the
-user's question. It returns `plane` (`vault` | `live` | `hybrid` | `unknown`),
+Before the manual classification below, run **`sfi.route_question`** through `sfi.run_analysis`
+(`{ "name": "sfi.route_question", "args": { "question": "<verbatim>" } }`). It returns `plane` (`vault` | `live` | `hybrid` | `unknown`),
 the ordered `sfi.*` `tools`, `needsResolve` (resolve a named component first?),
 `liveRequired` (needs the opt-in live plane?), and a `gap` when no dedicated tool
 exists yet. Then:
@@ -157,7 +157,7 @@ A few cues to break ties:
 | **Schema (specific)** | `sfi.get_component` (by canonical ID) | `sfi.search_components` if the ID is wrong |
 | **Whole-object profile ("everything about `Contact`", "what is attached to this object", "what points at it")** | `sfi.object_360` (by `objectApiName`) — twelve sections covering what the object owns, what points at it, who can touch it, and when its metadata last changed. It ANALYSES and never adjudicates: `summary.verdict` is `null` by construction, so never read its counts as a "safe/unsafe to delete" answer | `sfi.get_impact` on `CustomObject:{Name}` for the edge-walked dependency slice |
 | **Dependency** | `sfi.get_edges` (one hop, with `direction`) | `sfi.get_subgraph` (up to 3 hops) |
-| **Permission** | `sfi.search_components` to find the permset/profile, then `sfi.get_edges` for `grantedBy` | `sfi.get_component` on the permset/profile for the full body |
+| **Permission** | `sfi.search_components` to find the permset/profile, then `sfi.get_edges` (via `sfi.run_analysis`) for `grantedBy`; `sfi.effective_permissions` (core) for one profile's or permission set's net access | `sfi.get_component` on the permset/profile for the full body |
 | **Naming / convention** | `sfi.get_naming_convention_report` (with `scope`) | none — if the report is empty, say so |
 | **Apex source** | `sfi.search_apex_source` (with `regex` if needed) | `sfi.get_component` on each hit's containing class for context |
 | **Flow metadata** | `sfi.search_flow_metadata` | `sfi.get_component` on each hit's containing Flow |
@@ -215,7 +215,7 @@ component ID** in backticks. The format is `Type:Id`:
 - `ApexTrigger:AccountTrigger`
 - `Layout:Account-Account Layout`
 - `PermissionSet:Sales_Manager`
-- `Profile:System Administrator`
+- `Profile:Admin`
 
 Acceptable:
 > `CustomField:Account.Industry__c` is a picklist with 7 values, used
@@ -297,9 +297,9 @@ Refuse honestly. Offer the partial answer you *can* give. Examples:
 
 | User asks | The honest answer |
 |---|---|
-| "What does this method do?" | Use `sfi.explain_apex_method` / quote source. Runtime/dynamic dispatch may be invisible — say "no static evidence" when applicable. |
+| "What does this method do?" | `sfi.explain_apex_method` (via `sfi.run_analysis`) / quote source. Runtime/dynamic dispatch may be invisible — say "no static evidence" when applicable. |
 | "Which Flow branch runs for this record?" | `sfi.explain_flow` lists structure; it does not evaluate runtime record state. |
-| "If I rename this field, what breaks?" | `sfi.get_impact`, `sfi.safe_to_delete_field` — check `sfi.coverage_report` first; cite `coverageCaveat` if present. |
+| "If I rename this field, what breaks?" | `sfi.safe_to_delete_field` (core), or `sfi.get_impact` through `sfi.run_analysis` — check coverage first (`sfi.coverage_report` through `sfi.run_analysis`, or the `health_check` coverage block); cite `coverageCaveat` if present. |
 | "How many Accounts have Industry='Tech'?" | Opt-in `sfi.live_count` when enabled; otherwise `sf data query`. Never infer counts from the vault. |
 | "Show me the latest changes to this field." | `sfi.last_modified`, `sfi.changed_since`, or `sfi.diff_snapshots` when snapshots exist. |
 | "Which EmailTemplate does this flow send?" | Grep Flow XML or `sfi.search_flow_metadata`; cite template id from metadata if extracted. |
@@ -314,7 +314,7 @@ then offer the right tool.
 | "I'll guess from Salesforce best practices." | The vault has *this org's* actual data. Best practices may not apply. Always cite from the vault. |
 | "I'll skip `sfi.health_check`; it's probably fine." | A stale vault returns confidently wrong answers. Always confirm freshness on the first turn of an org-touching session. |
 | "`search_components` returned nothing, so the answer is no." | Empty often means wrong query terms. Try synonyms, then escalate to `search_apex_source` / `search_flow_metadata`. Only after the cascade is dry do you say "not in the vault". |
-| "I'll synthesize a Flow answer without calling `sfi.explain_flow`." | Call the tool; surface `heuristic` limits from its disclosure. |
+| "I'll synthesize a Flow answer without calling `sfi.flow_graph` or `sfi.explain_flow`." | Call the tool (`sfi.flow_graph` directly; `sfi.explain_flow` through `sfi.run_analysis`); surface `heuristic` limits from its disclosure. |
 | "I can read this Apex method and tell the user what it does." | You can quote it. You cannot assert semantics. Quote and stop. |
 | "I'll skip citing component IDs to keep the answer readable." | The IDs are the proof you're reading the vault. Skipping them means the user has to trust you. Always cite. |
 | "Naming-convention observations are good enough to act on." | They're `heuristic` confidence. Say so. Don't treat a 70%-match pattern as a rule. |
@@ -354,7 +354,7 @@ Before sending a response, confirm:
 - [ ] I cited the canonical component ID (`Type:Id` in backticks) for
       every org artifact I named.
 - [ ] I built the answer ONLY from tool output and ran it through
-      `sfi.synthesize_answer` — `hallucinatedIds` is empty (no ID in my
+      `sfi.synthesize_answer` (via `sfi.run_analysis`) — `hallucinatedIds` is empty (no ID in my
       prose that a tool did not return).
 - [ ] If I reported an edge, I cited its `confidence` level
       (`declared` / `parsed` / `heuristic`).

@@ -5,7 +5,7 @@ description: |
   "when was X modified?", "who built this?", "what changed since
   last week?", "has this been touched since go-live?", "what
   changed in the last sprint?". Call `sfi.run_analysis` with `{ "name": "sfi.last_modified", "args": { … } }` and
-  `sfi.changed_since`. Discloses v1.7 honesty axis: when Tooling
+  `sfi.changed_since`. Discloses the honesty axis: when Tooling
   API enrichment hasn't run, returns `enriched: false` with
   explicit guidance to run `sfi refresh --with-tooling-api`;
   never fabricates dates.
@@ -15,7 +15,7 @@ description: |
 
 ## Overview
 
-This skill is the cross-persona companion to v1.7's freshness tools:
+This skill is the cross-persona companion to the freshness tools:
 `sfi.last_modified` (per-component lookup) and `sfi.changed_since`
 (time-range scan). The question shape — "when was X modified?",
 "who changed this?", "what's new since the deploy?" — comes from
@@ -24,15 +24,15 @@ edited this trigger?"), and architects ("show me everything modified
 in the deploy window") in roughly equal measure. Splitting into
 admin/developer/architect variants would force the user to
 pre-classify their own question; bundling all three personas into
-one skill mirrors the v1.3 `admin-legacy-automation` decision and
+one skill mirrors the `admin-legacy-automation` decision and
 keeps the routing surface narrow.
 
-The skill's load-bearing teaching is the **honesty axis** v1.7
-introduces: freshness data is **opt-in**. v1.0-v1.6 vaults shipped
+The skill's load-bearing teaching is the **honesty axis** it
+introduces: freshness data is **opt-in**. Earlier vaults shipped
 with `lastModifiedDate: null` across the board because the offline
 DX-source extraction pipeline does not have a way to ask the org
 "when was this last touched?" — that requires a live Tooling API
-call. v1.7 ships the live-API enrichment tier, but it is gated
+call. sf-intelligence ships the live-API enrichment tier, but it is gated
 behind the `sfi refresh --with-tooling-api --target-org <alias>`
 flag (default refresh stays offline). When the enrichment has not
 run, every freshness query honestly returns `enriched: false` (or,
@@ -40,16 +40,16 @@ for the range scan, a non-zero `unenrichedCount`) plus a verbatim
 recommendation to run the enricher. **The skill never fabricates a
 date.** The skill never estimates "this looks like a year-old
 class" from training-data priors about how Salesforce orgs
-typically evolve. The skill says "v1.7 Tooling API enrichment has
+typically evolve. The skill says "Tooling API enrichment has
 not run for this vault" and stops, because the alternative is
 hallucinating freshness on a deploy decision.
 
-The v1.7 R2/R3 enrichment covers **six ComponentTypes**: ApexClass,
+The enrichment covers **six ComponentTypes**: ApexClass,
 ApexTrigger, Flow, Layout, CustomField, and ValidationRule. Other
 types (Profile, PermissionSet, Group, Role, SharingRule, RecordType,
 WorkflowRule, ApprovalProcess, etc.) remain `enriched: false` even
-after `--with-tooling-api` runs — future v1.7+ iterations may
-expand coverage, but as of v1.7 R3 these types have no Tooling API
+after `--with-tooling-api` runs — later releases may
+expand coverage, but these types have no Tooling API
 endpoint the enricher consumes. When the user's question is about
 an unsupported type, the skill names the type-coverage boundary
 explicitly rather than treating "no data" as "never modified."
@@ -78,7 +78,7 @@ Fire this skill on freshness-shaped phrasing. Concrete triggers:
    since the audit?". Walks `sfi.last_modified` and compares the
    timestamp against the event date.
 6. **Structural drift over time** — "How has the org grown?", "What
-   changed between last week's snapshot and now?". Use **`sfi.trend`**
+   changed between last week's snapshot and now?". Use **`sfi.trend`** (via `sfi.run_analysis`)
    (needs `sfi snapshot create` after refreshes) and **`sfi.diff_snapshots`**
    for label-to-label diffs (omit labels to auto-diff the latest two; add
    `summary: true` for a compact churn digest). Freshness timestamps
@@ -94,8 +94,8 @@ Fire this skill on freshness-shaped phrasing. Concrete triggers:
    24 hours?", "Show me everything modified this week.". Direct
    `sfi.changed_since` call with a near-recent `since`.
 8. **"Who's the busiest developer / admin?"** — group-by question.
-   v1.7 surfaces `lastModifiedBy` per node; the skill can aggregate
-   client-side, but **disclose** that v1.7 names the LAST deployer,
+   sf-intelligence surfaces `lastModifiedBy` per node; the skill can aggregate
+   client-side, but **disclose** that names the LAST deployer,
    not the cumulative contributor — a developer who edited a class
    in v1, v2, and v3 only shows up in v3's `lastModifiedBy`.
 9. **"What's the freshness coverage in this vault?"** — meta
@@ -132,7 +132,7 @@ Defer to another skill when:
   `refreshing-the-org-vault`, `/sfi-init`, or `pre-flight-checks`.
 - **The user asks for record-level last-touched info** ("when did
   this Account record's Industry get updated?", "who edited
-  `001xx12345`'s Owner?"). v1.7 surfaces **component** freshness
+  `001xx12345`'s Owner?"). sf-intelligence surfaces **component** freshness
   (when was the *field definition* modified), not **record-row**
   freshness (when was a specific record's value modified). The
   latter requires a live `sf data query` against `SystemModstamp`
@@ -181,7 +181,7 @@ Default invocation:
 }
 ```
 
-The response shape (per the v1.7 R3 contract):
+The response shape (per the tool contract):
 
 ```json
 {
@@ -198,7 +198,7 @@ The response shape (per the v1.7 R3 contract):
 
 When `enriched: true`, every freshness axis carries a value the
 consumer can render. When `enriched: false`, the `disclosure` field
-carries the verbatim recommendation: "v1.7 Tooling API enrichment
+carries the verbatim recommendation: "Tooling API enrichment
 has not run for this vault. Run `sfi refresh --with-tooling-api
 --target-org <alias>` to populate lastModifiedDate / lastModifiedBy
 / apiVersion for the enriched types." **Surface that verbatim** —
@@ -208,7 +208,7 @@ priors, do not "split the difference" with a hedged guess.
 When `enriched: false`, the answer is a **structured refusal** with
 a concrete next step (run the enricher). When the user pushes back
 ("just give me your best guess"), refuse again and name the
-auth/enrichment prerequisite — the v1.7 honesty axis is
+auth/enrichment prerequisite — the honesty axis is
 constitutional, not a courtesy.
 
 ### Step 3 — Time-range target: call `sfi.run_analysis` with `{ "name": "sfi.changed_since", "args": { … } }`
@@ -222,7 +222,7 @@ Default invocation:
 }
 ```
 
-The response shape (per the v1.7 R2 contract):
+The response shape (per the tool contract):
 
 ```json
 {
@@ -243,7 +243,7 @@ The response shape (per the v1.7 R2 contract):
 }
 ```
 
-The `unenrichedCount` is the v1.7 R2 honesty axis: it names how
+The `unenrichedCount` is the honesty axis: it names how
 many nodes (within the requested types) carry `lastModifiedDate:
 null` — these are nodes the offline DX-source extractor produced
 without freshness data. **Surface `unenrichedCount` whenever it is
@@ -329,7 +329,7 @@ vault:
     "lastModifiedDate": null,
     "lastModifiedBy": null,
     "apiVersion": null,
-    "disclosure": "v1.7 Tooling API enrichment has not run for this vault. Run `sfi refresh --with-tooling-api --target-org <alias>` to populate lastModifiedDate / lastModifiedBy / apiVersion for the enriched types."
+    "disclosure": "Tooling API enrichment has not run for this vault. Run `sfi refresh --with-tooling-api --target-org <alias>` to populate lastModifiedDate / lastModifiedBy / apiVersion for the enriched types."
   }
 }
 ```
@@ -339,7 +339,7 @@ Claude's presentation back to the user:
 > Freshness for `ApexClass:AccountController` is **not available**
 > in this vault.
 >
-> v1.7 Tooling API enrichment has not run for this vault. Run
+> Tooling API enrichment has not run for this vault. Run
 > `sfi refresh --with-tooling-api --target-org <alias>` to
 > populate lastModifiedDate / lastModifiedBy / apiVersion for the
 > enriched types (ApexClass, ApexTrigger, Flow, Layout,
@@ -378,14 +378,14 @@ Claude's presentation back to the architect:
 > - `ApexTrigger:AccountTrigger` — 2026-05-12, Bob Brown.
 >
 > Coverage note: 47 components of these types carry no
-> freshness data — the v1.7 enrichment has only partially
+> freshness data — the enrichment has only partially
 > covered this vault. Run `sfi refresh --with-tooling-api` for
 > full coverage; until then, treat this list as a lower bound,
 > not an exhaustive one.
 
 ## Boundary disclosure
 
-v1.7's freshness tier has well-defined gaps. Surface this list
+The freshness tier has well-defined gaps. Surface this list
 whenever the user is about to act on the report, and **always**
 when `enriched: false` or `unenrichedCount > 0`:
 
@@ -393,7 +393,7 @@ when `enriched: false` or `unenrichedCount > 0`:
   not call the API; freshness is null until `sfi refresh
   --with-tooling-api --target-org <alias>` runs. The skill says
   so plainly rather than fabricating dates.
-- **Only six ComponentTypes are enriched.** v1.7 R3 covers
+- **Only six ComponentTypes are enriched.** covers
   ApexClass, ApexTrigger, Flow, Layout, CustomField, and
   ValidationRule. Other types (Profile, PermissionSet, Group,
   Role, SharingRule, RecordType, WorkflowRule, ApprovalProcess,
@@ -406,7 +406,7 @@ when `enriched: false` or `unenrichedCount > 0`:
   CustomLabel, StaticResource, PermissionSetAssignment,
   BusinessProcess, CustomTab, CustomApplication, QuickAction,
   PathAssistant) remain `enriched: false` even after enrichment
-  runs. Future v1.7+ iterations may extend coverage.
+  runs. Later releases may extend coverage.
 - **`lastModifiedBy` is the LAST DEPLOYER, not the original
   author.** Salesforce's Tooling API surfaces the user who last
   touched the metadata in the running org. A class first authored
@@ -424,11 +424,11 @@ when `enriched: false` or `unenrichedCount > 0`:
   the enricher after the rate-limit window resets.
 - **Setup Audit Trail is NOT extracted.** Salesforce's per-action
   audit log (who changed what setting when, from which IP, etc.)
-  is a separate API surface (`SetupAuditTrail`) v1.7 does not
+  is a separate API surface (`SetupAuditTrail`) sf-intelligence does not
   read. Questions like "who changed the OWD setting in March?"
   or "what permission did Alice grant on May 12?" require a
   separate `sf data query` against `SetupAuditTrail` — out of
-  scope until a future v1.7.x extends to it.
+  scope until a later release extends to it.
 - **`lastModifiedDate` lags wall-clock by query-time delta.** Even
   with fresh enrichment, the timestamp reflects the org's state
   at the moment the API was queried — typically seconds before
@@ -438,12 +438,12 @@ when `enriched: false` or `unenrichedCount > 0`:
   Apex class has been edited in the Developer Console (live) but
   the DX source has not been re-retrieved, the Tooling API's
   `LastModifiedDate` is fresher than what the offline extractor
-  saw. v1.7 enrichment updates the freshness data but does NOT
+  saw. The enrichment updates the freshness data but does NOT
   refresh structural extraction — the graph nodes/edges reflect
   DX source, the freshness reflects the API. Name this drift
   verbatim when the user's question is sensitive to it.
 
-Treat **`enriched: false`** verdicts as "v1.7 cannot tell" — not
+Treat **`enriched: false`** verdicts as "sf-intelligence cannot tell" — not
 as "never modified." Treat **`unenrichedCount > 0`** scans as
 "partial answer, run the enricher for full coverage."
 
@@ -451,13 +451,13 @@ as "never modified." Treat **`unenrichedCount > 0`** scans as
 
 | Mistake | Why it's wrong |
 |---|---|
-| Presenting `enriched: false` or `lastModifiedDate: null` as "this component was never modified" or "this is brand new". | `null` is a **gap**, not a value. v1.7's enrichment is opt-in; `null` means "we have no data," not "the component is fresh." Surface the gap as the disclosure says: enrichment has not run, run the enricher. |
-| Estimating freshness from training-data priors ("classes typically get updated every sprint, so probably 2 weeks ago"). | The v1.7 honesty axis is constitutional. Fabricated freshness is worse than no freshness because a deploy decision based on a fabricated date is unrecoverable. Refuse honestly. |
+| Presenting `enriched: false` or `lastModifiedDate: null` as "this component was never modified" or "this is brand new". | `null` is a **gap**, not a value. The enrichment is opt-in; `null` means "we have no data," not "the component is fresh." Surface the gap as the disclosure says: enrichment has not run, run the enricher. |
+| Estimating freshness from training-data priors ("classes typically get updated every sprint, so probably 2 weeks ago"). | The  honesty axis is constitutional. Fabricated freshness is worse than no freshness because a deploy decision based on a fabricated date is unrecoverable. Refuse honestly. |
 | Conflating `lastModifiedBy` with the original author. | `lastModifiedBy` names the user who last *deployed* the change. A 5-year-old class that Alice redeployed yesterday will list Alice, not the original 2021 author. Cite the caveat verbatim when the question is about authorship. |
 | Ignoring `unenrichedCount` in the `changed_since` response. | A `changed: []` result with `unenrichedCount: 47` means "we can't tell"; a `changed: []` with `unenrichedCount: 0` means "genuinely nothing changed." Surfacing only `changed.length === 0` collapses both into "nothing changed" and misleads the consumer. |
 | Citing `apiVersion: null` as "this class is on the latest API". | `null` is the same gap as the others — no enrichment, no data. The class's *running* API version is whatever the Tooling API would return; until the enricher fills it, the skill says so. |
-| Running `sfi.last_modified` against a record-row id (`001xx12345`) instead of a component id. | v1.7 freshness covers component metadata (the field definition), not record rows. The handler returns `component-not-found`; translate the question to live-data shape ("query `Account.SystemModstamp` via `sf data query`") and disclose the shift. |
-| Treating "I checked `sfi.last_modified` and it returned `enriched: true`" as proof a component is in active use. | Freshness is "when was the metadata last touched," not "is anyone using this." A class deployed yesterday may have zero callers; a class untouched since 2020 may be the org's load-bearing core. Use `sfi.find_code_usages` for usage, `sfi.last_modified` for freshness, and never confuse the two. |
+| Running `sfi.last_modified` against a record-row id (`001xx12345`) instead of a component id. | Freshness covers component metadata (the field definition), not record rows. The handler returns `component-not-found`; translate the question to live-data shape ("query `Account.SystemModstamp` via `sf data query`") and disclose the shift. |
+| Treating "I checked `sfi.last_modified` and it returned `enriched: true`" as proof a component is in active use. | Freshness is "when was the metadata last touched," not "is anyone using this." A class deployed yesterday may have zero callers; a class untouched since 2020 may be the org's load-bearing core. Use `sfi.find_code_usages` (via `sfi.run_analysis`) for usage, `sfi.last_modified` for freshness, and never confuse the two. |
 | Skipping the boundary disclosure when `enriched: true` for one component but the user's question implies a broader sweep. | The disclosure protects the user's mental model. A single-component happy path doesn't mean the vault as a whole is enriched. When the user's question implies "across the org," the disclosure goes in even if the cited component happens to be enriched. |
 | Suggesting "run a SOQL query to check" without naming `sf data query --target-org <alias>` and the specific object (`ApexClass`, `Flow`, `FieldDefinition`, etc.). | The user needs an executable next step. "Run a SOQL query" is too vague; "run `sf data query --target-org <alias> --query 'SELECT LastModifiedDate, LastModifiedBy.Name FROM ApexClass WHERE Name = ''AccountController'''` " is the load-bearing instruction. |
 
@@ -475,7 +475,7 @@ Claude's flow:
 3. The tool returns `enriched: false`, every freshness field
    `null`, and the verbatim disclosure.
 4. **Refuse honestly** with the disclosure surfaced verbatim:
-   "v1.7 Tooling API enrichment has not run for this vault. Run
+   "Tooling API enrichment has not run for this vault. Run
    `sfi refresh --with-tooling-api --target-org <alias>` to
    populate lastModifiedDate / lastModifiedBy / apiVersion for
    the enriched types. I can't tell you when this class was last
@@ -499,7 +499,7 @@ Claude's flow:
 4. **Render** the grouped list — apiName / modifier name /
    timestamp per row.
 5. **Surface the coverage note** verbatim: "12 Flow components
-   carry no freshness data — the v1.7 enrichment has only
+   carry no freshness data — the enrichment has only
    partially covered this vault. Treat this list as a lower
    bound; run `sfi refresh --with-tooling-api` for full
    coverage."
@@ -511,13 +511,13 @@ User: *"Who built the `Sales_Manager` profile?"*
 Claude's flow:
 
 1. **Parse.** Component target = `Profile:Sales_Manager`. Note:
-   Profile is NOT in v1.7's enriched-type list.
+   Profile is NOT in the enriched-type list.
 2. **Fire** `sfi.run_analysis` with `{ "name": "sfi.last_modified", "args": { … } }` with
    `{ componentId: 'Profile:Sales_Manager' }`.
 3. The tool returns `enriched: false` even if the vault was
    refreshed with `--with-tooling-api` (Profile is uncovered).
 4. **Disclose the type-coverage boundary**, not just the
-   enrichment-not-run line: "v1.7 R3's Tooling API enrichment
+   enrichment-not-run line: "the Tooling API enrichment
    covers ApexClass, ApexTrigger, Flow, Layout, CustomField, and
    ValidationRule — Profile is not yet covered. Until a future
    iteration extends coverage, the freshness fields for
@@ -541,7 +541,7 @@ Claude's flow:
 3. The tool returns `enriched: true`,
    `lastModifiedBy: { id: '005xx...', name: 'Alice Adams' }`.
 4. **Surface the value AND the authorship caveat verbatim**:
-   "v1.7's `lastModifiedBy` names the user who last *deployed*
+   "`lastModifiedBy` names the user who last *deployed*
    the change — Alice Adams here. That is NOT necessarily the
    original author. A flow first built by Bob in 2024 and last
    re-saved by Alice in May 2026 shows only Alice. For the
@@ -577,7 +577,7 @@ Before sending a response, confirm:
       authorship.
 - [ ] I cited canonical IDs (`ApexClass:...`, `Flow:...`,
       `CustomField:...`) for every component named.
-- [ ] When the target ComponentType was outside v1.7's enriched
+- [ ] When the target ComponentType was outside the enriched
       set (Profile, PermissionSet, etc.), I named the type-coverage
       boundary explicitly and offered the live-data
       `sf data query` fallback.
@@ -587,4 +587,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

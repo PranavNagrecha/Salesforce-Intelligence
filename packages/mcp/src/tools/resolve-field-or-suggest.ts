@@ -146,7 +146,7 @@ export const resolveToFieldOrSuggest = async (
   // the same false label FIX 2 removes from the naming-convention report.
   const message =
     `You passed an object id ('${raw}') instead of a field id. ` +
-    `Here are the ${fieldCount} field(s) SfIntelligence holds for ${objectApiName} (custom and standard). ` +
+    `Here are the ${fieldCount} field(s) sf-intelligence holds for ${objectApiName} (custom and standard). ` +
     listSnippet +
     ` Each entry in \`fieldIds\` uses the canonical \`${CUSTOM_FIELD_PREFIX}{Object}.{Field}\` format.`;
 

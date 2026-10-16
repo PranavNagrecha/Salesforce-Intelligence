@@ -8,7 +8,7 @@ import siteData from "../data/site-data.json";
 const title = "Install sf-intelligence for Claude, Cursor, VS Code & Codex";
 const description =
   "Try the demo org in two minutes, then connect your own Salesforce org: read it once with init and refresh, add one snippet to your AI assistant, and ask.";
-const dateModified = "2026-10-10";
+const dateModified = "2026-10-16";
 
 // HowTo rich results were retired by Google (2023), so the page is modelled as
 // a TechArticle, which Bing and answer engines still parse.
@@ -121,7 +121,7 @@ const fullProfile = `"env": { "SFI_TOOL_PROFILE": "full" }`;
           <li><strong>Any assistant:</strong> ask it to run <code>sfi.health_check</code>. A <code>healthy</code> result means everything is wired up.</li>
         </ul>
 
-        <p>Step-by-step guides for two hosts with their own quirks: <a href="/setup/vs-code-copilot">VS Code + GitHub Copilot</a> and <a href="/setup/cursor">Cursor</a>.</p>
+        <p>Step-by-step guides, with Windows notes, for each host: <a href="/setup/claude-code">Claude Code</a>, <a href="/setup/claude-desktop">Claude Desktop</a>, <a href="/setup/cursor">Cursor</a> and <a href="/setup/vs-code-copilot">VS Code + GitHub Copilot</a>.</p>
 
         <h3 id="tool-profile">Tool profile</h3>
         <p>By default your assistant sees a small core set of tools, which keeps its tool list short. Every other analysis is still reachable through <code>sfi.run_analysis</code>. To list all {siteData.listedToolCount} tools directly, add this to the server’s config:</p>
@@ -149,8 +149,19 @@ const fullProfile = `"env": { "SFI_TOOL_PROFILE": "full" }`;
         <p>For anything else, run <code>npx -y sf-intelligence doctor</code>. It checks the Salesforce CLI, the snapshot, your login and the graph, and prints a fix for each problem.</p>
 
         <h3 id="plugin">Claude Code plugin</h3>
-        <p>Installing sf-intelligence as a Claude Code plugin adds {siteData.skillCount} skills that switch on when you talk about Salesforce, and {siteData.commandCount} slash commands such as <code>/sfi-onboard</code>, a guided first run. The plugin registers the same server, so you don’t need a separate <code>claude mcp add</code>.</p>
+        <p>Installing sf-intelligence as a Claude Code plugin adds {siteData.skillCount} skills that switch on when you talk about Salesforce, and {siteData.commandCount} slash commands such as <code>/sfi-onboard</code>, a guided first run. The plugin registers the same server, so you don’t need a separate <code>claude mcp add</code>. It can’t know where your <code>org-kb</code> folder is, though: either set <code>SFI_VAULT</code> to the full path of that folder (in your shell profile, so Claude Code inherits it) or start Claude Code from the folder that holds <code>org-kb</code>. If answers come back empty, ask “is the server set up?” and it says where it looked.</p>
         <CodeCard id="gs-plugin" file="Inside Claude Code" code={"/plugin marketplace add PranavNagrecha/Salesforce-Intelligence\n/plugin install sf-intelligence@sf-intelligence"} />
+        <p>The <a href="/setup/claude-code">Claude Code guide</a> covers the plugin, the one-command install and the Windows notes.</p>
+
+        <h3 id="uninstall">Uninstall</h3>
+        <p>Nothing is installed in Salesforce, so there is nothing to remove there. On your computer:</p>
+        <ul>
+          <li><strong>Remove the server from your assistant.</strong> Claude Code: <code>claude mcp remove sf-intelligence</code>. Other hosts: delete the <code>sf-intelligence</code> block from the config file you added it to, then restart the host.</li>
+          <li><strong>If you installed the Claude Code plugin:</strong> <code>/plugin uninstall sf-intelligence@sf-intelligence</code>.</li>
+          <li><strong>If you installed it globally:</strong> <code>npm uninstall -g sf-intelligence</code>. With <code>npx</code> there is nothing to uninstall.</li>
+          <li><strong>If you started the drift watcher:</strong> <code>npx -y sf-intelligence watch stop</code> in the project folder.</li>
+          <li><strong>Delete the data:</strong> the <code>org-kb</code> folder next to your project, and <code>~/.sf-intelligence</code> in your home folder (the demo cache, live-mode consent and local feedback).</li>
+        </ul>
 
         <h3 id="more">Live data, multiple orgs and other options</h3>
         <p>Answers come from the snapshot by default. To turn on the opt-in, read-only live lookups (record counts, samples, org limits), or to work with several orgs, see the <a href="/configuration">configuration reference</a>.</p>

@@ -5,6 +5,7 @@
  * level down in a <details>, for developers who want to check it.
  */
 import type { DemoAnswer } from "../data/demo-answers.ts";
+import toolsData from "../data/tools.json";
 import CiteChip from "./CiteChip.astro";
 
 interface Props {
@@ -20,7 +21,14 @@ const { answer, level = 3, showTool = true, showIds = true } = Astro.props;
 const show = showIds ? "id" : "none";
 const Q = level === 2 ? "h2" : "h3";
 const pillClass = `pill pill-${answer.verdict.tone}`;
-const toolJson = JSON.stringify({ name: answer.tool.name, arguments: answer.tool.args }, null, 2);
+/* The call as the server accepts it under the default (core) profile: a core
+ * tool is called directly; every other analysis goes through sfi.run_analysis.
+ * The core roster comes from tools.json, so this never drifts from the product. */
+const isCore = new Set(toolsData.core).has(answer.tool.name);
+const call = isCore
+  ? { name: answer.tool.name, arguments: answer.tool.args }
+  : { name: "sfi.run_analysis", arguments: { name: answer.tool.name, args: answer.tool.args } };
+const toolJson = JSON.stringify(call, null, 2);
 ---
 
 <article class="answer-card">
@@ -79,7 +87,7 @@ const toolJson = JSON.stringify({ name: answer.tool.name, arguments: answer.tool
     {showTool && (
       <details class="tool-call">
         <summary>For developers: the tool call</summary>
-        <p>Your assistant made this call to the sf-intelligence MCP server:</p>
+        <p>Your assistant made this call to the sf-intelligence MCP server{isCore ? "" : <>. <code>{answer.tool.name}</code> isn’t in the short default tool list, so it runs through <code>sfi.run_analysis</code></>}:</p>
         <pre>{toolJson}</pre>
         {answer.raw && (
           <details class="tool-call">

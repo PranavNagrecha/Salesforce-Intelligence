@@ -451,10 +451,10 @@ const buildPlatformEventListensToEdge = (
  * `<actionType>` is `apex`. Each apex-typed action call yields one edge
  * to `ApexClass:{actionName}`.
  *
- * Non-apex action types (`emailAlert`, `emailSimple`, `chatterPost`,
- * `flow`, etc.) are deferred to v0.3 and produce no edges here — but
- * they don't warn either, since they're a normal part of Flow XML, not
- * an inconsistency.
+ * Non-apex action types that declare a dependency target are handled by
+ * {@link buildNonApexActionReferenceEdges}. All other non-apex types
+ * (`emailSimple`, `chatterPost`, `activateSessionPermSet`, etc.) still
+ * produce no edges here and do not warn.
  *
  * Edges carry `confidence: 'parsed'` (we parsed them out of the XML)
  * with `properties.actionType: 'apex'`. Duplicates by toId are
@@ -492,6 +492,261 @@ const buildActionCallEdges = (
     } catch (cause: unknown) {
       warnings.push(
         `failed to read <actionCalls>[${i}]: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    }
+  }
+  return edges;
+};
+
+/** `<actionCalls>` types that become a `references` edge via {@link buildNonApexActionReferenceEdges}. */
+const NON_APEX_ACTION_REFERENCE_TYPES = new Set([
+  'emailAlert',
+  'quickAction',
+  'externalService',
+  'flow',
+]);
+
+/**
+ * Build `references` edges from `<actionCalls>` whose `<actionType>` names a
+ * vault-modeled dependency: workflow email alert, quick action, external
+ * service registration, or another Flow invoked as an action (distinct from
+ * `<subflows>`, which uses `referenceKind: 'subflow'`).
+ *
+ * `<actionName>` is used verbatim as the canonical id suffix — e.g.
+ * `WorkflowAlert:Demo_Obj__c.Demo_Alert`, `QuickAction:Demo_Obj__c.Demo_Action`,
+ * `ExternalService:Demo_Service`, `Flow:Demo_Child_Flow`. Targets may be
+ * dangling when the dependency was not captured in the vault; the edge is
+ * still emitted.
+ */
+const buildNonApexActionReferenceEdges = (
+  flowId: string,
+  rootObj: Record<string, unknown>,
+  warnings: string[],
+): Edge[] => {
+  const edges: Edge[] = [];
+  const actionCalls = toArray(rootObj['actionCalls']);
+  for (let i = 0; i < actionCalls.length; i += 1) {
+    const call = actionCalls[i];
+    try {
+      if (typeof call !== 'object' || call === null) continue;
+      const callObj = call as Record<string, unknown>;
+      const actionType = toNonEmptyString(callObj['actionType']);
+      if (actionType === null || !NON_APEX_ACTION_REFERENCE_TYPES.has(actionType)) {
+        continue;
+      }
+      const actionName = toNonEmptyString(callObj['actionName']);
+      if (actionName === null) {
+        warnings.push(
+          `<actionCalls>[${i}] has actionType=${actionType} but no <actionName>`,
+        );
+        continue;
+      }
+      const referenceKind =
+        actionType === 'emailAlert'
+          ? 'emailAlert'
+          : actionType === 'quickAction'
+            ? 'quickAction'
+            : actionType === 'externalService'
+              ? 'externalService'
+              : 'flowAction';
+      const idPrefix =
+        actionType === 'emailAlert'
+          ? 'WorkflowAlert'
+          : actionType === 'quickAction'
+            ? 'QuickAction'
+            : actionType === 'externalService'
+              ? 'ExternalService'
+              : ROOT_ELEMENT;
+      edges.push({
+        fromId: flowId,
+        toId: `${idPrefix}:${actionName}`,
+        edgeType: 'references',
+        confidence: 'declared',
+        source: EDGE_SOURCE,
+        properties: { referenceKind, actionType },
+      });
+    } catch (cause: unknown) {
+      warnings.push(
+        `failed to read <actionCalls>[${i}]: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    }
+  }
+  return edges;
+};
+
+const MAX_SCREEN_FIELD_DEPTH = 8;
+
+const splitObjectFieldReference = (
+  ref: string,
+): { objectApiName: string; fieldApiName: string } | null => {
+  const dot = ref.indexOf('.');
+  if (dot <= 0 || dot >= ref.length - 1) return null;
+  return {
+    objectApiName: ref.slice(0, dot),
+    fieldApiName: ref.slice(dot + 1),
+  };
+};
+
+/** Map a screen `ComponentInstance` `<extensionName>` to a component canonical id. */
+const screenExtensionTargetId = (extensionName: string): string =>
+  extensionName.startsWith('c:')
+    ? `LightningComponentBundle:${extensionName}`
+    : `AuraDefinitionBundle:${extensionName}`;
+
+/**
+ * Resolve the PREFIX of a screen field's `<objectFieldReference>` to an SObject.
+ * In Flow metadata the prefix is never an object api name: it is `$Record`, a
+ * record VARIABLE declared in `<variables>` (with an `<objectType>`), or the
+ * name of a `<recordLookups>` element that stores its result automatically.
+ * Anything else resolves to null and mints NO edge — the object is not guessed.
+ */
+const resolveScreenFieldObject = (
+  prefix: string,
+  dataflowIndex: FlowDataflowIndex,
+): { object: string; via: 'triggerRecord' | 'recordVariable' | 'recordLookup' } | null => {
+  if (prefix === '$Record' || prefix === '$Record__Prior') {
+    return dataflowIndex.recordObject === null
+      ? null
+      : { object: dataflowIndex.recordObject, via: 'triggerRecord' };
+  }
+  const variable = dataflowIndex.variables.get(prefix);
+  if (variable !== undefined && variable.objectType !== null) {
+    return { object: variable.objectType, via: 'recordVariable' };
+  }
+  const lookup = dataflowIndex.lookups.get(prefix);
+  if (lookup !== undefined && lookup.object !== null) {
+    return { object: lookup.object, via: 'recordLookup' };
+  }
+  return null;
+};
+
+const collectScreenFieldEdgesFromRaw = (
+  flowId: string,
+  screenIndex: number,
+  fieldPath: string,
+  raw: Record<string, unknown>,
+  depth: number,
+  edges: Edge[],
+  warnings: string[],
+  dataflowIndex: FlowDataflowIndex,
+): void => {
+  const objectFieldReference = toNonEmptyString(raw['objectFieldReference']);
+  if (objectFieldReference !== null) {
+    const parsed = splitObjectFieldReference(objectFieldReference);
+    const resolved = parsed === null ? null : resolveScreenFieldObject(parsed.objectApiName, dataflowIndex);
+    if (parsed === null) {
+      warnings.push(
+        `<screens>[${screenIndex}]${fieldPath} has malformed <objectFieldReference>`,
+      );
+    } else if (resolved === null) {
+      // The prefix is a variable / element this flow does not declare with an
+      // object type (or a loop variable): the field's object is unknown, so no
+      // edge is minted. Disclosed as a warning rather than fabricated.
+      warnings.push(
+        `<screens>[${screenIndex}]${fieldPath} <objectFieldReference> prefix '${parsed.objectApiName}' does not resolve to an SObject; no field edge minted`,
+      );
+    } else {
+      const fieldId = `CustomField:${resolved.object}.${parsed.fieldApiName}`;
+      const properties = {
+        operation: 'screenField',
+        objectFieldReference,
+        resolvedVia: resolved.via,
+      };
+      edges.push(
+        {
+          fromId: flowId,
+          toId: fieldId,
+          edgeType: 'readsFrom',
+          confidence: 'declared',
+          source: EDGE_SOURCE,
+          properties,
+        },
+        {
+          fromId: flowId,
+          toId: fieldId,
+          edgeType: 'writesTo',
+          confidence: 'declared',
+          source: EDGE_SOURCE,
+          properties,
+        },
+      );
+    }
+  }
+  const extensionName = toNonEmptyString(raw['extensionName']);
+  if (extensionName !== null) {
+    edges.push({
+      fromId: flowId,
+      toId: screenExtensionTargetId(extensionName),
+      edgeType: 'references',
+      confidence: 'declared',
+      source: EDGE_SOURCE,
+      properties: {
+        referenceKind: 'flowScreenComponent',
+        extensionName,
+      },
+    });
+  }
+  if (depth >= MAX_SCREEN_FIELD_DEPTH) return;
+  const nestedFields = toArray(raw['fields']);
+  for (let j = 0; j < nestedFields.length; j += 1) {
+    const child = nestedFields[j];
+    if (typeof child !== 'object' || child === null) continue;
+    collectScreenFieldEdgesFromRaw(
+      flowId,
+      screenIndex,
+      `${fieldPath}.fields[${j}]`,
+      child as Record<string, unknown>,
+      depth + 1,
+      edges,
+      warnings,
+      dataflowIndex,
+    );
+  }
+};
+
+/**
+ * Build `readsFrom` / `writesTo` / `references` edges from `<screens><fields>`.
+ * Each `objectFieldReference` (`{variable}.{Field}`, where the prefix is
+ * `$Record`, a record variable or a record-lookup element — see
+ * {@link resolveScreenFieldObject}) yields one read and one write edge to
+ * `CustomField:{ResolvedObject}.{Field}` (`operation: 'screenField'`,
+ * `resolvedVia` names the resolution). An unresolvable prefix mints nothing
+ * and is reported in `warnings`. Each `extensionName` on a `ComponentInstance`
+ * field yields a `references` edge to the LWC (`c:…` →
+ * `LightningComponentBundle:…`) or Aura bundle.
+ */
+const buildScreenFieldEdges = (
+  flowId: string,
+  rootObj: Record<string, unknown>,
+  warnings: string[],
+  dataflowIndex: FlowDataflowIndex,
+): Edge[] => {
+  const edges: Edge[] = [];
+  const screens = toArray(rootObj['screens']);
+  for (let i = 0; i < screens.length; i += 1) {
+    const screen = screens[i];
+    try {
+      if (typeof screen !== 'object' || screen === null) continue;
+      const screenObj = screen as Record<string, unknown>;
+      const fields = toArray(screenObj['fields']);
+      for (let j = 0; j < fields.length; j += 1) {
+        const field = fields[j];
+        if (typeof field !== 'object' || field === null) continue;
+        collectScreenFieldEdgesFromRaw(
+          flowId,
+          i,
+          `.fields[${j}]`,
+          field as Record<string, unknown>,
+          0,
+          edges,
+          warnings,
+        
+          dataflowIndex,
+        );
+      }
+    } catch (cause: unknown) {
+      warnings.push(
+        `failed to read <screens>[${i}]: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
     }
   }
@@ -2019,9 +2274,15 @@ const dedupeAndSortEdges = (edges: readonly Edge[]): Edge[] => {
  *   - `<recordDeletes>` → one `writesTo` edge per delete.
  *   - `<subflows>` → one `references` edge per subflow call to the
  *     target `Flow:{flowName}` (confidence `declared`,
- *     `referenceKind: 'subflow'`). This is the ONLY flow→flow edge;
- *     without it a subflow called by N parents reads as having zero
- *     dependents (R6-02).
+ *     `referenceKind: 'subflow'`). Without it a subflow called by N
+ *     parents reads as having zero dependents (R6-02).
+ *   - `<actionCalls>` with `actionType` ∈ {emailAlert, quickAction,
+ *     externalService, flow} → one `references` edge per call to the
+ *     declared target (`WorkflowAlert`, `QuickAction`, `ExternalService`,
+ *     or `Flow` id).
+ *   - `<screens><fields>` → per `objectFieldReference`, one `readsFrom`
+ *     and one `writesTo` to `CustomField:{Object}.{Field}`; per
+ *     `extensionName`, one `references` edge to the screen component.
  *
  * Edges are deduplicated by `(fromId, toId, edgeType, source)` and
  * sorted by `toId`, then `edgeType` for byte-stable test output.
@@ -2031,9 +2292,10 @@ const dedupeAndSortEdges = (edges: readonly Edge[]): Edge[] => {
  * whole extraction. The Flow's `<status>` validation and root-element
  * checks still hard-fail per the documented error contract.
  *
- * Decisions, screens, and non-apex action types remain out of scope as
- * ELEMENTS (no element-level nodes are minted); see `Flow.md` v0.2
- * section "Deferred to v0.3". `<assignments>`, `<variables>`,
+ * Decisions remain out of scope as ELEMENTS (no element-level nodes are
+ * minted). Screen fields and the four non-apex `<actionCalls>` types above
+ * ARE modeled as component-level edges (not as Flow element nodes).
+ * `<assignments>`, `<variables>`,
  * `<formulas>`, and `<loops>` are PARSED (R6-11) — not as elements, but as
  * the dataflow plumbing that maps DML input assignments back to their
  * record-field sources; R7-W2 additionally reads `<assignments>` items that
@@ -2212,6 +2474,8 @@ export const extractFlow = async (
   );
   const dataflowCollector: DataflowSourceCollector = new Map();
   rawEdges.push(...buildActionCallEdges(flowId, rootObj, warnings));
+  rawEdges.push(...buildNonApexActionReferenceEdges(flowId, rootObj, warnings));
+  rawEdges.push(...buildScreenFieldEdges(flowId, rootObj, warnings, dataflowIndex));
   rawEdges.push(...buildSubflowEdges(flowId, rootObj, warnings));
   rawEdges.push(...buildRecordLookupEdges(flowId, rootObj, warnings));
   rawEdges.push(
@@ -2328,9 +2592,9 @@ export const extractFlow = async (
         asRecord(unwrapSingle(rootObj['start'])),
       ),
       // bundle-4(a): every <actionCalls> element's {actionType, actionName}
-      // (apex AND non-apex). Apex calls also get a `callsApex` edge; non-apex
-      // action types (e.g. activateSessionPermSet) emit no edge, so this list
-      // is the only place explain_flow can identify the faultable element type.
+      // (apex AND non-apex). Apex calls also get a `callsApex` edge; emailAlert,
+      // quickAction, externalService, and flow also get `references` edges; other
+      // non-apex types (e.g. activateSessionPermSet) rely on this list only.
       actionCalls: actionCallSummaries,
       // `<formulas>` resources that compare a record field to a quoted literal
       // (`ISPICKVAL({!$Record.Status__c}, 'Closed')`) — no edge carries them.

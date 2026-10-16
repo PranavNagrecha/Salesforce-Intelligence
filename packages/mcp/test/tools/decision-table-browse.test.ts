@@ -308,7 +308,7 @@ describe('decisionTableBrowseHandler', () => {
     // contract a v3.2 release passes regardless of test-suite green.
     expect(data.boundaries[0]).toBe(
       'DecisionTable rows live in CSV uploads or SObject records, ' +
-        'not in the metadata XML. v3.2 cannot enumerate row content. ' +
+        'not in the metadata XML. This tool cannot enumerate row content. ' +
         'To see the actual rows, query the row data source (SObject ' +
         'record query or the original CSV).',
     );
@@ -328,7 +328,7 @@ describe('decisionTableBrowseHandler', () => {
     const data = result.value.data;
     expect(data.dataSourceType).toBe('SObject');
     // Q179 anchor still first, then SObject hint naming Account.
-    expect(data.boundaries[0]).toContain('v3.2 cannot enumerate row content');
+    expect(data.boundaries[0]).toContain('This tool cannot enumerate row content');
     expect(data.boundaries[1]).toContain('dataSourceType is SObject');
     expect(data.boundaries[1]).toContain("'Account' SObject");
     expect(data.rows).toBeNull();
@@ -343,7 +343,7 @@ describe('decisionTableBrowseHandler', () => {
     const data = result.value.data;
     expect(data.dataSourceType).toBe('Manual');
     expect(data.executionType).toBe('OnPrem');
-    expect(data.boundaries[0]).toContain('v3.2 cannot enumerate row content');
+    expect(data.boundaries[0]).toContain('This tool cannot enumerate row content');
     expect(data.boundaries[1]).toContain('dataSourceType is Manual');
     expect(data.boundaries[1]).toContain('row-editor UI');
     expect(data.rows).toBeNull();
@@ -376,7 +376,7 @@ describe('decisionTableBrowseHandler', () => {
     expect(data.rows).toBeNull();
     // Q179 still first; Native-vs-Vlocity third; read-failure last so
     // callers see the partial-answer signal verbatim.
-    expect(data.boundaries[0]).toContain('v3.2 cannot enumerate row content');
+    expect(data.boundaries[0]).toContain('This tool cannot enumerate row content');
     const readFailureBoundary = data.boundaries[data.boundaries.length - 1];
     expect(readFailureBoundary).toContain('parameter list unavailable');
     expect(readFailureBoundary).toContain('sfi refresh');

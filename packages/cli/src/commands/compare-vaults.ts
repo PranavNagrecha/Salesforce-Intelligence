@@ -330,7 +330,7 @@ export const registerCompareVaultsCommand = (program: Command): void => {
     )
     .option(
       '--include-volatile-properties',
-      'Disable the v2.0c volatile-property noise filter (surface lastModifiedDate / lastModifiedBy drift)',
+      'Disable the volatile-property noise filter (surface lastModifiedDate / lastModifiedBy drift)',
     )
     .option(
       '--json',

@@ -5,7 +5,7 @@ slug: /setup/cursor
 targetQuery: "cursor salesforce mcp"
 persona: "Salesforce developer or admin using Cursor"
 datePublished: 2026-10-10
-dateModified: 2026-10-10
+dateModified: 2026-10-16
 faq:
   - q: "Why don't the sf-intelligence tools show up in Cursor?"
     a: "Usually Cursor has not reloaded the file. It does not pick up changes to .cursor/mcp.json by itself, so turn the server off and on in Cursor's MCP settings, or restart Cursor. Also check that the file uses the mcpServers key."
@@ -15,6 +15,7 @@ faq:
     a: "No. VS Code reads a different file, .vscode/mcp.json, and a different top-level key, servers. Pasting a Cursor block into VS Code loads nothing and shows no error."
 related:
   - /setup/vs-code-copilot
+  - /setup/claude-code
   - /getting-started
   - /compare/salesforce-mcp-servers
   - /how-to/pre-deployment-impact-review

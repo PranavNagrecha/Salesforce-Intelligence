@@ -1,9 +1,9 @@
 ---
-description: Guided first-run setup for SfIntelligence.
+description: Guided first-run setup for sf-intelligence.
 argument-hint: "[--target-org ALIAS] [--vault-root PATH] [--with-tooling-api] [--skip-refresh]"
 ---
 
-You are about to guide a new user through their first SfIntelligence setup.
+You are about to guide a new user through their first sf-intelligence setup.
 
 This command is the product's first-run wizard. The user has installed the
 plugin, but they may not know what a vault is, which Salesforce org is active,
@@ -20,9 +20,9 @@ Walk the user through:
 5. Run one known-good test question.
 6. Tell the user they are ready and show the most useful commands.
 
-SfIntelligence is read-only. Say this plainly before the refresh:
+sf-intelligence is read-only. Say this plainly before the refresh:
 
-> SfIntelligence will retrieve metadata and build a local vault. It will not
+> sf-intelligence will retrieve metadata and build a local vault. It will not
 > deploy, insert, update, delete, or mutate Salesforce data.
 
 ## Running the CLI
@@ -30,7 +30,7 @@ SfIntelligence is read-only. Say this plainly before the refresh:
 The plugin installs the MCP server, not the `sfi` command. Before the first
 command, run `command -v sfi` via the Bash tool. If it prints a path, run the
 commands below as written. If it prints nothing, run every `sfi …` command
-below as `npx -y sf-intelligence@0.5.0 …` instead, with the same arguments.
+below as `npx -y sf-intelligence@0.6.0 …` instead, with the same arguments.
 The Bash tool has no terminal, so the CLI cannot prompt: always pass the
 flags it would otherwise ask for.
 
@@ -72,7 +72,7 @@ sf org list --skip-connection-status --json
 
 Stop and give a concrete fix when:
 
-- `sfi` is not on PATH and `npx -y sf-intelligence@0.5.0 doctor` also fails:
+- `sfi` is not on PATH and `npx -y sf-intelligence@0.6.0 doctor` also fails:
   tell the user Node.js 20+ (which provides `npx`) is required.
 - `sf` is not on PATH: tell the user to install Salesforce CLI.
 - the list holds no org alias or username at all: tell the user to run

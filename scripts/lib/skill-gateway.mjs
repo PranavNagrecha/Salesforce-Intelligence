@@ -63,7 +63,7 @@ export const LEGACY_GATEWAY_FOOTER =
  * Captures the tool name without the sfi. prefix in group 1 when possible.
  */
 export const DIRECT_INVOKE_RE =
-  /(?:^|\s)(?:Call|call|Fire|fire|Invoke|invoke|Run|run|Calls|calls)\s+`sfi\.([a-z0-9_]+)`/gm;
+  /(?:^|\s)(?:Call|call|Calls|calls|Fire|fire|Invoke|invoke|Run|run|Runs|runs|Use|use|Ask|ask|Query|query|Try|try|Prefer|prefer|Start with|start with)\s+(?:\*\*)?`sfi\.([a-z0-9_]+)`/gm;
 
 export const STEP_HEADER_INVOKE_RE =
   /^#{2,4}\s+[^\n]*\b(?:Call|call|Fire|fire)\s+`sfi\.([a-z0-9_]+)`/gm;
@@ -78,6 +78,9 @@ export function normalizeToolName(name) {
 }
 
 export function isCoreTool(name) {
+  // sfi.setup_status is served by the setup-mode server (no vault bound); it is
+  // always directly callable there, so instructing it is never a gateway miss.
+  if (normalizeToolName(name) === 'sfi.setup_status') return true;
   return CORE_PROFILE_TOOLS.has(normalizeToolName(name));
 }
 
@@ -94,7 +97,10 @@ export function findDirectInvokeViolations(markdown) {
     // Already gateway-shaped lines are fine even if they mention a non-core name.
     if (/sfi\.run_analysis/.test(line)) continue;
     const patterns = [
-      /(?:Call|call|Fire|fire|Invoke|invoke|Run|run|Calls|calls)\s+`sfi\.([a-z0-9_]+)`/g,
+      /(?:Call|call|Calls|calls|Fire|fire|Invoke|invoke|Run|run|Runs|runs|Use|use|Ask|ask|Query|query|Try|try|Prefer|prefer|Start with|start with)\s+(?:\*\*)?`sfi\.([a-z0-9_]+)`/g,
+      // "`sfi.x` first", "→ `sfi.x`", "then `sfi.x`" are instructions too, not catalog mentions
+      /`sfi\.([a-z0-9_]+)`\*?\*?\s+(?:FIRST|first)\b/g,
+      /(?:→|->|then)\s+`sfi\.([a-z0-9_]+)`/g,
       /^#{2,4}\s+[^\n]*\b(?:Call|call|Fire|fire)\s+`sfi\.([a-z0-9_]+)`/g,
       /I called `sfi\.([a-z0-9_]+)`/g,
       /\*\*Fire\*\*\s+`sfi\.([a-z0-9_]+)`/g,
@@ -123,7 +129,12 @@ export function findDirectInvokeViolations(markdown) {
  */
 export function rewriteDirectInvokes(markdown) {
   let out = markdown;
-  if (out.includes(LEGACY_GATEWAY_FOOTER)) {
+  // Any paragraph that opens with the shared-contract marker is a footer, whatever
+  // intermediate wording it carries (three forms existed by 0.6.0); replace it whole.
+  const FOOTER_PARAGRAPH_RE = /^\*\*Grounding & routing \(shared contract\)\.\*\*[^\n]*$/gm;
+  if (FOOTER_PARAGRAPH_RE.test(out)) {
+    out = out.replace(FOOTER_PARAGRAPH_RE, GATEWAY_FOOTER);
+  } else if (out.includes(LEGACY_GATEWAY_FOOTER)) {
     out = out.split(LEGACY_GATEWAY_FOOTER).join(GATEWAY_FOOTER);
   }
 

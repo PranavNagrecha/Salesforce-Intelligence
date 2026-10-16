@@ -1,14 +1,14 @@
 ---
 name: salesforce-org-context
 description: |
-  Silent pre-loader for the SfIntelligence vault. Fires automatically
+  Silent pre-loader for the sf-intelligence vault. Fires automatically
   when the user's message mentions any Salesforce concept — words like
   "object", "field", "trigger", "flow", "validation rule", "permission
   set", "profile", "layout", "Apex", "picklist", "lookup", "record
   type", "metadata", "org", "sandbox"; common object names like
   Account, Contact, Opportunity, Lead, Case, User; or the custom-suffix
   patterns `__c`, `__mdt`, `__e`, `__b`, `__r`, `__x`. Calls
-  `sfi.org_card` (the refresh-time orientation card; falls back to
+  `sfi.org_card` through `sfi.run_analysis` (the refresh-time orientation card; falls back to
   `sfi.get_manifest` + `sfi.list_components(type: 'CustomObject')` on a
   vault without a card) to warm the cache so the next question answers
   faster. Does not print
@@ -23,7 +23,7 @@ description: |
 
 This skill is a **silent context pre-loader**. It fires on Salesforce
 vocabulary in user input — before the user has even finished framing
-their question — runs ONE cheap MCP call (`sfi.org_card`, the
+their question — runs ONE cheap MCP call (`sfi.org_card` through `sfi.run_analysis`, the
 refresh-time orientation card) and holds the result in Claude's working
 memory. When the user's actual question arrives ("what fields does
 `Account` have?"), identity/freshness, scale, coverage and blind spots,
@@ -79,7 +79,7 @@ When multiple triggers appear in one message, still fire once.
 
 ONE call. Hold the result in context.
 
-1. **`sfi.org_card` with `{}`.** The refresh-time orientation card — a
+1. **`sfi.run_analysis` with `{ "name": "sfi.org_card", "args": {} }`.** The refresh-time orientation card — a
    single cheap cache read that supersedes the old two-call warm-up:
    identity & freshness (`refreshedAt`, `sourceTreeHash`), per-type
    scale counts, coverage and blind spots, the org's top objects by
@@ -89,7 +89,7 @@ ONE call. Hold the result in context.
 **Fallback (older vault):** when `org_card` returns `available: false`
 (the vault predates the card-rendering refresh), fall back to the
 previous warm-up — `sfi.get_manifest` with `{}` then
-`sfi.list_components` with `{ type: 'CustomObject' }` — and mention
+`sfi.list_components` with `{ type: 'CustomObject' }`, both through `sfi.run_analysis` — and mention
 `/sfi-refresh` will generate the card next time. Do not pre-load other
 types; the answering skill fetches them on demand.
 
@@ -151,10 +151,10 @@ Salesforce-vocabulary message may re-fire this skill.
 - **The user's message has Salesforce vocabulary but is plainly
   asking a question this product can't answer** (live data, Apex
   semantics, record counts). Still fire — the warm-up doesn't hurt,
-  and the answering skill will explain the v0.1 boundary. But do not
+  and the answering skill will explain the boundary. But do not
   expand the pre-load to try to compensate.
 - **You catch yourself wanting to add a second call** ("let me also
-  pre-load CustomField..."). Stop. The whole-vault warm-up is a v0.2
+  pre-load CustomField..."). Stop. The whole-vault warm-up is a later
   concern. The budget is the ONE `sfi.org_card` call.
 - **The user invoked a slash command and you fired anyway.** Roll
   back: the slash command's skill is the right entry; this pre-loader
@@ -172,10 +172,11 @@ to the next skill in the chain), confirm:
       `/sfi-refresh`, or `/sfi-status`.
 - [ ] I did not fire because context was already loaded earlier in
       this session.
-- [ ] I called exactly `sfi.org_card` with `{}` — one call, no
+- [ ] I called exactly `sfi.run_analysis` with `{ "name": "sfi.org_card", "args": {} }` — one call, no
       additional calls. (On the `available: false` fallback path only,
       the older `sfi.get_manifest` +
-      `sfi.list_components(type: 'CustomObject')` pair, in that order.)
+      `sfi.list_components(type: 'CustomObject')` pair, in that order,
+      both through `sfi.run_analysis`.)
 - [ ] I produced no user-visible output from this skill firing. No
       "context loaded" note. No manifest summary. Silence.
 - [ ] If a call failed, I yielded to the next skill rather than
@@ -186,4 +187,4 @@ to the next skill in the chain), confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

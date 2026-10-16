@@ -275,7 +275,7 @@ const renderRecentChangesSection = (
     return [
       '## Recent Changes',
       '',
-      'Recent-change data depends on v1.7 enrichment. Run `sfi refresh --with-tooling-api` to populate `lastModifiedDate` for the enriched types.',
+      'Recent-change data depends on the Tooling API enrichment pass. Run `sfi refresh --with-tooling-api` to populate `lastModifiedDate` for the enriched types.',
     ].join('\n');
   }
   const sorted = [...enriched].sort((a, b) => {

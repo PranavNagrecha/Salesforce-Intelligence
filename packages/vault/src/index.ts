@@ -49,6 +49,8 @@ export {
   SHARED_CONTAINER_TYPES,
   partialCoverageReasons,
   type PartialCoverageReason,
+  notModeledCoverageEntries,
+  notModeledCoverageTypes,
   standardFieldDescribeDisclosure,
   standardFieldDescribeGapFor,
   summarizeCoverage,

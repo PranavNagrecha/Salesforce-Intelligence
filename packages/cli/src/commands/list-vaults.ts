@@ -109,7 +109,7 @@ export const registerListVaultsCommand = (program: Command): void => {
   program
     .command('list-vaults')
     .description(
-      'List every registered vault and its refresh state for v3.1 cross-vault tools',
+      'List every registered vault and its refresh state for the cross-vault tools',
     )
     .option(
       '--json',

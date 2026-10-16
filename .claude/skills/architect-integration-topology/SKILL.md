@@ -10,10 +10,10 @@ description: |
   providers". Call `sfi.run_analysis` with `{ "name": "sfi.integration_map", "args": { … } }` (organized map of auth +
   endpoints + APIs + access lists) and `sfi.event_subscribers`
   (given a platform event, return all Apex/Flow subscribers). Plus
-  `sfi.list_components` with the new v1.5 property filters
+  `sfi.list_components` with the property filters
   (isQueueable, isSchedulable, isBatchable, hasFutureMethod,
   hasInvocableMethod, isRestResource, hasAuraEnabledMethod) for
-  async/job and API surface questions. Discloses v1.5 honesty axis:
+  async/job and API surface questions. Discloses the honesty axis:
   some patterns are heuristic (dispatchesAsync via reflection, LWC
   fetch URL correlation, CDC subscription detection) and require
   manual verification.
@@ -23,40 +23,40 @@ description: |
 
 ## Overview
 
-This skill is the architect persona's companion to v1.5's two
+This skill is the architect persona's companion to the two
 headline tools, `sfi.integration_map` and `sfi.event_subscribers`,
-plus the new v1.5 property filters on `sfi.list_components`. The
+plus the property filters on `sfi.list_components`. The
 architect's first-line question is almost always one of four
 shapes — "draw me our integration map", "who subscribes to this
 event", "what runs async", or "what does this org expose as an
 API" — and the honest answer is to route to the right tool, render
 the structured response in a way an architect can read top-down,
-and disclose what v1.5's metadata-XML + Apex-header model
+and disclose what the metadata-XML + Apex-header model
 deliberately does not see.
 
-v1.5 produces three new producers in the integration tier and two
-new EdgeTypes. The new edges are **`exposes`** (an `ApexClass`
+The integration tier has three edge producers and two
+EdgeTypes of its own. The edges are **`exposes`** (an `ApexClass`
 declares it serves an external API surface via `@RestResource`,
 `@AuraEnabled`, or `@InvocableMethod` — the `toId` is a
 **synthetic id** `ExternalApi:{kind}/{path}` rather than a real
 graph node) and **`dispatchesAsync`** (an `ApexClass` enqueues,
 schedules, or batches another `ApexClass`). The unlocked edge is
-**`listensTo`** — reserved-and-empty since v1.0 and now produced
+**`listensTo`** — reserved-and-empty and now produced
 from `apex-trigger` (the `on {Event}__e` clause), `apex-class`
 (the `implements Triggerable<{Event}__e>` clause), and `flow`
-(the `<triggerType>PlatformEvent</triggerType>` start). v1.5 also
+(the `<triggerType>PlatformEvent</triggerType>` start). sf-intelligence also
 extends `ApexClass.properties` with seven new boolean flags
 (`isQueueable`, `isSchedulable`, `isBatchable`, `hasFutureMethod`,
 `hasInvocableMethod`, `isRestResource`, `hasAuraEnabledMethod`)
 that drive the async / API-surface classifier questions.
 
-v1.5's integration tier is **declared-first** — almost every
+The integration tier is **declared-first** — almost every
 edge and property is read straight from metadata XML or an Apex
 annotation. The single `heuristic` exception is the
 `dispatchesAsync` edge when the dispatched job class is resolved
 from a named local variable (the constructor is visible to the
 scanner but the dispatch site is one hop away). The boundary
-that matters for architects: **v1.5 captures the declared /
+that matters for architects: **sf-intelligence captures the declared /
 configured integration surface, not the runtime topology.**
 Outbound HTTP calls from LWC source, programmatic
 `EventBus.subscribe` registrations, CDC subscriptions on
@@ -67,11 +67,11 @@ linkage all return as either omitted or as `unknown` boundary
 notes; the architect verifies in Salesforce Setup before acting.
 
 This is the first architect-persona skill in the bundle — the
-direct sibling of `architect-impact-analysis` (v0.2; "what breaks
+direct sibling of `architect-impact-analysis` ("what breaks
 if I change X") and the architect-tier inverse of
-`admin-sharing-troubleshooting` (v1.1; "why can't user X see Y").
-v1.5's architect surface differs from v0.2's impact analysis in
-that v1.5 answers organized "what's wired to what" questions, not
+`admin-sharing-troubleshooting` ("why can't user X see Y").
+The architect surface differs from the impact analysis in
+that answers organized "what's wired to what" questions, not
 "what depends on this single node" questions. The tool routing
 below makes that distinction concrete.
 
@@ -144,29 +144,29 @@ Defer to another skill when:
 
 - **"What breaks if I change `ApexClass:OrderService`?"** — that's
   cross-component impact analysis, not integration topology.
-  Defer to `architect-impact-analysis` → `sfi.get_impact`.
+  Defer to `architect-impact-analysis` → `sfi.get_impact` (via `sfi.run_analysis`).
 - **"Where is `OrderService` used in Apex / LWC code?"** — that's
   a code-side reference question. Defer to
-  `developer-apex-refactor` → `sfi.find_code_usages` or
+  `developer-apex-refactor` → `sfi.find_code_usages` (via `sfi.run_analysis`) or
   `sfi.find_code_usages`.
 - **"Why can't user X see this Connected App?"** — that's a
   visibility question. Defer to `admin-sharing-troubleshooting` →
   `sfi.why_cant_user_see_record`.
 - **"Which page layout does the System Administrator profile see
   for Account?"** — that's layout routing. Defer to
-  `admin-page-layout-routing` → `sfi.layout_for_user`.
+  `admin-page-layout-routing` → `sfi.layout_for_user` (via `sfi.run_analysis`).
 - **"What workflow rule routes Cases?"** / **"Which approval
   process is active on Opportunity?"** — that's legacy automation,
   not integration topology. Defer to `admin-legacy-automation` →
   `sfi.get_impact` / `sfi.get_edges` over WorkflowRule /
   ApprovalProcess / AssignmentRule.
 - **The user wants live data** ("how many callouts did
-  `NamedCredential:OrdersApi` make today?"). v1.5 is offline.
+  `NamedCredential:OrdersApi` make today?"). sf-intelligence is offline.
   Tell them to query their org directly.
 - **The user wants to modify metadata** ("disable this auth
-  provider for me"). v1.5 is read-only.
+  provider for me"). sf-intelligence is read-only.
 - **The user names a Network (Experience Cloud Site) — NOT
-  NetworkAccess.** v1.5 covers the IP-range trust list
+  NetworkAccess.** sf-intelligence covers the IP-range trust list
   (`NetworkAccess`), not the Experience Cloud Site (`Network` /
   `ExperienceBundle`) metadata family. Say so; offer
   `NetworkAccess` if that's what they meant.
@@ -192,7 +192,7 @@ question and bucket it:
    classes by capability* (Queueable / Schedulable / Batchable /
    `@future` / `@InvocableMethod`). Routes to
    `sfi.list_components` with `type: 'ApexClass'` plus client-side
-   filtering on the v1.5 property booleans.
+   filtering on the property booleans.
 4. **API surface** — phrasing that asks where the org *exposes*
    an external API. Routes to `sfi.list_components` with
    `type: 'ApexClass'` plus client-side filtering on
@@ -286,7 +286,7 @@ the question.
 
 #### Category (c): async / job classifier
 
-v1.5 does **not** yet ship server-side property filters on
+sf-intelligence does **not** yet ship server-side property filters on
 `sfi.list_components`. Walk the full ApexClass list and filter
 client-side. Default invocation:
 
@@ -305,10 +305,10 @@ Then filter the returned nodes by the relevant property boolean:
 | "list every `@InvocableMethod`" | `properties.hasInvocableMethod === true` |
 | "what runs async (broad)" | any of the four above |
 
-Note this v1.5 limit explicitly in the response: "v1.5 doesn't
+Note this limit explicitly in the response: "sf-intelligence doesn't
 yet support server-side property filters on `sfi.list_components`;
 this is a client-side filter over the full ApexClass list. A
-follow-up server-side filter is a bounded v1.6+ extension."
+follow-up server-side filter is a possible later extension."
 
 For the "who enqueues this Queueable" follow-up question, call
 `sfi.get_edges` with the Queueable class id, `direction: 'in'`,
@@ -364,7 +364,7 @@ Render the response as a flat list, grouped by `subscriberType`
 (ApexTrigger first, then ApexClass, then Flow). Within each
 group, cite the canonical id, the `subscriberSource` (which
 extractor emitted the edge), and the edge's `confidence` (always
-`declared` for v1.5 `listensTo` edges). The architect's natural
+`declared` for `listensTo` edges). The architect's natural
 follow-up is "what does each subscriber do?" — point them at
 `sfi.get_component` for the per-subscriber detail.
 
@@ -376,8 +376,8 @@ canonical id. State the capability the bucket represents (e.g.,
 When the architect asked for a single capability, present only
 that bucket; when the question was broad ("what runs async"),
 render four buckets (Queueable, Schedulable, Batchable,
-hasFutureMethod). Surface the v1.5 client-side-filter limit
-verbatim in the response: "v1.5 does not yet support server-side
+hasFutureMethod). Surface the client-side-filter limit
+verbatim in the response: "sf-intelligence does not yet support server-side
 property filters; this list is filtered client-side."
 
 #### For Category (d) — API surface: API-surface table with synthetic ids
@@ -395,16 +395,16 @@ form or drop the prefix.
 
 Every component named in the response gets its canonical ID in
 backticks. Every cross-type reference cites the edge's
-`confidence` — always `declared` for v1.5's integration tier
+`confidence` — always `declared` for the integration tier
 except for the single heuristic case of `dispatchesAsync` with
 a named-local-variable dispatch site.
 
-Canonical id formats for the v1.5 integration tier:
+Canonical id formats for the integration tier:
 
 - **`AuthProvider:{Name}`** — e.g.,
   `AuthProvider:Salesforce_OAuth`.
 - **`NamedCredential:{Name}`** — e.g.,
-  `NamedCredential:OrdersApi` (v0.2 ComponentType).
+  `NamedCredential:OrdersApi`.
 - **`RemoteSiteSetting:{Name}`** — e.g.,
   `RemoteSiteSetting:Salesforce_Reports`.
 - **`CspTrustedSite:{Name}`** — e.g.,
@@ -414,10 +414,10 @@ Canonical id formats for the v1.5 integration tier:
 - **`ExternalService:{Name}`** — e.g.,
   `ExternalService:WeatherService`.
 - **`ConnectedApp:{Name}`** — e.g.,
-  `ConnectedApp:MarketingSync` (v0.2 ComponentType).
+  `ConnectedApp:MarketingSync`.
 - **`NetworkAccess:{Name}`** — e.g., `NetworkAccess:OfficeRange`.
 - **`CustomObject:{Name}__e`** — Platform Event, e.g.,
-  `CustomObject:Account_Change__e` (a v1.0 ComponentType
+  `CustomObject:Account_Change__e` (a ComponentType
   variant — `__e` suffix on the ApiName is the Platform Event
   discriminator).
 - **`ApexClass:{ClassName}`**, **`ApexTrigger:{TriggerName}`**,
@@ -426,7 +426,7 @@ Canonical id formats for the v1.5 integration tier:
 
 #### Synthetic ids — render verbatim
 
-The `exposes` edge is the only v1.5 edge whose `toId` is **not**
+The `exposes` edge is the only integration-tier edge whose `toId` is **not**
 a real graph node. The synthetic id format is
 `ExternalApi:{kind}/{path}` where `{kind}` is one of `rest`,
 `aura`, or `invocable`:
@@ -443,16 +443,16 @@ component, never drop the `ExternalApi:` prefix, never paraphrase
 the path. The architect reads the synthetic id and immediately
 understands what's exposed.
 
-### Step 5 — Disclose the v1.5 boundary
+### Step 5 — Disclose the boundary
 
 This step is non-optional. After the category-specific report,
-append a short disclosure that names the v1.5 coverage gaps.
+append a short disclosure that names the coverage gaps.
 **Always** — even when the result is large — the architect needs
 to know what *isn't* in the answer.
 
 Standard disclosure paragraph:
 
-> v1.5 integration topology captures the **declared / configured**
+> The integration topology captures the **declared / configured**
 > surface — metadata XML for the six new integration types
 > (AuthProvider, RemoteSiteSetting, CspTrustedSite,
 > ExternalDataSource, ExternalService, NetworkAccess) and the
@@ -465,26 +465,26 @@ Standard disclosure paragraph:
 > (`AccountChangeEvent` shapes), reflective async dispatch
 > (`Type.forName(...).newInstance()`), Connected App → Profile /
 > Permission Set linkage (Connected Apps surface as stand-alone
-> nodes; v0.2 captured `<profileName>` / `<permissionSetName>`
+> nodes; `<profileName>` / `<permissionSetName>` are captured
 > as bare strings, not edges), the `@AuraEnabled(label='...')`
 > argument or any other annotation-argument body, and Sites /
 > Experience Cloud (`Network` / `ExperienceBundle`) inbound
 > surfaces. Runtime invocation behavior, per-callout traces, and
 > live event-publication counts need the Salesforce UI or
-> Setup — v1.5's offline knowledge base does not have them.
+> Setup — the offline knowledge base does not have them.
 
 For Category (c) and Category (d), also note the client-side
 filter limit:
 
-> v1.5 doesn't yet ship server-side property filters on
+> sf-intelligence doesn't yet ship server-side property filters on
 > `sfi.list_components`; this list is filtered client-side over
 > the full ApexClass enumeration. Server-side property filters
-> are a bounded v1.6+ extension.
+> are a possible later extension.
 
 ## Reporting format
 
 Worked example for the integration-map happy path. Use the
-synthetic-v1.5 fixture conventions
+synthetic fixture conventions
 (`AuthProvider:Salesforce_OAuth`,
 `NamedCredential:OrdersApi`,
 `ExternalDataSource:Orders_OData`,
@@ -567,7 +567,7 @@ Claude's flow:
 >
 > **Connected apps (1)**
 > - `ConnectedApp:MarketingSync` — OAuth client (stand-alone in
->   v1.5; no edge into Profile / PermissionSet).
+> no edge into Profile / PermissionSet).
 >
 > **Network access (1)**
 > - `NetworkAccess:OfficeRange` — `10.0.0.0 - 10.0.0.255`.
@@ -578,7 +578,7 @@ Claude's flow:
 > - `ExternalService:WeatherService` → `NamedCredential:OrdersApi`
 >   (`references`, role `namedCredential`, `confidence: declared`).
 >
-> v1.5 integration topology captures the declared / configured
+> The integration topology captures the declared / configured
 > surface from metadata XML and Apex-header annotations. It does
 > **not** model outbound `fetch('https://...')` from LWC source,
 > outbound-message destinations from WorkflowRule, virtual
@@ -596,18 +596,18 @@ verbatim.
 
 ## Boundary disclosure
 
-v1.5's integration topology has well-defined gaps. Surface this
+The integration topology has well-defined gaps. Surface this
 list whenever the architect is about to act on the report
 (audit, deprecation, refactor), and **always** when the result
 hits one of the boundaries below:
 
-- **Sites / Experience Cloud (`Network` metadata type).** v1.5
+- **Sites / Experience Cloud (`Network` metadata type).** sf-intelligence
   covers `NetworkAccess` (the IP-range trust list) — NOT the
   `Network` Experience Cloud Site metadata family (a separate
   family that also includes `ExperienceBundle`). The naming
   collision is unfortunate; the metadata types are unrelated.
   If the architect needs Sites / Experience Cloud coverage,
-  refuse honestly; deferred to v1.6+ if architect demand
+  refuse honestly; deferred if architect demand
   surfaces.
 - **Event publishers are PARTLY modeled — under a different edge
   name.** There is no `publishesTo` EdgeType and there never was; the
@@ -631,50 +631,50 @@ hits one of the boundaries below:
 - **LWC `fetch()` URL correlation to `RemoteSiteSetting` /
   `CspTrustedSite`.** An LWC bundle that does
   `fetch('https://my-api.example.com/x')` is invisible to
-  v1.5's integration map. The v1.4 LWC scanner is regex-based
+  the integration map. The LWC scanner is regex-based
   and was scoped to field-access / Apex-import patterns; URL
   detection in JS source would require an additional pass with
   a high noise floor (any URL-shaped string in JS looks like
-  an integration point). Deferred to v1.6+.
-- **Outbound-message destination correlation.** v1.3 WorkflowRule
+  an integration point). Deferred.
+- **Outbound-message destination correlation.** WorkflowRule
   nodes carry `outboundMessages` properties with the endpoint
-  URL as a string; v1.5 does NOT emit an edge from the
+  URL as a string; sf-intelligence does NOT emit an edge from the
   WorkflowRule to the destination endpoint (adding it would
   require synthesizing an `ExternalEndpoint:` synthetic-id
-  family, which v1.5 explicitly does not introduce). The
+  family, which this tier explicitly does not introduce). The
   integration map is scoped to first-party, named outbound
   surfaces. The architect verifies the destination in the
   WorkflowRule node's properties directly.
-- **Connected App → Profile / Permission Set linkage.** v0.2's
+- **Connected App → Profile / Permission Set linkage.** The
   ConnectedApp extractor surfaces `<profileName>` and
   `<permissionSetName>` as bare strings in the node's
-  properties; v1.5 does NOT promote them to edges. The
+  properties; sf-intelligence does NOT promote them to edges. The
   integration map shows Connected Apps as stand-alone surfaces.
   Architects auditing who can use a Connected App's OAuth
   client check the bare-string properties or run
   `sfi.get_component` on the Connected App node.
 - **Virtual sObjects from Salesforce Connect (`Customer__x`).**
   An `ExternalDataSource` of type `OData4` projects external
-  data as virtual sObjects with names ending in `__x`; v1.5
+  data as virtual sObjects with names ending in `__x`; sf-intelligence
   records the data source itself but does NOT create
   CustomObject nodes for the virtual sObjects it projects
   (extraction would require querying the external schema, a
-  network call v1.5's offline posture cannot make). Deferred.
+  network call the offline posture cannot make). Deferred.
 - **Change Data Capture (CDC) subscription detection.** CDC
   events have names like `AccountChangeEvent` (no `__e`
   suffix) and are subscribed via the Streaming API channel
-  paths, not the Platform Event mechanism. v1.5's `listensTo`
+  paths, not the Platform Event mechanism. `listensTo`
   rules pin to `__e` shapes; CDC subscribers are NOT modeled.
   Deferred.
 - **Reflective async dispatch
   (`Type.forName(...).newInstance()`).** The dispatch site
   passes a constructed instance whose type is a string
-  expression the scanner cannot resolve. v1.5's
+  expression the scanner cannot resolve. The
   `dispatchesAsync` edge is **not** emitted for this pattern;
   the architect verifies the dispatch source code manually.
 - **Programmatic event subscription
   (`EventBus.subscribe(...)`).** An Apex class that registers a
-  subscriber at runtime is invisible to v1.5 — subscription is
+  subscriber at runtime is invisible to the extractor — subscription is
   a runtime registration, not a declaration. The
   `listensTo` rules pin to declared subscriber shapes
   (trigger, `Triggerable<>`, Flow start). Deferred.
@@ -702,7 +702,7 @@ hits one of the boundaries below:
 - **Platform Event channel routing.** Platform Events routed
   through dedicated channels for tenant isolation are
   subscribed via the same `on {Event}__e` / `Triggerable<>` /
-  `<triggerType>PlatformEvent</triggerType>` shapes; v1.5
+  `<triggerType>PlatformEvent</triggerType>` shapes; sf-intelligence
   emits the `listensTo` edge but does NOT carry the channel
   binding as edge metadata. The channel is documented in the
   ApexClass source comment, not the metadata XML.
@@ -719,17 +719,17 @@ metadata IS the declaration.
 
 | Mistake | Why it's wrong |
 |---|---|
-| Confusing `NetworkAccess` (IP range trust list) with `Network` (Experience Cloud Site). | They are distinct, unrelated metadata families with a confusing naming collision. v1.5 covers `NetworkAccess` only; `Network` / `ExperienceBundle` are inbound site surfaces not modeled in v1.5. Refuse the Experience Cloud question and name the boundary. |
+| Confusing `NetworkAccess` (IP range trust list) with `Network` (Experience Cloud Site). | They are distinct, unrelated metadata families with a confusing naming collision. sf-intelligence covers `NetworkAccess` only; `Network` / `ExperienceBundle` are inbound site surfaces not modeled. Refuse the Experience Cloud question and name the boundary. |
 | Treating `dispatchesAsync` heuristic results as declared. | The `heuristic` confidence is load-bearing: the scanner inferred the dispatch from a callee annotation (the `@future` case) or a named local variable. The architect makes a refactor decision and skips the manual source check if the confidence is paraphrased away. Always cite confidence. |
-| Presenting `integration_map` output as exhaustive. | The map lists only what's extracted in v1.5. LWC `fetch()` calls, outbound-message destinations, CDC subscribers, virtual sObjects, and `EventBus.publish` are all invisible. The architect making an "audit our outbound surface" decision based on the map alone misses real callouts; the boundary disclosure paragraph is the protection. Always disclose. |
-| Querying `sfi.event_subscribers` on a non-`__e` id and expecting an error rather than empty result. | The tool actively errors with `invalid-query` when the eventId is not a `CustomObject:` whose ApiName ends in `__e` — this is the v1.5 contract pinning the input axis to Platform Events. Don't retry on the same id; recover by classifying to `sfi.get_edges` with `edgeType: 'triggersOn'` for standard sObject subscriptions. |
+| Presenting `integration_map` output as exhaustive. | The map lists only what's extracted. LWC `fetch()` calls, outbound-message destinations, CDC subscribers, virtual sObjects, and `EventBus.publish` are all invisible. The architect making an "audit our outbound surface" decision based on the map alone misses real callouts; the boundary disclosure paragraph is the protection. Always disclose. |
+| Querying `sfi.event_subscribers` on a non-`__e` id and expecting an error rather than empty result. | The tool actively errors with `invalid-query` when the eventId is not a `CustomObject:` whose ApiName ends in `__e` — this is the  contract pinning the input axis to Platform Events. Don't retry on the same id; recover by classifying to `sfi.get_edges` with `edgeType: 'triggersOn'` for standard sObject subscriptions. |
 | Resolving the synthetic `ExternalApi:` id to a fake `ApexClass:` form. | The synthetic id IS the architect-readable rendering. Don't paraphrase it, don't drop the prefix, don't substitute the source class for the API path. The architect needs `ExternalApi:rest/Accounts` verbatim to recognize the REST mapping. |
 | Walking outgoing `references` edges from an integration node and surfacing every target (e.g., `CustomField` rows). | `sfi.integration_map` already filters to cross-type integration edges. Don't pad the response by walking edges into non-integration targets; the architect's question is "what does this org *integrate* with", not "what does the integration touch internally". |
-| Firing this skill on a v0.2 impact question. | "What breaks if I delete `NamedCredential:OrdersApi`?" is `architect-impact-analysis` shape (`sfi.get_impact`). v1.5's `sfi.integration_map` answers "what's wired"; v0.2's `sfi.get_impact` answers "what depends on this". Defer correctly. |
+| Firing this skill on a impact question. | "What breaks if I delete `NamedCredential:OrdersApi`?" is `architect-impact-analysis` shape (`sfi.get_impact`). `sfi.integration_map` answers "what's wired"; `sfi.get_impact` answers "what depends on this". Defer correctly. |
 | Skipping the boundary disclosure on a non-empty integration map. | The disclosure is the architect's protection against the wrong mental model. A populated integration map still has to coexist with un-modeled LWC `fetch()` URLs, outbound message destinations, and Connected App linkages. Always disclose. |
 | Silently filtering empty integration categories from the report when `filter: 'all'`. | An empty `remoteSiteSettings` array IS information — it tells the architect this org uses Named Credentials exclusively. Surface the empty category with a one-line note rather than dropping it. |
-| Confidently answering "is this Connected App used by Profile X" from the integration map. | v1.5 does NOT model Connected App → Profile / Permission Set linkage. The Connected App's `<profileName>` / `<permissionSetName>` are bare strings in the node's properties, not edges. Refuse the question; offer `sfi.get_component` on the Connected App for the raw property list. |
-| Treating an `unknown` boundary note as `not used`. | Every `unknown` is "v1.5 can't tell from declared metadata". For LWC `fetch()` and `EventBus.publish` patterns, the actual integration may exist in source code that v1.5's scanner doesn't extract. Never collapse an `unknown` boundary into a definitive negative. |
+| Confidently answering "is this Connected App used by Profile X" from the integration map. | sf-intelligence does NOT model Connected App → Profile / Permission Set linkage. The Connected App's `<profileName>` / `<permissionSetName>` are bare strings in the node's properties, not edges. Refuse the question; offer `sfi.get_component` on the Connected App for the raw property list. |
+| Treating an `unknown` boundary note as `not used`. | Every `unknown` is "sf-intelligence can't tell from declared metadata". For LWC `fetch()` and `EventBus.publish` patterns, the actual integration may exist in source code that the scanner doesn't extract. Never collapse an `unknown` boundary into a definitive negative. |
 
 ## Example interactions
 
@@ -799,10 +799,10 @@ Claude's flow:
 >   and `<object>Account_Change__e</object>`. Source:
 >   `flow-extractor`, `confidence: declared`.
 >
-> All three subscribers are `declared`-confidence — v1.5 reads
+> All three subscribers are `declared`-confidence — sf-intelligence reads
 > the subscription declaration directly from the source.
 >
-> v1.5 captures the declared subscriber surface. Apex
+> sf-intelligence captures the declared subscriber surface. Apex
 > `EventBus.subscribe(...)` is now recognized heuristically
 > (static/resolvable channel args only); dynamically-built
 > subscriptions and managed-package listeners remain invisible. CDC
@@ -845,7 +845,7 @@ Claude's flow:
 > - `ApexClass:OrderRefresh` — `implements Queueable,
 >   Database.AllowsCallouts`. No incoming `dispatchesAsync` edges
 >   detected — either nothing enqueues it, or the enqueue site
->   uses a pattern v1.5's scanner can't resolve (helper wrapper,
+> uses a pattern the scanner can't resolve (helper wrapper,
 >   reflective dispatch). Verify manually.
 > - `ApexClass:WeatherSync` — `implements Queueable`. Enqueued by
 >   `ApexClass:WeatherScheduler` via the chain `System.schedule(...)
@@ -853,11 +853,11 @@ Claude's flow:
 >   WeatherSync())` (one incoming `dispatchesAsync` edge,
 >   `confidence: declared`).
 >
-> v1.5 does not yet ship server-side property filters on
+> sf-intelligence does not yet ship server-side property filters on
 > `sfi.list_components`; this list is filtered client-side over
 > the full ApexClass enumeration (server-side property filters
-> are a bounded v1.6+ extension). The `isQueueable` property is
-> emitted by the v1.5 `parseApexHeader` extension and is
+> are a possible later extension). The `isQueueable` property is
+> emitted by the `parseApexHeader` extension and is
 > `declared`-confidence — the `implements Queueable` clause IS
 > the declaration.
 >
@@ -876,14 +876,14 @@ User: *"What URL does the LWC `accountDashboard` fetch from?"*
 Claude's flow:
 
 1. **Classify** — this is a topology-shape question, but the
-   target is an LWC outbound HTTP call, NOT a v1.5-modeled
+   target is an LWC outbound HTTP call, NOT a modeled
    integration surface.
 2. **Stop.** Do not fire `sfi.run_analysis` with `{ "name": "sfi.integration_map", "args": { … } }` or
-   `sfi.list_components` — the answer isn't in the v1.5 graph.
+   `sfi.list_components` — the answer isn't in the graph.
 3. **Respond:**
 
-> v1.5 doesn't correlate LWC `fetch('https://...')` URLs to
-> `RemoteSiteSetting` / `CspTrustedSite` entries — the v1.4 LWC
+> sf-intelligence doesn't correlate LWC `fetch('https://...')` URLs to
+> `RemoteSiteSetting` / `CspTrustedSite` entries — the LWC
 > scanner was scoped to field-access and Apex-import patterns,
 > and URL detection in JS source would have a high noise floor
 > (any URL-shaped string in JS looks like an integration point).
@@ -902,11 +902,11 @@ Claude's flow:
 >   LWC fetching a URL not in that list will fail at runtime
 >   (CSP block).
 >
-> LWC URL correlation is a bounded v1.6+ extension. For now,
-> v1.5 can map the *allowed* outbound surface but not the
+> LWC URL correlation is a possible later extension. For now,
+> sf-intelligence can map the *allowed* outbound surface but not the
 > *actual* LWC outbound calls.
 
-The response names the v1.5 boundary, points to two concrete
+The response names the boundary, points to two concrete
 in-scope alternatives, and offers the next-milestone roadmap.
 
 ### Recovery — `event_subscribers` on a non-event id
@@ -925,7 +925,7 @@ Claude's flow:
    end in `__e`.
 4. **Respond:**
 
-> `Account` is a standard sObject, not a Platform Event. v1.5's
+> `Account` is a standard sObject, not a Platform Event.
 > `sfi.event_subscribers` is scoped to Platform Events
 > (`CustomObject:` ids ending in `__e`); standard sObject
 > trigger subscriptions use the `triggersOn` edge family, not
@@ -941,10 +941,10 @@ Claude's flow:
 >
 > Want me to run that instead? Or did you mean a Platform Event
 > like `Account_Change__e` (the Change Data Capture name is
-> `AccountChangeEvent` — v1.5 doesn't model CDC subscribers
+> `AccountChangeEvent` — sf-intelligence doesn't model CDC subscribers
 > either; that's a separate roadmap item)?
 
-The response refuses cleanly, names the v1.5 contract boundary
+The response refuses cleanly, names the contract boundary
 explicitly, and offers the in-scope alternative.
 
 ## Verification
@@ -963,7 +963,7 @@ Before sending a response, confirm:
       which I recover from rather than retry.
 - [ ] For an async / job classifier question, I called
       `sfi.list_components({ type: 'ApexClass' })` and filtered
-      client-side on the v1.5 boolean property (`isQueueable`,
+      client-side on the  boolean property (`isQueueable`,
       `isSchedulable`, `isBatchable`, `hasFutureMethod`,
       `hasInvocableMethod`), and surfaced the client-side
       filter limit explicitly.
@@ -980,14 +980,14 @@ Before sending a response, confirm:
       `CustomObject:{Name}__e`, `ApexClass:`, `ApexTrigger:`,
       `Flow:`) for every component named.
 - [ ] I cited every cross-type reference edge's
-      `confidence` (`declared` for the v1.5 integration tier,
+      `confidence` (`declared` for the  integration tier,
       `heuristic` only for the named-local-variable
       `dispatchesAsync` case).
 - [ ] I did NOT confuse `NetworkAccess` (IP range trust list)
       with `Network` (Experience Cloud Site).
 - [ ] I did NOT resolve a synthetic `ExternalApi:` id to a fake
       real-node form.
-- [ ] I appended the v1.5 boundary disclosure — LWC fetch
+- [ ] I appended the boundary disclosure — LWC fetch
       correlation, outbound message destinations,
       virtual sObjects, reflective dispatch, AuraEnabled label
       argument, Connected App → Profile linkage, helper-wrapper
@@ -1004,9 +1004,9 @@ Before sending a response, confirm:
       Site, LWC fetch URL, CDC subscriber, or event publisher,
       I refused honestly and named the boundary verbatim.
 - [ ] I did not present an `unknown` boundary note as `not
-      used`, and I did not fabricate an integration when v1.5
+      used`, and I did not fabricate an integration when the tool
       couldn't tell.
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

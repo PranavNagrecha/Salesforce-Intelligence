@@ -7,14 +7,14 @@ description: |
   customer health", "what does this field actually mean", "is
   `Status` the same as `Stage` here", "is this field manually
   entered or automated", "what does this acronym mean", "find this
-  literal anywhere in the org". Cascades over the v2.2 universal-
+  literal anywhere in the org". Cascades over the universal-
   search tools (`find_field_anywhere`, `find_semantic_field`,
-  `find_hardcoded_values_anywhere`) and the v2.9 vocabulary +
+  `find_hardcoded_values_anywhere`) and the vocabulary +
   semantic-disambiguation tools (`field_meaning`,
-  `disambiguate_concepts`, `field_provenance`). Discloses the v2.2
+  `disambiguate_concepts`, `field_provenance`). Discloses the 
   Q95 honesty anchor verbatim (lexical-only, no synonyms) and the
-  v2.9 classifier-not-run boundary (`sourceOfTruth` /
-  `semanticCategory` absent on pre-v2.9 vaults).
+   classifier-not-run boundary (`sourceOfTruth` /
+  `semanticCategory` absent on older vaults).
 ---
 
 # Developer find-anywhere
@@ -32,8 +32,8 @@ multi-tool fan-out without citing evidence tiers (graph edge `confidence` + grep
 
 ## Overview
 
-This skill is the developer persona's companion to v2.2's universal-
-search family and v2.9's vocabulary + semantic-disambiguation tier.
+This skill is the developer persona's companion to the universal-
+search family and the vocabulary + semantic-disambiguation tier.
 The developer's first-line question is one of two shapes:
 
 1. **"Where is X used?"** — for a known component id (`Industry__c`),
@@ -46,10 +46,10 @@ The developer's first-line question is one of two shapes:
    `sfi.field_meaning` is the per-field deep dive once the candidate
    is identified.
 
-Plus four secondary shapes the v2.9 vocabulary tier addresses:
+Plus four secondary shapes the vocabulary tier addresses:
 
 3. **"What does `X` mean in our org?"** — `sfi.field_meaning`
-   surfaces label, description, type, picklist values, the v2.9
+   surfaces label, description, type, picklist values, the 
    `sourceOfTruth` and `semanticCategory` classifications, usage
    frequency, and similar fields. Org-vocabulary drift is the
    honesty anchor.
@@ -59,7 +59,7 @@ Plus four secondary shapes the v2.9 vocabulary tier addresses:
    picklist-values, usage). The Q155 honesty anchor: vocabulary is
    org-specific.
 5. **"Is this field manually entered or automated?"** —
-   `sfi.field_provenance` surfaces the v2.9 `sourceOfTruth`
+   `sfi.field_provenance` surfaces the `sourceOfTruth`
    classification + structural trace (formula? auto-number? Apex
    writers? Flow writers? Trigger writers?).
 6. **"Find this literal / hardcoded value anywhere."** —
@@ -67,7 +67,7 @@ Plus four secondary shapes the v2.9 vocabulary tier addresses:
    literal search (Apex string literals + Flow XML + metadata
    XML + formula expressions + Custom Metadata records).
 
-The boundary that matters for developers: **v2.2's semantic field
+The boundary that matters for developers: **the semantic field
 search is lexical, not neural.** TF-IDF cosine similarity over
 tokenized apiName + label + description. A field named
 `Customer_Industry__c` will rank highly for the query "customer
@@ -75,9 +75,9 @@ health" because they share the `customer` token — even though the
 semantic meaning differs. The Q95 honesty anchor surfaces this in
 every result.
 
-The v2.9 classifier-not-run boundary: `sourceOfTruth` and
-`semanticCategory` are populated by the v2.9 R3 extraction pass.
-A vault refreshed before v2.9 returns `unknown` for both with the
+The classifier-not-run boundary: `sourceOfTruth` and
+`semanticCategory` are populated by the extraction pass.
+An older vault returns `unknown` for both with the
 verbatim "classification not run" disclosure. The tool still
 emits its structural surface (the writer trace, the similar-field
 overlap, the usage counts) so the developer can answer the
@@ -91,14 +91,14 @@ Concrete triggers:
 - **"Find every reference to / where is X used / find X
   anywhere."** — "find every reference to `Industry__c`", "where
   is `Account.Tier__c` used anywhere", "find anywhere we touch
-  this field". Use `sfi.find_field_anywhere`.
+  this field". Use `sfi.find_field_anywhere` (via `sfi.run_analysis`).
 - **"Do we have a field for / is there a field for / show me
   fields about."** — "do we have a field for customer health",
   "is there a field for renewal date", "show me fields about
-  payment terms". Use `sfi.find_semantic_field`.
+  payment terms". Use `sfi.find_semantic_field` (via `sfi.run_analysis`).
 - **"What does X mean in our org / what is `Tier__c`."** — "what
   does `Industry__c` mean", "what is `Account.Tier__c`", "explain
-  this field". Use `sfi.field_meaning`.
+  this field". Use `sfi.field_meaning` (via `sfi.run_analysis`).
 - **"Is `Status` the same as `Stage` / what's the difference
   between X and Y / how do X and Y differ."** — "is `Status` the
   same as `Stage`", "what's the difference between
@@ -106,7 +106,7 @@ Concrete triggers:
   `sfi.disambiguate_concepts`.
 - **"Is this field automated / where does this data come from."**
   — "is `Account.Tier__c` manually entered", "what writes this
-  field", "is this auto-populated". Use `sfi.field_provenance`.
+  field", "is this auto-populated". Use `sfi.field_provenance` (via `sfi.run_analysis`).
 - **"Find this literal anywhere / find this string in metadata."**
   — "find `'sandbox@example.com'` anywhere", "where does this URL
   appear", "find this constant in the metadata". Use
@@ -123,7 +123,7 @@ Concrete triggers:
 Defer to another skill when:
 
 - **The user asks "what breaks if I change X?"** That's impact
-  analysis. Defer to `architect-impact-analysis` → `sfi.get_impact`.
+  analysis. Defer to `architect-impact-analysis` → `sfi.get_impact` (via `sfi.run_analysis`).
 - **The user asks "is this code dead?"** That's a hygiene
   question. Defer to `developer-code-quality` → `sfi.find_dead_code`.
 - **The user asks "what tests cover this method?"** That's
@@ -138,8 +138,8 @@ Defer to another skill when:
   have?"). That's `answering-org-questions` →
   `sfi.list_components` / `sfi.get_component`.
 - **The user wants live data** ("how many records have
-  Industry='Tech'"). v2.2 is offline.
-- **The user wants the recognizer to FIX a hardcoded value.** v2.2
+  Industry='Tech'"). sf-intelligence is offline.
+- **The user wants the recognizer to FIX a hardcoded value.** sf-intelligence
   is read-only; it surfaces matches but never proposes a rewrite.
 
 ## The cascade
@@ -148,7 +148,7 @@ The six tools split by user intent. Pick the right entry point.
 
 ### 1. `sfi.find_field_anywhere` — known-field universal sweep
 
-The v2.2 Q86-style discovery surface. Given a `CustomField:` id, it
+The discovery surface. Given a `CustomField:` id, it
 walks every incoming edge regardless of type, resolves each
 referrer to a node, and emits one entry per `(referrer, edgeType)`
 pair grouped by the referrer's `ComponentType`. Surfaces Apex
@@ -170,11 +170,11 @@ each group, distinguish `readsFrom` from `writesTo` so the
 developer sees reads and writes separately.
 
 For Apex-only or LWC-only narrowing, defer to
-`developer-apex-refactor` → `sfi.find_code_usages` with `nodeTypes`.
+`developer-apex-refactor` → `sfi.find_code_usages` (via `sfi.run_analysis`) with `nodeTypes`.
 
 ### 2. `sfi.find_semantic_field` — natural-language field discovery
 
-The v2.2 "do we already have a field for X?" surface. Takes a
+The "do we already have a field for X?" surface. Takes a
 natural-language description and returns CustomField nodes whose
 tokenized `apiName + label + description` has the highest token-
 overlap score against the query.
@@ -186,7 +186,7 @@ Default invocation:
 ```
 
 The matching is Jaccard-style token overlap (or TF-IDF cosine
-similarity when the v2.2 R4 search-index is built — the tool
+similarity when the search-index is built — the tool
 auto-detects which). The `minScore` default of 0.1 filters
 single-token matches that are too noisy to surface.
 
@@ -206,12 +206,12 @@ offer to deep-dive on the most likely match via
 
 ### 3. `sfi.field_meaning` — per-field deep dive
 
-The v2.9 R4 "what does this field actually mean?" surface. Given a
+The "what does this field actually mean?" surface. Given a
 CustomField id, returns:
 
 - **Declared shape** — apiName, label, description, type, parent
   object, picklist values (when present), required flag.
-- **v2.9 vocabulary classifications** —
+- **Vocabulary classifications** —
   `sourceOfTruth` (`manual` | `derived` | `integration-synced` |
   `manual-and-coded` | `unknown`, with `declared`/`heuristic`
   confidence) and `semanticCategory` (`identifier` | `status` |
@@ -242,13 +242,13 @@ Default invocation:
 ```
 
 Fire this when the user asks "what is X" or "what does X mean"
-for a specific field id. Use the v2.9 classification + writer
+for a specific field id. Use the classification + writer
 count + similar-fields list to give the developer the org-context
 answer their question deserves.
 
 ### 4. `sfi.disambiguate_concepts` — two-concept comparison
 
-The v2.9 R4 "is `Status` the same as `Stage` here?" surface.
+The "is `Status` the same as `Stage` here?" surface.
 Takes two concept tokens and returns per-concept matching-field
 buckets, per-axis differences (parent-object distribution,
 declared types, picklist-values, usage-pattern), and an optional
@@ -273,13 +273,13 @@ distinction to surface").
 
 ### 5. `sfi.field_provenance` — writer trace and source classification
 
-The v2.9 R4 "is this field manually entered or automated?"
+The "is this field manually entered or automated?"
 surface. Given a CustomField id, returns:
 
-- v2.9 `sourceOfTruth` classification + confidence.
+- The `sourceOfTruth` classification + confidence.
 - `declaredAsFormula` (formula expression when present).
 - `declaredAsAutoNumber` (displayFormat when auto-number).
-- ALL `apexWriters` (with `isIntegrationTagged` flag from v2.0a
+- ALL `apexWriters` (with `isIntegrationTagged` flag from 
   `references` edges to `NamedCredential` / `ExternalDataSource`).
 - ALL `flowWriters`.
 - ALL `triggerWriters` (ApexTrigger nodes).
@@ -299,7 +299,7 @@ auto-populated.
 
 ### 6. `sfi.find_hardcoded_values_anywhere` — cross-corpus literal search
 
-The v2.2 universal literal-search surface. Searches Apex string
+The universal literal-search surface. Searches Apex string
 literals (NO-STRIP pass), Flow XML `<value>` elements, metadata
 XML files (`.field-meta.xml`, `.validationRule-meta.xml`, etc.),
 formula expressions, and Custom Metadata records for either:
@@ -321,8 +321,8 @@ Default invocation (category pattern):
 ```
 
 Fire this when the user asks for a literal across corpora. Note
-the distinction from `sfi.find_hardcoded_values` (v2.1, Apex-only,
-recognizer-driven): the v2.2 tool searches every corpus and emits
+the distinction from `sfi.find_hardcoded_values` (Apex-only,
+recognizer-driven): the tool searches every corpus and emits
 matches at `confidence: declared` for exact-value mode (the
 source literally contains the string) and `confidence: heuristic`
 for category-pattern mode.
@@ -334,7 +334,7 @@ by default unless the user explicitly asks.
 
 ## Honesty axes
 
-### v2.2 universal (every tool's `boundaries[]`)
+### Universal disclosure (every tool's `boundaries[]`)
 
 - **Dynamic SOQL invisible.** `Database.query('SELECT...')` is
   stripped before pattern passes; the embedded SQL is invisible.
@@ -357,7 +357,7 @@ by default unless the user explicitly asks.
 > the token `customer`. Verify the returned field's label and
 > description before treating as the answer.
 
-Additional v2.2 disclosures the skill surfaces:
+Additional disclosures the skill surfaces:
 
 - **No synonym handling.** The similarity ranking treats `customer
   health` and `client wellness` as completely unrelated queries —
@@ -386,17 +386,17 @@ Additional v2.2 disclosures the skill surfaces:
   validation references are `declared`. Confidence is per-edge — state
   it per bucket, and don't assume Apex means heuristic.
 
-### v2.9 vocabulary tools — classifier-not-run boundary (verbatim)
+### Vocabulary tools — classifier-not-run boundary (verbatim)
 
-> The v2.9 `sourceOfTruth` and `semanticCategory` classifications
-> are populated by the v2.9 R3 extraction pass. If your vault was
-> last refreshed before v2.9 shipped, both fields will be
+> The `sourceOfTruth` and `semanticCategory` classifications
+> are populated by the extraction pass. If your vault was
+> last refreshed by an older version, both fields will be
 > `unknown` and this boundary surfaces. The structural surface
 > (writers list, declared shape, similar fields, usage frequency)
 > remains intact regardless — you can answer the underlying
 > question manually from the trace.
 
-Additional v2.9 disclosures the skill surfaces:
+Additional disclosures the skill surfaces:
 
 - **Vocabulary is org-specific** (Q155 anchor). One org's `Status`
   is another org's `Stage`; the tool reports what THIS org's
@@ -457,7 +457,7 @@ Claude's flow:
 4. **Respond:**
 
 > Three candidate fields for "customer health score" (heuristic
-> token-overlap ranking; v2.2 is lexical, not neural):
+> token-overlap ranking; the search is lexical, not neural):
 >
 > **Best match (score 0.78)**
 > - `CustomField:Account.Customer_Health_Score__c` — *Customer
@@ -480,7 +480,7 @@ Claude's flow:
 > includes all three of yours, and the legacy field's description
 > explicitly redirects there.
 >
-> Important caveats (v2.2 honesty anchor):
+> Important caveats:
 >
 > - This ranking is lexical token overlap; "customer health" and
 >   "client wellness" would be treated as unrelated. If your org
@@ -493,7 +493,7 @@ Claude's flow:
 > Next steps:
 >
 > - For a deeper look at the best match (description, writers,
->   v2.9 source-of-truth classification, similar fields), run
+> source-of-truth classification, similar fields), run
 >   `sfi.field_meaning` on
 >   `CustomField:Account.Customer_Health_Score__c`.
 > - For "where is `Customer_Health_Score__c` used anywhere in the
@@ -515,13 +515,13 @@ and offers three concrete next-step tool calls.
 |---|---|
 | Presenting `sfi.find_semantic_field` results as authoritative ("the field for customer health is X"). | Every result is `confidence: heuristic`. The matched-tokens array IS the verification surface. Cite it explicitly and let the user pick. |
 | Dropping the `matchedTokens` array from the response. | The Q95 honesty anchor depends on it. Without matched-tokens, the user can't distinguish "matched on all 3 tokens" from "matched on 1 common token". |
-| Treating a `unknown` v2.9 classification as "the answer is unknown." | `unknown` means the v2.9 classifier didn't run (pre-v2.9 vault) or the inference fell through. The structural trace (writers list, formula declaration, integration tagging) IS the source-of-truth answer the developer needs; surface it. |
+| Treating an `unknown` classification as "the answer is unknown." | `unknown` means the classifier didn't run (older vault) or the inference fell through. The structural trace (writers list, formula declaration, integration tagging) IS the source-of-truth answer the developer needs; surface it. |
 | Trying to disambiguate two concepts that are the same token. | When `conceptA === conceptB` the tool returns identical buckets. The Q150 refusal pattern says: do not fabricate a distinction. Tell the user the two concepts you named are the same. |
 | Treating a `find_field_anywhere` result as a closed list. | The graph cannot see managed-package callers, dynamic SOQL, reflective field access, or LWC `record[fieldName]` dynamic access. Surface the boundary disclosure on every response, especially empty / near-empty ones. |
 | Defaulting to `find_field_anywhere` when the user asks for an Apex-only refactor question. | When the user pins to Apex ("is it safe to rename `processOpp` in Apex?"), the narrower `sfi.find_code_usages` in `developer-apex-refactor` is the right fit. `find_field_anywhere` over-reports. |
 | Treating a `find_hardcoded_values_anywhere` numeric match as a bug. | The numeric category has very high FP rate. Suppress by default; surface only when the user explicitly asks. |
 | Skipping the Q155 vocabulary-is-org-specific disclosure on `disambiguate_concepts`. | The disclosure is the developer's protection against treating a token's industry convention as the answer in this org. Always surface. |
-| Conflating v2.2's `confidence: heuristic` semantic-search ranking with v2.9's `confidence: heuristic` classification confidence. | They're independent axes. v2.2 confidence is about THE MATCH (this field may or may not be the answer); v2.9 confidence is about THE CLASSIFICATION (this field's source-of-truth may or may not be `derived`). Cite each in its own context. |
+| Conflating `confidence: heuristic` semantic-search ranking with `confidence: heuristic` classification confidence. | They're independent axes. search confidence is about THE MATCH (this field may or may not be the answer); classification confidence is about THE CLASSIFICATION (this field's source-of-truth may or may not be `derived`). Cite each in its own context. |
 
 ## See also
 
@@ -531,14 +531,14 @@ and offers three concrete next-step tool calls.
   source surface.
 - `developer-code-quality` — for hardcoded-value scanning inside
   Apex (`sfi.find_hardcoded_values` — recognizer-driven, Apex-only)
-  vs the v2.2 cross-corpus tool here.
+  vs the cross-corpus tool here.
 - `architect-impact-analysis` — for "what breaks if I delete this
   field" cross-component impact analysis.
 - `recognizing-naming-conventions` — for org-vocabulary pattern
   detection ("our convention is `Status__c`, not `State__c`").
   Vocabulary tools here are per-field; convention recognition is
   org-wide.
-- `developer-field-deep-dive` — for the full v3.0 synthesis
+- `developer-field-deep-dive` — for the full synthesis
   (`sfi.field_360`, `sfi.field_lineage`) once a field is picked.
 
 ## Verification
@@ -556,7 +556,7 @@ Before sending a response, confirm:
       `ComponentType` and within each group distinguished `readsFrom`
       from `writesTo`. I cited the per-bucket confidence.
 - [ ] For `field_meaning` / `field_provenance` / `disambiguate_concepts`,
-      I surfaced the v2.9 vocabulary disclosures verbatim
+      I surfaced the  vocabulary disclosures verbatim
       (org-specific, heuristic classifier, name-pattern semantic
       category) when relevant.
 - [ ] For `disambiguate_concepts` with identical concepts, I
@@ -569,10 +569,10 @@ Before sending a response, confirm:
 - [ ] I did NOT present a `confidence: heuristic` result as ground
       truth or recommend an action without naming the verification
       step.
-- [ ] When the v2.9 classification is `unknown`, I surfaced the
+- [ ] When the classification is `unknown`, I surfaced the
       classifier-not-run boundary and still gave the structural
       trace answer.
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

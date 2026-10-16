@@ -172,7 +172,7 @@ describe('generateOnboardingDocHandler (empty graph)', () => {
     if (!result.ok) return;
     const doc = result.value.data.document;
     expect(doc.body).toContain('Welcome to acme@example.com');
-    expect(doc.body).toContain('Key Contacts data depends on v1.7 enrichment');
+    expect(doc.body).toContain('Key Contacts data depends on the Tooling API enrichment pass');
   });
 });
 
@@ -477,7 +477,7 @@ describe('generateOnboardingDocHandler — a failed code scan is NOT an enrichme
     expect(result.ok).toBe(false);
     if (result.ok) {
       expect(result.value.data.document.body).not.toContain(
-        'Key Contacts data depends on v1.7 enrichment',
+        'Key Contacts data depends on the Tooling API enrichment pass',
       );
       return;
     }

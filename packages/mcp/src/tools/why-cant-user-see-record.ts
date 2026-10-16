@@ -2331,7 +2331,7 @@ const UNKNOWN_TAIL: readonly AccessReasoningStep[] = Object.freeze([
   step(
     'AccountTeams',
     'unknown',
-    'account team membership requires record-level data not modeled in v1.1',
+    'account team membership requires record-level data that the vault does not model',
   ),
 ]);
 

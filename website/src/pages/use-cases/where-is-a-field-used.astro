@@ -24,8 +24,9 @@ import { fieldDependents, whereUsed } from "../../data/page-answers.ts";
     "<strong>Apex classes and triggers</strong>, from the parsed source, plus a text search for anything the parser missed",
     "<strong>Flows</strong> that read or set the field, and the conditions that start them",
     "<strong>Formulas, roll-ups and validation rules</strong>",
-    "<strong>Page layouts, sharing rules and analytics</strong> that reference it",
-    "<strong>Lightning components and Visualforce</strong>, when your refresh pulled them",
+    "<strong>Page layouts, sharing rules and analytics</strong> that reference it, including related-list columns on other objects’ layouts",
+    "<strong>Flow screens</strong> that show or edit it",
+    "<strong>Lightning components and Visualforce</strong>, including fields bound in Lightning web component and Aura markup, when your refresh pulled them",
   ]}
   limits={[
     "Field names put together at run time in Apex",
@@ -55,10 +56,12 @@ import { fieldDependents, whereUsed } from "../../data/page-answers.ts";
     },
   ]}
   cta={{ question: whereUsed.question, related: { href: "/use-cases/what-breaks-if-you-delete-a-field", label: "Before you delete a field" } }}
-  dateModified="2026-10-10"
+  dateModified="2026-10-16"
 >
   <h2>Usage first, verdict second</h2>
   <p>“Where is it used?” and “can I delete it?” sound like the same question, but they aren’t. The first gives you a list. The second weighs that list and adds what wasn’t checked before it says yes or no. Start here when you’re exploring a field you didn’t build. Move to <a href="/use-cases/what-breaks-if-you-delete-a-field">what breaks if I delete it</a> when you’re about to change it.</p>
   <h2>Access isn’t usage</h2>
   <p>Profiles and permission sets that grant access to a field are listed separately from the components that use it. A permission set that can see a field doesn’t stop you deleting it. A flow that sets it does.</p>
+  <h2>The quiet references</h2>
+  <p>Some uses never show up in Setup’s own “Where is this used?”: a field shown only on a flow screen, bound only in a Lightning component’s markup, or listed only as a column of a related list on another object’s page layout. sf-intelligence reads all three from the metadata and lists them with the rest. If you upgraded from an older release, run <code>refresh</code> once so they are in your snapshot.</p>
 </UseCaseLayout>

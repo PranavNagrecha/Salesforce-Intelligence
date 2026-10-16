@@ -1,7 +1,7 @@
 {
   "name": "sf-intelligence",
-  "version": "0.5.0",
-  "description": "Salesforce Org Intelligence for AI agents: a read-only, offline, source-available MCP server and CLI. Ask about your org's metadata, dependencies, permissions, Apex and Flows \u2014 grounded in real retrieved metadata. Ships the sfi CLI and an MCP server.",
+  "version": "0.6.0",
+  "description": "Salesforce Org Intelligence for AI agents: a read-only, offline, open-source (MIT) MCP server and CLI. Ask about your org's metadata, dependencies, permissions, Apex and Flows \u2014 grounded in real retrieved metadata. Ships the sfi CLI and an MCP server.",
   "license": "MIT",
   "homepage": "https://sfi.auditforce.cloud",
   "repository": {
@@ -37,7 +37,16 @@
     "impact-analysis",
     "read-only",
     "flow",
-    "ai-agents"
+    "ai-agents",
+    "vscode",
+    "github-copilot",
+    "codex",
+    "salesforce-admin",
+    "permission-sets",
+    "sharing",
+    "salesforce-flow",
+    "lwc",
+    "static-analysis"
   ],
   "type": "module",
   "bin": {

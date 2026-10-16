@@ -80,7 +80,7 @@ const OUTPUT_USAGE = 'OUTPUT';
  */
 const ROW_DATA_BOUNDARY =
   'DecisionTable rows live in CSV uploads or SObject records, not in ' +
-  'the metadata XML. v3.2 cannot enumerate row content. To see the ' +
+  'the metadata XML. This tool cannot enumerate row content. To see the ' +
   'actual rows, query the row data source (SObject record query or ' +
   'the original CSV).';
 
@@ -99,25 +99,25 @@ const rowStoreHint = (
     case 'CsvUpload':
       return (
         'dataSourceType is CsvUpload — rows live in the CSV File ' +
-        'uploaded to this DecisionTable. v3.2 does NOT enumerate ' +
+        'uploaded to this DecisionTable. This tool does NOT enumerate ' +
         'Salesforce File content.'
       );
     case 'SObject': {
       const obj = sourceObject ?? '<unknown>';
       return (
         `dataSourceType is SObject — rows live in '${obj}' SObject ` +
-        'records. v3.2 does NOT query SObject records.'
+        'records. This tool does NOT query SObject records.'
       );
     }
     case 'Manual':
       return (
         'dataSourceType is Manual — rows live in the OmniStudio ' +
-        "designer's row-editor UI. v3.2 does NOT reach into that UI."
+        "designer's row-editor UI. This tool does NOT reach into that UI."
       );
     default:
       return (
         `dataSourceType '${dataSourceType}' is not one of the three ` +
-        'known row-store kinds (CsvUpload / SObject / Manual); v3.2 ' +
+        'known row-store kinds (CsvUpload / SObject / Manual); this tool ' +
         'surfaces the value verbatim but cannot determine where the ' +
         'rows live for this kind.'
       );

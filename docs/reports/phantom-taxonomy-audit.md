@@ -1,17 +1,12 @@
-# Phantom / referenced-but-unretrieved taxonomy audit (GATE 0)
+# Phantom / referenced-but-unretrieved taxonomy audit
 
-**Backlog item:** `P7-phantom-taxonomy-audit` (Phase 7, Cluster B GATE 0).
 **Purpose:** measure, on real orgs, what the "phantom" graph (edges whose target
 id resolves to no node) and the manifest gaps actually consist of — so the
-Cluster-B stub-node / demand-retrieve design is driven by evidence, not a guess.
+stub-node / demand-retrieve design is driven by evidence, not a guess.
 **This report is counts-only and anonymized** (org labels `ORG_D` / `ORG_M`,
 generic Salesforce ComponentType names, no real API names or aliases). It was
 produced by a throwaway read-only analysis script over each vault's graph +
 manifest; the script is not committed (it holds real vault paths).
-
-> **GATE rule:** no Cluster-B product code (reference stub nodes, demand-retrieve
-> policy, package describe) may land before this report exists. Every Cluster-B
-> commit must cite a row from the tables below.
 
 ## Method
 
@@ -77,7 +72,7 @@ Dangling targets: **4,804** distinct ids across **9,768** reference edges
 
 Referenced-but-unretrieved TYPES: `ExternalApi`.
 
-## Findings → Cluster-B design decisions
+## Findings → design decisions
 
 1. **Reject bulk phantom retrieve.** On the managed-heavy org, managed-extension
    (32%) + standard-field-phantom (39%) + grant-only (13%) = **84% of distinct
@@ -86,13 +81,13 @@ Referenced-but-unretrieved TYPES: `ExternalApi`.
    grant targets for almost no analysis gain — the documented "700+ grant-only
    object" bloat trap, confirmed.
 2. **`grant-only`, `managed-extension`, `standard-field-phantom` → L2 stub
-   forever** (`P7-reference-stub-nodes`). They are referenced but not
+   forever**. They are referenced but not
    retrievable-with-value: materialize a lightweight `ReferenceStub` so
    `get_component` returns a classified stub instead of a bare not-found, and
    tools return `insufficientKnowledge` rather than a false "none".
 3. **`automation-critical` is tiny and is the only demand-retrieve target**
-   (66 ids on ORG_D, 3 on ORG_M). This validates keeping the B29
-   automation-only expansion and scoping `P7-demand-retrieve` to
+   (66 ids on ORG_D, 3 on ORG_M). This validates keeping the
+   automation-only expansion and scoping demand-retrieve to
    automation-classified phantoms ONLY — refuse grant-only / managed / standard
    pulls with the classification reason.
 4. **`blindspot-manifest` is a manifest-widening fix, not a stub** — a small set
@@ -102,5 +97,5 @@ Referenced-but-unretrieved TYPES: `ExternalApi`.
 
 **Net:** stubs for the bulk (grant / managed / standard), demand-retrieve for the
 tiny automation-critical set, manifest-widening for blindspot-manifest types —
-exactly the evidence-driven slice the backlog scoped. Cluster-B commits cite the
-ORG_D row for the bucket they implement.
+exactly the evidence-driven slice that shipped; the decision is recorded in
+[ADR-004](../decisions/ADR-004-phantom-taxonomy-on-demand.md).

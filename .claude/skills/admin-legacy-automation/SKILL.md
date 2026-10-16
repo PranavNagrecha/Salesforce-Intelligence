@@ -11,10 +11,10 @@ description: |
   approval processes, assignment/auto-response/escalation rules,
   duplicate/matching rules, email templates, and letterheads —
   plus the `sendsEmail`, `triggersOn`, and `references` edges that
-  connect them. Discloses the v1.3 boundary honestly: workflow
-  rules and processes are extracted in v1.3, but their actual
+  connect them. Discloses the boundary honestly: workflow
+  rules and processes are extracted, but their actual
   execution semantics (criteria evaluation, time-dependent actions,
-  approval routing) need record-level data v1.x doesn't have.
+  approval routing) need record-level data the vault doesn't have.
   Recommends Flow migration honestly where applicable.
 ---
 
@@ -22,8 +22,8 @@ description: |
 
 ## Overview
 
-This skill is the admin persona's companion to v1.3's coverage
-extension of `sfi.get_impact`. v1.3 does not introduce a new
+This skill is the admin persona's companion to the coverage
+extension of `sfi.get_impact`. It does not introduce a new
 headline tool — it makes the existing impact graph aware of nine
 new ComponentTypes (`WorkflowRule`, `ApprovalProcess`,
 `AssignmentRule`, `AutoResponseRule`, `EscalationRule`,
@@ -40,15 +40,15 @@ ones. The new edge is `sendsEmail` (a rule declares it will send
 the named EmailTemplate; direction: `{WorkflowRule |
 ApprovalProcess | AutoResponseRule} → EmailTemplate`,
 `confidence: declared`). The reused edges, all `declared` in
-v1.3's emission set, are `triggersOn` (rule → parent
+The emission set, are `triggersOn` (rule → parent
 `CustomObject`), `references` (rule → action target or approver
 or assignee or matching rule), and `parentOf` (one-file-many-
 rules container relationship from `CustomObject` to each per-
-rule node). The boundary that matters for admins: **v1.3 lists
+rule node). The boundary that matters for admins: **sf-intelligence lists
 what's configured, it does not simulate runtime.** Workflow rule
 criteria, time-dependent actions, approval routing per record,
 and duplicate fuzzy-match decisions all need record-level data
-v1.x doesn't have. The skill surfaces this gap explicitly rather
+the vault doesn't have. The skill surfaces this gap explicitly rather
 than fabricating an evaluated answer.
 
 ## When to fire
@@ -105,7 +105,7 @@ Defer to another skill when:
 
 - **The user asks "what breaks if I change X?"** — cross-component
   impact analysis. Defer to `architect-impact-analysis` →
-  `sfi.get_impact`. (That skill already walks the v1.3 edges; it
+  `sfi.get_impact`. (That skill already walks the edges; it
   just frames the answer for architects rather than admins.)
 - **The user asks "why can't user X see this record?"** — visibility,
   not automation. Defer to `admin-sharing-troubleshooting` →
@@ -115,9 +115,9 @@ Defer to another skill when:
   `sfi.layout_for_user`.
 - **The user asks "where is this field used in Apex?"** —
   code-side reference question. Defer to `developer-apex-refactor`
-  → `sfi.find_code_usages`.
+  → `sfi.find_code_usages` (via `sfi.run_analysis`).
 - **The user asks "what does this flow do?"** — Flow narration is
-  outside v1.3 (and outside the legacy-automation skill regardless;
+  outside this coverage (and outside the legacy-automation skill regardless;
   Flow is the *modern* automation tier). Defer to
   `business-user-orientation`'s process-explanation intent, which
   refuses to narrate Flow XML as English. If the user wants to know
@@ -128,16 +128,16 @@ Defer to another skill when:
 - **The user asks for record-level evaluation** ("does this
   workflow rule actually fire on Account 001xx12345?", "is this
   approval process triggered for this specific opportunity?").
-  v1.3 lists what's configured; it doesn't simulate execution.
+  sf-intelligence lists what's configured; it doesn't simulate execution.
   Refuse honestly; direct the admin to **Setup → Workflow Rules**
   or **Setup → Approval Processes** in the Salesforce UI, or to a
   live `sf data query` against their org.
 - **The user wants to refresh, init, or check vault status.** Fire
   `refreshing-the-org-vault`, `/sfi-init`, or `pre-flight-checks`.
-- **The user names an automation type outside v1.3's nine** —
+- **The user names an automation type outside the nine** —
   `OutboundMessage`, `WorkflowTask`, `OrgWideEmailAddress`, or
   Process Builder as a standalone type (Process Builder is
-  metadata-shaped as a `Flow`, covered by v0.1's Flow extractor).
+  metadata-shaped as a `Flow`, covered by the Flow extractor).
   Say so plainly and name the boundary; offer the closest partial
   if one exists (e.g., the rule's action `references` the outbound
   message by name even though the OutboundMessage node itself isn't
@@ -195,7 +195,7 @@ approval fire on opportunity 006xx12345?"), **refuse the record-
 level half** and translate to the configuration question
 explicitly: "I can tell you what `ApprovalProcess:Opportunity.
 Discount_Approval` is configured to do — entry criteria, approver
-chain, email templates. v1.x can't tell you whether *that
+chain, email templates. The vault can't tell you whether *that
 specific record* would trigger it; check the record's
 `Approval History` related list in Salesforce for that."
 
@@ -247,7 +247,7 @@ touches) and `impact.edges`. Walk the edges and bucket by
   knows the parent is `CustomObject:Account` (or whichever).
 
 For an **inversion** question ("which rules send this email
-template?"), use `sfi.get_edges`:
+template?"), use `sfi.get_edges` (via `sfi.run_analysis`):
 
 ```json
 {
@@ -262,7 +262,7 @@ The response lists every `WorkflowRule`, `ApprovalProcess`, or
 the named template. Sort by rule type for legibility.
 
 For an **approver chain** question ("who approves the discount
-process?"), use `sfi.get_edges`:
+process?"), use `sfi.get_edges` (via `sfi.run_analysis`):
 
 ```json
 {
@@ -293,7 +293,7 @@ question is "what does that email actually say?" Call
   `visualforce` templates, whose body lives in the referenced VF page).
   If the admin needs the body text, point them at the source file, or
   read it via the `sourcePath` on the node.
-- **Merge tokens ARE tokenized.** The v3.0 body-merge scan parses the
+- **Merge tokens ARE tokenized.** The body-merge scan parses the
   `<content>` body for `{!Object.Field}` and conditional
   `{!IF(... Object.Field ...)}` merges. Each distinct field yields a
   `references` edge with `confidence: 'parsed'`, `properties.role:
@@ -357,8 +357,8 @@ order:
 5. **Targets.** For each action target, cite the canonical id
    (`EmailTemplate:Sales.WelcomeEmail`, `Queue:Tier2_Support`,
    `MatchingRule:Account.Account_Name_And_Domain`, etc.) and the
-   confidence (always `declared` for v1.3 emission).
-6. **Disclosure.** "v1.3 lists what's configured; doesn't
+   confidence (always `declared` for legacy-automation edges).
+6. **Disclosure.** "sf-intelligence lists what's configured; doesn't
    simulate runtime."
 
 **Do not silently drop steps.** An inactive rule, an empty action
@@ -367,7 +367,7 @@ trust hinges on every extracted edge appearing in the report.
 
 ### Step 6 — Honest disclosure when an edge dangles
 
-The v1.0 graph store tolerates dangling edges. When a
+The graph store tolerates dangling edges. When a
 WorkflowRule action references a target the extractor cannot
 resolve — e.g., the rule's `<fieldUpdates>[*].<field>` names
 `Region__c` but `CustomField:Account.Region__c` is not in the
@@ -384,12 +384,12 @@ Surface this verbatim, **never silently drop it**:
 > missed it. Verify in **Setup → Object Manager → Account →
 > Fields**.
 
-This is the v1.3 honesty anchor (Q35). The dangling edge is
+This is the honesty anchor (Q35). The dangling edge is
 *evidence*, not a footnote — it's how the admin learns that the
 workflow rule is pointing at a field that no longer exists in the
 expected place.
 
-### Step 7 — Append the v1.3 boundary disclosure
+### Step 7 — Append the boundary disclosure
 
 Every response from this skill ends with the fixed-form boundary
 disclosure (next section). When the response surfaces a dangling
@@ -406,7 +406,7 @@ migration paragraph:
 > Salesforce has superseded WorkflowRule and Process Builder
 > with Flow for most use cases. Workflow Rules are in the multi-
 > release retirement track (retirement began in 2024+); Process
-> Builder is already retired. v1.3 still extracts WorkflowRules
+> Builder is already retired. sf-intelligence still extracts WorkflowRules
 > honestly because real orgs still ship them in production —
 > but when planning changes, consider whether the rule should
 > move to Flow before extending it. **Migration considerations
@@ -428,7 +428,7 @@ full target list will produce an incomplete Flow.
 
 ## Reporting format
 
-Use the synthetic-v1.3 fixture for the worked example. Suppose
+Use the synthetic fixture for the worked example. Suppose
 the admin asks:
 
 > "What workflow rules touch Account?"
@@ -478,7 +478,7 @@ Claude's flow:
 > - **Triggers on** `CustomObject:Account` (`triggersOn`,
 >   `declared`).
 > - **Criteria** (verbatim, not evaluated): `Account.Type
->   equals 'Tier 1'`. v1.3 lists what's configured; the
+> equals 'Tier 1'`. sf-intelligence lists what's configured; the
 >   per-record evaluation needs record data.
 > - **Actions:**
 >   - Alert action `Email_Sales_Team` (`references`,
@@ -502,11 +502,11 @@ Claude's flow:
 >     (`references`, `declared`) — shares the action target
 >     with the rule above.
 > - **Inactive flag.** This rule is extracted but
->   `active: false`. Salesforce will not fire it; v1.3 still
+> `active: false`. Salesforce will not fire it; sf-intelligence still
 >   lists it because the metadata exists. Migration target
 >   *or* deletion candidate — decide per org policy.
 >
-> v1.3 legacy-automation coverage: WorkflowRule (rules + alerts
+> The legacy-automation coverage: WorkflowRule (rules + alerts
 > + field updates + tasks + outbound messages, via the per-
 > object Workflow container), ApprovalProcess (entry criteria
 > + step chain), AssignmentRule / AutoResponseRule /
@@ -519,7 +519,7 @@ Claude's flow:
 > silently dropped. **Migration disclosure:** Salesforce has
 > superseded WorkflowRule and Process Builder with Flow for
 > most use cases (Workflow Rules retire 2024+, Process
-> Builder retired). v1.3 still extracts them honestly because
+> Builder retired). sf-intelligence still extracts them honestly because
 > real orgs still ship them in production, but when planning
 > changes consider whether the rule should move to Flow
 > before extending it.
@@ -531,7 +531,7 @@ evaluated. The migration disclosure is fixed-form and unskippable.
 
 ## Boundary disclosure
 
-v1.3's legacy-automation coverage has well-defined gaps. The
+The legacy-automation coverage has well-defined gaps. The
 fixed-form boundary disclosure (which the worked example above
 embeds verbatim) surfaces this list once per response. The list
 below documents what's behind each gap so Claude can answer
@@ -539,13 +539,13 @@ follow-ups without paraphrasing.
 
 - **Workflow rule criteria evaluation.** A WorkflowRule's
   `<criteriaItems>` or `<formula>` is extracted as a property
-  string. v1.3 does **not** evaluate it against any record. "Does
+  string. sf-intelligence does **not** evaluate it against any record. "Does
   this rule fire for *this* Account?" is record-level. Direct
   the admin to **Setup → Workflow Rules → {rule} → Test** for
   per-record evaluation.
 - **Time-dependent workflow actions.** Workflow rules carry
   `<workflowTimeTriggers>` that schedule actions for some offset
-  (hours/days) after a criteria match. v1.3 surfaces the trigger
+  (hours/days) after a criteria match. sf-intelligence surfaces the trigger
   count via the node's `properties.timeTriggerCount` and the
   declarative shape via `properties.timeTriggers[]` (each entry:
   `timeLength`, `timeUnit`, `offsetFromField`, `actionCount`) —
@@ -569,7 +569,7 @@ follow-ups without paraphrasing.
   approver evaluation depends on the approver type
   (`userHierarchyField` walks `User.ManagerId` per submitter,
   `relatedUser` reads a User lookup on the submitted record,
-  `queue` and `group` are bundles). v1.3 stores the approver
+  `queue` and `group` are bundles). sf-intelligence stores the approver
   type and name as properties but does **not** resolve the
   approver per record. The skill walks the *declared* approver
   chain (the `references` edges); the *runtime* approver is
@@ -578,16 +578,16 @@ follow-ups without paraphrasing.
   `<matchingMethod>` (`Exact`, `Fuzzy:Company Name`, etc.) and
   `<blankValueBehavior>` are extracted as string properties.
   The actual fuzzy-match algorithm is opaque Salesforce platform
-  code. v1.3 lists the field-and-method recipe; it cannot
+  code. sf-intelligence lists the field-and-method recipe; it cannot
   predict whether two specific records will collide.
 - **Duplicate rule `<duplicateRuleFilter>`.** The boolean filter
   that scopes which records the rule applies to (e.g., "only
   active leads") is stored as a string property and **not**
   evaluated. Per-record applicability is out of scope.
 - **EmailTemplate body merge fields.** EmailTemplate bodies
-  contain `{!Field_Reference}` merge tokens. v1.3 stores the
+  contain `{!Field_Reference}` merge tokens. sf-intelligence stores the
   body as a string property but does **not** tokenize merge
-  fields into per-field `references` edges (deferred to v1.4,
+  fields into per-field `references` edges (deferred,
   parallel with LWC/VF template-reference work). If the admin
   asks "which fields does this template merge in?", surface the
   body verbatim and direct them to read it themselves; do not
@@ -596,7 +596,7 @@ follow-ups without paraphrasing.
 - **Inactive rules.** Workflow rules, approval processes,
   assignment / auto-response / escalation rules, and duplicate
   rules all carry an `<active>` / `<isActive>` / `<ruleStatus>`
-  property. v1.3 extracts the flag and the rule itself
+  property. sf-intelligence extracts the flag and the rule itself
   regardless; **always cite the active state** when surfacing a
   rule, and flag inactive rules explicitly. An inactive rule
   isn't firing, but it's still part of the org's metadata
@@ -605,18 +605,18 @@ follow-ups without paraphrasing.
 - **`OutboundMessage` action targets.** WorkflowRule actions of
   type `OutboundMessage` `reference` the OutboundMessage by
   name. The OutboundMessage metadata itself is **not** extracted
-  as a node in v1.3 (deferred to v1.5 integration-topology).
+  as a node (deferred).
   The `references` edge dangles by design — surface it as
   "target not in extracted set" and direct the admin to **Setup
   → Outbound Messages**.
 - **`WorkflowTask` action targets.** Same treatment as
   outboundMessages — the rule's action references the task by
-  name; the WorkflowTask metadata isn't a node in v1.3. Edge
+  name; the WorkflowTask metadata isn't a node. Edge
   dangles, surfaced verbatim.
 - **`OrgWideEmailAddress`.** Referenced by AutoResponseRule's
-  `<senderEmail>` and WorkflowAlert's `<senderAddress>`. v1.3
+  `<senderEmail>` and WorkflowAlert's `<senderAddress>`. sf-intelligence
   stores the address as a string property; the
-  OrgWideEmailAddress metadata is deferred to v1.5. Surface the
+  OrgWideEmailAddress metadata is deferred. Surface the
   address verbatim; do not attempt to resolve it to an
   organization-wide email node.
 - **EmailFolder hierarchy.** Templates live under
@@ -624,10 +624,10 @@ follow-ups without paraphrasing.
   captured in the canonical id (`EmailTemplate:{Folder}.
   {Template}`) but the EmailFolder itself is **not** a node.
   Folder-level access permissions are a Profile / PermissionSet
-  concern outside v1.3.
+  concern outside this coverage.
 - **Process Builder.** Process Builder is metadata-shaped as a
   Flow (`<processType>Workflow</processType>` in the Flow XML).
-  v0.1's Flow extractor already covers it; v1.3 does **not**
+  the Flow extractor already covers it; sf-intelligence does **not**
   duplicate that coverage. If the admin asks "is this a Process
   Builder or a Workflow Rule?", point to the `Flow:` vs
   `WorkflowRule:` id prefix; the type is the answer.
@@ -656,12 +656,12 @@ follow-ups without paraphrasing.
   `ConditionalContext` nodes for the expression instead.
 - **Workflow flow-trigger Apex (`callsApex` floor).** When a
   WorkflowRule action is of type `Apex`, the rule node has a
-  `callsApex` edge to the named `ApexClass`. The v0.1
-  Apex-source extractor handles the receiving class; v1.3 just
+  `callsApex` edge to the named `ApexClass`. The 
+  Apex-source extractor handles the receiving class; sf-intelligence just
   extends the producer side.
 - **Migration to Flow.** Workflow Rules and Process Builder
   retirement is in flight (Workflow 2024+, Process Builder
-  already retired). v1.3 extracts both because real orgs ship
+  already retired). sf-intelligence extracts both because real orgs ship
   them; the skill's migration disclosure recommends Flow as the
   modern replacement but does **not** auto-migrate.
 
@@ -671,7 +671,7 @@ extracted, and the admin needs the pointer to act on it. Treat
 **inactive rules** as still-part-of-the-metadata-surface — they
 don't fire, but they're a migration candidate or a cleanup
 candidate. Treat **criteria text** as documentation, never as
-an evaluator — v1.3 reads it verbatim and stops.
+an evaluator — sf-intelligence reads it verbatim and stops.
 
 ## Anti-patterns
 
@@ -679,16 +679,16 @@ an evaluator — v1.3 reads it verbatim and stops.
 |---|---|
 | Confusing WorkflowRule with Flow. | WorkflowRule and Flow are different metadata types — `WorkflowRule:Account.X` vs `Flow:Account_X`. The skill's audience is admins working on the legacy declarative tier; if the user names a Flow, defer to the Flow-handling skill (or route to a Flow-narration refusal). Never label a `WorkflowRule:` id as a "flow" in plain English. |
 | Not citing the `active` / `isActive` / `ruleStatus` property. | An inactive WorkflowRule is extracted but not firing. The admin's first question after "what does this do" is "is this still on?" — the active flag is load-bearing. Cite it for every rule, every time. |
-| Treating extracted criteria as evaluated. | v1.3 reads `<criteriaItems>` and `<formula>` as **text**, not as a predicate. Saying "this rule fires when X = 'Tier 1'" is fine; saying "this rule will fire for *this* Account because its Type is 'Tier 1'" is fabricating a record-level evaluation. Surface the criteria verbatim, name what would have to be true for it to fire, and refuse the per-record half. |
+| Treating extracted criteria as evaluated. | sf-intelligence reads `<criteriaItems>` and `<formula>` as **text**, not as a predicate. Saying "this rule fires when X = 'Tier 1'" is fine; saying "this rule will fire for *this* Account because its Type is 'Tier 1'" is fabricating a record-level evaluation. Surface the criteria verbatim, name what would have to be true for it to fire, and refuse the per-record half. |
 | Silently dropping a dangling action target. | The Q35 honesty anchor verbatim. A WorkflowRule whose fieldUpdate names a `CustomField` not in the extracted set is *evidence* that the field has been removed or renamed. Surface the dangling edge explicitly; never collapse it into the report's empty space. |
 | Confusing DuplicateRule with MatchingRule. | DuplicateRule is the policy ("block save on insert when X looks like Y"); MatchingRule is the recipe ("compare fields A, B with methods M"). They're separate types connected by a `references` edge from duplicate to matcher. Walking the chain is the answer to "what fields does this duplicate rule check?"; collapsing the two loses the comparison logic. |
 | Skipping the ApprovalProcess approver chain. | ApprovalProcess has `<approvalSteps>[*].<assignedApprover>` — that chain *is* the answer to "who approves this?". Walking the chain step-by-step and naming each approver (Role / Group / User / Queue) is the legible trace the admin came for. Naming only the process and stopping at "an approval process" misses the entire point. |
 | Translating EmailTemplate's canonical id with an object prefix. | EmailTemplate is the outlier — `EmailTemplate:{Folder}.{Template}`, NOT `EmailTemplate:{Object}.{Template}`. The template's folder is the parent, not the object the template *concerns*. The body merges field references for whatever object the calling rule operates on. |
 | Walking past Letterhead. | Letterhead is a leaf — it has zero outgoing edges. When the admin asks "what does this letterhead do?", surface its properties (`topLineColor`, `bodyColor`, `available`, `description`) and the EmailTemplates that `reference` it (via `sfi.get_edges` with `direction: 'in'`). Don't go further; there's nothing to walk to. |
-| Treating the metadata definition as runtime behavior. | "v1.3 lists what's configured" is the constitutional axis. If the admin asks "is this workflow firing right now?", the honest answer is "I can tell you what it's configured to do; whether it fires depends on record-level data v1.x doesn't have." Refuse the runtime half and surface the configuration half. |
+| Treating the metadata definition as runtime behavior. | "sf-intelligence lists what's configured" is the constitutional axis. If the admin asks "is this workflow firing right now?", the honest answer is "I can tell you what it's configured to do; whether it fires depends on record-level data the vault doesn't have." Refuse the runtime half and surface the configuration half. |
 | Recommending Flow migration without the impact chain first. | The migration disclosure is a *footer*, not a replacement for the impact analysis. An admin planning a migration without the full target list (action references, sendsEmail targets, callsApex targets) will produce an incomplete Flow. Walk the chain, then recommend migration. |
 | Conflating "active rule" with "still relevant" or "live." | An active rule is firing; that's a metadata fact. Whether it's still *correct* — whether the criteria still match the org's business logic — is judgment, not metadata. Don't paper over the gap. |
-| Citing `parsed` or `heuristic` confidence on a v1.3 edge. | v1.3's new emission set is **all `declared`**: `sendsEmail`, the reused `triggersOn` / `references` / `callsApex` / `parentOf` instances. The extractor reads directly from XML elements. Don't introduce uncertainty where the metadata is plain. |
+| Citing `parsed` or `heuristic` confidence on a edge. | The new emission set is **all `declared`**: `sendsEmail`, the reused `triggersOn` / `references` / `callsApex` / `parentOf` instances. The extractor reads directly from XML elements. Don't introduce uncertainty where the metadata is plain. |
 | Skipping the boundary disclosure on a clean impact report. | The disclosure protects against the wrong mental model. A clean report that lists every action target still has to coexist with un-modeled gaps (OutboundMessage, WorkflowTask, OrgWideEmailAddress, EmailTemplate merge fields, record-level evaluation). Always disclose. |
 
 ## Example interactions
@@ -754,7 +754,7 @@ Claude's flow:
 > templates does `ApprovalProcess:Account.Credit_Review` use?" and
 > I'll walk the outgoing edges.
 >
-> v1.3 legacy-automation coverage: [fixed-form boundary
+> The legacy-automation coverage: [fixed-form boundary
 > disclosure follows].
 
 ### Migration recommendation — "should I migrate this workflow to Flow?"
@@ -790,7 +790,7 @@ Claude's flow:
 >
 > Salesforce has superseded WorkflowRule and Process Builder
 > with Flow for most use cases (Workflow Rules retire 2024+,
-> Process Builder retired). v1.3 still extracts WorkflowRules
+> Process Builder retired). sf-intelligence still extracts WorkflowRules
 > honestly because real orgs still ship them in production —
 > but when planning changes, consider whether the rule should
 > move to Flow before extending it. Migration considerations
@@ -816,17 +816,17 @@ Claude's flow:
 >   no Time-Dependent Actions are present so no Scheduled
 >   Paths are needed.
 >
-> **What v1.3 cannot tell you:**
+> **What sf-intelligence cannot tell you:**
 >
-> - Whether the rule is still business-correct. v1.3 reads the
+> - Whether the rule is still business-correct. sf-intelligence reads the
 >   metadata; whether "Tier 1" is still the right cohort is
 >   judgment.
 > - Whether the `EmailTemplate:Sales.WelcomeEmail` body still
 >   makes sense for newly-created tier-1 accounts. The body's
->   `{!Field_Reference}` merge tokens are not tokenized in v1.3
->   (deferred to v1.4); review the body verbatim.
+> `{!Field_Reference}` merge tokens are not tokenized
+> (deferred); review the body verbatim.
 >
-> v1.3 legacy-automation coverage: [fixed-form boundary
+> The legacy-automation coverage: [fixed-form boundary
 > disclosure follows].
 
 ### Honest refusal — Q35 dangling action target
@@ -865,7 +865,7 @@ Claude's flow:
 > firing against a missing target every time its trigger
 > condition matches.
 >
-> v1.3 legacy-automation coverage: [fixed-form boundary
+> The legacy-automation coverage: [fixed-form boundary
 > disclosure follows, restated because the response carries a
 > dangling edge].
 
@@ -896,7 +896,7 @@ Before sending a response, confirm:
       presented each rule as `(active flag → triggers on →
       criteria text → actions → targets)`.
 - [ ] I cited every component's canonical id, every edge's
-      `confidence` (all `declared` for v1.3 emission), and every
+      `confidence` (all `declared` for legacy-automation edges), and every
       rule's `active` / `isActive` / `ruleStatus` flag.
 - [ ] I surfaced criteria text **verbatim** without evaluating
       it against record data.
@@ -921,7 +921,7 @@ Before sending a response, confirm:
       NOT read `type` / `body` / `letterhead` (those property names
       do not exist), and I did NOT claim merge tokens are
       un-tokenized.
-- [ ] I appended the v1.3 boundary disclosure verbatim —
+- [ ] I appended the boundary disclosure verbatim —
       criteria-evaluation gap, time-dependent actions,
       approval-process-routing gap, fuzzy matching, merge
       fields, OutboundMessage / WorkflowTask / OrgWideEmailAddress
@@ -941,4 +941,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

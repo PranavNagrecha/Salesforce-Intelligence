@@ -67,7 +67,7 @@ export const createProgram = (): Command => {
   const program = new Command();
   program
     .name('sfi')
-    .description('SfIntelligence CLI — knowledge base for Salesforce orgs')
+    .description('sf-intelligence: answers about one Salesforce org from a local, read-only metadata snapshot')
     .version(readVersion());
 
   registerInitCommand(program);

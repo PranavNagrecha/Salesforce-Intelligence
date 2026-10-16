@@ -80,7 +80,7 @@ const DISPATCH_EDGE_TYPE = 'dispatchesOmniAction';
  * SObject records, NOT in the metadata XML this tool reads.
  */
 const RECORD_LEVEL_DISCLOSURE =
-  "v3.2 walks the OmniScript / IP / Card metadata XML. The actual user-entered data and runtime state lives in OmniProcessElement and related SObject records; that is record-level data, out of scope for v0.1's read-the-metadata posture.";
+  "This tool walks the OmniScript / IP / Card metadata XML. The actual user-entered data and runtime state lives in OmniProcessElement and related SObject records; that is record-level data, out of scope for v0.1's read-the-metadata posture.";
 
 /**
  * The Apex-coupling scope disclosure, surfaced verbatim on EVERY

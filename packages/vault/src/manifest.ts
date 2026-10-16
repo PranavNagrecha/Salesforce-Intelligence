@@ -735,6 +735,24 @@ export const summarizeCoverage = (
   };
 };
 
+/**
+ * Canonical not-modeled type list for `coverage_report`, `health_check`, and
+ * the a4 I3 cross-check. Always derived from {@link summarizeCoverage}.
+ */
+export const notModeledCoverageTypes = (
+  manifest: VaultManifest | ExtendedVaultManifest | undefined,
+  relevantTypes?: readonly string[],
+): readonly string[] => summarizeCoverage(manifest, relevantTypes).notModeledTypes;
+
+/** Rows backing {@link notModeledCoverageTypes} — one entry per type, registry order. */
+export const notModeledCoverageEntries = (
+  manifest: VaultManifest | ExtendedVaultManifest | undefined,
+  relevantTypes?: readonly string[],
+): readonly CoverageEntry[] => {
+  const wanted = new Set(notModeledCoverageTypes(manifest, relevantTypes));
+  return buildCoverageEntries(manifest).filter((entry) => wanted.has(entry.type));
+};
+
 /** Why a type sits in {@link CoverageSummary.partialTypes}. */
 export type PartialCoverageReason = 'errored' | 'pending' | 'capped' | 'empty-unconfirmed';
 

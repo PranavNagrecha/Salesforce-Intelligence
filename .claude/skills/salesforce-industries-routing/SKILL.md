@@ -5,7 +5,7 @@ description: |
   OmniScript step by step", "what endpoints does this Integration
   Procedure hit", "what does this DataRaptor map", "what's inside this
   FlexCard", "what inputs does this DecisionTable take", "what
-  OmniStudio version is this org on". Drives the v3.2 cascade:
+  OmniStudio version is this org on". Drives the cascade:
   `omniscript_flow` (OmniScript step sequence + downstream IP /
   DataRaptor dispatches), `integration_procedure_chain` (IP action
   chain + REST endpoints + downstream IP / DataRaptor),
@@ -40,11 +40,11 @@ description: |
 
 ## Overview
 
-This skill is the buyer-facing entry point for the v3.2 OmniStudio /
-Salesforce Industries extraction tier. The v0.1-v3.1 product silently
+This skill is the buyer-facing entry point for the OmniStudio /
+Salesforce Industries extraction tier. Earlier versions silently
 skipped the entire OmniStudio family — a single Globex sandbox
 carried 1,474 Industries metadata files with zero graph footprint
-(journal 0157). v3.2 turns those files into graph citizens across
+(journal 0157). sf-intelligence turns those files into graph citizens across
 **five new ComponentTypes** and **one new edge type**:
 
 | ComponentType | What it is | File extension |
@@ -55,7 +55,7 @@ carried 1,474 Industries metadata files with zero graph footprint
 | `OmniUiCard` | The FlexCard widget-canvas primitive | `.ouc-meta.xml` |
 | `DecisionTable` | The declarative rule-table primitive | `.decisionTable-meta.xml` |
 
-The new edge type, `dispatchesOmniAction`, runs from any v3.2-tier
+The new edge type, `dispatchesOmniAction`, runs from any OmniStudio-tier
 component (OmniScript, IP, OmniUiCard) to the IP / DataRaptor / sibling
 OmniScript it invokes via an action child — resolved at import onto the
 version that RUNS (an IP / OmniScript's `isActive` is the runtime switch;
@@ -76,17 +76,17 @@ The load-bearing insight: **OmniStudio is a declarative-process
 surface where the "process" IS the metadata.** An OmniScript's XML
 carries the entire user-facing flow — steps, actions, conditional
 branches, IP calls, DataRaptor reads — inline as
-`<omniProcessElements>` children. v3.2's extractors parse those
-elements; v3.2's tools surface them.
+`<omniProcessElements>` children. The extractors parse those
+elements; the tools surface them.
 
-The boundary that matters for the buyer: **v3.2 reads the metadata
+The boundary that matters for the buyer: **sf-intelligence reads the metadata
 XML, not the runtime records.** An OmniScript's metadata XML is the
 flow definition. The user-entered data and in-flight session state
 live in OmniProcessElement SObject records (12,899 of them in
-Globex). v3.2 reads the definition; the records are record-level
+Globex). sf-intelligence reads the definition; the records are record-level
 data, out of scope (Q179 anchor).
 
-The constitutional axis (Q180): **v3.2 admits the v3.1 roadmap
+The constitutional axis (Q180): **sf-intelligence admits the roadmap
 closure was wrong.** The OmniStudio family was a missing extraction
 tier, not an out-of-roadmap zone. Managed-package (Vlocity)
 OmniStudio — records, not metadata — is modelled from a Vlocity Build
@@ -106,7 +106,7 @@ triggers:
 ### OmniScript flow shape
 
 - **"Walk `Acme_Enrollment_English_1` step by step."** /
-  **"What does this OmniScript do?"** — Use `sfi.omniscript_flow`
+  **"What does this OmniScript do?"** — Use `sfi.omniscript_flow` (via `sfi.run_analysis`)
   with `{ omniScriptId: 'OmniScript:Acme_Enrollment_English_1' }`.
 - **"What does this no-code form do when I click Submit?"** —
   Same; the dispatched-action list shows what the buttons call.
@@ -219,20 +219,20 @@ Defer to another skill when:
 - **The user asks "what calls
   `Acme_ValidateMember`?"** (who dispatches INTO an IP).
   That's a graph walk over incoming `dispatchesOmniAction` edges;
-  defer to `developer-find-anywhere` → `sfi.find_field_anywhere` /
-  the broader find-anywhere walk. v3.2's edges feed that walk
+  defer to `developer-find-anywhere` → `sfi.find_field_anywhere` (via `sfi.run_analysis`) /
+  the broader find-anywhere walk. The edges feed that walk
   without a special routing case — the edge type is in the union.
 - **The user asks "what breaks if I delete
   `AcmeExtractContact`?"** That's impact analysis over
   incoming edges; defer to `architect-impact-analysis` →
-  `sfi.get_impact`, or `developer-impact-and-reachability`. v3.2's
+  `sfi.get_impact`, or `developer-impact-and-reachability`. The
   `dispatchesOmniAction` edges feed into those walks.
 - **The user asks for the broad integration map** ("draw me our
   integration map", "what named credentials / external data
-  sources do we have"). That's v1.5's `sfi.integration_map`; defer
-  to `architect-integration-topology`. v3.2's
+  sources do we have"). That's `sfi.integration_map`; defer
+  to `architect-integration-topology`.
   `sfi.integration_procedure_chain` adds OmniStudio Rest Actions to
-  that surface, but the org-wide topology question is v1.5's.
+  that surface, but the org-wide topology question belongs there.
 - **The user asks about a standard Flow** (`Flow:` /
   `*.flow-meta.xml`). OmniScripts and Flows are different families.
   Defer to `answering-org-questions` / the Flow tools.
@@ -240,7 +240,7 @@ Defer to another skill when:
   runtime data.** That's record-level data, out of scope. Surface
   the Q179 disclosure.
 - **The user wants the visual designer's drag-drop widget order.**
-  v3.2 parses the propertySetConfig JSON's declared order, not the
+  sf-intelligence parses the propertySetConfig JSON's declared order, not the
   designer's visual order. Surface the propertySetConfig-parsing
   disclosure.
 
@@ -255,9 +255,9 @@ matching candidates across all five types before dispatching:
 > `AcmeEnrollment` matches several OmniStudio components. Which one?
 >
 > - `OmniScript:Acme_Enrollment_English_1` (the user-facing
->   form flow) → `sfi.omniscript_flow`
+> form flow) → `sfi.omniscript_flow` (via `sfi.run_analysis`)
 > - `OmniIntegrationProcedure:Acme_ValidateMember_Procedure_1`
->   (the server-side action chain) → `sfi.integration_procedure_chain`
+> (the server-side action chain) → `sfi.integration_procedure_chain` (via `sfi.run_analysis`)
 > - `OmniUiCard:AcmeEnrollmentIntro_Developer_1` (the FlexCard) →
 >   `sfi.omniuicard_widget_breakdown`
 
@@ -268,7 +268,7 @@ output shapes; dispatching the wrong tool surfaces an
 ## The cascade
 
 Five tools, five distinct OmniStudio question shapes. Each composes
-its v3.2 ComponentType node + (where applicable) the
+its ComponentType node + (where applicable) the
 `dispatchesOmniAction` edge. Each refuses an unknown id with a
 `component-not-found` payload. Pick the right entry point.
 
@@ -299,7 +299,7 @@ isActive, isWebCompEnabled, uniqueName, subType, type), `steps[]`
 level, sequenceNumber, isActive), `dispatchedActions[]` (one per
 `dispatchesOmniAction` edge; carries stepName, stepType, targetId,
 targetRawName, confidence), and `boundaries[]` (three verbatim
-disclosures — Native-vs-Vlocity, record-level, v3.3 Apex deferral).
+disclosures — Native-vs-Vlocity, record-level, Apex deferral).
 
 The tool re-parses the source XML at invocation time for the step
 shape (the R2 extractor stores summary counts on the node, not the
@@ -456,7 +456,7 @@ row-store hint, then the Native-vs-Vlocity disclosure).
 records, not in the metadata XML. The dataSourceType-specific hint
 tells the caller WHERE the rows live (CsvUpload → the uploaded CSV
 File; SObject → `{sourceObject}` records; Manual → the OmniStudio
-designer's row-editor). v3.2 reaches none of those.
+designer's row-editor). sf-intelligence reaches none of those.
 
 ## Output rendering discipline
 
@@ -472,7 +472,7 @@ designer's row-editor). v3.2 reaches none of those.
 ## Honesty axes
 
 The skill MUST surface these disclosures verbatim. Paraphrasing them
-is a v3.2 contract violation (PLAN-v3.2 §10). Each tool already
+is a contract violation. Each tool already
 bundles its disclosures into `boundaries[]`; re-emit them unchanged.
 
 ### Native vs managed-package (Vlocity) source (Q180 — verbatim, EVERY tool)
@@ -499,10 +499,10 @@ no export means its components are missing from every answer.
 
 ### OmniProcessElement record-level data is out of scope (Q179 — verbatim)
 
-> v3.2 walks the OmniScript / IP / Card metadata XML. The actual
+> sf-intelligence walks the OmniScript / IP / Card metadata XML. The actual
 > user-entered data and runtime state lives in OmniProcessElement and
 > related SObject records; that is record-level data, out of scope
-> for v0.1's read-the-metadata posture.
+> for the read-the-metadata posture.
 
 Surfaced on EVERY `sfi.omniscript_flow`,
 `sfi.integration_procedure_chain`, AND `sfi.decision_table_browse`
@@ -512,11 +512,11 @@ flow?", this is the answer.
 ### DecisionTable row data is NOT enumerable from metadata (Q179 anchor — verbatim)
 
 > DecisionTable rows live in CSV uploads or SObject records, not in
-> the metadata XML. v3.2 cannot enumerate row content. To see the
+> the metadata XML. sf-intelligence cannot enumerate row content. To see the
 > actual rows, query the row data source (SObject record query or
 > the original CSV).
 
-The first v3.2 honesty anchor. `sfi.decision_table_browse` returns
+The first honesty anchor. `sfi.decision_table_browse` returns
 `rows: null` AND surfaces this phrase first in `boundaries[]`. When
 the user asks "show me the actual rows in `AcmeIncomeThresholds`", surface
 this verbatim and the dataSourceType-specific hint. **Do NOT
@@ -563,13 +563,13 @@ says so and names the targeted retrieve that tells them apart.
 ### REST endpoint URLs are `parsed`, not verified (verbatim, IP chain)
 
 > REST endpoint URLs are surfaced with `parsed` confidence (from the
-> propertySetConfig JSON blob); v3.2 does NOT probe the URL, verify
+> propertySetConfig JSON blob); sf-intelligence does NOT probe the URL, verify
 > the endpoint is reachable, or resolve the Named Credential against
 > live state.
 
 Surfaced on EVERY `sfi.integration_procedure_chain` response. A
 `rest`-kind endpoint's URL is the verbatim `restPath` from the JSON;
-v3.2 does not confirm it resolves, does not check DNS / TLS, and does
+sf-intelligence does not confirm it resolves, does not check DNS / TLS, and does
 not resolve the Named Credential against live state. The architect
 verifies reachability separately.
 
@@ -598,7 +598,7 @@ to a vaulted SObject.
 ### propertySetConfig parsing brittleness
 
 The `propertySetConfig` blobs are HTML-entity-escaped JSON (the
-source XML carries `&quot;` everywhere). v3.2's extractors and tools
+source XML carries `&quot;` everywhere). The extractors and tools
 decode and parse them best-effort. A malformed blob (rare;
 Salesforce's exporter is reliable) becomes `null` / an empty
 `states[]` / `steps[]` list rather than an extractor failure. If a
@@ -677,7 +677,7 @@ Claude's flow:
 > - `callUserSearch` → IP `UserSearch_Existing`
 >   (`dispatchesOmniAction`, `parsed`).
 >
-> **Important v3.2 boundaries (verbatim):**
+> **Important boundaries (verbatim):**
 >
 > - **Widget order follows the JSON, not the designer.** widget
 >   breakdown parses the propertySetConfig JSON blob. FlexCard
@@ -694,10 +694,10 @@ Claude's flow:
 >   DataPack export placed under org-kb/source/vlocity/ (their nodes carry
 >   `sourceFormat: vlocity-datapack`), and the vault cannot tell whether that
 >   export is current. Mid-migration orgs may show partial coverage.
-> - **The OmniScript's runtime data is out of scope.** v3.2 walks the
+> - **The OmniScript's runtime data is out of scope.** sf-intelligence walks the
 >   OmniScript / IP / Card metadata XML. The actual user-entered data
 >   and runtime state lives in OmniProcessElement and related SObject
->   records; that is record-level data, out of scope for v0.1's
+> records; that is record-level data, out of scope for the
 >   read-the-metadata posture.
 > - **Apex calls are listed elsewhere.** A step that calls Apex is a
 >   `callsApex` edge from the OmniScript (with its methods and call
@@ -714,7 +714,7 @@ Claude's flow:
 The response leads with the answer (the button launches an
 OmniScript), follows the `dispatchesOmniAction` chain one hop, cites
 every canonical id with its edge confidence, and appends the verbatim
-v3.2 disclosures.
+OmniStudio disclosures.
 
 ## Anti-patterns
 
@@ -723,33 +723,33 @@ v3.2 disclosures.
 | Claiming "this org is on Industries Native" because all the files are `.os-meta.xml`. | The vault shows what was retrieved and exported, not which runtime the org runs — a Vlocity package with no export leaves its components out entirely. Check installed packages and `trust.limitations`, surface the disclosure verbatim, and do not infer the migration posture. |
 | Fabricating DecisionTable rows when the user asks "show me the rows". | `rows` is unconditionally `null` (Q179 anchor). Row data lives in CSV uploads / SObject records. Surface the verbatim refusal + the dataSourceType-specific hint; do NOT invent row content. |
 | Treating a `dispatchedActions[]` entry with `targetId: null` as "the OmniScript is broken". | A null `targetId` is a dangling reference — the target name is in the XML but no matching component is in the vault. Common for managed-package or cross-namespace targets. Surface the `targetRawName` and flag it as dangling, not as a defect. |
-| Reporting a REST endpoint URL as "this endpoint is reachable". | v3.2 surfaces the URL with `parsed` confidence from the JSON blob; it does NOT probe, verify, or resolve the Named Credential against live state. State the REST-reachability disclosure. |
+| Reporting a REST endpoint URL as "this endpoint is reachable". | sf-intelligence surfaces the URL with `parsed` confidence from the JSON blob; it does NOT probe, verify, or resolve the Named Credential against live state. State the REST-reachability disclosure. |
 | Collapsing the DataRaptor per-row `confidence` into a single "this mapper is parsed" claim. | Per-row confidence is the load-bearing axis. A `declared` row came from a flat XML element; a `parsed` row used a designer-controlled colon-alias path that may not resolve to a real SObject. Cite each row's confidence; do not collapse. |
 | Dispatching `sfi.omniscript_flow` against an id that resolves to an OmniIntegrationProcedure. | The tool surfaces `invalid-query` "id resolved to type X, not Y". OmniScripts and IPs share the `<omniProcessElements>` shape but are distinct types with distinct tools. Re-route to `sfi.integration_procedure_chain`; do not retry. |
 | Reporting a managed-package OmniScript as absent because a tool returned `component-not-found`. | Managed-package components are records: the vault has them only from a DataPack export under `org-kb/source/vlocity/`. Say it is missing for want of an export and give the recipe; never conclude it does not exist. |
 | Asserting "this FlexCard has no widgets" when the breakdown returns an empty `states[]`. | An empty `states[]` may mean a malformed / hand-edited / non-`layer-0` propertySetConfig (the best-effort parse degrades to empty rather than failing). Surface the propertySetConfig-parsing disclosure; suggest the user check the raw blob. |
 | Skipping the verbatim boundary on a "short" or "obvious" response. | The disclosures are the buyer's protection against treating a metadata read as runtime truth. ALWAYS surface every applicable disclosure, even when the answer feels complete. |
-| Routing "what calls this IP?" to a v3.2 tool. | The v3.2 tools walk OUTGOING `dispatchesOmniAction` edges (what THIS component dispatches). "What calls INTO this" is an incoming-edge walk — defer to `developer-find-anywhere` / `architect-impact-analysis`. |
+| Routing "what calls this IP?" to a  tool. | The  tools walk OUTGOING `dispatchesOmniAction` edges (what THIS component dispatches). "What calls INTO this" is an incoming-edge walk — defer to `developer-find-anywhere` / `architect-impact-analysis`. |
 
 ## See also
 
-- `architect-integration-topology` — the v1.5 declared-integration
+- `architect-integration-topology` — the declared-integration
   tier (`integration_map`, `event_subscribers`, the async / API
-  property booleans, the endpoint catalog). v3.2's
+  property booleans, the endpoint catalog).
   `sfi.integration_procedure_chain` ADDS OmniStudio Rest Action
   endpoints to that surface; for the org-wide "what external
-  endpoints exist" question, the topology skill consults v3.2's tool.
-  v3.2 EXTENDS but does not replace — defer there for the declared
+  endpoints exist" question, the topology skill consults the tool.
+  This skill EXTENDS but does not replace — defer there for the declared
   integration tier.
 - `developer-find-anywhere` — for "what calls
   `Acme_ValidateMember`?" (incoming `dispatchesOmniAction`
-  edges). v3.2's edges feed the find-anywhere walk without a special
+  edges). The edges feed the find-anywhere walk without a special
   routing case — the edge type is in the union.
 - `architect-impact-analysis` — for "what breaks if I delete
-  `AcmeExtractContact`?". v0.2's `sfi.get_impact` walks every
+  `AcmeExtractContact`?". `sfi.get_impact` walks every
   incoming edge, including `dispatchesOmniAction`.
 - `developer-impact-and-reachability` — for "what breaks if I delete
-  this OmniScript / IP". v2.7's walks consume v3.2's
+  this OmniScript / IP". The walks consume the
   `dispatchesOmniAction` edges directly.
 - `business-user-orientation` — for the business-user phrasing ("what
   happens when I click Submit on AcmeEnrollment"). That routes here
@@ -809,4 +809,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, call `sfi.route_question` first — in the default hybrid mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer`, which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

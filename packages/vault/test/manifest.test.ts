@@ -11,6 +11,8 @@ import {
   backfillCoverageInMemory,
   buildCoverageEntries,
   ENTERPRISE_NOT_MODELED_TYPES,
+  notModeledCoverageEntries,
+  notModeledCoverageTypes,
   loadManifest,
   rankUncoveredFamilies,
   readCoverageEntries,
@@ -464,6 +466,32 @@ describe('coverage fields (enterprise trust contract)', () => {
     expect(summary.coveredTypes).toEqual(['CustomObject']);
     // missingCoverage is the documented union — ListView still belongs there once.
     expect(summary.missingCoverage).toEqual(['ListView']);
+  });
+
+  it('notModeledCoverageTypes and notModeledCoverageEntries stay aligned with summarizeCoverage (V6-2)', () => {
+    const manifest: ExtendedVaultManifest = {
+      ...sampleManifest(),
+      skippedDirectories: { listViews: 12 },
+      coverage: [
+        {
+          type: 'CustomObject',
+          requested: true,
+          retrieved: 1,
+          errored: false,
+          neverModeled: false,
+        },
+        {
+          type: 'ListView',
+          requested: true,
+          retrieved: 12,
+          errored: false,
+          neverModeled: true,
+        },
+      ],
+    };
+    const types = notModeledCoverageTypes(manifest);
+    expect(types).toEqual(summarizeCoverage(manifest).notModeledTypes);
+    expect(notModeledCoverageEntries(manifest).map((e) => e.type)).toEqual([...types]);
   });
 
   it('CR-P3-3: a confirmed-clean empty type (retrieveConfirmed:true) is COMPLETE, not partial', () => {

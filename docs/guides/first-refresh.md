@@ -75,8 +75,11 @@ your-dx-repo/
 `/sfi-init` appends `org-kb/source/` and `org-kb/graph/` to
 `.gitignore`. Both directories hold regenerable artifacts — the raw DX
 retrieve output and the DuckDB graph file — so they don't belong in git.
-The committed half is `org-kb/components/` and `org-kb/meta/`; that's
-where the team-shared value of the vault lives.
+If you commit the vault, commit `org-kb/components/` plus
+`org-kb/meta/manifest.json`, `meta/config.json` and `meta/version.txt`.
+Do not commit the rest of `meta/`: `profile-name-map.json` (Profile Ids and
+labels), annotations and the demand queue hold org data, and `sfi init` does
+not ignore them for you.
 
 A summary at the end confirms what was done:
 
@@ -243,8 +246,8 @@ A refresh ends in one of three states, printed at the top of the summary:
   environment problem (the retrieve could not authenticate, or the source
   tree is empty), not the indexing pipeline.
 
-If a refresh ends `failed`, run `/sfi-status` and read the `Fatal:` line and
-the manifest's `errors` array before re-running. To re-extract from the
+If a refresh ends `failed`, read the `Fatal:` line and the per-file failure
+list in the refresh summary before re-running. To re-extract from the
 source tree you already pulled — without another network round-trip — re-run
 with `--no-pull` (see §8).
 
@@ -299,7 +302,7 @@ Once refresh prints `success` (or `partial` with errors you've read),
 commit two paths:
 
 ```sh
-git add org-kb/components/ org-kb/meta/
+git add org-kb/components/ org-kb/meta/manifest.json org-kb/meta/config.json org-kb/meta/version.txt
 git commit -m "Initial SfIntelligence vault for my-org-prod"
 ```
 
@@ -326,7 +329,7 @@ in the same DX repo and try one of:
 - "Show me the validation rules on Contact."
 - "What's our naming convention for custom fields?"
 
-Claude will use `sfi.list_components`, `sfi.search_components`,
+Claude will use `sfi.search_components`, `sfi.list_components` (through `sfi.run_analysis`),
 `sfi.get_component`, and `sfi.get_edges`, citing canonical component
 IDs (`CustomObject:Account`, `ValidationRule:Contact.Phone_Required`)
 as it goes.
@@ -404,8 +407,8 @@ If you need to drop a deletion without pulling again: delete the stale
 file(s) under `org-kb/source/` and run `/sfi-refresh --no-pull` (full,
 not scoped).
 
-If a refresh ends `failed`, read the `Fatal:` line and the manifest's
-`errors` array (§4) before re-running.
+If a refresh ends `failed`, read the `Fatal:` line and the failure list in
+the refresh summary (§4) before re-running.
 
 ## 9. Sharing a vault externally
 
@@ -445,7 +448,11 @@ write happens under `--out`.
   tool surface, edge semantics, component/edge coverage.
 - [`docs/guides/installation.md`](./installation.md) — re-installing
   or moving the plugin between machines.
+- [`docs/guides/upgrading.md`](./upgrading.md) — what to do after
+  moving to a newer release (a refresh is part of it).
+- [`docs/guides/troubleshooting.md`](./troubleshooting.md) — the errors
+  a refresh or a tool can return.
 
 If something here doesn't match what you see, run `/sfi-status` and read
 the manifest — `refreshedAt`, the `sourceTreeHash`, the per-type counts, and
-the `errors` array (§4) usually surface the cause.
+the `coverage` rows usually surface the cause.

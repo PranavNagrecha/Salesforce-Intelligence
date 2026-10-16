@@ -1,16 +1,16 @@
 ---
-description: Set up SfIntelligence for this Salesforce org repository.
+description: Set up sf-intelligence for this Salesforce org repository.
 argument-hint: "[--target-org ALIAS] [--vault PATH] [--force]"
 ---
 
-You are about to initialize SfIntelligence for this repository.
+You are about to initialize sf-intelligence for this repository.
 
 ## Running the CLI
 
 The plugin installs the MCP server, not the `sfi` command. Before the first
 command, run `command -v sfi` via the Bash tool. If it prints a path, run the
 commands below as written. If it prints nothing, run every `sfi …` command
-below as `npx -y sf-intelligence@0.5.0 …` instead, with the same arguments.
+below as `npx -y sf-intelligence@0.6.0 …` instead, with the same arguments.
 The Bash tool has no terminal, so the CLI cannot prompt: always pass the
 flags it would otherwise ask for.
 

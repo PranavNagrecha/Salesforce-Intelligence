@@ -18,9 +18,9 @@ hosted UI, certified accuracy guarantees, always-on cloud sync, and deploy
 tooling. Whether that trade is right for you is the whole question this doc
 tries to answer fairly.
 
-The tool names below are real — they come from the `V01_TOOLS` roster in
-`packages/mcp/src/tools/index.ts`. Run `sfi.capabilities` for the live tool
-count and category map. Org examples (`Account`, `Payment__c`, etc.) are generic
+The tool names below are real; `eval/product-manifest.json` lists every one.
+Most of them run through `sfi.run_analysis` under the default profile. Org
+examples (`Account`, `Payment__c`, etc.) are generic
 placeholders, not anything from a real vault.
 
 Public compare pages (same framing, scannable):
@@ -134,7 +134,7 @@ impact). The shipped surface is wider than those three labels. Named jobs:
   scheduled jobs, etc.) — never ambient; consent-gated and disclosed
 
 The architecture claim stays the original three fused categories on **one**
-graph. The jobs above are how that graph shows up for buyers who search
+graph. The jobs above are how that graph shows up when the question is
 "tech debt," "AI-ready org," or "agent readiness" rather than "data dictionary."
 
 ---
@@ -182,7 +182,7 @@ trials on their site — we do not mirror prices here).
 **When to prefer them:** shared governance dashboard, BA/process tooling
 (UPN etc.), enterprise SLAs, team collaboration over a vendor cloud model.
 **sf-intelligence edge:** free, local vault, no per-seat license, confidence-
-tagged edges, source-available. MCP-to-a-dependency-model is no longer unique
+tagged edges, open source (MIT). MCP-to-a-dependency-model is no longer unique
 once their server ships — locality + honesty + price remain the contrast.
 See [vs Elements.cloud](https://sfi.auditforce.cloud/compare/elements-cloud).
 
@@ -196,9 +196,10 @@ changelog). No MCP story found in their public changelog as of mid-2026 —
 usable from a browser product, not as a local MCP server in Claude/Cursor.
 
 **When to prefer them:** you want a polished hosted chat product, vendor
-security questionnaire answers (ISO), and zero local setup. **Do not win on
-"security objection to cloud" alone** — their cert closes that for many
-buyers. Win on **MCP-native + offline + graph depth + free OSS vs per-seat**.
+security questionnaire answers (ISO), and zero local setup. If your only
+concern with a cloud product is the security review, their certification may
+already settle it. **When to prefer sf-intelligence:** MCP-native in your
+editor, offline by default, graph depth, and free rather than per-seat.
 See [vs dx0](https://sfi.auditforce.cloud/compare/dx0).
 
 ### Hubbl
@@ -275,14 +276,14 @@ Gearset/Copado/DX MCP still ship the change.
 1. **Depth you can verify, offline.** Not "privacy alone" (Metazoa shares that
    pitch) and not "MCP alone" (Salesforce and Elements share that path). The
    combination: local vault + dependency graph + confidence tags + refusal
-   discipline + free source-available package.
+   discipline + free open-source (MIT) package.
 2. **All answer jobs on one graph.** Dictionary → SAST → impact → exposure
    audit in one conversation, one data model — not three SaaS exports.
 3. **Natural language in the editor.** MCP server driven from Claude Code /
    Cursor / other hosts. Skills route to `sfi.*` tools and cite canonical
    component IDs.
-4. **Free (MIT).** No per-seat meter. Run `sfi.capabilities`
-   for the live roster.
+4. **Free (MIT).** No per-seat meter. `sfi.list_analyses` lists the
+   roster.
 5. **Two graphs, joined — reasoning, not just retrieval.** The grounded org
    graph (graph A) is joined to a curated, org-independent **concept model**
    (graph B — master-detail cascade, junction objects, read-only formula/roll-up
@@ -296,7 +297,8 @@ Gearset/Copado/DX MCP still ship the change.
    model you cannot audit; this reasons in a rule engine you can read. The rules
    that name an actionable finding now carry **cited, dependency-ordered
    remediation**: `interpret` emits ordered fix steps grounded in the same ids and
-   stamped with the same confidence as the claim, and `synthesize_answer` folds
+   stamped with the same confidence as the claim, and the host (or
+   `sfi.synthesize_answer` through `sfi.run_analysis`) folds
    them into a FIX / NEXT answer — attributed, hedged, and honest. It ships the
    REMEDIATION HALF only: the steps never assert the finding is *closed* (no
    `what_if_*` tool mutates the sharing/CRUD/keyword shapes the engine reasons
@@ -308,15 +310,16 @@ The wedge is not "better SAST than Clayton" or "better deploys than Gearset."
 It is **convergence + locality + honesty** after first-party MCP made shallow
 access free — now with a second, org-independent reasoning graph joined on top.
 
-### Market framing buyers already use
+### Preparing an org for AI agents
 
 Tech debt is a top admin pain in 2026 industry commentary, and "get the org
-AI-ready / agent-ready" is a common buying trigger for Hubbl- and
-Elements-style audits. sf-intelligence already ships the kit
-(`sfi.tech_debt_score`, `sfi.org_risk_report`, `sfi.unused_fields_deep`,
-`sfi.find_dead_code`, `sfi.ai_exposure_report`, doc generators) — package it as
-an [agent-readiness audit](https://sfi.auditforce.cloud/use-cases/agent-readiness-audit),
-not as three abstract categories.
+AI-ready / agent-ready" is a common reason teams buy Hubbl- or Elements-style
+audits. sf-intelligence ships the same kit (`sfi.tech_debt_score`,
+`sfi.org_risk_report`, `sfi.unused_fields_deep`, `sfi.find_dead_code`,
+`sfi.ai_exposure_report` and the doc generators, all through
+`sfi.run_analysis`); the
+[agent-readiness audit](https://sfi.auditforce.cloud/use-cases/agent-readiness-audit)
+walks through using them together.
 
 ---
 

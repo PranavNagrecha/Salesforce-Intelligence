@@ -21,11 +21,13 @@ import { join } from 'node:path';
 
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
-import type { VaultManifest } from '@sf-intelligence/contracts';
+import {
+  ORG_METADATA_CONTENT_POLICY_DISCLOSURE,
+  type VaultManifest,
+} from '@sf-intelligence/contracts';
 import { saveManifest, vaultPaths } from '@sf-intelligence/vault';
 
-import type { Context } from '../../src/server.js';
-import { SERVER_INSTRUCTIONS, buildContext, createServer, shutdown } from '../../src/server.js';
+import { SERVER_INSTRUCTIONS, buildContext, createServer, shutdown, type Context } from '../../src/server.js';
 import { oneLiner } from '../../src/tools/catalog-gateway.js';
 import { V01_TOOLS, advertisedTools } from '../../src/tools/index.js';
 
@@ -93,6 +95,8 @@ describe('core tools/list stays inside its token budget', () => {
     for (const rule of ['sfi.resolve', 'sfi.run_analysis', 'sfi.route_question', 'sfi.live_consent', 'Empty is not none']) {
       expect(SERVER_INSTRUCTIONS).toContain(rule);
     }
+    expect(SERVER_INSTRUCTIONS).toContain(ORG_METADATA_CONTENT_POLICY_DISCLOSURE);
+    expect(SERVER_INSTRUCTIONS).toContain('contentPolicy: "org-metadata"');
   });
 
   it.each(advertisedTools('core').map((t) => [t.name, t] as const))(

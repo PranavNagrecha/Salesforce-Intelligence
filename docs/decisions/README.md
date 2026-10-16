@@ -4,10 +4,9 @@ Load-bearing decisions a maintainer must understand before changing the
 codebase. Each ADR captures the *why* — the context, the alternatives, and the
 consequences — for a decision that would be expensive to reverse.
 
-These records are descriptive of decisions already in force (recorded
-retroactively during Phase-10 hardening), not proposals. Don't delete an ADR;
-when a decision changes, write a new one that supersedes it
-(see `documentation-and-adrs`).
+These records are descriptive of decisions already in force, not proposals.
+Don't delete an ADR; when a decision changes, write a new one that supersedes
+it and link the two.
 
 | ADR | Decision | Touches |
 | --- | --- | --- |
@@ -20,6 +19,7 @@ when a decision changes, write a new one that supersedes it
 | [ADR-007](./ADR-007-canonical-response-envelope.md) | Canonical `{data, vaultState}` envelope + `componentId` id key; additive, gate-guarded | `mcp/tools/index`, `mcp/response-consistency`, `check-response-consistency` |
 | [ADR-008](./ADR-008-deterministic-concept-model-reasoning.md) | Deterministic concept-model reasoning: an org-independent Concept Model joined against the vault via `sfi.interpret`; claim confidence is a second axis floored by edge confidence | `mcp/model/*.yaml`, `mcp/knowledge`, `mcp/tools/interpret`, `synthesize-answer` |
 | [ADR-009](./ADR-009-selector-scope-honesty.md) | Scope-aware tools accept natural selectors, echo the resolved `appliedScope`, and refuse conflicts/misses with `invalid-query` — byte-identical when unscoped | scope-aware `mcp/tools/*`, `docs/configuration.md` § input scope |
+| [ADR-010](./ADR-010-core-profile-and-run-analysis.md) | A 16-tool default (`core`) profile; every other analysis runs through the `sfi.run_analysis` gateway with identical output; routing is the host model's job | `mcp/tools/tool-profile`, `mcp/tools/roster`, every skill and doc that names a tool |
 
 ## Relationships
 
@@ -33,4 +33,7 @@ exceed the weakest edge it rests on. ADR-002 (offline/live boundary) and ADR-006
 ADR-003's tools emit. ADR-009 (selector-scope honesty) extends ADR-007: ADR-007
 fixed the canonical *name* of the target id; ADR-009 fixes the *behaviour* when a
 caller scopes by any natural selector — honoured and echoed, or refused, never
-silently mis-scoped.
+silently mis-scoped. ADR-010 (core profile) changes how a tool is *reached*,
+not what it returns: the gateway re-uses the same dispatch, so ADR-005's byte
+budget, ADR-007's envelope and ADR-009's scope contract apply unchanged
+through `sfi.run_analysis`.

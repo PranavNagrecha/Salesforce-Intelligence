@@ -14,7 +14,9 @@ router. For what end users can ask see
 The one-paragraph version: **the pipeline is good at putting the right tool in
 the shortlist (~90%) and no better than a coin flip at putting it first (~60%).**
 That is by design — `sfi.route_question` advises and the host LLM decides — and
-every number in §13 is a variation on it.
+every number in §13 is a variation on it. Under the default `core` profile
+`sfi.route_question` is not advertised; a host runs it through
+`sfi.run_analysis { name: 'sfi.route_question', args: { question } }` (§7).
 
 ---
 
@@ -43,7 +45,7 @@ returns, for one plain-language question:
 | --- | --- | --- |
 | `toolCandidates` | **Primary** | Meaning-ranked shortlist of `sfi.*` tools (offline TF-IDF over the tool catalog — no network, no embeddings service). Each row carries the tool, **`answers`** (the tool's one-line summary) and its **`category`**, its plane, whether it needs the live org, a confidence band, and `cosine` — the raw pre-fusion semantic score (`0` for rows inserted purely from a regex route hint), so you can tell real semantic support from rule assertion. |
 | `route` | **Advisory hint** | The deterministic route: an intent, ordered `route.tools` (with step ids and `dependsOn` edges for compound questions), plane, confidence, `suggestedArgs`, disclosures. A suggestion to inform your pick — never a command. |
-| `guidance` | Informative | One line stating the loop the host owns: read the candidates → resolve any named component → pick/sequence the tool(s) → run them → ground via `sfi.synthesize_answer`. |
+| `guidance` | Informative | One line stating the loop the host owns: read the candidates → resolve any named component → pick/sequence the tool(s) → run them → ground the answer in the ids they return. |
 
 `answers` exists because the default tool profile is `core`, which advertises 16
 of 226 tools. For every other candidate the shortlist would otherwise name a tool
@@ -91,7 +93,7 @@ way to make a tool findable is to change this document:
 | --- | --- |
 | tool **name** words | `sfi.find_dead_code` becomes `find dead code` |
 | `TOOL_KEYWORDS` | curated per-tool overlay for tools whose prose does not echo how people ask |
-| `FUNNEL_UTTERANCES` | **2,260 ask-phrasings across 226 tools** — the primary lever |
+| `FUNNEL_UTTERANCES` | **the curated ask-phrasings across 226 tools** (several per tool) — the primary lever |
 | `tool.description` | the host-facing contract, **boilerplate-stripped** first |
 | capability map | `tools/capabilities.ts` CATEGORIES title / description / examples |
 | `INTERPRET_CONCEPT_CARDS` | 48 cards giving `sfi.interpret` per-concept documents |
@@ -148,9 +150,7 @@ sub-bar lift".
 
 Regenerating the static assets and enabling the gate was re-measured for this
 document: **recall identical at every K**. The reason is visible in the raw
-embedding ranking — every tool vector lands inside a **0.51-0.56** cosine band
-(measured when the index held 206 vectors; it holds 217 today and the shape is
-unchanged). A distilled static model mean-pools its token rows, so a couple of
+embedding ranking — every tool vector lands inside a **0.51-0.56** cosine band. A distilled static model mean-pools its token rows, so a couple of
 hundred long, jargon-dense documents collapse to nearly the same point. The RRF
 fusion is deliberately asymmetric (`RRF_K_LEX = 10`, `RRF_K_EMBED = 60`) so the embedding can only
 promote a lexical near-miss, never displace a lexical hit — which is why turning
@@ -182,8 +182,8 @@ deliberate. It is a REPORTING gap: the ordering key is invisible, so a reader
 candidate from a funnel-found one. If you are debugging "why is this tool first",
 check whether a rule named it before you touch a single funnel weight.
 
-Note the asymmetry this creates for the goldset harness: it grades
-`route.tools[0]`, which on an `unrouted` question is the funnel-promotion
+Note the asymmetry this creates for any top-1 measurement that grades
+`route.tools[0]`: on an `unrouted` question that is the funnel-promotion
 fallback, NOT `candidates[0]`. A question can therefore be graded a miss while
 the shortlist ranks the correct tool first and the host answers correctly.
 
@@ -445,37 +445,20 @@ spine (§7).
 
 ## 13. Measured behaviour
 
-Three harnesses, three different questions. **Always state which, and always
-state K** — the same stack reads as 98.8% or 60% depending on both.
+Two numbers describe routing, and they must always be quoted together with
+the K they were measured at:
 
-| Harness | Corpus | What it grades |
-| --- | --- | --- |
-| `router-goldset.mjs` | 328 labelled questions | full pipeline **top-1**, strict |
-| `router-recall.mjs` | same 328 | raw funnel **recall@K** |
-| `funnel-generalization.mjs` | 1,000 template-generated FRESH questions | raw funnel **recall@K** |
+- **Recall@8 around 90%** — on fresh, template-generated questions the right
+  tool is in the eight-row shortlist about nine times in ten.
+- **Recall@1 around 60%** — the right tool is *first* about six times in ten.
 
-Current numbers:
+A hand-written sample of a few dozen domain questions lands in the same
+place. The two numbers describe the same system at different K; quoting
+either without K is misleading.
 
-| Measurement | @1 | @3 | @8 |
-| --- | --- | --- | --- |
-| Raw funnel, tuned goldset (328) | 60.1% | 83.8% | 94.5% |
-| Raw funnel, fresh generalization (1000) | 60.9% | 80.4% | 89.4% |
-| Raw funnel, hand-written domain questions (30) | 56.7% | 83.3% | 96.7% |
-| **Full pipeline, tuned goldset (328)** | **98.8%** | — | — |
-| **Full pipeline, fresh questions (300)** | **60.0%** | 82.7% | 92.0% |
+### What the deterministic layer contributes
 
-### The two numbers you must not confuse
-
-**`router-goldset` 98.8% is tuning, not accuracy.** It grades the full pipeline
-on the set the 241 intents were fitted to. On fresh questions the same pipeline
-scores **60.0%** — a **38.8-point generalization gap**. Never quote the goldset
-top-1 as the product's routing accuracy. BUILD-CONTRACT already says it: recall
-is the **authority**, the goldset is a **tripwire**, and nothing is ever tuned on
-the tripwire.
-
-### What the deterministic layer actually contributes
-
-Measured on the same 300 fresh questions, raw funnel versus full pipeline:
+Measured on 300 fresh questions, raw funnel versus full pipeline:
 
 | | raw funnel | + deterministic layer |
 | --- | --- | --- |
@@ -483,69 +466,46 @@ Measured on the same 300 fresh questions, raw funnel versus full pipeline:
 | top-3 | 242 (80.7%) | 248 (82.7%) |
 | top-8 | 269 (89.7%) | 276 (92.0%) |
 
-The regex layer fires on **96/300 (32%)** of fresh questions and is correct on
-**81 of those 96 (84%)** — yet nets **−3 at top-1** while adding **+7 at top-8**.
-Where it is right the funnel usually had it right already; where it is wrong it
-displaces a correct funnel top-1. **It earns its keep as a shortlist
-contributor, not as a decider.**
+The regex layer fires on about a third of fresh questions and is right on most
+of those, yet nets **−3 at top-1** while adding **+7 at top-8**. Where it is
+right the funnel usually had it right already; where it is wrong it displaces a
+correct funnel top-1. **It earns its keep as a shortlist contributor, not as a
+decider.** On the phrasings it was written against it is never wrong, and on
+genuinely fresh phrasing it fires on about one question in seven: a lookup
+table, not a generaliser. A curated intent table is a perfectly good way to
+nail known phrasings, but a number measured on those same phrasings is tuning,
+not accuracy, and is never the product's routing accuracy.
 
 ### Per-tool reachability
 
-Querying each tool by its own first utterance: rank-1 **75.5%**, top-8 **96.7%**
-(measured when 212 tools had utterances; 226 have them now). Five registered
-tools carry no utterances at all, and all five are hidden from `tools/list` on
-purpose:
+Querying each tool by its own first utterance puts it first about three times
+in four and in the top eight nearly always. Five registered tools carry no
+utterances, and all five are hidden from `tools/list` on purpose:
 `release_readiness_report`, `churn` and `cdc_subscribers` each name their
 survivor in their own description (`cdc_subscribers` folded into
-`sfi.event_topology`), and `find_apex_usages` folded into
-`sfi.find_code_usages` with a `nodeTypes` narrow. Routing to a retired tool
-would be the defect, not the fix. The fifth, `field_cleanup_candidates`, is now
-hidden: it folded into `sfi.unused_fields_deep` (`format: 'cleanup'`).
-
-### What the deterministic layer memorised
-
-The same activation measurement across three corpora makes the fitting visible:
-
-| corpus | regex fires | correct when it fires |
-| --- | --- | --- |
-| tuned goldset (328) | 165/328 (50.3%) | **165/165 — 100.0%** |
-| fresh (1,000 rows) | 296/1000 (29.6%) | 256/296 (86.5%) |
-| fresh, **deduplicated** (563) | **77/563 (13.7%)** | 65/77 (84.4%) |
-
-A layer that is **never wrong** on the set it was fitted to and fires on **one
-question in seven** of genuinely fresh phrasing is a lookup table, not a
-generaliser. This is not a criticism of the design — a curated intent table is a
-perfectly good way to nail known phrasings — but it is the reason the goldset
-number cannot be quoted as accuracy.
+`sfi.event_topology`), `find_apex_usages` folded into `sfi.find_code_usages`
+with a `nodeTypes` narrow, and `field_cleanup_candidates` folded into
+`sfi.unused_fields_deep` (`format: 'cleanup'`). Routing to a retired tool
+would be the defect, not the fix.
 
 ### Honest limits of these numbers
 
-Every caveat below was verified against the corpora themselves, not inferred.
-
-- **The "1,000 fresh questions" are 563 distinct strings.** 437 rows are exact
-  duplicates — a padding loop recycles templates until the array reaches 1,000,
-  and one string appears 9 times. Deduplicating drops recall@8 from 89.4% to
-  **84.7%**. The duplicated rows are also disproportionately regex-matched, which
-  is why activation falls from 29.6% to 13.7% on the deduplicated set.
-- **Grading accepts a tool FAMILY, not a tool.** Each row carries a hand-written
-  list of acceptable tools (mean 2.22, max 4). A "hit" means any family member
-  reached the top-K.
-- **Only 67 distinct tools are ever accepted anywhere in the corpus**, out of the
-  211 the funnel indexes. **144 tools have zero generalization coverage** — the
-  harness cannot regress what it never grades. Its accept-lists also still name
-  `sfi.cdc_subscribers` and `sfi.find_apex_usages`, two tools now hidden from
-  `tools/list`.
-- **Both recall harnesses stop at `semanticCandidates`** — the RAW funnel. The
-  list a host actually receives is built by `buildFunnelCandidates`, which fuses
-  the regex route, de-crowds what-if families, applies the mode rerank and breaks
-  plane ties before slicing. Those stages are **ungated for recall**: a change
-  that broke the fusion outright would not move either recall number.
-- **The corpus is template-generated** from a closed vocabulary (18 objects, 16
-  fields, 7 profiles, 7 classes, 5 flows, 3 events). It proves generalization
-  beyond the goldset and nothing about real user phrasing.
-- Recall@8 around 90% and recall@1 around 60% describe the same system. Quoting
-  either without K is misleading.
-- Where a shortlist contains a *better* tool than the label, the harness scores it
+- **The fresh corpus is template-generated** from a closed vocabulary (a few
+  dozen objects, fields, profiles, classes, flows and events), and many rows
+  are exact duplicates. It proves generalization beyond the tuning set and
+  nothing about real user phrasing; deduplicated, recall@8 drops by about five
+  points.
+- **Grading accepts a tool family, not a tool.** Each row carries a short
+  list of acceptable tools; a hit means any of them reached the top-K.
+- **Only about a third of the tools are ever accepted anywhere in the
+  corpus.** The rest have no generalization coverage, and a measurement cannot
+  regress what it never grades.
+- **The recall measurements stop at the raw funnel.** The list a host receives
+  is built by `buildFunnelCandidates`, which fuses the regex route, de-crowds
+  what-if families, applies the mode rerank and breaks plane ties before
+  slicing. A change that broke that fusion outright would not move either
+  recall number.
+- Where a shortlist contains a *better* tool than the label, it is scored
   wrong.
 
 ---
@@ -583,7 +543,7 @@ The list people most often assume wrongly:
   `sfi.trace_debug_log` at **0.503**, far above the 0.26 floor, while
   `detectRefusalShape` classifies the same string `write-imperative` and the route
   returns `tools: []`. The verb, not the subject, is what the gate reads.
-- **12 of the product's own 2,138 funnel utterances are gated by its own refusal
+- **A dozen of the product's own funnel utterances are gated by its own refusal
   detectors** (11 `write-imperative`, 1 `out-of-scope`). These are the phrasings the
   corpus teaches the funnel to expect, so a user who asks exactly the way the product
   advertises is refused. Among them:
@@ -606,17 +566,13 @@ The list people most often assume wrongly:
 
 ## 15. Changing routing safely
 
-**Definition of done for a new tool.** A gold row plus funnel reachability are
-part of the component, not follow-up work. A tool nothing can route to does not
-exist. A missing gold row is a TEST bug: backfill additively, never re-map an
-existing row to make a change look clean.
+**Definition of done for a new tool.** Ask-phrasings (`FUNNEL_UTTERANCES`) and
+a reachability check are part of the component, not follow-up work. A tool
+nothing can route to does not exist. Run the new phrasings through the refusal
+gates too (§14).
 
-**Which number to move.** Report **@1 and @8**. Recall@8 is already around 90%;
-a change that lifts @8 while flattening @1 has helped nobody.
-
-**The harness hierarchy.** `funnel-generalization` (1,000 fresh) is the
-authority. `router-recall` is the reachability floor. `router-goldset` is a
-tripwire. Never tune on the tripwire.
+**Which number to move.** Report **@1 and @8**. Recall@8 is already around
+90%; a change that lifts @8 while flattening @1 has helped nobody.
 
 **Sample size.** A hand-written sample will confirm whatever you expect. The
 stemmer change measured +10 at rank-1 on 30 questions and −23 on 1,000. Nothing
@@ -627,25 +583,13 @@ scores for tools you did not touch. Two shipped regressions came from exactly
 this. If a disclosure must appear on several tools, route it through
 `corpus-boilerplate.ts` rather than pasting it into several descriptions.
 
-**Adding utterances is not free.** A wrapper tool given utterances that duplicate
-its own dependency's mostly steals routing from the dependency. Check what
-already covers the phrasing before adding.
+**Adding utterances is not free.** A wrapper tool given utterances that
+duplicate its own dependency's mostly steals routing from the dependency.
+Check what already covers the phrasing before adding.
 
-**Routing quality is NOT defended by CI.** A negative search over `.github/`
-finds zero references to `router-goldset`, `router-recall`,
-`funnel-generalization`, `sf-intelligence-qa` or `commit-gate`. GitHub CI runs
-only `pnpm eval:routing-gate`. The three harnesses above live in the LOCAL
-commit gate, which a human must remember to run. Treat a green CI badge as
-saying nothing about routing.
-
-**The per-question guards are partial, and one command erases them.**
-`config/router-recall-baseline.json` records `total: 115` and a `passing` list of
-103, written 2026-06-16; the fixture now holds **328** rows. So 225 rows have no
-per-question protection — only the aggregate floor. And
-`router-goldset.mjs --update-baseline` writes the new baseline and `return`s
-**before** the regression check, so a ratchet run always exits 0 and silently
-drops any currently-failing row out of the guarded set. Ratchet deliberately,
-never as housekeeping.
+**Routing quality is not defended by the public CI.** GitHub CI runs
+`pnpm eval:routing-gate`, a tripwire. The recall measurements above are run by
+hand before a release. Treat a green CI badge as saying nothing about routing.
 
 **Two fixes already measured and refused** — do not re-attempt without new
 evidence: enabling the embeddings (§4), and correcting the plural stemmer (§3).

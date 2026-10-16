@@ -453,6 +453,54 @@ describe('resource reference edges (P14-USAGE-label-static-graph)', () => {
   });
 });
 
+describe('V6-6 — LWC markup field bindings', () => {
+  it('emits declared readsFrom/writesTo and unresolvedFieldBindings for Demo_ markup', async () => {
+    const html = `<template>
+  <lightning-record-edit-form object-api-name="Demo_Obj__c" fields="Demo_Field__c">
+    <lightning-input-field field-name="Demo_Input__c"></lightning-input-field>
+    <lightning-output-field field-name="Demo_Output__c"></lightning-output-field>
+  </lightning-record-edit-form>
+  <lightning-input-field field-name="Demo_Bare__c"></lightning-input-field>
+</template>`;
+    const { tempDir, bundleDir } = await writeTempLwcBundle('Demo_Markup', {
+      htmlBody: html,
+    });
+    try {
+      const result = await extractLightningComponentBundle(bundleDir);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const owner = 'LightningComponentBundle:Demo_Markup';
+      expect(result.value.edges).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            fromId: owner,
+            toId: 'CustomField:Demo_Obj__c.Demo_Field__c',
+            edgeType: 'writesTo',
+            confidence: 'declared',
+            properties: expect.objectContaining({ mechanism: 'markup-binding' }),
+          }),
+          expect.objectContaining({
+            toId: 'CustomField:Demo_Obj__c.Demo_Input__c',
+            edgeType: 'writesTo',
+          }),
+          expect.objectContaining({
+            toId: 'CustomField:Demo_Obj__c.Demo_Output__c',
+            edgeType: 'readsFrom',
+          }),
+        ]),
+      );
+      expect(
+        result.value.edges.some((e) => e.toId === 'CustomField:Demo_Obj__c.Demo_Bare__c'),
+      ).toBe(false);
+      expect(result.value.nodes[0]?.properties['unresolvedFieldBindings']).toEqual([
+        'Demo_Bare__c',
+      ]);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('schema-import field edges (WOW-11)', () => {
   it('FAIL-BEFORE/PASS-AFTER: a @salesforce/schema import mints a DECLARED field edge stamped schema-import', async () => {
     const { tempDir, bundleDir } = await writeTempLwcBundle('invoiceLink', {

@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: Commons Clause"></a>
+  <a href="./LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
   <a href="https://www.npmjs.com/package/sf-intelligence"><img src="https://img.shields.io/npm/v/sf-intelligence.svg?color=cb3837&label=npm" alt="npm version"></a>
   <a href="https://github.com/PranavNagrecha/Salesforce-Intelligence/actions/workflows/ci.yml"><img src="https://github.com/PranavNagrecha/Salesforce-Intelligence/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
   <img src="https://img.shields.io/badge/node-%E2%89%A520-339933.svg" alt="Node.js >= 20">
@@ -13,36 +13,47 @@
 
 # sf-intelligence
 
-Ask your AI what breaks before you change Salesforce. Offline, read-only, cited answers.
-**Website, demo and docs: [sfi.auditforce.cloud](https://sfi.auditforce.cloud)**
+**Know what breaks before you change Salesforce.** Ask the AI assistant you already use about your org. sf-intelligence runs on your computer, never writes to your org, and every answer names the components it came from.
 
-[![Add the demo to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/install-mcp?name=sf-intelligence-demo&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsInNmLWludGVsbGlnZW5jZSIsImRlbW8iXX0%3D) Try the built-in demo org in Cursor in one click (no Salesforce login). AI agents installing this server: see [llms-install.md](llms-install.md).
+<p align="center"><img src="assets/demo.gif" alt="A question typed into an AI assistant: can I delete Project__c.Risk_Score__c? The answer: not safe, blocking; the Apex handler writes it, its test reads it, the Residential layout shows it; every line cites a component." width="820"></p>
 
-**A grounded, fail-closed backend for AI assistants working in one Salesforce
-org.** Your AI host (Claude, or any MCP client) asks it questions in plain
-language; it answers from the org's **real metadata** — never a guess — and
-labels every claim with how much to lean on it.
+**Website, demo and docs: [sfi.auditforce.cloud](https://sfi.auditforce.cloud)** · Works in Claude Code, Claude Desktop, Cursor, VS Code + Copilot and Codex.
 
-`sf-intelligence` is an **offline, read-only, MCP-first knowledge base** for a
-single Salesforce org. You run one retrieve (`sf project retrieve`); it builds a
-local Markdown vault and a DuckDB dependency graph. From then on every answer is
-served locally by default — **offline-first, no network egress for vault
-answers.** An **opt-in live read-only plane** (`sfi.live_*`) can answer record
-counts and samples when enabled. Private by design. MIT.
+## What it answers
 
-It is **not a standalone chatbot** — it has no chat surface. It is the
-evidence layer an AI host consumes: a router that **advises** (ranked tool
-candidates plus explicit disclosures), a host LLM that **decides** (picks and
-runs the tools), and an engine that grounds every answer in the vault and
-**fails closed** — refusing, disclosing a gap, or asking a clarifying
-question — when it cannot.
+The questions below were checked by an outside reviewer against a real production org (about 4,700 components) by reading the raw metadata. The answers were right.
+
+| Ask | What you get back |
+|---|---|
+| **Where is this field used?** | Every Apex class, flow, layout, validation rule, report and page that references it, each with how it was found (declared, parsed or heuristic) |
+| **Can I delete this field?** | A verdict (safe, risky, blocking, review) with the reasons and the components behind each one, plus what was *not* checked |
+| **What happens when I save a record?** | The save order for one object and one event: triggers, validation rules, flows, approvals, in the sequence they run |
+| **Which Apex is dead?** | Classes and triggers nothing calls, with the honest tier (definitely, likely, uncertain) and why |
+| **Who can see or edit this?** | Effective permissions from profile plus permission sets, and why a given user cannot see a record |
+
+A real answer from the built-in demo org (a solar installer called Verdant), unedited:
+
+> **Can I delete `Project__c.Risk_Score__c`?** Not safe to delete: **blocking**. `ProjectTriggerHandler` writes it and `ProjectTriggerHandlerTest` reads it (parsed from the Apex); the Residential page layout shows it (declared). Checked: Apex, flows, workflow rules, validation rules, layouts. Not checked: assignment, auto-response and escalation rules, because they were not retrieved.
+
+## Try it in three commands
+
+```bash
+npm install -g sf-intelligence
+sfi demo            # a built-in demo org, no Salesforce login needed
+sfi init            # then: connect your own org (read-only retrieve)
+```
+
+Then register the server in your AI host; the [install guide](./llms-install.md) has the exact block for each host. Or one click: [![Add the demo to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/install-mcp?name=sf-intelligence-demo&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsInNmLWludGVsbGlnZW5jZSIsImRlbW8iXX0%3D) Try the built-in demo org in Cursor in one click (no Salesforce login). AI agents installing this server: see [llms-install.md](llms-install.md).
+
+By default your assistant sees 16 tools: the eight that answer the questions above and eight that help it find its way (`sfi.resolve`, `sfi.search_components`, `sfi.get_component`, `sfi.health_check`, `sfi.list_analyses`, `sfi.describe_analysis`, `sfi.run_analysis`, `sfi.live_consent`). Every other analysis sits behind one gateway tool, `sfi.run_analysis`, and is listed by `sfi.list_analyses`. The vault is a local folder, answers are served offline, and the optional live read-only plane is off until you turn it on. What your AI assistant does and does not see is in [Privacy](#privacy).
+
+**For engineers:** how the vault, the dependency graph and your assistant fit together is in [How it works](#how-it-works); what is deliberately not modeled is in [What it does NOT do](#what-it-does-not-do).
 
 ## Ask it like a person
 
-You don't need to know the exact API name of anything. The front door is a
-**typo-tolerant resolver** that turns messy phrasing into the right component —
-and when it isn't sure, it **asks you a clarifying question** instead of
-guessing:
+You don't need to know the exact API name of anything. A typo-tolerant resolver
+turns messy phrasing into the right component, and when it isn't sure it
+**asks you a clarifying question** instead of guessing:
 
 > **You:** where's the emale field?
 >
@@ -61,315 +72,85 @@ guessing:
 > 2026-05-20 — want to pull fresh metadata from the org (`/sfi-refresh`) in case
 > it's new, or rephrase?
 
-That is the headline behavior for **resolution and routing**: **they never
-silently commit to a guess.** Resolution is always heuristic and labeled as
-such. When several components are plausible it hands you a clarifying question;
-when nothing matches it offers to refresh from the org or stop. A high match
-score is string similarity, not proof. **Source grep tools** (`sfi.search_apex_source`,
-`sfi.search_flow_metadata`) walk the vaulted `source/` tree from your last
-refresh — run `/sfi-refresh` before trusting an empty grep result.
-
-## Advisory routing — the funnel advises, the host decides
-
-Under the hood a semantic **router** (`sfi.route_question`) reads each question
-and returns a **meaning-ranked shortlist** (`toolCandidates`) of the `sfi.*`
-tools that can answer it — so your AI host picks and runs them without you ever
-typing a tool name. It runs fully **offline** (a small TF-IDF model over the
-tool catalog — no network, no embeddings service) and it **advises rather than
-dictates**: the candidates are the primary output; the deterministic `route`
-that rides along is a non-authoritative hint. The host LLM decides which tools
-to run, in what order.
-
-Confidence semantics are explicit. When no deterministic intent matches but the
-semantic funnel's top candidate scores above a fixed floor, the router returns a
-**`funnel-advisory` route** — the top funnel tools, confidence **`low` by
-construction**, reason flagged `FUNNEL-DERIVED` — an advisory pick for the host
-to verify (resolve the named component, then ground), never a command. Each
-candidate row also carries `cosine`, its raw semantic score, so a host can tell
-real semantic support from a regex-rule assertion.
-
-The router also tags each question with the plane that answers it —
-the **offline vault** (metadata, dependencies, permissions), the **live org**
-(counts, samples, limits, inactive users — read-only, opt-in), or a **hybrid** of
-both (e.g. "is this field *actually* populated?"). Every answer is stamped with
-its provenance (`offline_snapshot`, `live_org`, or `hybrid`) and freshness.
-Clarifying questions are a **last resort**: a qualifier already in the question
-("the X *object*", an object word next to a same-named field, a literal API
-name) auto-resolves instead of blocking, and offered options are hygienic —
-fuzzy lookalike junk never appears as a choice. But when two genuinely competing
-components remain, or the best-fitting tools diverge on something consequential
-(one destructive-simulation, one read-only), the router **stops and asks which
-you meant** instead of letting the host silently commit. When nothing fits, it
-**says so** rather than guessing (and can log the gap locally — opt-in via
-`logGap: true`). (A deterministic, no-LLM routing mode is available via
-`SFI_ROUTER_MODE=offline` for CI / air-gapped hosts.)
-
-An **experimental, opt-in RRF hybrid embeddings layer** is available for early
-adopters (`SFI_EMBEDDINGS=1` + `npm i @huggingface/transformers`). It fuses the
-TF-IDF candidates with a locally cached neural model (`~23 MB`) via Reciprocal
-Rank Fusion. The model is **not bundled** with the npm package and isn't
-fetched automatically — it requires the separate peer-dependency install
-above, and the download-on-first-use path is still being hardened, so treat it
-as a manual opt-in step, not something that happens for you. **Off by
-default** either way — the lexical path is byte-identical when unset, and if
-the model isn't installed or cached the funnel silently falls back to
-lexical-only. The honesty/refusal decision and the deterministic `route.tools`
-plan are not affected. See
-[`docs/configuration.md`](./docs/configuration.md) for details.
-
-## Refusal behavior — fail closed, offer the read
-
-Some questions should never route to an executable tool, no matter how well
-they score. Score-independent **refusal gates** run on the raw question before
-any intent matching, and a refusal is non-executable *by shape* (`tools: []`
-plus a structured `route.refusal` disclosure):
-
-- **Write imperatives** ("delete the X field for me", "go ahead and merge these
-  profiles") → `refused-write`, with a **read-only alternative** offered instead
-  (`safe_to_delete_field`, `what_if_merge_profiles`, `get_impact`, … by verb
-  family) — the product has no write path; the refusal names the simulation
-  that answers the underlying question safely.
-- **Prompt injection / record-value exfiltration** ("ignore your previous
-  instructions…", "dump all SSN values") → `refused-injection`, with candidates
-  and guidance suppressed entirely.
-- **Runtime telemetry no tool models** → `honest-gap-runtime`, naming the
-  nearest real reads. **Non-Salesforce asks** → `out-of-scope`.
-
-Legitimate reads are explicit excluders — "am I allowed to edit…", "who can
-delete…", "is it safe to…" are permission *questions* and route normally. On a
-2,000-question real-org evaluation, the gates cut genuine over-confident routes
-from 69 to 11 with **zero** answerable questions falsely refused.
-
-## Conversation context — follow-ups without server-side memory
-
-The product stores **no conversation state**. Instead, the host may pass an
-optional `context.previous` on each `route_question` call describing what the
-prior turn was about, and terse follow-ups ("does it fire on delete too?",
-"what about on Contact?", "the second one") resolve against it — pronoun
-substitution is an **exact-id** lookup (never fuzzy), an inherited tool is an
-advisory continuation **capped at `medium` confidence**, and a clarification
-pick re-dispatches through the normal clarification contract (out-of-range
-ordinals re-ask, stale ids are rejected). A self-contained question ignores
-context entirely, and refusal gates run before any context logic — context
-never bypasses them. Host-side, after routing "who can edit the SSN field?"
-and running the tools:
-
-```jsonc
-// next turn: "can Support Agents specifically edit it?"
-{
-  "question": "can Support Agents specifically edit it?",
-  "context": {
-    "previous": {
-      "question": "who can edit the SSN field?",
-      "tool": "sfi.field_access_audit",
-      "componentId": "CustomField:Contact.SSN__c"
-    }
-  }
-}
-```
-
-When (and only when) context changes the route, the response discloses it in
-`route.contextApplied`. See [docs/routing.md](./docs/routing.md) for the full
-host contract.
-
-## Honesty guarantees
-
-The design rule across the surface is **fail closed, disclose first**:
-
-- **Grounded or refused.** Every answer path ends in real tool output against
-  the vault (or the consented live org); when no tool covers the ask, the
-  router returns an honest gap — never a lookalike tool, never general
-  Salesforce knowledge dressed up as org fact.
-- **Premise checks.** A question naming a component the resolver cannot find
-  still routes (the tools fail closed on the unknown id), but confidence is
-  downgraded and a `PREMISE CHECK` disclosure warns that no such component
-  exists in the vault — and a funnel-advisory route is never granted on a
-  failed premise.
-- **Disclosure-first.** Coverage caveats, staleness warnings, live-consent
-  notices, refusals, and context application are structured fields the host
-  renders *before* the answer — not fine print after it.
+It never silently commits to a guess. When several components are plausible it
+asks which you meant; when nothing matches it offers to refresh from the org or
+stop. A high match score is string similarity, not proof.
 
 ## How it works
 
-One read-only **refresh** turns your org into a local vault; from then on every
-question is answered **offline** — your AI host asks the router for a shortlist,
-picks the tools, runs them against the vault, and grounds the answer. The host
-decides; the router only advises.
+One read-only **refresh** turns your org into a local vault: the raw metadata,
+one Markdown page per component, and a dependency graph. From then on every
+question is answered **offline**. Your AI assistant resolves the name you used,
+calls one of the 16 default tools (or `sfi.run_analysis` for any other
+analysis), and builds its answer only from what came back, citing each
+component.
 
 ```mermaid
 flowchart TB
     subgraph REFRESH["Refresh — once, and whenever the org changes"]
         direction LR
         ORG[("Salesforce org")] -->|"sf project retrieve (read-only)"| SRC["source/ raw metadata"]
-        SRC -->|"extract + parse Apex / Flow / XML"| VAULT[("Graph A · Local vault<br/>your org, grounded<br/>Markdown + DuckDB graph")]
-    end
-
-    subgraph CONCEPT["Concept Model — ships with the package · no org data, ever"]
-        CM[["Graph B · Concept Model<br/>153 org-independent concepts / 207 rules<br/>save-order · relationships · sharing · code-shape"]]
+        SRC -->|"extract + parse Apex / Flow / XML"| VAULT[("Local vault<br/>Markdown + DuckDB graph")]
     end
 
     subgraph ASK["Ask — every question, offline on your machine"]
         direction TB
-        Q["Your question<br/>(plain language)"] --> HOST["Host LLM<br/>(Claude, etc.)"]
-        HOST -->|"1 · route_question"| FUNNEL["Semantic funnel<br/>offline TF-IDF — no network"]
-        FUNNEL -->|"toolCandidates + guidance<br/>(ranked shortlist — advises)"| HOST
-        HOST -->|"2a · retrieve: picks and runs"| TOOLS["sfi.* retrieval tools"]
+        Q["Your question<br/>(plain language)"] --> HOST["Your AI assistant<br/>(Claude, Cursor, Copilot, Codex)"]
+        HOST -->|"1 · sfi.resolve"| RESOLVE["The component you meant<br/>(or a clarifying question)"]
+        RESOLVE --> HOST
+        HOST -->|"2 · a core tool, or<br/>sfi.run_analysis for the rest"| TOOLS["sfi.* analysis"]
         TOOLS -->|"read"| VAULT
         TOOLS -.->|"opt-in, read-only, capped"| LIVE[("Live org")]
-        HOST -->|"2b · reason: resolve"| RESOLVE["sfi.resolve<br/>fix the component"]
-        RESOLVE -->|"interpret"| INTERPRET["sfi.interpret · deterministic OFFLINE JOIN<br/>Concept Model × grounded vault slice<br/>no LLM · no live org read"]
-        INTERPRET -->|"cited, confidence-tiered<br/>structural-implication claims"| SYNTH["3 · synthesize_answer"]
-        TOOLS --> SYNTH
-        SYNTH --> ANS["Grounded answer<br/>+ provenance + freshness<br/>+ cited canonical ids"]
+        TOOLS -->|"cited components + confidence<br/>+ what was not checked"| HOST
+        HOST --> ANS["Grounded answer"]
     end
-
-    VAULT ==>|"grounded slice · Graph A"| INTERPRET
-    CM ==>|"concept rules · Graph B"| INTERPRET
 ```
 
 Every box on the **Ask** path runs on your machine; the dotted edge to the live
 org is the only one that can touch Salesforce, and only after you opt in.
-Retrieval (`route_question → sfi.* → synthesize_answer`) reports *what's in the
-org*; the reasoning path (`resolve → interpret → synthesize_answer`) reports
-*what its shape implies*. `sfi.interpret` is a deterministic, offline **join** of
-the org-independent **Concept Model** (Graph B — 153 concepts / 207 rules, which
-never touches your org) against a grounded slice of the vault (Graph A); it runs
-with no LLM and no live read, and every claim it feeds `synthesize_answer` is
-cited and confidence-tiered. The deterministic `SFI_ROUTER_MODE=offline` mode
-collapses step 1 to a single routed plan for hosts with no LLM in the loop.
 
-## Reasoning, not just retrieval
+### How it stays honest
 
-Retrieval tells you *what's in the org*. It doesn't tell you what a structure
-**implies** — that a master-detail parent delete cascade-deletes its children,
-that two active before-save flows on one object run in an **undefined order**, or
-that an `@AuraEnabled` method is an entry point where Apex does not auto-enforce
-field-level security. SfIntelligence answers those with a small second graph.
-
-Alongside the org's grounded vault, the product ships a **Concept Model**: **153**
-org-independent, curated concepts and **207** rules that encode general Salesforce
-truth — save-order phases, relationship semantics, sharing posture, code-shape
-signals. No org data lives in it; the org enters reasoning **only** through the
-grounded slice at query time. The `sfi.interpret` tool **joins** the two: it
-assembles a minimal graph slice around one component and fires the applicable
-rules to produce **cited, confidence-tiered structural-implication claims**. It
-is **deterministic and offline** — no LLM, no live org read — and its claims are
-also folded into `sfi.synthesize_answer` so they reach a normal answer, hedged
-and attributed, on any MCP host.
-
-The concept families are curated structural patterns, not vulnerability
-detection. A sample of what fires today:
-
-- **Relationships** — master-detail cascade-delete + read-only roll-up summary;
-  junction (two-master) many-to-many; formula/roll-up fields are read-only, so a
-  write to one is write-hostile.
-- **Automation** — multiple active record-triggered flows in one trigger context
-  (undefined execution order); a firing condition that tests a field another
-  automation writes in the same save (cross-phase coupling); before/after trigger
-  phases; a flow fault-path rollback gap.
-- **Sharing & security surface** — organization-wide default (OWD) posture;
-  `without sharing` system-context Apex; an external API surface
-  (`@RestResource` / `@AuraEnabled` / `@InvocableMethod`) where FLS/CRUD are not
-  auto-enforced; async boundaries; connected-app OAuth scope.
-- **Code shape** — Apex SOQL-injection / bulkification / CRUD-FLS / swallowed-
-  exception / hardcoded-id gaps; a test with no assertions.
-
-Every claim is **grounded or it does not exist**. Each interpretation carries a
-`groundedIn` list of the exact component ids it matched — **no citation ⇒ no
-claim** — and its confidence is **computed, never asserted**: the *weakest* of
-the rule's ceiling and the grounding edges it matched (see the two-axis note
-below). An empty result means **"no concept rule fired,"** never "nothing depends
-on it." And the governor/security concepts reason about **static code shape** —
-they name a surface or a coupling, not a live limit breach or a proven runtime
-vulnerability. For a worked resolve → interpret → synthesize example, see
-[`docs/guides/asking-questions.md`](./docs/guides/asking-questions.md) §2b; for
-the design rationale, [ADR-008](./docs/decisions/ADR-008-deterministic-concept-model-reasoning.md).
+Every answer is built from tool output, never from general Salesforce
+knowledge. Each relationship carries how it was found: `declared` (stated in
+the metadata), `parsed` (from Apex, Flow or formula source) or `heuristic`
+(pattern matching, so spot-check before acting). Each answer says which
+metadata families were checked and which were not, so "nothing references
+this" always means "no evidence in what was retrieved". A request to change
+the org is refused and answered with the read-only check that fits instead.
+For "what does this imply" questions, a deterministic, offline concept model
+of general Salesforce truth (never your org's data) adds cited structural
+claims, such as a master-detail cascade delete or two flows with an undefined
+order. The details: [routing and refusal](./docs/routing.md),
+[architecture and the trust boundary](./docs/architecture.md),
+[asking questions](./docs/guides/asking-questions.md),
+[ADR-001 confidence-tagged edges](./docs/decisions/ADR-001-confidence-tagged-edges.md)
+and [ADR-008 deterministic reasoning](./docs/decisions/ADR-008-deterministic-concept-model-reasoning.md).
 
 ## What you can ask
 
-Eight capability areas, each answerable in natural language (ask
-`sfi.capabilities`, or just "what can you do?", for the live map):
+Every area answers in plain language; ask "what can you do?" for the live map.
 
 | Area | Example questions |
 | --- | --- |
 | **Find & identify** | "where is the email field?" · "what's the payment object called?" |
-| **Understand** | "what does this validation rule do?" · "what happens when an Account is saved?" (automation on standard objects works even when the object file was not retrieved; `objectModeled: false` is surfaced) |
+| **Understand** | "what does this validation rule do?" · "what happens when an Account is saved?" (automation on standard objects works even when the object itself was not retrieved; the answer says so) |
 | **Impact & dependencies** | "what breaks if I delete this field?" · "is it safe to deactivate this flow?" |
 | **Permissions & sharing** | "why can't this user see this record?" · "who can edit the Salary field?" · "who holds the Sales Manager permission set?" (live) · "what does user Jane hold?" (live) · "who's in the Support queue?" (live) · "which active users have zero permission-set assignments?" (live) |
 | **Automation & code** | "what runs on Case create?" · "which Apex methods have no real test coverage?" · "decode this Apex debug log / governor-limit exception to the class that ran" |
 | **Decision-support (before you build/change)** | "before I add automation to this object, what already runs there?" · "building Apex here — what should I watch out for?" · "before I change/require this field, what breaks?" |
 | **Architect & developer** | "are there circular Apex dependencies?" · "which classes have no test reference?" · "does the vault still match the live org?" |
 | **Integrations** | "what external systems does this org talk to?" · "list every outbound endpoint" |
-| **Documentation** | "give me a tour of this org" · "generate a data dictionary" · "which reports / objects / permission sets have no description?" (`list_components` with `missingDescription: true`) |
+| **Documentation** | "give me a tour of this org" · "generate a data dictionary" · "which reports / objects / permission sets have no description?" |
 | **Health & audit** | "is my vault fresh?" · "where is PII stored?" · "how has the org changed across refreshes?" |
 
-These are **advisory, read-only briefings** — e.g. `automation_build_advisor`,
-`apex_build_advisor`, `field_change_advisor` synthesize what the org already
-shows so you make a better build decision; `find_dependency_cycles`,
-`apex_test_coverage`, `live_drift_check`, and `org_history` serve architects and
-developers. None of them write to the org.
-
-Every org artifact the product names is backed by a tool call and cited with its
-canonical ID (`CustomObject:Account`, `CustomField:Account.Industry__c`), and
-every relationship is cited with its confidence (`declared`, `parsed`, or
-`heuristic`).
-
-## Trust & confidence glossary
-
-Every answer is tagged so you know how much to lean on it. These tags match the
-runtime values verbatim (the `trust` block on analysis tools, the per-edge
-`confidence`, and `synthesize_answer`'s `provenance.stamp`).
-
-**Edge confidence** — how a *relationship* was derived. This is the per-edge tier
-you see on dependency answers:
-
-- `declared` — Salesforce metadata states it directly (a layout assignment, a
-  field's `referenceTo`, a permission grant). Highest trust.
-- `parsed` — produced by AST/XML parsing of source (the **parser-grade Apex
-  pass that runs on every refresh by default** — resolved field reads/writes,
-  cross-class calls, field-level SOQL — plus the formula tokenizer, Flow
-  elements, a profile's `<layoutAssignments>`). High trust.
-- `heuristic` — produced by regex / token / dynamic-string analysis (the Apex
-  recall scanner that supplements the parsed pass, name-pattern detection). May
-  have false positives — spot-check before acting.
-
-**Claim confidence** — a *different* axis: how well a **reasoning claim** from
-`sfi.interpret` is grounded. It uses the same `declared | parsed | heuristic`
-words, but it is **computed, not read off one edge**: a claim's confidence is the
-*weakest* of the concept rule's ceiling and the grounding edges the claim matched.
-An absence-shaped claim under non-complete coverage reads `unknown`. Do not
-conflate the two — edge confidence describes a single relationship; claim
-confidence describes an interpretation that *rests on* one or more such edges and
-can never exceed the weakest of them.
-
-**Provenance** — where the answer came from:
-
-- `offline_snapshot` — the last `/sfi-refresh` vault. The default for every vault
-  tool.
-- `live_org` — an opt-in, capped, read-only `sfi.live_*` SOQL read.
-- `hybrid` — fuses vault + live and discloses both provenances.
-
-**Completeness** — how much of what the answer depends on was actually retrieved:
-
-- `complete` — the refresh modeled every metadata family the answer needs.
-- `partial` — a family the answer depends on was not retrieved; absence means
-  "not checked", never "none" (a `coverageCaveat` names the gap).
-- `unknown` — coverage could not be determined.
-
-Two tools make this concrete. `sfi.coverage_report` lists what the retrieve
-manifest *requested and returned*; `sfi.retrieve_blindspot_report` lists what the
-graph *references but never retrieved* — automation/code/config that depends on a
-component the vault never pulled — so an "X is unused / nothing references X"
-answer carries a known-coverage caveat instead of a silent blind spot.
-
-## How much it models
-
-| | |
-| --- | --- |
-| **MCP roster** | Every `sfi.*` tool is registered in code; run `sfi.capabilities` (see `productManifest`) for the live registered/advertised counts — never a handwritten number |
-| **Graph model** | A broad `ComponentType` union across **103** component types (objects, fields, Flows, Apex, layouts, permissions, sharing, UI, legacy automation, integrations, CPQ, OmniStudio, reports, FlexiPages, and more) connected by **23** typed edge types — see `sfi.capabilities` for how tools group those families. Counts are pinned by `eval/product-manifest.json`. |
-| **Concept Model** | Concept Model (153 concepts / 207 rules) — org-independent, curated — JOIN against the grounded vault to produce cited structural-implication claims via `sfi.interpret`. No org data lives in the model. Same figures in `eval/product-manifest.json`. |
-| **26** | skills + **5** slash commands + **4** subagents (Claude Code plugin layer) that auto-activate in a session |
+All of these are read-only briefings; none of them write to the org. Every
+component an answer names is backed by a tool call and cited with its
+canonical id (`CustomObject:Account`, `CustomField:Account.Industry__c`), and
+every relationship with its confidence (`declared`, `parsed` or `heuristic`).
+The full catalog with the live counts comes from `sfi.capabilities` (through
+`sfi.run_analysis`) or the [tools page](https://sfi.auditforce.cloud/tools);
+the counts are pinned by `eval/product-manifest.json`, never typed by hand.
 
 ## What it does NOT do
 
@@ -377,55 +158,50 @@ Boundaries are explicit, and the product tells you plainly when it hits one
 rather than papering over the gap with general Salesforce knowledge:
 
 - **Offline by default.** Vault tools never call Salesforce mid-conversation.
-  Run `/sfi-refresh` to update metadata. **Opt-in live tools** (`sfi.live_*`)
-  run read-only SOQL with strict caps and label answers `provenance: live_org`.
-  The live plane is **off until you grant once per org** with
-  `sfi.live_consent { grant: true }` (binds OrgId+principal, scopes+expiry;
-  persists locally) or set `SFI_LIVE_PLANE_ENABLED=1`. Per-call
-  `liveEnabled: true` is intent only — not a consent substitute. Step up
-  `sample` / `users` scopes for row samples and user-identity tools.
-  **Hybrid** answers fuse vault + live and disclose both provenances plus the
-  active grant. Live never backfills stale vault claims, and the product never
-  auto-picks which org to query.
+  Run `/sfi-refresh` (or `sfi refresh`) to update metadata. The opt-in live
+  tools (`sfi.live_*`) run read-only queries with strict caps and label their
+  answers `live_org`. They stay off until you grant consent once per org with
+  `sfi.live_consent { grant: true }` (bound to the org and user, scoped,
+  expiring, stored locally) or set `SFI_LIVE_PLANE_ENABLED=1`. A per-call
+  `liveEnabled: true` is intent only, not consent. Hybrid answers combine the
+  vault and the live org and say so. The product never picks which org to
+  query on its own.
 - **No record-level data.** The vault stores schema and source, not rows. "How
   many Opportunities closed last quarter" is a question for your org directly.
-- **Static analysis, not runtime.** Dependency edges are derived from metadata
-  and source. Dynamic SOQL, reflective Apex, and runtime metadata lookups are
-  invisible to static analysis — a "no references found" result means "no static
-  evidence", not "definitely unused".
-- **Reasoning is deterministic rule-match, not an LLM and not a live check.**
-  `sfi.interpret` fires curated concept rules against the offline grounded slice.
-  Its claims are structural implications of the *code and metadata shape* — it
-  names a pattern (a cascade-delete, an undefined flow order, an unenforced entry
-  point), and cites the ids it matched. A governor or security concept is a
-  **static-shape signal, not a proven runtime limit breach or a proven
-  vulnerability**; a claim with no citation is never made, and an empty result
-  means "no rule fired," not "nothing depends on it."
+- **Static analysis, not runtime.** Dependency edges come from metadata and
+  source. Dynamic SOQL, reflective Apex and runtime metadata lookups are
+  invisible to it, so "no references found" means "no static evidence", not
+  "definitely unused".
+- **Reasoning is rule matching, not an LLM and not a live check.** A
+  structural claim names a pattern in the code and metadata shape and cites
+  the ids it matched. A governor or security concept is a signal, not a proven
+  runtime breach or vulnerability; an empty result means no rule fired, not
+  that nothing depends on the component.
 - **Read-only.** The product never writes to your org. It has no write path.
-- **Tested scale (CI budgets).** Three separate ceilings are gated in CI:
-  - **Graph import:** 10,000 nodes in &lt;90s (`packages/graph/test/scale-import.test.ts`, `SCALE_IMPORT_BUDGET_MS`).
-  - **Full refresh:** 1,000 `CustomObject`+`CustomField` files by default in &lt;10m (`packages/cli/test/scale-refresh.test.ts`, `SCALE_REFRESH_FIELD_COUNT`, `SCALE_REFRESH_BUDGET_MS`).
-  - **Resolve:** p95 under 2s on the CI vault (`pnpm eval:scale`, `SCALE_BUDGET_MS`).
-  Very large production orgs may still need narrowed retrieves or multiple vaults.
+- **Tested scale.** CI gates three ceilings: a 10,000-node graph import in
+  under 90 s, a 1,000-file `CustomObject` + `CustomField` refresh in under
+  10 min, and resolve p95 under 2 s on the CI vault. Very large production orgs
+  may still need narrowed retrieves or several vaults.
 
 ## Review changes before you deploy (PR gate)
 
-`sfi.review_change` is the pre-deploy gate: hand it the components a PR /
-`package.xml` / `git diff` touches and it returns a per-component risk verdict
-(`blocking` / `risky` / `review` / `safe`), each one's direct dependents, and the
-tests to run — most-dangerous first, entirely offline against the target org's
+`sfi review-change` is the pre-deploy gate: hand it the components a PR,
+`package.xml` or `git diff` touches and it returns a per-component risk verdict
+(`blocking` / `risky` / `review` / `safe`), each one's direct dependents and the
+tests to run, most dangerous first, entirely offline against the target org's
 last vault refresh. A deleted component with any dependent fails **closed**
-(`blocking`); a modified component with firm dependents is `risky`; `overallVerdict`
-is the worst across the set. Point it at another vault (`againstVault`) to answer
-"will this changeset break anything in **prod**?" against that org's graph.
+(`blocking`); a modified component with firm dependents is `risky`; the overall
+verdict is the worst across the set. Point it at another vault (`--against`) to
+answer "will this changeset break anything in **prod**?" against that org's
+graph. The same analysis is `sfi.review_change` over MCP.
 
-The same analysis ships as a GitHub Action — the composite Action at
+The same analysis ships as a GitHub Action: the composite Action at
 [`.github/actions/review-change`](./.github/actions/review-change/README.md)
 emits SARIF 2.1.0 (findings show up inline on the PR's "Files changed" tab and in
 the Security tab) plus a markdown PR comment, with a 0/1/2 exit-code gate. Copy
 [`docs/ci/review-change-pr-gate.example.yml`](./docs/ci/review-change-pr-gate.example.yml)
 into your org repo to wire it up. It never runs `sfi refresh` and never calls the
-`sf` CLI — it only reads an already-built vault.
+`sf` CLI; it only reads an already-built vault.
 
 ## Try it now — no Salesforce org needed
 
@@ -472,11 +248,14 @@ Every host launches the same command; each reads a **different config file in a
 different format**. Pick yours — the full per-host, per-platform detail
 (exact paths for macOS and Windows, where the logs are, what to do when it
 doesn't connect) is in **[docs/guides/mcp-hosts.md](./docs/guides/mcp-hosts.md)**.
+Error messages and what to do about them: **[docs/guides/troubleshooting.md](./docs/guides/troubleshooting.md)**.
+Moving from an earlier release: **[docs/guides/upgrading.md](./docs/guides/upgrading.md)**.
 
 | Host | Config file | Top-level key |
 |---|---|---|
 | Claude Code | `.mcp.json` (project) or `~/.claude.json` | `mcpServers` |
 | Claude Desktop | `claude_desktop_config.json` | `mcpServers` |
+| Cursor | `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` | `mcpServers` |
 | Codex | `~/.codex/config.toml` | `[mcp_servers.*]` (TOML) |
 | VS Code + GitHub Copilot | `.vscode/mcp.json` | **`servers`** |
 
@@ -504,6 +283,10 @@ the app:
 }
 ```
 
+**Cursor** — the same block, in `.cursor/mcp.json` at the project root (or
+`~/.cursor/mcp.json` for every project). Cursor does not reload the file on
+its own: turn the server off and on in Settings → MCP, or restart Cursor.
+
 **VS Code + GitHub Copilot** — create `.vscode/mcp.json` in your project. Note
 the top-level key is `servers`, **not** `mcpServers`; pasting the Claude block
 here parses fine and registers nothing:
@@ -525,8 +308,8 @@ here parses fine and registers nothing:
 **Codex** — `codex mcp add sf-intelligence -- npx -y sf-intelligence mcp --vault /abs/path/to/org-kb`,
 or the TOML equivalent in `~/.codex/config.toml`.
 
-Restart the client. The `sfi.*` tools are now available — ask `sfi.capabilities`
-for the live tool map.
+Restart the client. The `sfi.*` tools are now available — ask "what can you
+do?" for the live tool map.
 
 > **Always pass an absolute `--vault` path.** The server looks for `./org-kb`
 > relative to *its own* working directory, and most hosts pick that directory
@@ -551,6 +334,7 @@ invokable under core. Set `SFI_TOOL_PROFILE=full` (or add
 `"env": { "SFI_TOOL_PROFILE": "full" }` in the config block above) to advertise
 and directly invoke the entire roster. See
 [docs/configuration.md](./docs/configuration.md) for the full reference.
+Every `sfi` command is described in [docs/cli.md](./docs/cli.md).
 
 ### Install as a Claude Code plugin
 
@@ -568,8 +352,17 @@ marketplace:
 
 Run `/reload-plugins` (or restart Claude Code) to pick it up in the current
 session; `/plugin list` confirms it's installed and enabled. The plugin
-manifest registers the same MCP server shown above, so once it's installed
-you don't need a separate `claude mcp add` step.
+manifest registers the same MCP server shown above, so you don't need a
+separate `claude mcp add` step. It cannot know where your vault is, though: it
+passes no `--vault`, so either set `SFI_VAULT` to the absolute path of your
+`org-kb` folder (in your shell profile, or in the host's `env` block) or launch
+Claude Code from the folder that holds `org-kb`. If answers come back empty,
+ask "is the server set up?" and it will say where it looked.
+
+The plugin ships the skills and the slash commands. It does not ship the agent
+files under `.claude/agents/`; two of those are maintainer tools, and the two
+that `/sfi-field-audit` spawns are available from a clone of this repo, not
+from the plugin.
 
 ## First run
 
@@ -664,22 +457,47 @@ sfi vault git enable
 ```
 
 From then on every refresh commits the vault's source and rendered Markdown, so
-"**when did this component change?**" (`sfi.component_history` — one timeline
-entry per source-changing refresh) and "**what did it look like before?**"
-(`sfi.component_as_of`) become answerable from the vault's own history. A vault
-without git answers those honestly (`available: false` plus this enable hint) —
-never an error.
+"**when did this component change?**" and "**what did it look like before?**"
+become answerable from the vault's own history (`sfi.component_history` and
+`sfi.component_as_of`, through `sfi.run_analysis`). A vault without git answers
+those honestly (`available: false` plus this enable hint), never with an error.
 
 ## Privacy
 
-Everything stays on your machine. The vault (`org-kb/`) is local; the MCP server
-defaults to `SFI_NETWORK_MODE=off` and makes no network calls while answering
-vault questions. Optional egress is explicit: npm update-check only when
-`SFI_UPDATE_CHECK=1` (or `updates-only` mode); Salesforce retrieve/live only
-when refresh or an authorized live tool elevates to `salesforce-read`. This
-public repository ships **zero org data** — a release privacy guard scans the
-shipping set on every release and fails the build if a real org identifier
+Everything the product does stays on your machine. The vault (`org-kb/`) is a
+local folder; the MCP server defaults to `SFI_NETWORK_MODE=off` and makes no
+network call while answering vault questions. The only outbound calls are the
+ones you ask for: the Salesforce retrieve during `sfi refresh`, a live
+read-only query after you grant consent, and an npm update check only when
+`SFI_UPDATE_CHECK=1`.
+
+One thing it cannot control: **your AI assistant sees every question and every
+answer**, just as it sees anything else you paste into it. The object, field
+and class names and the verdicts in an answer go to that assistant's provider
+(Claude, Cursor, GitHub Copilot, Codex) under its terms. sf-intelligence itself
+uploads nothing. Use an assistant your company approves for its metadata.
+
+This public repository ships **zero org data**: a release privacy guard scans
+the shipping set on every release and fails the build if a real org identifier
 leaks. What you vault is yours.
+
+## Uninstall
+
+1. Remove the server from your host: `claude mcp remove sf-intelligence`
+   (Claude Code; add `--scope project` if you registered it that way), or
+   delete the `sf-intelligence` entry from the host's config file named in
+   [Install](#install). Remove `sf-intelligence-demo` the same way if you
+   added the demo.
+2. Installed the Claude Code plugin? `/plugin uninstall sf-intelligence@sf-intelligence`.
+3. Running the drift watcher? `sfi watch stop` in the vaulted project.
+4. Installed the CLI globally? `npm uninstall -g sf-intelligence`. (`npx`
+   installs nothing permanent.)
+5. Delete the data: `org-kb/` in each Salesforce project you vaulted,
+   `~/.sf-intelligence/` (demo vault, live-consent grants, feedback and
+   route-gap logs) and, if you registered vaults for cross-org comparison,
+   `~/sf-intelligence-vaults/`.
+
+Nothing is left in your Salesforce org; the product never wrote to it.
 
 ## Roadmap
 
@@ -716,23 +534,23 @@ the whole machine-global log — review it before sharing if you work across
 multiple orgs. Share it (or just describe the gap) at
 <https://github.com/PranavNagrecha/Salesforce-Intelligence/issues>.
 
+## Contributing
+
+Bug reports, feature requests and extractor gaps each have an issue template;
+pull requests have a short checklist. Dev setup, the test commands and the
+rules for adding a tool are in [CONTRIBUTING.md](./CONTRIBUTING.md); the repo
+map is [REPO-STRUCTURE.md](./REPO-STRUCTURE.md). Security reports go through a
+[private advisory](https://github.com/PranavNagrecha/Salesforce-Intelligence/security/advisories/new),
+never a public issue ([SECURITY.md](./SECURITY.md)).
+
 ## License
 
 `sf-intelligence` is licensed under the **[MIT License](./LICENSE)** (see also [`NOTICE`](./NOTICE)). Releases before 0.5.0 carried a Commons Clause condition; it was removed in 0.5.0. In plain English:
 
-- ✅ **Free to use for any purpose — including at work, inside a company.** Evaluate, study, modify, self-host for your own use, fork, redistribute, and contribute — all free.
-- 🚫 **You may not _Sell_ it without a commercial license** — i.e. provide it to third parties, for a fee, as a product or service whose value derives substantially from the Software. That includes offering it (or a hosted / SaaS / derivative version) as a paid product or service, reselling it or paid access to it, or charging for hosting/support whose value derives substantially from it.
-
-For a commercial ("Sell") license, contact **pranav.sfintelligence@gmail.com**. _(Plain-English summary; the [LICENSE](./LICENSE) controls. Not legal advice.)_
+- ✅ **Free for any purpose, including commercial use:** use, copy, modify, merge, publish, distribute, sublicense and sell. Keep the copyright and license notice with it. _(Plain-English summary; the [LICENSE](./LICENSE) controls. Not legal advice.)_
 
 ## Documentation
 
 - [sfi.auditforce.cloud](https://sfi.auditforce.cloud) — website: [demo answers](https://sfi.auditforce.cloud/demo), [getting started](https://sfi.auditforce.cloud/getting-started), [all tools](https://sfi.auditforce.cloud/tools), [FAQ](https://sfi.auditforce.cloud/faq)
 - [Documentation index](./docs/README.md) — guides, architecture, configuration
 - [Contributing](./CONTRIBUTING.md) · [Security](./SECURITY.md)
-
-The build harness (a sibling repo, separate from this product) vendors Addy
-Osmani's [`agent-skills`](https://github.com/addyosmani/agent-skills) under MIT.
-Copyright (c) Addy Osmani; full MIT license text travels with the harness. None
-of that content is redistributed in this product directory; the attribution is
-recorded here for completeness.

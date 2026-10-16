@@ -133,7 +133,7 @@ describe('generateAdminHandbookHandler (empty graph)', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const body = result.value.data.document.body;
-    expect(body).toContain('Recent-change data depends on v1.7 enrichment');
+    expect(body).toContain('Recent-change data depends on the Tooling API enrichment pass');
   });
 });
 

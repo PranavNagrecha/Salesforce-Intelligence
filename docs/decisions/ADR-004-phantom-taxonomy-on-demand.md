@@ -4,12 +4,12 @@
 Accepted
 
 ## Date
-2026-06-07 (retroactively recording the P7 reference-stub / GATE-0 decision)
+2026-06-07 (retroactively recording the reference-stub decision)
 
 ## Context
 ADR-003 leaves dangling edges (`targetMissing`) — references to ids with no node.
 A real org has tens of thousands of them, and they are not all the same thing.
-The phantom-taxonomy audit (`docs/reports/phantom-taxonomy-audit.md`, GATE-0)
+The phantom-taxonomy audit (`docs/reports/phantom-taxonomy-audit.md`)
 measured the population on real orgs and found wildly different causes:
 50,415 / 63,136 phantom grants were pure permission references, hundreds of
 automation references pointed at genuinely-missing components, and many were just
@@ -86,7 +86,7 @@ access, not usage (`NON_FUNCTIONAL_EDGE_KINDS`).
 ## Alternatives Considered
 
 ### Retrieve every phantom on refresh
-- Rejected by the GATE-0 data: 700+ object bloat, 50k+ grant-only noise.
+- Rejected by the audit data: 700+ object bloat, 50k+ grant-only noise.
 
 ### Materialise stub nodes in the graph
 - Pros: every edge resolves; simpler reads.

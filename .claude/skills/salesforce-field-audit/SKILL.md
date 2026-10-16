@@ -49,6 +49,8 @@ Someone who reads only this section is already better at the task.
 
 All four are closed in 0.3.0. A fifth gap of the same family — the **usage-ranked report cap** — is still open and is yours to handle in the runbook (see below); it is disclosed rather than fixed.
 
+Three more closed in 0.6.0, and each had produced the same confident zero: Flow **screen fields** bound with `objectFieldReference` and non-Apex **action calls** (email alerts, quick actions, external services, subflows); **LWC and Aura template bindings** (`lightning-input-field`, `lightning-record-*-form` field lists, `force:recordData`) where the object can be derived; and **Classic page-layout related-list columns**, which now resolve to the child object's field the same way Lightning dynamic related lists do. These edges exist only in a vault refreshed by 0.6.0 or later: refresh before you trust a zero on any of them, and read `missingEdgeFamilies` from `sfi.health_check` to see what an older vault lacks.
+
 The dangerous property the four closed ones shared: all sat inside metadata families the tool had *fully retrieved*, so no coverage caveat fired and the verdict presented as clean. A tool can only warn you about gaps it knows it has. Before recording "no references", run your method against a field you *know* is referenced and confirm it can see anything at all — the positive control is what tells you which kind of zero you are holding. The closures narrow the gap; they do not remove the need for the control.
 
 **Undocumented reference grammars.** Field references appear in several distinct textual forms per metadata type, and orgs use forms the documentation doesn't mention. Derive the grammar empirically (see below) instead of assuming it. A search using an incomplete grammar returns zero and certifies a live field as safe.
@@ -91,7 +93,7 @@ This skill owns the **decision**: whether a field can be deleted, and what must 
 SFI_REPORTS_CAP=10000 sfi refresh --no-pull    # recompute from existing source
 ```
 
-Then confirm with `sfi.coverage_report` that Report/Dashboard reads `complete` rather than `pending`. A `pending` coverage under a "no reports use it" verdict is a Phase 0 failure, not a Phase 4 limit.
+Then confirm with `sfi.coverage_report` (through `sfi.run_analysis`) that Report/Dashboard reads `complete` rather than `pending`. A `pending` coverage under a "no reports use it" verdict is a Phase 0 failure, not a Phase 4 limit.
 
 ## The workflow
 

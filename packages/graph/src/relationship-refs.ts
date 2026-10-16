@@ -15,7 +15,7 @@ import type { Edge, Node } from '@sf-intelligence/contracts';
  *                              (`Parent__r.Status__c`). The leading segment is a
  *                              relationship name, so the target object is not
  *                              knowable from the formula's own file.
- *   `relatedListFieldRefs`     on a FlexiPage — dynamic related-list columns,
+ *   `relatedListFieldRefs`     on a FlexiPage or Layout — related-list columns,
  *                              which are BARE field names on the RELATED object.
  *   `unresolvedTraversalRefs`  on a ConditionalContext — the relationship-shaped
  *                              refs a Flow decision, record-trigger filter, or
@@ -103,6 +103,76 @@ interface RelationshipMaps {
   readonly childward: ReadonlyMap<string, string>;
 }
 
+/** Unresolved work parked by FlexiPage / Layout extractors for this pass. */
+export interface RelatedListFieldRef {
+  readonly relatedListApiName: string;
+  readonly fields: readonly string[];
+}
+
+/**
+ * Map a layout or Lightning-page `relatedList` / `relatedListApiName` token to
+ * the child object that holds the lookup. Same childward index FlexiPage
+ * related-list aliases use — one resolver, never a relationship name mistaken
+ * for an object api name.
+ */
+export const resolveRelatedListChildObject = (
+  relatedListApiName: string,
+  maps: RelationshipMaps,
+): string | undefined => maps.childward.get(relatedListApiName.toLowerCase());
+
+interface MintRelatedListColumnsOptions {
+  readonly edgeType: Edge['edgeType'];
+  readonly referenceKind: string;
+}
+
+/**
+ * Mint edges for bare related-list column names, or record unresolved list names.
+ * Skips dotted aliases (object-qualified columns belong to other extractors).
+ */
+const mintRelatedListColumnEdges = (
+  fromId: string,
+  related: unknown,
+  maps: RelationshipMaps,
+  fieldIds: ReadonlySet<string>,
+  emit: (
+    fromId: string,
+    toId: string,
+    confidence: Edge['confidence'],
+    edgeType: Edge['edgeType'],
+    properties: Record<string, unknown>,
+  ) => void,
+  options: MintRelatedListColumnsOptions,
+  unresolvedRelatedLists: string[],
+): void => {
+  if (!Array.isArray(related)) return;
+  for (const entry of related) {
+    if (typeof entry !== 'object' || entry === null) continue;
+    const { relatedListApiName, fields } = entry as {
+      relatedListApiName?: unknown;
+      fields?: unknown;
+    };
+    if (typeof relatedListApiName !== 'string' || relatedListApiName.length === 0) {
+      continue;
+    }
+    const childObject = resolveRelatedListChildObject(relatedListApiName, maps);
+    if (childObject === undefined) {
+      unresolvedRelatedLists.push(relatedListApiName);
+      continue;
+    }
+    if (!Array.isArray(fields)) continue;
+    for (const field of fields) {
+      if (typeof field !== 'string' || field.length === 0) continue;
+      if (field.includes('.')) continue;
+      const toId = `CustomField:${childObject}.${field}`;
+      if (!fieldIds.has(toId)) continue;
+      emit(fromId, toId, 'parsed', options.edgeType, {
+        referenceKind: options.referenceKind,
+        relatedListApiName,
+      });
+    }
+  }
+};
+
 const AMBIGUOUS = Symbol('ambiguous');
 
 export const buildRelationshipMaps = (
@@ -142,9 +212,18 @@ export const buildRelationshipMaps = (
 
     // Childward: the related-list name declared on this lookup, spelled `__r`
     // when traversed. Both spellings are indexed so a caller can pass either.
+    // A Classic page layout names the same list a third way: object-qualified,
+    // `{ChildObject}.{LookupField}` (`Invoice__c.Project__c`). That spelling is
+    // derived from this very node (its owning object and api name), so it is
+    // indexed too — never parsed out of the layout token by splitting on a dot.
     const relationshipName = node.properties['relationshipName'];
-    if (typeof relationshipName === 'string' && relationshipName.length > 0) {
-      for (const key of [relationshipName, `${relationshipName}__r`]) {
+    const classicSpelling = `${owningObject}.${fieldApiName}`;
+    const childKeys: string[] =
+      typeof relationshipName === 'string' && relationshipName.length > 0
+        ? [relationshipName, `${relationshipName}__r`, classicSpelling]
+        : [classicSpelling];
+    {
+      for (const key of childKeys) {
         const lower = key.toLowerCase();
         const existing = childward.get(lower);
         if (existing === undefined) {
@@ -329,32 +408,33 @@ export const mintRelationshipTraversalEdges = (
 
     // ── Dynamic related-list columns on a Lightning page ────────────────────
     if (node.type === 'FlexiPage') {
-      const related = node.properties['relatedListFieldRefs'];
-      if (!Array.isArray(related)) continue;
-      for (const entry of related) {
-        if (typeof entry !== 'object' || entry === null) continue;
-        const { relatedListApiName, fields } = entry as {
-          relatedListApiName?: unknown;
-          fields?: unknown;
-        };
-        if (typeof relatedListApiName !== 'string') continue;
-        const childObject = maps.childward.get(relatedListApiName.toLowerCase());
-        if (childObject === undefined || !Array.isArray(fields)) continue;
-        for (const field of fields) {
-          if (typeof field !== 'string' || field.length === 0) continue;
-          // A dotted alias already names its own object; the generic sweep owns
-          // those. Only bare names need the related object supplied.
-          if (field.includes('.')) continue;
-          // `parsed`, not `declared` — symmetric with the formula branch above
-          // and for the same reason: the column name was regex-scraped from
-          // FlexiPage XML and the OBJECT it belongs to came from the inferred
-          // childward map. Nothing declared this pointer. Stamping `declared`
-          // overclaimed on the axis a caller weighs before deleting a field.
-          emit(node.id, `CustomField:${childObject}.${field}`, 'parsed', 'references', {
-            referenceKind: 'relatedListFieldAlias',
-            relatedListApiName,
-          });
-        }
+      mintRelatedListColumnEdges(
+        node.id,
+        node.properties['relatedListFieldRefs'],
+        maps,
+        fieldIds,
+        emit,
+        { edgeType: 'references', referenceKind: 'relatedListFieldAlias' },
+        [],
+      );
+      continue;
+    }
+
+    // ── Classic layout related-list columns ─────────────────────────────────
+    if (node.type === 'Layout') {
+      const unresolvedRelatedLists: string[] = [];
+      mintRelatedListColumnEdges(
+        node.id,
+        node.properties['relatedListFieldRefs'],
+        maps,
+        fieldIds,
+        emit,
+        { edgeType: 'usedInLayout', referenceKind: 'layoutRelatedListColumn' },
+        unresolvedRelatedLists,
+      );
+      if (unresolvedRelatedLists.length > 0) {
+        const props = node.properties as Record<string, unknown>;
+        props['unresolvedRelatedLists'] = [...new Set(unresolvedRelatedLists)].sort();
       }
     }
   }

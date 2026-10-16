@@ -943,7 +943,7 @@ export const fieldLineageHandler = async (
   ];
   if (cyclesDetected) {
     boundaries.push(
-      'cycle detected in the lineage walk; back-edges were short-circuited per the v2.7 cycle discipline',
+      'cycle detected in the lineage walk; back-edges were short-circuited',
     );
   }
   // R6-11: disclose the flow-dataflow trace semantics whenever the upstream

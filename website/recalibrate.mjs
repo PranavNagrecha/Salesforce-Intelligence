@@ -52,10 +52,13 @@ const die = (m) => { console.error("\n✗ " + m + "\n"); process.exit(1); };
 const fmt = (n) => Number(n).toLocaleString("en-US");
 
 /* ---- editorial constants (config, not computed from source) ------------- */
+/* What the public CI workflow (.github/workflows/ci.yml) runs on every push.
+ * Integration suites and real-org checks run in the private release gate, not
+ * here, so they are described on /trust in prose, never listed as CI checks. */
 const GATES = [
-  "Type-check", "Lint", "Unit tests", "Integration + golden tests",
-  "End-to-end smoke", "Natural-language regression", "Analytical correctness eval",
-  "Scale benchmarks", "SAST", "Release guard", "Org-data leak scan",
+  "Type-check", "Lint", "Unit tests", "Docs match the product",
+  "Natural-language routing gate", "End-to-end smoke", "Golden retrieval eval",
+  "Analytical correctness eval", "Scale benchmarks", "Release guard", "Org-data leak scan",
 ];
 const SCALE_BUDGETS = {
   graphImport: "10,000 nodes in under 90 seconds",

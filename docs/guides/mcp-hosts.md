@@ -1,4 +1,4 @@
-# Connecting your AI host — Claude, Codex, VS Code + Copilot
+# Connecting your AI host — Claude, Codex, VS Code + Copilot, Cursor
 
 `sf-intelligence` is a stdio MCP server. Every AI host launches it the same way
 — `npx -y sf-intelligence mcp --vault <absolute path to org-kb>` — but each host reads a **different config file**
@@ -46,6 +46,7 @@ need from me?" and it will walk you through it. See
 | [Claude Code](#claude-code) | `.mcp.json` (project) or `~/.claude.json` | `mcpServers` |
 | [Claude Desktop](#claude-desktop) | `claude_desktop_config.json` | `mcpServers` |
 | [Codex](#codex) | `~/.codex/config.toml` | `[mcp_servers.<name>]` (TOML) |
+| [Cursor](#cursor) | `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` | `mcpServers` |
 | [VS Code + GitHub Copilot](#vs-code--github-copilot) | `.vscode/mcp.json` | **`servers`** — not `mcpServers` |
 
 > **The most common mistake:** pasting the Claude block (`"mcpServers"`) into VS
@@ -188,6 +189,31 @@ If you run Codex from inside the ChatGPT desktop app rather than a terminal, the
 `codex` binary lives at
 `/Applications/ChatGPT.app/Contents/Resources/codex` on macOS.
 
+## Cursor
+
+Cursor reads the Claude-style JSON. Create `.cursor/mcp.json` in your
+Salesforce project (project scope; commit it to share with your team) or
+`~/.cursor/mcp.json` (every project):
+
+```json
+{
+  "mcpServers": {
+    "sf-intelligence": {
+      "command": "npx",
+      "args": ["-y", "sf-intelligence", "mcp", "--vault", "/abs/path/to/org-kb"]
+    }
+  }
+}
+```
+
+On Windows, double the backslashes: `"C:\\Users\\you\\project\\org-kb"`.
+
+Cursor does not pick up edits to this file live. After saving, open
+Settings → MCP and toggle the server off and on (or restart Cursor); until you
+do, the `sfi.*` tools do not appear in the agent's tool list. The tools are
+used from Agent mode. Cursor shows a tool count next to the server name; a
+count of one (`sfi.setup_status`) means setup mode (rule 2 above).
+
 ## VS Code + GitHub Copilot
 
 Requires VS Code **1.102 or later** (MCP first shipped in 1.99; 1.102 is where it
@@ -241,7 +267,7 @@ Two notes:
 
 - Keep the server name **hyphenated** (`sf-intelligence`). VS Code groups server
   instructions on an underscore, so `sf_intelligence` mis-keys the group.
-- VS Code renames the tools from `sfi.route_question` to `sfi_route_question`
+- VS Code renames the tools from `sfi.find_component_usages` to `sfi_find_component_usages`
   (dots are not allowed) and logs a warning per tool. This is cosmetic — the
   tools work.
 - If you use **Remote-SSH, WSL, or a dev container**, the server is configured by
@@ -286,7 +312,7 @@ Ask your chat to run `sfi.setup_status` and follow it.
 `lookedForVaultAt` and `serverLaunchDirectory`. If the directory is your home
 folder or `/`, the host chose it — add `--vault <absolute path>`.
 
-**3. Right file, right key?** `servers` for VS Code; `mcpServers` for Claude.
+**3. Right file, right key?** `servers` for VS Code; `mcpServers` for Claude and Cursor.
 On Windows, backslashes doubled in JSON, single-quoted in TOML.
 
 **4. Did you fully restart the host?** Claude Desktop must be quit entirely.
@@ -334,6 +360,9 @@ window each time the server starts.
 checks Node, the `sf` CLI, the vault, org auth, freshness, and the graph, and
 prints a fix for each problem. Include its output in a
 [bug report](https://github.com/PranavNagrecha/Salesforce-Intelligence/issues).
+
+Once the server connects and answers, the errors a tool can return are
+explained in [troubleshooting.md](./troubleshooting.md).
 
 ## Pinning the version
 

@@ -69,6 +69,23 @@ const flexiPage = (apiName: string, properties: Record<string, unknown>): Node =
   properties,
 });
 
+const layout = (
+  objectApiName: string,
+  layoutName: string,
+  properties: Record<string, unknown>,
+): Node => ({
+  id: `Layout:${objectApiName}.${layoutName}` as ComponentId,
+  type: 'Layout',
+  apiName: layoutName,
+  label: layoutName,
+  parentId: `CustomObject:${objectApiName}` as ComponentId,
+  sourcePath: `layouts/${objectApiName}-${layoutName}.layout-meta.xml`,
+  lastModifiedDate: null,
+  lastModifiedBy: null,
+  apiVersion: null,
+  properties,
+});
+
 /**
  * A two-object model: `Enrolment__c` holds a lookup to `Programme__c`, named
  * `Programme__c` on the field and `Enrolments` as the child relationship.
@@ -89,6 +106,8 @@ describe('buildRelationshipMaps', () => {
     // lookup — the direction a related list traverses.
     expect(maps.childward.get('enrolments__r')).toBe('Enrolment__c');
     expect(maps.childward.get('enrolments')).toBe('Enrolment__c');
+    // Classic page layouts name the same list object-qualified: `{Child}.{LookupField}`.
+    expect(maps.childward.get('enrolment__c.programme__c')).toBe('Enrolment__c');
   });
 
   it('drops an ambiguous child relationship name rather than picking one', () => {
@@ -319,6 +338,67 @@ describe('mintRelationshipTraversalEdges — dynamic related-list columns', () =
     const edges: Edge[] = [];
     mintRelationshipTraversalEdges([LOOKUP, rival, CHILD_FIELD, page], edges);
     expect(edges).toEqual([]);
+  });
+});
+
+describe('mintRelationshipTraversalEdges — layout related-list columns', () => {
+  it('mints usedInLayout on the child object when the relationship resolves', () => {
+    const pageLayout = layout('Programme__c', 'Programme Layout', {
+      relatedListFieldRefs: [
+        { relatedListApiName: 'Enrolments__r', fields: ['Outcome__c'] },
+      ],
+    });
+    const edges: Edge[] = [];
+    mintRelationshipTraversalEdges(
+      [LOOKUP, CHILD_FIELD, pageLayout],
+      edges,
+    );
+    expect(edges).toHaveLength(1);
+    expect(edges[0]?.edgeType).toBe('usedInLayout');
+    expect(edges[0]?.toId).toBe('CustomField:Enrolment__c.Outcome__c');
+    expect(edges[0]?.fromId).toBe('Layout:Programme__c.Programme Layout');
+    expect(edges[0]?.confidence).toBe('parsed');
+    expect(edges[0]?.properties['referenceKind']).toBe('layoutRelatedListColumn');
+  });
+
+  it('resolves the Classic object-qualified spelling ({Child}.{LookupField}) a page layout uses', () => {
+    // FAIL-BEFORE: the childward index knew only the relationship name, so every
+    // Classic layout list (`Enrolment__c.Programme__c`) fell into unresolved and
+    // the item minted nothing on real page layouts.
+    const pageLayout = layout('Programme__c', 'Programme Layout', {
+      relatedListFieldRefs: [
+        { relatedListApiName: 'Enrolment__c.Programme__c', fields: ['Outcome__c'] },
+      ],
+    });
+    const edges: Edge[] = [];
+    mintRelationshipTraversalEdges([LOOKUP, CHILD_FIELD, pageLayout], edges);
+    expect(edges).toHaveLength(1);
+    expect(edges[0]?.toId).toBe('CustomField:Enrolment__c.Outcome__c');
+    expect(pageLayout.properties['unresolvedRelatedLists']).toBeUndefined();
+  });
+
+  it('records unresolvedRelatedLists for a standard relationship and mints nothing', () => {
+    const pageLayout = layout('Programme__c', 'Programme Layout', {
+      relatedListFieldRefs: [
+        { relatedListApiName: 'RelatedActivityList', fields: ['TASK.SUBJECT'] },
+      ],
+    });
+    const edges: Edge[] = [];
+    mintRelationshipTraversalEdges([LOOKUP, CHILD_FIELD, pageLayout], edges);
+    expect(edges).toEqual([]);
+    expect(pageLayout.properties['unresolvedRelatedLists']).toEqual([
+      'RelatedActivityList',
+    ]);
+  });
+
+  it('omits related lists with no columns from relatedListFieldRefs handling', () => {
+    const pageLayout = layout('Programme__c', 'Programme Layout', {
+      relatedListFieldRefs: [],
+    });
+    const edges: Edge[] = [];
+    mintRelationshipTraversalEdges([LOOKUP, pageLayout], edges);
+    expect(edges).toEqual([]);
+    expect(pageLayout.properties['unresolvedRelatedLists']).toBeUndefined();
   });
 });
 

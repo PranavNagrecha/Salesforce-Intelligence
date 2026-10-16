@@ -15,7 +15,7 @@ import {
   type CallToolResult,
 } from '@modelcontextprotocol/sdk/types.js';
 import {
-  ORG_METADATA_CONTENT_POLICY,
+  ORG_METADATA_CONTENT_POLICY_MARKER,
   type McpError,
   type McpResponse,
 } from '@sf-intelligence/contracts';
@@ -2754,7 +2754,7 @@ export const jsonResult = (
   ): Record<string, unknown> =>
     isErrorEnvelope || !('data' in value)
       ? value
-      : { ...value, contentPolicy: ORG_METADATA_CONTENT_POLICY };
+      : { ...value, contentPolicy: ORG_METADATA_CONTENT_POLICY_MARKER };
   // Report the ORIGINAL stamped payload size (incl. contentPolicy). Trimmed
   // envelopes keep that number so hosts see pre-trim magnitude; fits() still
   // checks the final serialized text.

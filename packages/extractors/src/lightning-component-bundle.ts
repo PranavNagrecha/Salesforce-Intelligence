@@ -9,10 +9,11 @@ import type {
   Result,
 } from '@sf-intelligence/contracts';
 import { err, ok } from '@sf-intelligence/core';
-import { scanFrontendSource } from '@sf-intelligence/parsers';
+import { scanFrontendSource, scanLwcHtml } from '@sf-intelligence/parsers';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 import { buildResourceRefEdges, mergeAndSortEdges } from './apex-edges.js';
+import { buildMarkupFieldBindingEdges } from './frontend-markup-field-edges.js';
 import { deriveBundleApiName } from './path-utils.js';
 
 const ROOT_ELEMENT = 'LightningComponentBundle';
@@ -341,9 +342,14 @@ const RESOLVABLE_ORIGINS: ReadonlySet<string> = new Set(['schema-import', 'wire-
  */
 const buildScannerEdges = (
   jsSource: string,
+  htmlSource: string | null,
   ownerId: string,
   trackedObjects: ReadonlySet<string>,
-): { readonly edges: readonly Edge[]; readonly warnings: readonly string[] } => {
+): {
+  readonly edges: readonly Edge[];
+  readonly warnings: readonly string[];
+  readonly unresolvedFieldBindings: readonly string[];
+} => {
   const result = scanFrontendSource(jsSource, 'lwc');
   if (!result.ok) {
     // Empty source is a tolerable shape (the doc allows a JS-less bundle
@@ -354,6 +360,7 @@ const buildScannerEdges = (
       warnings: [
         `lwc-scanner: ${result.error.kind} at offset ${result.error.offset}: ${result.error.message}`,
       ],
+      unresolvedFieldBindings: [],
     };
   }
 
@@ -422,7 +429,31 @@ const buildScannerEdges = (
   // an `import ... from '@salesforce/label/c.X'` statement is as declarative
   // as the apex imports above (P14-USAGE-label-static-graph).
   raw.push(...buildResourceRefEdges(ownerId, result.value.resourceRefs, EDGE_SOURCE, 'declared'));
-  return { edges: raw, warnings: [] };
+
+  let unresolvedFieldBindings: readonly string[] = [];
+  if (htmlSource !== null && htmlSource.trim().length > 0) {
+    const htmlScan = scanLwcHtml(htmlSource);
+    if (htmlScan.ok) {
+      const markup = buildMarkupFieldBindingEdges(
+        ownerId,
+        EDGE_SOURCE,
+        htmlScan.value.fieldAccesses,
+        htmlScan.value.unresolvedFieldBindings,
+      );
+      raw.push(...markup.edges);
+      unresolvedFieldBindings = markup.unresolvedFieldBindings;
+    } else if (htmlScan.error.kind !== 'empty-source') {
+      return {
+        edges: raw,
+        warnings: [
+          `lwc-html-scanner: ${htmlScan.error.kind} at offset ${htmlScan.error.offset}: ${htmlScan.error.message}`,
+        ],
+        unresolvedFieldBindings: [],
+      };
+    }
+  }
+
+  return { edges: raw, warnings: [], unresolvedFieldBindings };
 };
 
 /**
@@ -433,9 +464,10 @@ const buildScannerEdges = (
  *
  * Reads the bundle's `{Name}.js-meta.xml` (required), `{Name}.js`
  * (required), and `{Name}.html` (optional). The JS source is passed to
- * the v1.4 LWC frontend scanner (`scanFrontendSource(..., 'lwc')`); the
- * HTML template is intentionally not scanned in v1.4 (markup-side reads
- * are deferred). Scanner errors surface as
+ * the v1.4 LWC frontend scanner (`scanFrontendSource(..., 'lwc')` on the
+ * `.js` file, {@link scanLwcHtml} on the optional `.html` for
+ * `lightning-input-field`, `lightning-output-field`, and
+ * `lightning-record-*-form` bindings). Scanner errors surface as
  * `node.properties.lwcScannerWarnings: string[]`, never as hard
  * failures — a parse glitch in the JS shouldn't void the entire node.
  *
@@ -445,11 +477,16 @@ const buildScannerEdges = (
  *     `CustomObject:{ObjectApiName}` at `confidence: 'declared'`.
  *   - `readsFrom` / `writesTo` edges to `CustomField:{object}.{field}`
  *     (`confidence: 'declared'` + `mechanism: 'schema-import'` for a
- *     `@salesforce/schema` import, else `'heuristic'`) ONLY for field accesses whose `object`
- *     resolves to a real SObject — a `@salesforce/schema` import, a
- *     `getRecord` wire array, or a `<targetConfig>` object. In-body
- *     `receiver.Field` accesses against unresolved JS locals emit NO
- *     field edge (LWC-JS-RECEIVER-FIELD-PHANTOMS).
+ *     `@salesforce/schema` import, else `'heuristic'`) ONLY for JS field
+ *     accesses whose `object` resolves to a real SObject — a
+ *     `@salesforce/schema` import, a `getRecord` wire array, or a
+ *     `<targetConfig>` object. In-body `receiver.Field` accesses against
+ *     unresolved JS locals emit NO field edge (LWC-JS-RECEIVER-FIELD-PHANTOMS).
+ *   - Markup bindings with a resolved `object-api-name` (or qualified
+ *     `Object.Field` in the attribute) emit `readsFrom` / `writesTo` or
+ *     `references` at `confidence: 'declared'` (`mechanism: 'markup-binding'`).
+ *     Bare field names with no derivable object are listed on
+ *     `properties.unresolvedFieldBindings` and mint no edge.
  *   - `callsApex` edges to `ApexClass:{className}` for each scanner
  *     `@salesforce/apex/...` import (`confidence: 'declared'`).
  *
@@ -512,6 +549,7 @@ export const extractLightningComponentBundle = async (
   // survives the phantom filter (LWC-JS-RECEIVER-FIELD-PHANTOMS).
   const scannerOutput = buildScannerEdges(
     jsSource,
+    htmlSource,
     ownerId,
     new Set(meta.targetConfigObjects),
   );
@@ -552,10 +590,17 @@ export const extractLightningComponentBundle = async (
   // `exactOptionalPropertyTypes` makes the warnings key all-or-nothing —
   // omit it on the success path so the golden's positive case stays
   // free of an empty-array prop.
+  const withUnresolved =
+    scannerOutput.unresolvedFieldBindings.length > 0
+      ? {
+          ...baseProperties,
+          unresolvedFieldBindings: scannerOutput.unresolvedFieldBindings,
+        }
+      : baseProperties;
   const properties =
     scannerOutput.warnings.length === 0
-      ? baseProperties
-      : { ...baseProperties, lwcScannerWarnings: scannerOutput.warnings };
+      ? withUnresolved
+      : { ...withUnresolved, lwcScannerWarnings: scannerOutput.warnings };
 
   const node: Node = {
     id: ownerId,

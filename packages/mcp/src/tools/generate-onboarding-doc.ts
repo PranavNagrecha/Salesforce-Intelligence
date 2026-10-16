@@ -205,7 +205,7 @@ const renderKeyContactsSection = (
     return [
       '## Key Contacts',
       '',
-      'Key Contacts data depends on v1.7 enrichment. Run `sfi refresh --with-tooling-api` to populate `lastModifiedBy` for the enriched types.',
+      'Key Contacts data depends on the Tooling API enrichment pass. Run `sfi refresh --with-tooling-api` to populate `lastModifiedBy` for the enriched types.',
     ].join('\n');
   }
   const lines = [
@@ -228,7 +228,7 @@ const renderWhereToGoNextSection = (persona: 'admin' | 'developer'): string => {
     persona === 'admin'
       ? [
           'Run `sfi.org_overview` for a structured tour of the org.',
-          'Run `sfi.unused_components` to find dead-weight components ripe for cleanup.',
+          'Ask "what is unused?" (`sfi.find_dead_code`) to find dead-weight components ripe for cleanup.',
           'Run `sfi.field_access_audit` on a specific field to investigate who can see it.',
           'Run `sfi.why_cant_user_see_record` when a user reports a missing record.',
         ]
@@ -415,7 +415,7 @@ export const generateOnboardingDocHandler = async (
     INHERITED_CONFIDENCE_DISCLOSURE,
     STRUCTURAL_DISCLOSURE,
     'Glossary entries are heuristic — a label on fewer than the threshold objects MAY be org-specific terminology or may simply be an underused standard label.',
-    'Key Contacts depends on v1.7 enrichment; without it the section surfaces an enrichment disclosure rather than a fabricated list.',
+    'Key Contacts depends on the Tooling API enrichment pass; without it the section surfaces an enrichment disclosure rather than a fabricated list.',
   ];
 
   // Residual-cap honesty: the full scans stop at FULL_SCAN_MAX_NODES only for a

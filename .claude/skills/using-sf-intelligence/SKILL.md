@@ -1,7 +1,7 @@
 ---
 name: using-sf-intelligence
 description: |
-  Entry point for the SfIntelligence plugin. Use whenever the
+  Entry point for the sf-intelligence plugin. Use whenever the
   conversation touches a Salesforce org in this repo — schema,
   dependencies, permissions, naming conventions, automation, Apex, Flow,
   integrations, sharing, or any question about a component the org
@@ -11,7 +11,7 @@ description: |
   skills.
 ---
 
-# Using SfIntelligence
+# Using sf-intelligence
 
 ## Overview
 
@@ -33,8 +33,9 @@ profiles and permission sets, the sharing tier (roles, groups, queues,
 sharing rules), record types and UI surfaces, legacy automation, LWC /
 Aura / Visualforce, the integration tier (named credentials, external
 services, outbound messages), CPQ, and OmniStudio. There are **231
-`sfi.*` tools**, fronted by `sfi.route_question` (call it first). Default
-conversation is **offline** (vault-only). The
+`sfi.*` analyses**; by default the host sees **16** of them directly and reaches
+every other one through `sfi.run_analysis`. Default conversation is **offline**
+(vault-only). The
 hard boundaries: **no writes to Salesforce**, **runtime / dynamic analysis
 is invisible** (dynamic SOQL, reflective Apex). **Record-level data** is
 available only via the **opt-in, per-org live plane** (`sfi.live_*`): enable
@@ -55,17 +56,22 @@ conventions, and the how-to-ask rules. It replaces the old
 `sfi.run_analysis { "name": "sfi.get_manifest", "args": {} }`.
 
 If you ever need the map of what the product can answer, call
-`sfi.capabilities` (no arguments) — it returns the categorized
+`sfi.run_analysis` with `{ "name": "sfi.capabilities", "args": {} }` — it returns the categorized
 capability list, example questions, the conversational pattern, and the
 slash commands.
 
 ## Tool profile (core by default)
 
-The MCP server defaults to **`SFI_TOOL_PROFILE=core`**: only **19** tools are
-advertised and directly invokable (`sfi.resolve`, `sfi.health_check`,
-`sfi.route_question`, `sfi.run_analysis`, `sfi.org_card`, … — see
-`sfi.capabilities`). Every other analysis still exists; it is reached through
-the catalog gateway:
+The MCP server defaults to **`SFI_TOOL_PROFILE=core`**: only **16** tools are
+advertised and directly invokable — the spine `sfi.resolve`,
+`sfi.search_components`, `sfi.get_component`, `sfi.health_check`,
+`sfi.list_analyses`, `sfi.describe_analysis`, `sfi.run_analysis`,
+`sfi.live_consent`, and the answer tools `sfi.find_component_usages`,
+`sfi.safe_to_delete_field`, `sfi.what_happens_on_save`, `sfi.find_dead_code`,
+`sfi.why_cant_user_see_record`, `sfi.effective_permissions`, `sfi.flow_graph`,
+`sfi.org_overview`. Every other analysis (including `sfi.route_question`,
+`sfi.org_card` and `sfi.capabilities`) still exists; it is reached through the
+catalog gateway:
 
 1. `sfi.list_analyses` — browse names (optional)
 2. `sfi.describe_analysis` — confirm args (optional)
@@ -78,8 +84,8 @@ advertised roster only when the operator sets `SFI_TOOL_PROFILE=full`.
 
 ## Start here: route the question
 
-For any non-trivial question, call **`sfi.route_question`** FIRST (pass the
-user's plain-language question verbatim). In the default hybrid mode it returns
+For any non-trivial question, run **`sfi.route_question`** through `sfi.run_analysis`
+first (`{ "name": "sfi.route_question", "args": { "question": "<verbatim>" } }`). In the default hybrid mode it returns
 a meaning-ranked **`toolCandidates`** shortlist (which YOU pick from) and a
 **`guidance`** planner line, plus a suggested plane (`vault` | `live` | `hybrid`
 | `unknown`) and a regex `route` as a HINT (`tools`, `needsResolve` — resolve a
@@ -148,8 +154,8 @@ source-tree hash still matches what was extracted.
   `/sfi-refresh` (or `/sfi-init` when `checks.vaultExists` is false). Do not answer
   from stale data; the org may have changed.
 - If the question is destructive, absence-based, or "is the vault
-  complete?", also call **`sfi.coverage_report`** (or read coverage from
-  `health_check`). Fire **`vault-coverage-honesty`** when rendering
+  complete?", also run **`sfi.coverage_report`** through `sfi.run_analysis`
+  (or read the coverage block of `health_check`). Fire **`vault-coverage-honesty`** when rendering
   `coverageCaveat` on verdict tools.
 
 ### Step 2 — RESOLVE what the user means (resolve-first)
@@ -196,7 +202,7 @@ Canonical IDs look like:
 - `CustomField:Account.Industry__c`
 - `ValidationRule:Account.Industry_Required`
 - `Flow:My_Flow` · `ApexClass:OpportunityService` · `ApexTrigger:AccountTrigger`
-- `Layout:Account-Account Layout` · `PermissionSet:Sales_Manager` · `Profile:System Administrator`
+- `Layout:Account-Account Layout` · `PermissionSet:Sales_Manager` · `Profile:Admin`
 - …and the same `Type:ApiName` shape for the other 50+ covered types.
 
 If `get_component` returns `not-found`, the ID is wrong — go back to
@@ -204,9 +210,10 @@ Step 2 and resolve again.
 
 ### Step 4 — walk edges or subgraph
 
-For dependency / impact questions, use `sfi.get_edges` (one-hop) or
-`sfi.get_subgraph` (multi-hop). Specify `direction` when the question is
-directional ("what uses X" = `direction: 'in'`).
+For "what uses X" questions, call `sfi.find_component_usages` (core). For a
+raw edge walk, run `sfi.get_edges` (one-hop) or `sfi.get_subgraph` (multi-hop) through `sfi.run_analysis`.
+Specify `direction` when the
+question is directional ("what uses X" = `direction: 'in'`).
 
 Every edge carries a `confidence`. **Cite it** when you report a
 relationship:
@@ -258,8 +265,8 @@ capability area (call `sfi.run_analysis` with `{ "name": "sfi.capabilities", "ar
 ### Step 6 — escalate to source grep
 
 If the vault doesn't have what the user needs (a raw string in Apex/Flow
-text), use `sfi.search_apex_source` or `sfi.search_flow_metadata` (both
-accept `query` + optional `regex: true`). After a hit, look up the
+text), run `sfi.search_apex_source` or `sfi.search_flow_metadata` through `sfi.run_analysis`
+(both accept `query` + optional `regex: true`). After a hit, look up the
 containing component by ID and call `sfi.get_component` for a structured
 answer — don't dump raw lines.
 
@@ -295,7 +302,8 @@ reading the vault, not guessing from training data.
 
 Before you deliver any answer that names org artifacts, **build your prose
 ONLY from what the tools returned, then pass it through
-`sfi.synthesize_answer { question, draft }`.** It returns `hallucinatedIds`
+`sfi.synthesize_answer`** — `sfi.run_analysis` with
+`{ "name": "sfi.synthesize_answer", "args": { "question", "draft" } }`. It returns `hallucinatedIds`
 — every canonical ID in your draft that **no tool** returned. If
 `hallucinatedIds` is non-empty, **strip those IDs before answering**: an ID
 the tools never produced is a fabrication, even if it "looks right". This is
@@ -314,7 +322,7 @@ provenance (`offline_snapshot` / `live_org` / `hybrid`) and freshness stamp.
 | "The user wants live data; I'll write a SOQL example as if it runs." | Use `sfi.live_*` when enabled; otherwise state the boundary and give `sf data query`. Never imply the vault proved runtime facts. |
 | "Coverage is probably fine; I'll say safe to delete." | Call `sfi.run_analysis` with `{ "name": "sfi.coverage_report", "args": { … } }` first. Partial coverage → never unqualified `safe`. |
 | "I'll combine this with web search for richer answers." | Don't. The org is private. Stay in the vault. |
-| "Apex/Flow analysis isn't supported." | It is. Use `sfi.call_graph`, `sfi.explain_flow`, `sfi.method_reachability`, etc. Only **runtime/dynamic** behavior is out of scope. |
+| "Apex/Flow analysis isn't supported." | It is. `sfi.flow_graph` is core; `sfi.call_graph`, `sfi.explain_flow`, `sfi.method_reachability` and the rest run through `sfi.run_analysis`. Only **runtime/dynamic** behavior is out of scope. |
 | "The manifest is two weeks old; probably fine." | If `health_check` flags it stale, tell the user to `/sfi-refresh`. |
 
 ## Red flags

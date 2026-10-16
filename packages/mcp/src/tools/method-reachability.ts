@@ -101,7 +101,7 @@ const APEX_TRIGGER_PREFIX = 'ApexTrigger:';
 
 /** Verbatim v2.7 honesty disclosure. */
 const REACHABILITY_DISCLOSURE =
-  'v2.7 method_reachability ships CLASS granularity (method-level promised in v2.7.1). Dynamic dispatch (Type.forName) and reflective invocation are invisible — a class genuinely invoked at runtime via reflection or framework wiring will surface as likely-dead-code. Trigger framework base classes (TriggerHandler, fflib) may be partially invisible. BFS is capped at depth 3.';
+  'method_reachability works at CLASS granularity. Dynamic dispatch (Type.forName) and reflective invocation are invisible — a class genuinely invoked at runtime via reflection or framework wiring will surface as likely-dead-code. Trigger framework base classes (TriggerHandler, fflib) may be partially invisible. BFS is capped at depth 3.';
 
 /**
  * Attached ONLY to a residual `likely-dead-code` verdict. This tool walks graph

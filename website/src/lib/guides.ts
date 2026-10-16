@@ -44,6 +44,7 @@ const PAGE_LABELS: Record<string, string> = {
   "/use-cases/salesforce-dependency-analysis": "Salesforce dependency analysis",
   "/use-cases/explain-a-salesforce-flow": "Explain a Salesforce Flow",
   "/use-cases/sharing-troubleshooting": "Why can't a user see a record?",
+  "/use-cases/claude-salesforce-mcp": "Ask Claude about your Salesforce org",
   "/compare/salesforce-dx-mcp": "sf-intelligence vs the Salesforce DX MCP server",
   "/compare/elements-cloud": "sf-intelligence vs Elements.cloud",
 };
