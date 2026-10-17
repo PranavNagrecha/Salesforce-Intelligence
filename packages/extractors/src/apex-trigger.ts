@@ -81,7 +81,7 @@ interface TriggerMeta {
 
 /**
  * Parse the `<ApexTrigger>` companion metadata XML and return the values
- * required by the v0.1 node. Validates the root element name and the
+ * required by the node. Validates the root element name and the
  * required child elements per the vendored `ApexTrigger.md` spec.
  */
 const parseMetaXml = (
@@ -194,7 +194,7 @@ const readTriggerSource = async (
  * Queueable/Batchable/Schedulable via `new X(...)` (the scanner is blind to
  * `new X()`, so this is wired in explicitly — mirroring `apex-class.ts`);
  * plus zero-to-many heuristic `readsFrom`/`writesTo`/`callsApex` edges derived
- * from the v0.3 heuristic Apex scanner (see `apex-edges.ts`). Scanner errors
+ * from the heuristic Apex scanner (see `apex-edges.ts`). Scanner errors
  * surface as `node.properties.apexScannerWarnings: string[]` (omitted entirely
  * on the success path).
  *
@@ -270,12 +270,12 @@ export const extractApexTrigger = async (
     source: EDGE_SOURCE,
     properties: { events: header.events },
   };
-  // v1.5: when the trigger's target object is a Platform Event
+  // when the trigger's target object is a Platform Event
   // (`__e`-suffixed api name), ALSO emit a `listensTo` edge to the
   // same CustomObject. `triggersOn` and `listensTo` aren't synonyms —
   // `triggersOn` says "this trigger fires on these events"; `listensTo`
   // says "this is a Platform Event subscriber". Both edges target the
-  // same CustomObject node (the existing v1.0 node for the `__e`
+  // same CustomObject node (the existing node for the `__e`
   // event). See `IntegrationTopologySemantics.md` Rule 1.
   const isPlatformEventSubscriber = header.objectApiName.endsWith('__e');
   const declaredEdges: Edge[] = [triggersOnEdge];
@@ -320,7 +320,7 @@ export const extractApexTrigger = async (
   // Match apex-class.ts: omit `apexScannerWarnings` on the success path
   // to keep `exactOptionalPropertyTypes` happy and the golden's positive
   // case free of an empty-array property.
-  // v1.5 adds `isPlatformEventSubscriber` — always present, default
+  // This adds `isPlatformEventSubscriber` — always present, default
   // false. Mirrors the apex-class.ts boolean-property approach so
   // consumers can filter triggers by property without distinguishing
   // "absent" from "false".

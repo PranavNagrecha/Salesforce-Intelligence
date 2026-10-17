@@ -13,10 +13,12 @@ properties:
   enableHistory: true
   enableReports: true
   enableSearch: false
+  externalSharingModel: null
   label: Invoice
   nameFieldLabel: Invoice Number
   nameFieldType: AutoNumber
   pluralLabel: Invoices
+  recordPageOverrides: []
   sharingModel: ControlledByParent
   visibility: Public
 sourcePath: source/main/default/objects/Invoice__c/Invoice__c.object-meta.xml
@@ -39,9 +41,11 @@ An invoice billed against a Project for solar installation work. Child of Projec
 | enableHistory | `true` |
 | enableReports | `true` |
 | enableSearch | `false` |
+| externalSharingModel | `null` |
 | nameFieldLabel | `Invoice Number` |
 | nameFieldType | `AutoNumber` |
 | pluralLabel | `Invoices` |
+| recordPageOverrides | `` |
 | sharingModel | `ControlledByParent` |
 | visibility | `Public` |
 
@@ -78,3 +82,9 @@ An invoice billed against a Project for solar installation work. Child of Projec
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `ApexClass:PaymentService` | heuristic | apex-scanner |
+
+### references (incoming, 1)
+
+| Source | Confidence | Producer |
+| --- | --- | --- |
+| `ApexClass:PaymentServiceTest` | heuristic | apex-scanner |

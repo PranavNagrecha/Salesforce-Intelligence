@@ -54,9 +54,10 @@ An approved permit must record the date it was approved.
 | --- | --- | --- |
 | `CustomObject:Permit__c` | declared | validation-rule-extractor |
 
-### references (outgoing, 2)
+### references (outgoing, 3)
 
 | Target | Confidence | Producer |
 | --- | --- | --- |
 | `CustomField:Permit__c.Approved_Date__c` | parsed | formula-tokenizer |
+| `CustomField:Permit__c.Approved_Date__c` | declared | validation-rule-extractor |
 | `CustomField:Permit__c.Status__c` | parsed | formula-tokenizer |

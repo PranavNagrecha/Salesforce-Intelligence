@@ -2,7 +2,7 @@
  * P6-hybrid-trust — the trust block for answers that FUSE the offline vault
  * metadata plane with the opt-in live read-only org plane.
  *
- * Phase 6's whole premise is hybrid answers: the vault says WHAT depends on a
+ * The hybrid tier's whole premise is hybrid answers: the vault says WHAT depends on a
  * field (structure), and a live query says HOW MUCH is at stake (magnitude). An
  * answer that combines them must NOT let one plane's freshness imply the
  * other's — a fresh live count says nothing about whether the vault structure

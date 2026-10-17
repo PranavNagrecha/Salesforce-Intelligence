@@ -337,12 +337,12 @@ describe('cpqDependencyMapHandler — CPQ presence disclosure', () => {
 });
 
 // =============================================================================
-// CR-22 B4 — full-scan output cursor (Option A: scanAllNodesOfTypes + paginate
+// full-scan output cursor (Option A: scanAllNodesOfTypes + paginate
 // the dependency list). A whole-fits no-cursor full-scan is byte-identical;
 // a truncated page resumes the full set with no gaps / dupes. The single-
 // component path never paginates.
 // =============================================================================
-describe('cpqDependencyMapHandler — output cursor (CR-22)', () => {
+describe('cpqDependencyMapHandler — output cursor', () => {
   it('full-scan whole-fits no-cursor call omits all paging fields', async () => {
     const r = await cpqDependencyMapHandler(ctx, {});
     expect(r.ok).toBe(true);

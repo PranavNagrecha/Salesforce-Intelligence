@@ -613,7 +613,7 @@ const realOrgShapeSeed: ExtractionResult = {
 };
 
 // =============================================================================
-// Seed 8 (R6-07): duplicate-rules phase. DupObj has an ACTIVE DuplicateRule
+// Seed 8: duplicate-rules phase. DupObj has an ACTIVE DuplicateRule
 // whose operationsOnInsert includes `Block` (referencing one MatchingRule)
 // and an INACTIVE DuplicateRule (isActive: false) that must be excluded from
 // the phase and disclosed in inactiveConfigured, mirroring the
@@ -679,7 +679,7 @@ const duplicateRuleSeed: ExtractionResult = {
 };
 
 // =============================================================================
-// Seed 9 (R6-07): post-save-rollup-recalc phase. RollupChild is the detail
+// Seed 9: post-save-rollup-recalc phase. RollupChild is the detail
 // side of a master-detail relationship; RollupParent carries a `type:
 // Summary` CustomField (`Total_Amount__c`) whose `summaryForeignKey` names
 // RollupChild as the child object. Saving RollupChild must name the parent
@@ -726,7 +726,7 @@ const rollupRecalcSeed: ExtractionResult = {
 };
 
 // =============================================================================
-// Seed 10 (R6-07): combined phase-order fixture. R607Obj exercises
+// Seed 10: combined phase-order fixture. R607Obj exercises
 // pre-save-triggers, pre-save-validation, duplicate-rules, save,
 // after-triggers, post-save-workflows, and post-save-rollup-recalc (as the
 // rollup child of R607RollupParent) together, so the EXACT documented
@@ -808,7 +808,7 @@ const r607OrderSeed: ExtractionResult = {
 };
 
 // =============================================================================
-// Seed 11 (R6-23): entitlementProcessNotes informational rider. R623Obj
+// Seed 11: entitlementProcessNotes informational rider. R623Obj
 // carries one ACTIVE EntitlementProcess (must surface), one INACTIVE
 // EntitlementProcess on the SAME object (must NOT surface — active:false),
 // and one ACTIVE EntitlementProcess on a DIFFERENT object (must NOT surface
@@ -981,7 +981,7 @@ const truncSaveSeed: ExtractionResult = (() => {
 // first (SOE runs pre-save → save → post-save → async). The byte bulk is a large
 // roster of pre-save-validation rules (the early head that survives); the
 // duplicate-rules / after-triggers / post-save-flows / post-save-async firers sit
-// at the tail and get dropped. This is the path the tool-local W5.1 guard cannot
+// at the tail and get dropped. This is the path the tool-local guard cannot
 // reach — the residual GLOBAL-budget honesty hole. All names synthetic.
 // =============================================================================
 
@@ -1657,7 +1657,7 @@ describe('whatHappensOnSaveHandler', () => {
     }
   });
 
-  it('places before-save record-triggered flows FIRST (P11-SOE-before-save-flows)', async () => {
+  it('places before-save record-triggered flows FIRST', async () => {
     const result = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'FullObj',
       event: 'insert',
@@ -1915,7 +1915,7 @@ describe('whatHappensOnSaveHandler', () => {
     });
   });
 
-  it('CR-CAP-11b: the time-trigger disclosure sentence is present and makes no firing claim', async () => {
+  it('the time-trigger disclosure sentence is present and makes no firing claim', async () => {
     const result = await whatHappensOnSaveHandler(ctx, {
       objectApiName: 'EmptyObj',
       event: 'insert',
@@ -2104,7 +2104,7 @@ describe('whatHappensOnSaveHandler', () => {
   });
 
   // ===========================================================================
-  // R6-07: duplicate-rules phase (Seed 8).
+  // duplicate-rules phase (Seed 8).
   // ===========================================================================
 
   it('includes only the active DuplicateRule in the duplicate-rules phase and discloses the inactive one', async () => {
@@ -2176,7 +2176,7 @@ describe('whatHappensOnSaveHandler', () => {
   });
 
   // ===========================================================================
-  // R6-07: post-save-rollup-recalc phase (Seed 9).
+  // post-save-rollup-recalc phase (Seed 9).
   // ===========================================================================
 
   it('names the parent Summary field(s) in post-save-rollup-recalc when this object is a rollup child', async () => {
@@ -2253,7 +2253,7 @@ describe('whatHappensOnSaveHandler', () => {
   });
 
   // ===========================================================================
-  // R6-07: combined phase-order assertion (Seed 10).
+  // combined phase-order assertion (Seed 10).
   // ===========================================================================
 
   it('emits duplicate-rules ahead of save and post-save-rollup-recalc near the end, in the documented order', async () => {
@@ -2280,9 +2280,9 @@ describe('whatHappensOnSaveHandler', () => {
     expect(rollupStep?.componentId).toBe(R607_ROLLUP_FIELD);
   });
 
-  // R6-23: entitlementProcessNotes informational rider — a disclosure-plus-
+  // entitlementProcessNotes informational rider — a disclosure-plus-
   // pointer, NOT a simulated order-of-execution phase.
-  describe('R6-23: entitlementProcessNotes rider', () => {
+  describe('entitlementProcessNotes rider', () => {
     it('surfaces a note for an active EntitlementProcess targeting the object, excluding inactive and other-object processes', async () => {
       const result = await whatHappensOnSaveHandler(ctx, {
         objectApiName: 'R623Obj',

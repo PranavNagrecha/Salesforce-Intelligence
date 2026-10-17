@@ -1,5 +1,5 @@
 /**
- * P13-STAGED-demand-queue — the vault-local demand-retrieve queue.
+ * the vault-local demand-retrieve queue.
  *
  * When an MCP consumer ASKS for a component that turns out to be an
  * automation-critical phantom (referenced by retrieved automation but never

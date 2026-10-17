@@ -326,7 +326,7 @@ describe('enrichLastModified — managed-package and unknown rows are silently d
 });
 
 describe('enrichLastModified — type not in dispatch table', () => {
-  it('emits one error per node for a type the v1.7 R2 dispatch table does not cover', async () => {
+  it('emits one error per node for a type the dispatch table does not cover', async () => {
     const nodes = [
       makeNode({ id: 'Profile:Admin', type: 'Profile', apiName: 'Admin' }),
     ];

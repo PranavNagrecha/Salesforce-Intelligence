@@ -1,25 +1,25 @@
 /**
  * Handler for the `sfi.unused_fields_deep` MCP tool.
  *
- * The v2.4 "is this CustomField dead ANYWHERE?" surface. Extends v2.0b's
+ * The "is this CustomField dead ANYWHERE?" surface. Extends the
  * `sfi.unused_components({ types: ['CustomField'] })` with a multi-tier
- * cross-walk: in addition to the v2.0b incoming-edge check, this tool
+ * cross-walk: in addition to the incoming-edge check, this tool
  * also inspects formula expression text, ValidationRule
  * errorConditionFormula text, WorkflowRule formula / conditions mirror,
- * v2.0a ConditionalContext expressions, layout XML placements, v1.4
- * frontend `references` edges, and v1.5 `exposedThroughIntegration`
- * edges before flagging a field as unused. v2.0b would have surfaced a
+ * ConditionalContext expressions, layout XML placements,
+ * frontend `references` edges, and `exposedThroughIntegration`
+ * edges before flagging a field as unused. The incoming-edge check alone would have surfaced a
  * field as unused based solely on the absence of structural incoming
- * edges; v2.4 narrows the answer to "no static evidence of use across
+ * edges; this narrows the answer to "no static evidence of use across
  * all eight tiers."
  *
- * **Honesty axis (v2.4-wide)**: even with the eight-tier check,
+ * **Honesty axis (wide)**: even with the eight-tier check,
  * string-BUILT dynamic SOQL (`Database.query('SELECT ' + f + ...)`),
  * LWC dynamic field access, Apex reflective access, runtime metadata
  * references, and integration payloads built dynamically remain
  * invisible. Inline static SOQL (`[SELECT ... WHERE Field__c ...]`)
  * and CONSTANT-string `Database.query` literals are NOT blind spots:
- * the default-on Apex AST pass (R6-03) resolves their SELECT / WHERE /
+ * the default-on Apex AST pass resolves their SELECT / WHERE /
  * ORDER BY / GROUP BY fields into `confidence: 'parsed'` readsFrom
  * edges that tier 1 (incoming edges) counts, with tier 4's
  * `soqlStrings` text-match as the belt-and-suspenders backstop for
@@ -36,11 +36,11 @@
  *      access is not usage). A field with only FLS grants and no real
  *      reference is unused; counting the grant here would falsely fail
  *      this tier and (since the verdict ANDs all tiers) hide the field.
- *      Mirrors v2.0b.
+ *      Mirrors `unused_components`.
  *   2. `noFormulaTextReferences`: scan every other CustomField with
  *      `properties.formula`, every ValidationRule with
  *      `properties.errorConditionFormula`, every WorkflowRule with
- *      `properties.formula` or the v2.0a `properties.conditions`
+ *      `properties.formula` or the `properties.conditions`
  *      mirror (`expression` + `fieldRefs`), for an apiName text match.
  *   3. `noLayoutReferences`: walk every Layout's
  *      `properties.layoutSections` (→ layoutItems → field) and
@@ -52,15 +52,15 @@
  *      `properties.unresolvedFieldReferences` (apex-scanner byproduct)
  *      for the apiName.
  *   6. `noLwcAuraVfReferences`: incoming `references` edges from one
- *      of the four v1.4 frontend ComponentTypes. v1.4 emission.
+ *      of the four frontend ComponentTypes.
  *   7. `noConditionalContextReferences`: scan every ConditionalContext
  *      node's `properties.expression` text.
  *   8. `noIntegrationExposure`: incoming `exposedThroughIntegration`
- *      edges from v1.5.
+ *      edges.
  *
  * When all eight checks return "no reference found" the field appears
  * in the output. When any check finds a reference, the field is NOT
- * surfaced — v2.4's eight-tier check catches what v2.0b's incoming-
+ * surfaced — the eight-tier check catches what the incoming-
  * edge-only check misses.
  *
  * **ACTIVITY-POLYMORPHIC re-check** (real-org honesty-bug campaign) — a
@@ -109,7 +109,7 @@
  *     representations of the SAME physical field and another EXISTING
  *     representation has a real incoming usage edge this one does not
  *     (see the ACTIVITY-POLYMORPHIC re-check above). This tier is the
- *     v2.4-honest "no static evidence of use, but the scanner has
+ *     honest "no static evidence of use, but the scanner has
  *     known blind spots" surface.
  *   - `low`: the field is in a protected category (standard or
  *     managed-package). Inventory-only — never recommended for
@@ -176,7 +176,7 @@ const UNUSED_FIELDS_DEEP_TOOL = 'sfi.unused_fields_deep';
 
 /**
  * Cap on how many report/dashboard-excluded fields get named in one proposal's
- * evidence comment (R6-24-WIRE). The unused scan can exclude thousands of
+ * evidence comment. The unused scan can exclude thousands of
  * report-used fields; the delete bundle only needs a bounded sample so a
  * human sees the pattern without a megabyte comment.
  */
@@ -242,7 +242,7 @@ const completenessForUnusedFieldsDeep = (
   };
 };
 
-/** Inclusive upper bound on `limit`. Mirrors v2.0b's LIST_MAX_LIMIT. */
+/** Inclusive upper bound on `limit`. Mirrors the LIST_MAX_LIMIT. */
 const UNUSED_FIELDS_DEEP_MAX_LIMIT = 500;
 /** Default `limit` when the caller omits it. */
 const UNUSED_FIELDS_DEEP_DEFAULT_LIMIT = 100;
@@ -261,7 +261,7 @@ const PAGE_CAP = 500;
 const pageSize = (): number => Math.min(nodeScanLimit(), PAGE_CAP);
 
 /**
- * CR-CAP-L5 perf bound — the maximum number of `confidence: 'high'` fields ON A
+ * Perf bound — the maximum number of `confidence: 'high'` fields ON A
  * PAGE that get the live-population cross-check in a SINGLE call.
  *
  * Each cross-checked field costs up to two live `SELECT COUNT()` reads (the
@@ -288,7 +288,7 @@ const pageSize = (): number => Math.min(nodeScanLimit(), PAGE_CAP);
 export const LIVE_CROSS_CHECK_CAP = 3;
 
 /**
- * The v1.4 frontend ComponentType set whose incoming `references`
+ * The frontend ComponentType set whose incoming `references`
  * edges qualify as a `noLwcAuraVfReferences = false` disqualifier.
  */
 const FRONTEND_REFERENCE_TYPES: ReadonlySet<ComponentType> = new Set<ComponentType>([
@@ -302,7 +302,7 @@ const FRONTEND_REFERENCE_TYPES: ReadonlySet<ComponentType> = new Set<ComponentTy
  * The per-tier invisibility-warning catalog. Each entry names the
  * tier of references the v1.x extractors cannot see; the relevant
  * entries are populated on every emitted CustomField, even at
- * `confidence: 'high'`. This is the v2.4 honesty surface: a "high
+ * `confidence: 'high'`. This is the honesty surface: a "high
  * confidence unused" flag carries the invisibility list so a caller
  * understands the bound.
  */
@@ -316,7 +316,7 @@ const INVISIBILITY_WARNINGS: readonly string[] = Object.freeze([
 
 /**
  * Response-level verbatim boundary disclosures emitted on every
- * response (matches v2.4 R2's honesty axis). The skill consumes these
+ * response (matches the honesty axis). The skill consumes these
  * verbatim.
  */
 const BOUNDARIES: readonly string[] = Object.freeze([
@@ -381,11 +381,11 @@ export const unusedFieldsDeepInputSchema = z.object({
     .min(1)
     .max(UNUSED_FIELDS_DEEP_MAX_LIMIT)
     .optional(),
-  // CR-22: page cursor for walking the full unused-field list when truncated.
+  // Page cursor for walking the full unused-field list when truncated.
   offset: z.number().int().min(0).optional(),
   cursor: z.string().min(1).optional(),
   /**
-   * CR-CAP-L5: opt-in live plane. When a field's static confidence would be
+   * Opt-in live plane. When a field's static confidence would be
    * `high` (unused across all eight tiers), cross-check its live production
    * population before trusting that tier — real data despite zero static
    * references may be written by a blind spot the scanner cannot see. Never
@@ -395,7 +395,7 @@ export const unusedFieldsDeepInputSchema = z.object({
   orgAlias: z.string().min(1).optional(),
   /**
    * INTERNAL composition guard — NOT advertised in the public tool description.
-   * When `true`, HARD-SKIP the entire CR-CAP-L5 live-population cross-check: no
+   * When `true`, HARD-SKIP the entire live-population cross-check: no
    * `probeLiveAccess`, no `computeLivePopulation`, no live query at all. The
    * response carries the STATIC eight-tier verdicts only. Composites that read
    * ONLY the static `totalCount` (`tech_debt_score` → `org_risk_report` /
@@ -403,11 +403,11 @@ export const unusedFieldsDeepInputSchema = z.object({
    * ~2 live `SELECT COUNT()` reads per high-confidence field from inside a
    * report roll-up — which, on a large org, pushed the composite past the MCP
    * 60s client timeout. `staticOnly` output is byte-identical for these
-   * consumers to the pre-CR-CAP-L5 offline path (the live cross-check never
+   * consumers to the legacy offline path (the live cross-check never
    * changes `totalCount` / `byConfidence` / `byParentObject`).
    */
   staticOnly: z.boolean().optional(),
-  // R6-21: 'csv' returns `csv` (rows serialized as CSV) instead of `fields`.
+  // 'csv' returns `csv` (rows serialized as CSV) instead of `fields`.
   // STEP-2: 'cleanup' additionally projects a ranked `findings[]` roster + the
   // report/dashboard usage caveat (the folded-in `field_cleanup_candidates`
   // MODE), trimming findings+fields together to the 36 KB response budget.
@@ -454,7 +454,7 @@ export interface UnusedFieldDeepEntry {
    */
   readonly piiClassification?: 'pii' | 'sensitive' | 'protected';
   /**
-   * CR-CAP-L5: live production population evidence, present ONLY when this
+   * Live production population evidence, present ONLY when this
    * field's static `confidence` was `high` AND the live plane answered
    * (a standing grant covers the org, or `SFI_LIVE_PLANE_ENABLED=1`; per-call
    * `liveEnabled` is intent only) for it. A `populatedCount > 0`
@@ -547,7 +547,7 @@ export interface UnusedFieldsDeepOutput {
   /**
    * Page size applied to this response. Present ONLY on a PAGED response
    * (`truncated` or a resumed `offset > 0`); omitted on a whole-fits no-cursor
-   * call so that response stays byte-identical to the pre-CR-22 shape.
+   * call so that response stays byte-identical to the pre-paging shape.
    */
   readonly limit?: number;
   /** Zero-based offset of the first returned field. Present only when paged (see `limit`). */
@@ -555,9 +555,9 @@ export interface UnusedFieldsDeepOutput {
   /** Offset to pass on the next call to fetch the following page. Present only when `truncated`. */
   readonly nextOffset?: number;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated.
+   * Opaque continuation token, present ONLY when this page is truncated.
    * Echo it back as `cursor` to resume. Absent on a complete page so an
-   * in-budget response is byte-identical to pre-CR-22.
+   * in-budget response is byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
@@ -593,7 +593,7 @@ const propertyStringArray = (
 };
 
 /**
- * Flatten a WorkflowRule's v2.0a `properties.conditions` mirror into
+ * Flatten a WorkflowRule's `properties.conditions` mirror into
  * searchable text (expression strings + canonical fieldRefs).
  */
 const workflowConditionsText = (node: Node): string => {
@@ -620,7 +620,7 @@ const workflowConditionsText = (node: Node): string => {
 /**
  * Recursively walks a Layout's `properties.layoutSections` →
  * `layoutItems` → `field` shape and returns the set of field api
- * names. v0.1's layout extractor emits this shape; the walk is
+ * names. The layout extractor emits this shape; the walk is
  * defensive against partial extraction.
  */
 const layoutSectionFields = (node: Node): ReadonlySet<string> => {
@@ -644,7 +644,7 @@ const layoutSectionFields = (node: Node): ReadonlySet<string> => {
 
 /**
  * Walks a Layout's `properties.relatedLists` to surface field
- * references inside `<fields>` child arrays — the v0.1 layout
+ * references inside `<fields>` child arrays — the layout
  * extractor emits these on related-list metadata.
  */
 const relatedListFields = (node: Node): ReadonlySet<string> => {
@@ -745,7 +745,7 @@ interface TaggedText {
 /**
  * The cross-tier corpora with every text-search value LOWER-CASED EXACTLY ONCE.
  *
- * The v2.4 text-presence checks are case-insensitive (Salesforce API-name
+ * The text-presence checks are case-insensitive (Salesforce API-name
  * comparisons in formula / layout / SOQL text are case-insensitive by platform
  * contract), so each check lower-cased both operands on every comparison. Done
  * PER FIELD, that re-lower-cased every (large) corpus string ~N times for N
@@ -770,7 +770,7 @@ interface LoweredCorpora {
   readonly customFieldFormulas: readonly TaggedText[];
   /**
    * Lower-cased ValidationRule `errorConditionFormula` + WorkflowRule `formula`
-   * / v2.0a `conditions` mirror text. No self-skip (never the field itself).
+   * / `conditions` mirror text. No self-skip (never the field itself).
    * Substring-matched.
    */
   readonly otherFormulaTexts: readonly string[];
@@ -853,8 +853,8 @@ const buildLoweredCorpora = (corpora: ScanCorpora): LoweredCorpora => {
 
 /**
  * Decide, from a field's already-fetched INCOMING edge set, whether it has zero
- * non-`parentOf`/non-`grantedBy` incoming edges (the v2.0b structural check).
- * Mirrors the v2.0b `isUnused` primitive.
+ * non-`parentOf`/non-`grantedBy` incoming edges (the structural check).
+ * Mirrors the `isUnused` primitive.
  *
  * Skips `parentOf` (owning object — structural) and `grantedBy` (a Profile /
  * PermissionSet FLS grant — ACCESS, not usage). A field nothing references is
@@ -944,13 +944,13 @@ const checkNoUnresolvedApexReferences = (
 
 /**
  * Decide, from a field's already-fetched INCOMING edge set, whether it has any
- * incoming `references` edge from one of the four v1.4 frontend ComponentTypes.
+ * incoming `references` edge from one of the four frontend ComponentTypes.
  * Pure over the edge set (see {@link checkNoIncomingEdgesFromEdges}).
  */
 const checkNoLwcAuraVfReferencesFromEdges = (incoming: readonly Edge[]): boolean => {
   for (const edge of incoming) {
     if (edge.edgeType !== 'references') continue;
-    // Heuristic: ComponentId prefix matches a v1.4 frontend type.
+    // Heuristic: ComponentId prefix matches a frontend type.
     for (const t of FRONTEND_REFERENCE_TYPES) {
       if (edge.fromId.startsWith(`${t}:`)) return false;
     }
@@ -960,7 +960,7 @@ const checkNoLwcAuraVfReferencesFromEdges = (incoming: readonly Edge[]): boolean
 
 /**
  * Decide whether the field's apiName appears in any
- * ConditionalContext's `properties.expression` (v2.0a). Reads the
+ * ConditionalContext's `properties.expression`. Reads the
  * pre-lowered {@link LoweredCorpora.conditionalContextTexts}.
  */
 const checkNoConditionalContextReferences = (
@@ -975,10 +975,10 @@ const checkNoConditionalContextReferences = (
 
 /**
  * Decide, from a field's already-fetched INCOMING edge set, whether it has any
- * incoming `exposes` edge from a v1.5 integration surface. The v1.5 spec emits
+ * incoming `exposes` edge from an integration surface. The spec emits
  * `exposes` from ApexClass to synthetic `ExternalApi:` nodes — when an
  * integration surface exposes a field, the relevant ApexClass carries the
- * exposure. v2.4 reads any incoming `exposes` edge as evidence of integration
+ * exposure. This reads any incoming `exposes` edge as evidence of integration
  * exposure. Pure over the edge set (see {@link checkNoIncomingEdgesFromEdges}).
  */
 const checkNoIntegrationExposureFromEdges = (incoming: readonly Edge[]): boolean => {
@@ -1089,7 +1089,7 @@ const buildActivityPolymorphicLiveSiblingIndex = async (
 
 /**
  * Extract a CustomField's data type from `properties.dataType` (the
- * v0.1 extractor convention). Falls back to empty string when absent.
+ * extractor convention). Falls back to empty string when absent.
  */
 const fieldTypeOf = (node: Node): string => {
   const t = node.properties['dataType'];
@@ -1134,7 +1134,7 @@ const computeConfidence = (
   isProtected: boolean,
 ): 'high' | 'medium' | 'low' => {
   if (isProtected) return 'low';
-  // Even at "all eight checks clean", v2.4's honesty discipline says
+  // Even at "all eight checks clean", the honesty discipline says
   // dynamic SOQL / LWC / reflective access remain invisible — that's
   // why every "high" entry still carries `invisibilityWarnings`
   // verbatim. We mark `high` only when nothing protects the field.
@@ -1188,7 +1188,7 @@ const recommendedActionFor = (
  * Comparator for the deterministic per-field sort. `id` ASC so the
  * truncation point is stable across runs.
  *
- * This is already a STRICT TOTAL order (CR-22): `id` is the field's unique graph
+ * This is already a STRICT TOTAL order: `id` is the field's unique graph
  * ComponentId (`CustomField:{Parent}.{Field}`), so no two distinct entries
  * compare equal — id-ASC needs no additional tiebreak for a dup-free /
  * skip-free offset resume.
@@ -1197,7 +1197,7 @@ const compareById = (a: UnusedFieldDeepEntry, b: UnusedFieldDeepEntry): number =
   a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
 
 /**
- * CSV header for the R6-21 `format: 'csv'` export. The eight-tier `checks`
+ * CSV header for the `format: 'csv'` export. The eight-tier `checks`
  * object is flattened into `checks_*` columns (a CSV row cannot nest); the
  * static `invisibilityWarnings` list is NOT a column (identical on every row)
  * — it rides in the comment-line disclosures instead.
@@ -1479,7 +1479,7 @@ const PROPOSAL_MAX_COMPONENTS = 200;
  * counts disclosed in the evidence. PURE — it PROPOSES local files a human
  * feeds to their own deploy tool; it never deploys or writes to the org.
  *
- * R6-24-WIRE: optional `reportExcluded` carries fold-time report/dashboard
+ * WIRE: optional `reportExcluded` carries fold-time report/dashboard
  * name lists for fields held out of the unused set because they are used in
  * analytics — those names land in the evidence comment so the proposal states
  * WHICH reports/dashboards would break (not just a boolean).
@@ -1541,7 +1541,7 @@ export const buildUnusedFieldsProposal = (
     );
   }
 
-  // R6-24-WIRE: name reports/dashboards that held fields out of the unused set.
+  // WIRE: name reports/dashboards that held fields out of the unused set.
   const reportBreakReasons: string[] = [];
   if (reportExcluded !== undefined && reportExcluded.length > 0) {
     const sample = reportExcluded.slice(0, PROPOSAL_REPORT_EXCLUSION_EVIDENCE_CAP);
@@ -1675,7 +1675,7 @@ export const unusedFieldsDeepHandler = async (
     // stays a PROPERTY, never an edge — so this property read remains the only
     // channel, and it covers every extracted report even when the node set is
     // capped.
-    // R6-24-WIRE: keep the capped name lists so format:'proposal' can name the
+    // WIRE: keep the capped name lists so format:'proposal' can name the
     // reports/dashboards that would break in the evidence comment.
     const rdDetail = reportDashboardUsageDetail(field);
     if (rdDetail.usedInReport || rdDetail.usedInDashboard) {
@@ -1872,7 +1872,7 @@ export const unusedFieldsDeepHandler = async (
       (byParentObject[e.parentObjectApiName] ?? 0) + 1;
     byConfidence[e.confidence] += 1;
   }
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // Resolve the resume offset (echoed cursor wins over explicit offset).
   // The fingerprint covers every NARROWING arg — the resolved object scope plus
   // the two exclude flags — so a token can't replay across a different
   // scope/flag set. argsFingerprint already strips limit/offset/cursor.
@@ -1966,7 +1966,7 @@ export const unusedFieldsDeepHandler = async (
   const emitCursor = paged.nextCursor !== null;
   const isPaged = truncated || offset > 0;
 
-  // Preserve the pre-CR-22 byte-trim `note`: emitted when the page was trimmed
+  // Preserve the pre-paging byte-trim `note`: emitted when the page was trimmed
   // BELOW the requested limit to fit the byte budget (not merely over-limit), so
   // a byte-trimmed-but-not-over-limit response keeps its existing shape.
   const byteTrimmedBelowLimit = paged.byteTrimmed && fields.length < limit;
@@ -1976,7 +1976,7 @@ export const unusedFieldsDeepHandler = async (
       `or a lower \`limit\`, or page for more.`
     : undefined;
 
-  // CR-CAP-L5: cross-check `confidence: 'high'` fields ON THIS PAGE against
+  // Cross-check `confidence: 'high'` fields ON THIS PAGE against
   // live production population — bounded by the page, never the full
   // unfiltered `sorted` set, so live-query cost tracks what is actually
   // returned (respects the session budget rather than spending it on
@@ -2237,7 +2237,7 @@ export const unusedFieldsDeepHandler = async (
     return ok({ data: dataWithoutCsv, vaultState });
   }
 
-  // R6-21: 'csv' carries this page's rows in `csv` instead of `fields` — the
+  // 'csv' carries this page's rows in `csv` instead of `fields` — the
   // pagination/byte-budget decisions above (fields/truncated/note) are already
   // final, so the csv is an alternate encoding of the SAME `fields` page, not a
   // second independent row-selection pass. `fitCsvRowsToBudget` bounds the RAW

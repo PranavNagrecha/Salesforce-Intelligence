@@ -538,7 +538,7 @@ const buildImpact = async (
     }
   }
 
-  // W6.1 (PACKAGE-IMPACT-TWO-SEGMENT-NAMESPACE-BLIND — targetMissing touchpoints,
+  // (PACKAGE-IMPACT-TWO-SEGMENT-NAMESPACE-BLIND — targetMissing touchpoints,
   // incl. the grant-only count residual): a managed package's INTERNAL components
   // are usually never retrieved, so a reference from YOUR code to
   // `Ns__ManagedThing` (an Apex `callout:` / cross-class call) — or, the residual
@@ -610,7 +610,7 @@ const buildImpact = async (
 
   const dependentComponentCount = new Set(dependencies.map((d) => d.fromId)).size;
 
-  // W6.2 (GATE-HONESTY-EMPTY-GRAPH-EQUALS-SAFE verdict policy — PACKAGE-IMPACT-
+  // (GATE-HONESTY-EMPTY-GRAPH-EQUALS-SAFE verdict policy — PACKAGE-IMPACT-
   // TWO-SEGMENT-NAMESPACE-BLIND residual). An absence-based verdict reads as a
   // soft "safe to uninstall"; it is only as strong as (a) the coverage of the
   // families that COULD hold a reference AND (b) the completeness of the scan.

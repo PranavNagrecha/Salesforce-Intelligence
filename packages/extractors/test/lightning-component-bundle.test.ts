@@ -419,7 +419,7 @@ describe('extractLightningComponentBundle', () => {
   });
 });
 
-describe('resource reference edges (P14-USAGE-label-static-graph)', () => {
+describe('resource reference edges', () => {
   it('emits DECLARED references edges for label and resourceUrl imports', async () => {
     const { tempDir, bundleDir } = await writeTempLwcBundle('LabelUser', {
       jsBody: [

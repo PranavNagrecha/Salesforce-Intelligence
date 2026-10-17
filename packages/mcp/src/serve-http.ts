@@ -1,5 +1,5 @@
 /**
- * P13-REMOTE-http — read-only HTTP serving of the SAME MCP server.
+ * Read-only HTTP serving of the SAME MCP server.
  *
  * `sfi serve --http` exposes the stdio server's exact tool surface over the
  * MCP streamable-HTTP transport. Security posture:
@@ -7,7 +7,7 @@
  *   - BEARER TOKEN required on every request (constant-time comparison —
  *     SHA-256 both sides then `timingSafeEqual`, so neither content nor
  *     length leaks). 401 without it.
- *   - Optional `--tokens-file` map (R8-PERCALLER-TOKENS): each token resolves
+ *   - Optional `--tokens-file` map: each token resolves
  *     to a caller identity threaded into Context for write attribution.
  *     Solo `--token` / `--generate-token` remains the single-token default
  *     (no identity). Identity attribution only — no role tiers.

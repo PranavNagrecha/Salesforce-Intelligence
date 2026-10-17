@@ -36,6 +36,7 @@ properties:
   referenceTo: null
   relationshipName: null
   required: false
+  restricted: true
   scale: null
   trackHistory: false
   unique: false
@@ -65,6 +66,7 @@ Lifecycle status of the invoice.
 | referenceTo | `null` |
 | relationshipName | `null` |
 | required | `false` |
+| restricted | `true` |
 | scale | `null` |
 | trackHistory | `false` |
 | unique | `false` |
@@ -90,6 +92,12 @@ Lifecycle status of the invoice.
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `ApexClass:PaymentService` | parsed | apex-ast |
+
+### references (incoming, 1)
+
+| Source | Confidence | Producer |
+| --- | --- | --- |
+| `SharingRule:Invoice__c.Share_Invoices_To_Finance` | declared | sharing-rule-extractor |
 
 ### writesTo (incoming, 1)
 

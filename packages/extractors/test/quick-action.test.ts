@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
+import { extractLightningComponentBundle } from '../src/lightning-component-bundle.js';
 import { extractQuickAction } from '../src/quick-action.js';
 
 import { findHarnessRoot, itHarness } from './harness-root.js';
@@ -109,7 +110,7 @@ describe('extractQuickAction', () => {
     itHarness('produces the golden output for the Call_Action fixture (LightningComponent variant on Account)', async () => {
       // Call_Action is a LightningComponent action on Account —
       // produces both `parentOf` and `references` (to
-      // `AuraDefinitionBundle:c:callPanel`).
+      // `AuraDefinitionBundle:callPanel`).
       const fixtureAbsPath = resolve(HARNESS_ROOT, CALL_ACTION_FIXTURE_PATH_REL);
       const goldenAbsPath = resolve(HARNESS_ROOT, CALL_ACTION_GOLDEN_PATH_REL);
 
@@ -241,7 +242,9 @@ describe('extractQuickAction', () => {
       );
       expect(refsEdge).toBeDefined();
       if (!refsEdge) return;
-      expect(refsEdge.toId).toBe('AuraDefinitionBundle:c:callPanel');
+      // `c:callPanel` is the org's own `callPanel` bundle: the id the Aura
+      // extractor mints from `aura/callPanel/`, with no namespace.
+      expect(refsEdge.toId).toBe('AuraDefinitionBundle:callPanel');
       expect(refsEdge.properties).toEqual({ targetKind: 'aura' });
     });
 
@@ -250,10 +253,53 @@ describe('extractQuickAction', () => {
 <QuickAction xmlns="http://soap.sforce.com/2006/04/metadata">
   <label>LWC Action</label>
   <type>LightningWebComponent</type>
-  <lightningWebComponent>c:myLwc</lightningWebComponent>
+  <lightningWebComponent>c:Demo_Card</lightningWebComponent>
 </QuickAction>`;
       const { dir, path } = await writeTempTopLevelQuickAction(
         'Global.LwcAction.quickAction-meta.xml',
+        xml,
+      );
+      const lwcDir = join(dir, 'lwc', 'Demo_Card');
+      await mkdir(lwcDir, { recursive: true });
+      await writeFile(
+        join(lwcDir, 'Demo_Card.js-meta.xml'),
+        `<?xml version="1.0" encoding="UTF-8"?>
+<LightningComponentBundle xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <isExposed>true</isExposed>
+</LightningComponentBundle>`,
+        'utf-8',
+      );
+      await writeFile(join(lwcDir, 'Demo_Card.js'), 'export default class DemoCard {}\n', 'utf-8');
+      try {
+        const lwc = await extractLightningComponentBundle(lwcDir);
+        const result = await extractQuickAction(path);
+        expect(lwc.ok && result.ok).toBe(true);
+        if (!lwc.ok || !result.ok) return;
+        const refsEdge = result.value.edges.find(
+          (e) => e.edgeType === 'references',
+        );
+        expect(refsEdge).toBeDefined();
+        if (!refsEdge) return;
+        // `c:` is the org's own namespace: the edge lands on the node the LWC
+        // extractor read from `lwc/Demo_Card/`.
+        expect(refsEdge.toId).toBe(lwc.value.nodes[0]!.id);
+        expect(refsEdge.toId).toBe('LightningComponentBundle:Demo_Card');
+        expect(refsEdge.properties).toEqual({ targetKind: 'lwc' });
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('keeps a foreign namespace on a LightningWebComponent target so it never claims a local bundle', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<QuickAction xmlns="http://soap.sforce.com/2006/04/metadata">
+  <label>Packaged LWC Action</label>
+  <type>LightningWebComponent</type>
+  <lightningWebComponent>demo_ns:Demo_Card</lightningWebComponent>
+</QuickAction>`;
+      const { dir, path } = await writeTempTopLevelQuickAction(
+        'Global.PackagedLwcAction.quickAction-meta.xml',
         xml,
       );
       try {
@@ -263,10 +309,7 @@ describe('extractQuickAction', () => {
         const refsEdge = result.value.edges.find(
           (e) => e.edgeType === 'references',
         );
-        expect(refsEdge).toBeDefined();
-        if (!refsEdge) return;
-        expect(refsEdge.toId).toBe('LightningComponentBundle:c:myLwc');
-        expect(refsEdge.properties).toEqual({ targetKind: 'lwc' });
+        expect(refsEdge?.toId).toBe('LightningComponentBundle:demo_ns:Demo_Card');
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

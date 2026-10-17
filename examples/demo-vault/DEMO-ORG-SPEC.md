@@ -51,6 +51,7 @@ Field notation: `Name__c (Type[, detail])`. Lookups/MD name the target.
    - `Is_Complete__c` (Formula Checkbox = `ISPICKVAL(Status__c,"Complete")`)
    - `Margin_Percent__c` (Formula Percent = `(Contract_Value__c - Total_Invoiced__c) / Contract_Value__c`)
    - `Risk_Score__c` (Number 3,0)
+   - `Utility_Provider__c` (Text 80) — shown only by the `projectSummaryCard` LWC
 2. **Site_Survey__c** — sharingModel Private.
    - `Project__c` (Lookup → Project__c)
    - `Roof_Type__c` (Picklist: Asphalt, Metal, Tile, Flat)
@@ -157,6 +158,12 @@ Field notation: `Name__c (Type[, detail])`. Lookups/MD name the target.
 
 **Layouts** (`layouts/`): `Project__c-Residential Layout.layout-meta.xml`, `Installation__c-Installation Layout.layout-meta.xml`. **Record types**: under `objects/Project__c/recordTypes/` `Residential` + `Commercial`.
 
+## 0.6.0 reference families (one fixture each)
+
+- `flows/Project_Site_Survey.flow-meta.xml` — screen flow; `ObjectProvided` screen fields on `Project__c.System_Size_kW__c` and `Project__c.Expected_Completion__c`, plus a `c:projectSummaryCard` screen component.
+- `lwc/projectSummaryCard/` — LWC whose `lightning-record-form` binds `Project__c.Status__c` and `Project__c.Utility_Provider__c`.
+- `Project__c-Residential Layout` — `<relatedLists>` for `Installation__c.Project__c` with `Install_Date__c` and `Panels_Installed__c` columns.
+
 ## OmniStudio + CPQ sliver
 
 - OmniScript `omniScripts/Customer_Intake_English_1.os-meta.xml` (intake form; root `<OmniScript>`).
@@ -212,5 +219,5 @@ These types have extractors on this branch but no demo-vault fixture yet:
 | `PresenceUserConfig`, `ServiceChannel`, `QueueRoutingConfig`, `EntitlementProcess`, `MilestoneType` | Service Cloud tier; deferred |
 | `InstalledPackage`, `ReportType`, `Report`, `Dashboard` | Complex/large; low demo priority |
 | `PermissionSetGroup`, `ScopingRule`, `RestrictionRule`, `ValidationRule`, `RecordType`, `BusinessProcess`, `CompactLayout`, `FieldSet`, `Index`, `ListView`, `WebLink` | Sub-object types extracted from objects/; already implicit via objects/ stubs |
-| `AuraDefinitionBundle`, `LightningComponentBundle`, `VisualforceComponent`, `VisualforcePage`, `FlexiPage`, `DecisionTable` | UI/markup tier; deferred |
+| `AuraDefinitionBundle`, `VisualforceComponent`, `VisualforcePage`, `FlexiPage`, `DecisionTable` | UI/markup tier; deferred (`LightningComponentBundle` is stubbed by `lwc/projectSummaryCard/`) |
 | `ExternalDataSource`, `ExternalService`, `CspTrustedSite`, `RemoteSiteSetting`, `SessionSettings` | Integration/security tier; NetworkAccess + NamedCredential + ConnectedApp + AuthProvider cover the priority surface |

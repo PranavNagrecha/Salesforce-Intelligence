@@ -48,10 +48,10 @@ const makeNode = (overrides: Partial<Node> & Pick<Node, 'id' | 'type' | 'apiName
 // Seed:
 //   - ApexClass:FullyEnriched — properties carry every freshness field
 //     (lastModifiedDate, lastModifiedBy: { id, name }, apiVersion).
-//     The happy v1.7-enrichment path.
+//     The happy enrichment path.
 //   - ApexClass:LegacyOnly — top-level lastModifiedDate + legacy string
 //     lastModifiedBy + top-level apiVersion populated, no properties
-//     overlay. Backward-compat: a pre-v1.7 vault that already had
+//     overlay. Backward-compat: a legacy vault that already had
 //     freshness from the DX-source extractor still resolves to
 //     enriched: true.
 //   - ApexClass:Unenriched — every freshness field null. The default
@@ -183,7 +183,7 @@ describe('lastModifiedHandler — unknown component', () => {
 });
 
 describe('lastModifiedHandler — fully enriched node', () => {
-  it('emits every freshness field from the v1.7 properties overlay', async () => {
+  it('emits every freshness field from the properties overlay', async () => {
     const result = await lastModifiedHandler(ctx, {
       componentId: 'ApexClass:FullyEnriched',
     });

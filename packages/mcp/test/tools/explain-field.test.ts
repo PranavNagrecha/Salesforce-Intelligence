@@ -87,7 +87,7 @@ const accountIndustrySeed: ExtractionResult = {
 // =============================================================================
 // Seed 1b: A Picklist field with an INLINE value-set definition. Verifies
 // `picklistValues` surfaces the declared values verbatim (the literal answer
-// to "what values are in this picklist?" — P14-ROUTER-picklist-values).
+// to "what values are in this picklist?").
 // Mirrors the real Payment_Status__c shape the custom-field extractor emits.
 // =============================================================================
 
@@ -147,10 +147,10 @@ const newVaultPicklistFieldSeed: ExtractionResult = {
 };
 
 // =============================================================================
-// Seed 1c: A GlobalValueSet-DRIVEN picklist (P14-USAGE-gvs-edge): inline
+// Seed 1c: A GlobalValueSet-DRIVEN picklist: inline
 // picklistValues null, but a usesValueSet edge leads to the GlobalValueSet
 // node carrying the declared values — explain_field follows it. The GVS node
-// carries pre-CR-10b bare-string `values` (a vault refreshed before the GVS
+// carries legacy bare-string `values` (a vault refreshed before the GVS
 // extractor captured per-value isActive/label/default) to pin the back-compat
 // path: normalizePicklistValues treats each bare string as an active value.
 // =============================================================================
@@ -200,7 +200,7 @@ const gvsDrivenFieldSeed: ExtractionResult = {
 };
 
 // =============================================================================
-// Seed 1d (CR-10b): A GlobalValueSet-DRIVEN picklist whose GVS node carries
+// Seed 1d: A GlobalValueSet-DRIVEN picklist whose GVS node carries
 // the CURRENT extractor's rich per-value shape `{value, isActive, label,
 // default}`, INCLUDING a deactivated entry — proves explain_field surfaces an
 // honest isActive for a GVS-resolved value (retained, not filtered, not
@@ -472,7 +472,7 @@ const mdtUnusedFieldSeed: ExtractionResult = {
 
 // =============================================================================
 // Seed 5 (R1 typed absence): an `__mdt` parent whose CustomMetadataRecord
-// children were built by a refresh that PREDATES the v1.6 R2 record-values
+// children were built by a refresh that PREDATES the record-values
 // extractor — the node carries NO `values` property at all (Alpha). The control
 // in the same seed is a record that WAS extracted (Bravo). Those two must never
 // render identically: the first is "never extracted", the second is a real
@@ -535,7 +535,7 @@ const legacyMdtSeed: ExtractionResult = {
       apiName: 'Legacy_Setting__mdt.Alpha',
       label: 'Alpha',
       parentId: LEGACY_MDT_TYPE_ID,
-      // NO `values` / `valuesCount` keys: the pre-v1.6 shape.
+      // NO `values` / `valuesCount` keys: the legacy shape.
       properties: {
         label: 'Alpha',
         protected: false,
@@ -724,7 +724,7 @@ describe('explainFieldHandler', () => {
   });
 
   it('surfaces the declared picklistValues for an inline-value-set picklist field (H10 back-compat: bare-string OLD vault ⇒ active objects)', async () => {
-    // This seed stores the LEGACY bare-string shape (a pre-CR-10 vault). The
+    // This seed stores the LEGACY bare-string shape (a legacy vault). The
     // normalizer must read it WITHOUT crashing or dropping, treating each
     // string as an ACTIVE value — never silently emptying to [].
     const result = await explainFieldHandler(ctx, {
@@ -775,12 +775,12 @@ describe('explainFieldHandler', () => {
     expect(result.value.data.picklistValuesNote).toContain('not inline');
   });
 
-  it('resolves a GlobalValueSet-driven picklist through the usesValueSet edge (P14-USAGE-gvs-edge); back-compat with a pre-CR-10b bare-string GVS', async () => {
+  it('resolves a GlobalValueSet-driven picklist through the usesValueSet edge; back-compat with a legacy bare-string GVS', async () => {
     const result = await explainFieldHandler(ctx, { fieldId: GVS_FIELD_ID });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     // The declared values come from the LINKED GlobalValueSet, cited by id.
-    // This GVS node's `values` are pre-CR-10b bare strings (an un-refreshed
+    // This GVS node's `values` are legacy bare strings (an un-refreshed
     // vault) — normalizePicklistValues wraps each as {value, isActive: true}
     // for shape uniformity, same back-compat rule as the inline reader.
     expect(result.value.data.picklistValues).toEqual([
@@ -789,12 +789,12 @@ describe('explainFieldHandler', () => {
       { value: 'AMER', isActive: true },
     ]);
     expect(result.value.data.picklistValuesSource).toBe(GVS_ID);
-    // CR-10b: no disclosure note fires for a resolved GlobalValueSet anymore
+    // No disclosure note fires for a resolved GlobalValueSet anymore
     // — the "not inline" note only fires when resolution FAILS.
     expect(result.value.data.picklistValuesNote).toBeUndefined();
   });
 
-  it('CR-10b: surfaces an honest isActive:false for a GVS-resolved deactivated value, never dropping it', async () => {
+  it('surfaces an honest isActive:false for a GVS-resolved deactivated value, never dropping it', async () => {
     const result = await explainFieldHandler(ctx, { fieldId: GVS_RICH_FIELD_ID });
     expect(result.ok).toBe(true);
     if (!result.ok) return;

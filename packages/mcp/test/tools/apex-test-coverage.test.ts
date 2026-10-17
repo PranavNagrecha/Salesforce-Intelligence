@@ -231,7 +231,7 @@ describe('apexTestCoverageHandler — past-cap roster (de-cap)', () => {
     });
   });
 
-  // CR-22 B4 — org-wide output cursor over the 4-untested-class list.
+  // Org-wide output cursor over the 4-untested-class list.
   it('org-wide: a truncated page emits a cursor that resumes with no gaps or dupes', async () => {
     const all = await apexTestCoverageHandler(pagedCtx, { limit: 500 });
     expect(all.ok).toBe(true);
@@ -276,16 +276,16 @@ describe('apexTestCoverageHandler — past-cap roster (de-cap)', () => {
   });
 });
 
-// --- CR-RV14: regression guard against the REAL 500-row cap ------------------
+// --- regression guard against the REAL 500-row cap ------------------
 //
 // The de-cap block above simulates the cap with SFI_NODE_SCAN_LIMIT=2 — a knob
-// CR-07 itself introduced, so it cannot fail on PRE-CR-07 code (the old handler
+// itself introduced, so it cannot fail on the old code (the old handler
 // loaded a single `listNodesByType` page hard-capped at 500 with NO env
 // override). This block seeds 501+ ApexClasses with a covering test sorted PAST
 // row 500 and sets NO env knob, so it exercises the genuine 500-cap the bug
-// lived behind. Pre-CR-07 behavior (single 500-row page) drops the tail and
+// lived behind. Legacy behavior (single 500-row page) drops the tail and
 // reports the covered class "no-test-references-found" — this test FAILS there.
-describe('apexTestCoverageHandler — past the REAL 500 cap (CR-RV14, no env knob)', () => {
+describe('apexTestCoverageHandler — past the REAL 500 cap (no env knob)', () => {
   let dir: string;
   let st: GraphStore;
   let bigCtx: Context;
@@ -329,8 +329,8 @@ describe('apexTestCoverageHandler — past the REAL 500 cap (CR-RV14, no env kno
     delete process.env['SFI_NODE_SCAN_LIMIT'];
   });
 
-  it('single-class: a covering test at row 501 is found at the REAL cap (fail-before on pre-CR-07)', async () => {
-    // Pre-CR-07 the lone 500-row page held only Cls000..Cls499, so Zcovered and
+  it('single-class: a covering test at row 501 is found at the REAL cap (fail-before on the old single-page cap)', async () => {
+    // Previously the lone 500-row page held only Cls000..Cls499, so Zcovered and
     // its ZcoveredTest were dropped and the verdict was a false
     // "no-test-references-found". The uncapped inbound-edge resolution finds it.
     const r = await apexTestCoverageHandler(bigCtx, { classApiName: 'Zcovered' });
@@ -341,7 +341,7 @@ describe('apexTestCoverageHandler — past the REAL 500 cap (CR-RV14, no env kno
   });
 
   it('org-wide: counts and backlog cover the FULL roster past the cap', async () => {
-    // Zuntested sorts past row 500. Pre-CR-07 the single 500-row page never saw
+    // Zuntested sorts past row 500. Previously the single 500-row page never saw
     // it, so the counts under-reported and it never appeared in the backlog.
     // The offset-loop walk enumerates the full roster.
     const r = await apexTestCoverageHandler(bigCtx, { limit: MAX_LIMIT });
@@ -350,7 +350,7 @@ describe('apexTestCoverageHandler — past the REAL 500 cap (CR-RV14, no env kno
     expect(r.value.data.mode).toBe('org-wide');
     // Counts are computed pre-slice from the full walk: Zcovered is the ONLY
     // class with a covering test; 500 fillers + Zuntested = 501 lack one.
-    // Pre-CR-07 these were ~499/0/499 off the single capped page.
+    // Previously these were ~499/0/499 off the single capped page.
     expect(r.value.data.summary).toMatchObject({
       nonTestClasses: FILLER + 2, // 500 fillers + Zcovered + Zuntested
       testClasses: 1,
@@ -385,9 +385,9 @@ describe('apexTestCoverageHandler — past the REAL 500 cap (CR-RV14, no env kno
   });
 });
 
-// CR-22 B4 — single-class mode must NEVER emit a cursor; org-wide whole-fits
+// Single-class mode must NEVER emit a cursor; org-wide whole-fits
 // stays byte-identical.
-describe('apexTestCoverageHandler — output cursor (CR-22)', () => {
+describe('apexTestCoverageHandler — output cursor', () => {
   it('single-class mode never emits a cursor or paging fields', async () => {
     const r = await apexTestCoverageHandler(ctx, { classApiName: 'SvcA' });
     expect(r.ok).toBe(true);
@@ -468,7 +468,7 @@ describe('apexTestCoverageInputSchema', () => {
   it('rejects limit above 500', () => {
     expect(apexTestCoverageInputSchema.safeParse({ limit: 501 }).success).toBe(false);
   });
-  it('accepts offset and cursor (CR-22)', () => {
+  it('accepts offset and cursor', () => {
     expect(
       apexTestCoverageInputSchema.safeParse({ offset: 1, cursor: 'abc' }).success,
     ).toBe(true);

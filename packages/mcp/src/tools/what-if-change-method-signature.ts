@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.what_if_change_method_signature` MCP tool.
  *
- * v2.3 R2b — the third of three component-level what-if composers.
+ * The third of three component-level what-if composers.
  * Given an ApexClass canonical id (`ApexClass:{Name}`), a method name,
  * and an optional new signature string, enumerates every Apex caller
  * that invokes the named method on the target class plus every test
@@ -10,17 +10,17 @@
  * surface as a parallel list so the renderer can prioritise the
  * test-suite update axis.
  *
- * **The signature-axis honesty boundary.** v2.3 does NOT parse the
- * `newSignature` string. The parameter is accepted for v2.3.1
+ * **The signature-axis honesty boundary.** This does NOT parse the
+ * `newSignature` string. The parameter is accepted for the
  * description (so a caller can echo the before/after for renderer
  * context), but it does NOT influence which callers are flagged. Per
  * Cross-class transitive analysis is not available: every direct
  * caller of the method is treated as "needs update" — fail-conservative. A future-milestone tool with
  * Apex AST capability could parse the signature and surface only the
  * callers whose call-sites would actually compile-fail under the new
- * signature; v2.3 flags every caller for human review.
+ * signature; flags every caller for human review.
  *
- * **CR-CAP-06 caller-method enrichment (additive, does NOT narrow the
+ * **Caller-method enrichment (additive, does NOT narrow the
  * verdict).** When a caller's `callsApex` edge was AST-extracted
  * (`source: 'apex-ast'`), it carries `callerMethodsByMethod` — a
  * target-method-partitioned map of which method(s) of the caller hold
@@ -35,7 +35,7 @@
  * on heuristic-scanner / Flow / LWC-Aura-declared callers and pre-fix
  * vaults (caller method unknown — the field is omitted, never `[]`).
  *
- * **Caller identification.** Composes over the v0.3 apex-scanner's
+ * **Caller identification.** Composes over the apex-scanner's
  * outgoing `callsApex` edges (the method-call-site index):
  *
  *   - For each ApexClass / ApexTrigger with an outgoing `callsApex`
@@ -62,7 +62,7 @@
  *   - Has an outgoing `coversTest` edge to the target class — NOTE: this
  *     branch is DEAD on every real vault. `coversTest` is a declared
  *     `EdgeType` with ZERO producers (see `UNPRODUCED_EDGE_TYPES` in
- *     `@sf-intelligence/contracts`); the "v0.3 extracted convention from
+ *     `@sf-intelligence/contracts`); the "extracted convention from
  *     @TestVisible / @TestSetup" this comment used to claim was never built,
  *     and could not be: neither annotation names a test-to-class mapping, and
  *     Salesforce publishes coverage only as a RUNTIME artifact. The walk is
@@ -70,7 +70,7 @@
  *     lands) and the gap is DISCLOSED rather than hidden, OR
  *   - Has an outgoing `callsApex` edge to the target class with the
  *     matching `methodName` AND its node properties indicate it is a
- *     test class (`properties.isTest === true` per the v1.5
+ *     test class (`properties.isTest === true` per the
  *     classifier).
  *
  * Test classes flagged this way surface in BOTH the
@@ -88,13 +88,13 @@
  *     list is then equally consistent with "there is no such method".
  *   - `risky` if at least one direct caller appears (the default for
  *     this tool — no `metadata-blocker` paths exist for method
- *     signature changes since the v0.3 extractor is heuristic).
+ *     signature changes since the extractor is heuristic).
  *   - `blocking` reserved for the case where a Flow `<actionName>`
  *     declaration references the method by name (the Flow XML is
  *     metadata-declared, so a Flow call-site to a renamed method is
  *     a metadata-deploy blocker).
  *
- * **Honesty axis.** v2.3 surfaces the verbatim disclosure using a
+ * **Honesty axis.** This surfaces the verbatim disclosure using a
  * fail-conservative posture: all direct callers are flagged for review.
  * Dynamic Apex blind-spots apply (reflective `Type.forName + invoke`
  * paths are invisible). Test-class identification reduces, in practice, to "an
@@ -179,7 +179,7 @@ type Category =
 /**
  * One impact entry in the response's `callingClasses` array. Mirrors
  * the `WhatIfImpactItem` interface in R2a's
- * `what-if-change-field-type.ts` — scoped to the fields v2.3 R2
+ * `what-if-change-field-type.ts` — scoped to the fields
  * populates.
  */
 export interface WhatIfImpactItem {
@@ -190,7 +190,7 @@ export interface WhatIfImpactItem {
   readonly confidence: ConfidenceLevel;
   readonly explanation: string;
   /**
-   * CR-CAP-06: AST-path only — the method(s) of THIS calling class that hold a
+   * AST-path only — the method(s) of THIS calling class that hold a
    * call-site to the SPECIFIC queried method (read from the edge's
    * `callerMethodsByMethod[methodName]` partition, NOT the class-level union —
    * so a sibling method that calls a DIFFERENT method of the target is never
@@ -480,12 +480,12 @@ const resolveTargetId = (
 /**
  * Whether a `callsApex` edge invokes `methodName` on its target class.
  *
- * P4-C5 method-level: the apex-scanner edge now carries `methods` — the
+ * Method-level: the apex-scanner edge now carries `methods` — the
  * COMPLETE set of the target's methods this caller invokes — so a caller of
- * both `Handler.save` and `Handler.deleteRecord` matches BOTH. Before P4-C5
+ * both `Handler.save` and `Handler.deleteRecord` matches BOTH. Before
  * the edge kept a single `methodName` (the lossy dedup), so this tool missed
  * callers of every method but one. We prefer `methods[]` and fall back to the
- * scalar `methodName` for vaults refreshed before P4-C5. The LWC/Aura/VF
+ * scalar `methodName` for legacy vaults. The LWC/Aura/VF
  * extractors mirror the scalar `methodName` shape; both are honoured.
  *
  * The comparison is CASE-INSENSITIVE because Apex is: `svc.ProcessOpp()` and
@@ -508,7 +508,7 @@ const callsMethod = (edge: Edge, methodName: string): boolean => {
 };
 
 /**
- * CR-CAP-06: read the caller class's method(s) that hold a call-site to the
+ * Read the caller class's method(s) that hold a call-site to the
  * SPECIFIC `methodName`, from the AST edge's `callerMethodsByMethod`
  * partition (`{ [targetMethod]: callerMethod[] }`). Partitioned by TARGET
  * METHOD so we attribute ONLY the caller methods that called THIS method —
@@ -538,7 +538,7 @@ const callerMethodsForTarget = (
 
 /**
  * Check whether a node represents a test class. Mirrors the
- * `explain-apex-method.ts` `isTest` axis: the v1.5 ApexClass
+ * `explain-apex-method.ts` `isTest` axis: the ApexClass
  * classifier populates `properties.isTest` as a top-level boolean.
  * Triggers and other types fall through to false.
  */
@@ -551,7 +551,7 @@ const isTestClass = (node: Node): boolean => {
 /**
  * Synthesise the per-caller `explanation` string. The phrasing
  * mirrors the sibling component-level what-if tools so the renderer
- * can rely on a uniform "the caller does X" shape across the v2.3
+ * can rely on a uniform "the caller does X" shape across the
  * surface.
  */
 const buildExplanation = (
@@ -561,7 +561,7 @@ const buildExplanation = (
   methodName: string,
   isTest: boolean,
   /**
-   * CR-CAP-06: the caller's method(s) holding the call-site to `methodName`
+   * The caller's method(s) holding the call-site to `methodName`
    * (AST-path, partitioned by target method). When present, the prose pinpoints
    * the method so a reviewer narrows from class to method; absent leaves the
    * sentence unchanged (caller method unknown).
@@ -595,7 +595,7 @@ const buildExplanation = (
  * `test-class-update` so the renderer can prioritise mechanical
  * test-suite updates; non-test callers surface as `code-needs-update`.
  * Flow callers with the Flow XML's `<actionName>` declaration are
- * metadata-declared, but the v2.3 tool still classifies them as
+ * metadata-declared, but the tool still classifies them as
  * `code-needs-update` (the Flow's invocable-action call-site must be
  * updated; the metadata declaration itself doesn't fail to deploy —
  * only fails at runtime if the method name changes).
@@ -615,7 +615,7 @@ const classifyCaller = (
  *     only invoked dynamically). The HANDLER downgrades that to `unknown`
  *     when the method itself could not be verified to exist, so this
  *     function's `safe` is a STRUCTURAL statement, not the headline.
- *   - any `metadata-blocker` → `blocking` (reserved; v2.3 does not
+ *   - any `metadata-blocker` → `blocking` (reserved; this does not
  *     emit `metadata-blocker` for method-signature changes today).
  *   - any non-blocker → `risky` (the default — every caller flag
  *     warrants human review).
@@ -706,7 +706,7 @@ const collectCallers = async (
     }
     const isTest = isTestClass(fromNode);
     const category = classifyCaller(fromNode, isTest);
-    // CR-CAP-06: the caller's method(s) that call THIS specific method
+    // The caller's method(s) that call THIS specific method
     // (partitioned by target method — no cross-method phantom). Absent on
     // scanner/Flow/declared edges → field omitted, explanation unchanged.
     const callerMethods = callerMethodsForTarget(edge, methodName);
@@ -739,7 +739,7 @@ const collectCallers = async (
  * Walk the incoming `coversTest` edges to the target class.
  *
  * COVERSTEST-DECLARED-BUT-NEVER-PRODUCED: this walk returns EMPTY on every
- * real vault. The doc here used to state that "the v0.3 extractor populates
+ * real vault. The doc here used to state that "the extractor populates
  * these from `@TestVisible` / `@TestSetup` annotations and the
  * `className + 'Test'` naming convention" — no such extractor exists, and a
  * scan of every producing package finds ZERO `edgeType: 'coversTest'`

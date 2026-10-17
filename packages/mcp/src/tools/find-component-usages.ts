@@ -1,6 +1,6 @@
 /**
  * Handler for the `sfi.find_component_usages` MCP tool — the universal
- * "where is this component used?" dispatcher (P12-USAGE-find-component-usages).
+ * "where is this component used?" dispatcher.
  *
  * One entry point for ANY canonical component type. It composes the two evidence
  * tiers the §C3 usage contract requires into ONE payload, instead of the agent
@@ -16,7 +16,7 @@
  *      graph does not model (dynamic SOQL, reflective access, `$Label` /
  *      `$Resource` / `@salesforce` module imports, CustomMetadataType /
  *      CustomLabel / StaticResource references). Over- and under-matches are
- *      disclosed (P14-USAGE-grep-frontend).
+ *      disclosed.
  *
  * The honesty anchor: an empty graph + empty grep is "no static evidence in the
  * vault", surfaced in `boundaries[]` — NEVER "nothing uses this". Phantom-aware:
@@ -81,7 +81,7 @@ const GREP_LIMIT_DEFAULT = 30;
 
 /**
  * Frontend bundle source the grep tier covers IN ADDITION to Apex
- * (P14-USAGE-grep-frontend): LWC (`.js`/`.html`), Aura
+ * LWC (`.js`/`.html`), Aura
  * (`.cmp`/`.app`/`.evt` + their `.js` controllers), Visualforce
  * (`.page`/`.component`). `$Label.c.X` / `@salesforce/label/c.X` and
  * `$Resource.X` / `@salesforce/resourceUrl/X` references live here — an
@@ -173,7 +173,7 @@ const basenameStem = (p: string): string => {
 
 /**
  * Per-type blind-spot notes appended when a component of this type has NO
- * static evidence (P14-USAGE-flow-object-boundaries): the generic
+ * static evidence: the generic
  * empty≠absent boundary says absence isn't proof, but each of these families
  * has a SPECIFIC, known hole an "unused" verdict must name — uniform across
  * the four types the §C3 audit flagged as non-uniform.
@@ -722,7 +722,7 @@ export const findComponentUsagesHandler = async (
   // --- GREP supplement: literal api-name match in Apex AND frontend bundle
   // source (text-match tier). The frontend pass (LWC/Aura/VF) fills whatever
   // budget the Apex pass left — $Label / $Resource / @salesforce module
-  // references are invisible to an Apex-only walk (P14-USAGE-grep-frontend).
+  // references are invisible to an Apex-only walk.
   const runGrep = input.includeGrep !== false;
   let grepRan = false;
   let grepMatches: { path: string; line: number; snippet: string }[] = [];

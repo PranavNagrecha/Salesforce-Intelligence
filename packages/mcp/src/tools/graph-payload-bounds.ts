@@ -98,7 +98,7 @@ export const slimGraphNodes = (
  * that then dangles — until the serialized slice fits, always keeping the root
  * node. Returns the trimmed slice (re-sorted by id) and whether trimming ran.
  *
- * CR-RV7: dangling edges (referencing a node absent from the returned `nodes`)
+ * Dangling edges (referencing a node absent from the returned `nodes`)
  * are dropped on BOTH paths — the under-budget early return AND the trim path —
  * so no consumer can deref a node missing from the slice. This is the single
  * chokepoint both `get_impact` and `get_subgraph` flow through, filtering
@@ -113,7 +113,7 @@ export const enforceGraphPayloadBudget = (
   readonly edges: readonly Edge[];
   readonly trimmed: boolean;
 } => {
-  // CR-RV7 (mirrors CR-13's getSubgraph fix): drop DANGLING edges — those
+  // (mirrors the getSubgraph fix): drop DANGLING edges — those
   // referencing a node absent from `nodes` — UNCONDITIONALLY, including on the
   // under-budget early-return branch. The caller's edge list is sliced
   // INDEPENDENTLY of its node list (e.g. `get-impact.ts` caps nodes and edges

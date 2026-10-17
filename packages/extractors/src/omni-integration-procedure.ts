@@ -46,7 +46,7 @@ const NESTED_IP_ACTION_TYPE = 'Integration Procedure Action';
  * property on the IP node (`restEndpoints` array + the derived
  * `restEndpointCount`); does NOT emit a `dispatchesOmniAction` edge (the
  * target is external — its destination is surfaced for composition with
- * v1.5's integration-topology tools downstream).
+ * the integration-topology tools downstream).
  */
 const REST_ACTION_TYPE = 'HTTP Action';
 
@@ -81,7 +81,7 @@ const BLOCK_ACTION_TYPES = new Set<string>([
 
 /**
  * Depth cap on the recursive action walk. Mirrors the depth-10 ceiling
- * the v2.8 async-chain walker uses (`async_chain_depth`); a Block
+ * the async-chain walker uses (`async_chain_depth`); a Block
  * nesting deeper than this is pathological (the OmniStudio designer
  * caps practical nesting well below 10) and is silently truncated
  * rather than risking unbounded recursion on a hand-edited cyclic blob.
@@ -206,7 +206,7 @@ const validateRoot = (
  * Returns `null` when the blob is absent, empty, or unparseable.
  * Malformed blobs are rare (Salesforce's exporter is reliable) but
  * surface as `null` rather than aborting the extraction — per the
- * v3.2 "best-effort propertySetConfig parsing" axis.
+ * "best-effort propertySetConfig parsing" axis.
  */
 const parsePropertySetConfig = (raw: unknown): Record<string, unknown> | null => {
   const value = unwrapSingle(raw);
@@ -700,7 +700,7 @@ const walkActions = (
  * `propertySetConfig` JSON blob); the per-doc "declared" branch
  * (top-level XML element siblings) is not exercised by Native IPs.
  *
- * Per-type Node properties surfaced (per PLAN-v3.2.md §3 + the
+ * Per-type Node properties surfaced (the
  * vendored doc):
  *   - `omniProcessType` ('Integration Procedure'), `omniProcessKey`,
  *     `versionNumber`, `language`, `subType`, `type`, `uniqueName`,
@@ -726,7 +726,7 @@ const walkActions = (
  *     children, where the old flat walk counted only top-level
  *     elements.
  *
- * Error cases (per the v0.1 extractor error contract):
+ * Error cases:
  *   - `file-not-found` if the file is missing.
  *   - `parse-error` if the XML is malformed.
  *   - `malformed-input` if the root isn't `<OmniIntegrationProcedure>`.
@@ -807,7 +807,7 @@ export const extractOmniIntegrationProcedureRoot = (
   // matching the repo's pattern of omitting empty optional props (so the
   // common IP with no callouts carries no empty-array churn in its
   // persisted `properties_json`). `restEndpointCount` is always present
-  // (0 when no REST endpoints) for back-compat with the v3.2 shape, and
+  // (0 when no REST endpoints) for back-compat with the shape, and
   // is derived from `restEndpoints.length` so the two never disagree.
   const calloutProperties: Record<string, unknown> = {};
   if (walk.restEndpoints.length > 0) {
@@ -866,7 +866,7 @@ export const extractOmniIntegrationProcedureRoot = (
       // surface as quick summary signals without re-walking the
       // omniProcessElements. `restEndpointCount` is `restEndpoints.length`
       // — the count of Rest Action children (at any nesting depth) whose
-      // `restPath` is non-empty (Q177-relevant — see
+      // `restPath` is non-empty (see
       // OmniIntegrationProcedure.md §"REST endpoint surfacing"). The full
       // `restEndpoints` / `remoteActions` arrays are spread in below when
       // non-empty.

@@ -75,8 +75,9 @@ Total amount billed on this invoice before payments are applied.
 | --- | --- | --- |
 | `ApexClass:PaymentService` | parsed | apex-ast |
 
-### references (incoming, 1)
+### references (incoming, 2)
 
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `CustomField:Invoice__c.Balance__c` | parsed | formula-tokenizer |
+| `CustomField:Project__c.Total_Invoiced__c` | declared | rollup-summary |

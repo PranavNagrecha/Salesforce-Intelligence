@@ -35,7 +35,7 @@ const FIXTURE_MANIFEST: VaultManifest = {
   sourceTreeHash: 'sha256:field-360-fixture',
 };
 
-// CR-CAP-03: a manifest whose coverage proves Report/Dashboard WERE retrieved
+// A manifest whose coverage proves Report/Dashboard WERE retrieved
 // (retrieved > 0 -> summarizeCoverage status 'complete'). With this manifest a
 // field that has no folded usage is confirmed-not-used, so `reports`/`dashboards`
 // must drop out of `dataNotAvailable`.
@@ -69,7 +69,7 @@ const makeEdge = (
   ...overrides,
 });
 
-// Canonical scenario per PLAN-v3.0 §7 Q156:
+// Canonical scenario:
 //
 //   - Account.Customer_Segment__c is the target field.
 //   - 1 ValidationRule references it (declared)
@@ -99,12 +99,12 @@ const REPORT_NAMED_FIELD = 'CustomField:Account.Report_Named__c';
 // Finding #36: a field whose fold-time name list was truncated by the 50-name
 // per-field cap — carries `usedInReportsTruncated` with the true total.
 const REPORT_TRUNCATED_FIELD = 'CustomField:Account.Report_Truncated__c';
-// CR-CAP-02: a ListView that references the TARGET field as a column. The
+// A ListView that references the TARGET field as a column. The
 // ListView->CustomField `references` edge exists in the graph (heuristic, regex
 // column extraction) but pre-fix field_360 had no branch for it, so the edge was
 // dropped silently (appeared in NO section).
 const LIST_VIEW = 'ListView:Account.RecentSegments';
-// CR-CAP-13: a field used ONLY as a filter predicate (never a column) and a
+// A field used ONLY as a filter predicate (never a column) and a
 // field used as BOTH a column and a filter — to prove the merged-edge
 // referenceKind (`filterRef` / `columnAndFilter`) reaches field_360 rows.
 const FILTER_ONLY_FIELD = 'CustomField:Account.Filter_Only__c';
@@ -243,7 +243,7 @@ const seed: ExtractionResult = {
         usedInReportsTruncated: 73,
       },
     }),
-    // CR-CAP-02: a ListView that shows the TARGET field as a column.
+    // A ListView that shows the TARGET field as a column.
     makeNode({
       id: LIST_VIEW,
       type: 'ListView',
@@ -251,7 +251,7 @@ const seed: ExtractionResult = {
       label: 'Recent Segments',
       parentId: 'CustomObject:Account',
     }),
-    // CR-CAP-13: a filter-only field + a both-column-and-filter field, each with
+    // A filter-only field + a both-column-and-filter field, each with
     // its own ListView, to prove the merged-edge referenceKind reaches rows.
     makeNode({
       id: FILTER_ONLY_FIELD,
@@ -382,7 +382,7 @@ const seed: ExtractionResult = {
         mergeContext: '{!Account.Customer_Segment__c}',
       },
     }),
-    // CR-CAP-02: ListView column ref → TARGET (heuristic, referenceKind fieldRef).
+    // ListView column ref → TARGET (heuristic, referenceKind fieldRef).
     makeEdge({
       fromId: LIST_VIEW,
       toId: TARGET,
@@ -391,7 +391,7 @@ const seed: ExtractionResult = {
       source: 'enterprise-metadata-extractor',
       properties: { referenceKind: 'fieldRef' },
     }),
-    // CR-CAP-13: a filter-only field surfaces in listViews tagged `filterRef`.
+    // A filter-only field surfaces in listViews tagged `filterRef`.
     makeEdge({
       fromId: FILTER_LIST_VIEW,
       toId: FILTER_ONLY_FIELD,
@@ -400,7 +400,7 @@ const seed: ExtractionResult = {
       source: 'enterprise-metadata-extractor',
       properties: { referenceKind: 'filterRef' },
     }),
-    // CR-CAP-13: a both-column-and-filter field is ONE merged `columnAndFilter`
+    // A both-column-and-filter field is ONE merged `columnAndFilter`
     // edge (the extractor never emits two `references` to the same field — the
     // edge PK would collide), so field_360 shows exactly ONE row, not two.
     makeEdge({
@@ -465,7 +465,7 @@ afterAll(async () => {
 });
 
 describe('field360Handler', () => {
-  it('composes every section with appropriate edges (Q156 happy path)', async () => {
+  it('composes every section with appropriate edges (happy path)', async () => {
     const result = await field360Handler(ctx, { fieldId: TARGET });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -493,7 +493,7 @@ describe('field360Handler', () => {
     expect(out.emails?.rows[0]?.properties['role']).toBe('body-merge');
   });
 
-  it('CR-CAP-02 — composes ListView column refs into the listViews section', async () => {
+  it('composes ListView column refs into the listViews section', async () => {
     // FAIL-BEFORE: classifyIncomingEdge had no branch for a `references` edge
     // whose source is a ListView, so the edge fell through every case and was
     // dropped silently (the field appeared in no section). After the fix it
@@ -565,7 +565,7 @@ describe('field360Handler', () => {
     expect(out.integrations?.rows.length ?? 0).toBe(0);
   });
 
-  it('CR-CAP-13 — a filter-ONLY field surfaces in listViews tagged filterRef', async () => {
+  it('a filter-ONLY field surfaces in listViews tagged filterRef', async () => {
     // FAIL-BEFORE: a filter-only field was either tagged `fieldRef`
     // (indistinguishable from a column) or, for a non-field token, minted a
     // phantom; the consumer could not tell a filter from a column. After the
@@ -583,7 +583,7 @@ describe('field360Handler', () => {
     expect(out.summary.perSectionCounts['listViews']).toBe(1);
   });
 
-  it('CR-CAP-13 — a column+filter field is ONE merged columnAndFilter row (no double-count)', async () => {
+  it('a column+filter field is ONE merged columnAndFilter row (no double-count)', async () => {
     // The extractor merges column + filter into ONE edge (the edge PK
     // (fromId,toId,edgeType,source) cannot hold two `references`), so field_360
     // shows exactly ONE listViews row, not two — no double-count.
@@ -596,7 +596,7 @@ describe('field360Handler', () => {
     expect(out.summary.perSectionCounts['listViews']).toBe(1);
   });
 
-  it('CR-CAP-13 — boundary distinguishes filter IDENTITY (composed) from predicate EVALUATION (unmodeled)', async () => {
+  it('boundary distinguishes filter IDENTITY (composed) from predicate EVALUATION (unmodeled)', async () => {
     const result = await field360Handler(ctx, { fieldId: FILTER_ONLY_FIELD });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -614,7 +614,7 @@ describe('field360Handler', () => {
     expect(out.dataNotAvailable).toContain('list-view-filters');
   });
 
-  it('CR-CAP-02 — drops the stale "NOT composed" boundary + Q165 list-view clause', async () => {
+  it('drops the stale "NOT composed" boundary + list-view clause', async () => {
     // FAIL-BEFORE: boundaries carried the verbatim "list view column refs are
     // extracted as graph edges but are NOT composed into field_360 sections"
     // line, and FIELD_360_Q165_DISCLOSURE claimed list view column refs are NOT
@@ -645,7 +645,7 @@ describe('field360Handler', () => {
     ).toBe(true);
   });
 
-  it('CR-CAP-02 — listViews stays empty for a field with no ListView ref (no fabrication)', async () => {
+  it('listViews stays empty for a field with no ListView ref (no fabrication)', async () => {
     // PASS-AFTER: a field whose only edges are an FLS grant has no ListView ref,
     // so the listViews section is empty/zero — the fix never fabricates rows.
     const result = await field360Handler(ctx, { fieldId: FLS_FIELD });
@@ -757,14 +757,14 @@ describe('field360Handler', () => {
     expect(out.referenceTo).toBe('hed__Course_Enrollment__c');
   });
 
-  it('surfaces the verbatim Q165 disclosure and dataNotAvailable (honesty anchor)', async () => {
+  it('surfaces the verbatim disclosure and dataNotAvailable (honesty anchor)', async () => {
     const result = await field360Handler(ctx, { fieldId: TARGET });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const out = result.value.data;
-    // The verbatim Q165 string must appear in boundaries.
+    // The verbatim string must appear in boundaries.
     expect(out.boundaries).toContain(FIELD_360_Q165_DISCLOSURE);
-    // The dataNotAvailable array uses the FIXED order per PLAN-v3.0 §16.
+    // The dataNotAvailable array uses the FIXED order.
     expect(out.dataNotAvailable).toEqual(FIELD_360_DATA_NOT_AVAILABLE);
     expect(out.dataNotAvailable).toEqual([
       'list-view-filters',
@@ -773,7 +773,7 @@ describe('field360Handler', () => {
     ]);
   });
 
-  it('honors includeSections to narrow the response (Q157)', async () => {
+  it('honors includeSections to narrow the response', async () => {
     const result = await field360Handler(ctx, {
       fieldId: TARGET,
       includeSections: ['writers', 'readers', 'summary'],
@@ -881,8 +881,8 @@ describe('field360Handler', () => {
     expect(result.value.data.fieldId).toBe(TARGET);
   });
 
-  it('CR-05 — surfaces a WorkflowRule field-update writer exactly once (no double-count)', async () => {
-    // The CR-05 extractor change emits a field-level `writesTo` from a
+  it('surfaces a WorkflowRule field-update writer exactly once (no double-count)', async () => {
+    // The extractor change emits a field-level `writesTo` from a
     // WorkflowRule to the field its FieldUpdate sets. field_360 must show
     // that rule ONCE in writers. It is NOT double-counted in automations:
     // the rule's OTHER (pre-existing) edge is a `references` to the
@@ -962,7 +962,7 @@ describe('field360Handler', () => {
   });
 });
 
-describe('field360Handler — CR-CAP-03 coverage-aware analytics disclosure', () => {
+describe('field360Handler — coverage-aware analytics disclosure', () => {
   it('not-retrieved manifest keeps reports/dashboards in dataNotAvailable + caveat', async () => {
     // PASS-AFTER guard: the default fixture manifest has no Report/Dashboard
     // coverage -> summarizeCoverage status 'unknown' (not 'complete') -> the
@@ -1003,7 +1003,7 @@ describe('field360Handler — CR-CAP-03 coverage-aware analytics disclosure', ()
       ),
     ).toBe(true);
     // The not-retrieved CAVEAT must NOT be present when reports were retrieved.
-    // (Note: '--with-reports' also appears in the always-present Q165
+    // (Note: '--with-reports' also appears in the always-present
     // disclosure, so we match the caveat's distinctive 'outside that cap' text.)
     expect(
       out.boundaries.some((b) => b.includes('outside that cap')),
@@ -1089,7 +1089,7 @@ describe('field360 risk classification', () => {
     }
   });
 
-  it('flags high risk when PII meets multiple integrations (Q159 pattern)', async () => {
+  it('flags high risk when PII meets multiple integrations', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-field-360-high-'));
     const dbPath = join(dir, 'high.db');
     const opened = await openGraph(dbPath);
@@ -1206,7 +1206,7 @@ describe('field360 risk classification', () => {
   });
 });
 
-describe('field360Handler — CR-22 section cursor', () => {
+describe('field360Handler — section cursor', () => {
   it('whole-fits omits cursor block (byte-identical golden)', async () => {
     const r = await field360Handler(ctx, { fieldId: TARGET });
     expect(r.ok).toBe(true);

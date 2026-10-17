@@ -124,7 +124,7 @@ const validateRoot = (
 };
 
 /**
- * One resolved `<customValue>` entry (H10 shape — CR-10b): the value's API
+ * One resolved `<customValue>` entry (H10 shape): the value's API
  * name, activation status, and the optional display label / default flag
  * when the source recorded them. Mirrors `PicklistValue` in custom-field.ts
  * (the CustomField inline picklist) and `StandardValueEntry` in
@@ -150,7 +150,7 @@ interface GlobalValueSetValueEntry {
 /**
  * Validate each `<customValue>` entry carries the required scalars
  * (`<fullName>`, `<default>`) per `GlobalValueSet.md`, and read each into
- * the H10 value shape `{value, isActive, label?, default?}` (CR-10b —
+ * the H10 value shape `{value, isActive, label?, default?}` (
  * `label`/`default` are OMIT-when-absent, mirroring custom-field.ts's inline
  * picklist reader, though `default` is validated required above so it is
  * present on every well-formed entry in practice). The well-formedness check
@@ -175,7 +175,7 @@ const validateAndReadCustomValues = (
       }
     }
   }
-  // P14-USAGE-gvs-edge: surface the per-value entries, not just the count —
+  // surface the per-value entries, not just the count —
   // a GlobalValueSet that only said "valueCount: 4" could never answer
   // "what values are in this picklist?" for the fields that use it.
   return ok(
@@ -201,7 +201,7 @@ const validateAndReadCustomValues = (
  * Reads `<masterLabel>` (required) and optional `<description>` and
  * `<sorted>` into the node's properties. Per-value entries (`<customValue>`)
  * are counted into `properties.valueCount` AND read into `properties.values`
- * as `{value, isActive, label?, default?}` (P14-USAGE-gvs-edge + CR-10b —
+ * as `{value, isActive, label?, default?}` (
  * the answer to "what values are in this picklist?" for GlobalValueSet-driven
  * fields, now with the same honest activation status the CustomField inline
  * picklist and StandardValueSet extractors carry — see
@@ -213,7 +213,7 @@ const validateAndReadCustomValues = (
  *
  * Returns one `Node` of type `'GlobalValueSet'` and zero edges. The
  * reciprocal `usesValueSet` edge (`CustomField -> GlobalValueSet`) is
- * emitted by the CustomField extractor (REAL as of P14-USAGE-gvs-edge —
+ * emitted by the CustomField extractor (REAL —
  * this comment described that edge for two minor versions while no code
  * emitted it; FINDINGS P-GVS-EDGE); this extractor only emits the node.
  *

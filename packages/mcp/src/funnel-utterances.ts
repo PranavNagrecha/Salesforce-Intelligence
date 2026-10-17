@@ -696,7 +696,7 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'does <UserName> have any expiring permission set assignments?',
     'what perm sets is jane.doe@example.com assigned in the live org?',
   ],
-  // R6-27 — the SetupAuditTrail "who changed what in Setup" sweep. Runtime
+  // The SetupAuditTrail "who changed what in Setup" sweep. Runtime
   // configuration-change history is not in the vault (declared metadata only);
   // this is the live_org read for it.
   'sfi.live_setup_audit_trail': [
@@ -1203,7 +1203,7 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'is <Field__c> safe to delete?',
     'which fields are safe to remove from Contact?',
     'I want to clean up unused fields — is this one safe to drop?',
-    // CR-CAP-L5: reinforcement — the HYBRID live-population wiring lengthened
+    // Reinforcement — the HYBRID live-population wiring lengthened
     // this tool's description, diluting its match against removal-simulation
     // phrasings (I6 margin-gate regression pin). Same pattern as a9eb65e.
     'run a removal simulation on this field before I delete it',
@@ -1371,7 +1371,7 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'trend analysis for Account record creation',
     'how has our automation complexity changed over the last year?',
     'show me component count growth over time across all snapshots',
-    // R8-SECURITY-TREND: posture-over-time asks must reach sfi.trend
+    // Posture-over-time asks must reach sfi.trend
     // (metric:securityScore via suggestArgs on the security-posture-trend intent).
     'is our security posture getting better or worse across refreshes?',
     'show the security score trend over time',
@@ -3077,7 +3077,7 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'restore view of <ComponentName> from a specific date',
     'show me what the Account trigger looked like at the v1.0 tag',
   ],
-  // R6-09 — error-to-source decoder. Support/business-user register: paste an
+  // Error-to-source decoder. Support/business-user register: paste an
   // error and ask what it means / where it came from.
   'sfi.explain_error': [
     'what does this error mean: FIELD_CUSTOM_VALIDATION_EXCEPTION?',

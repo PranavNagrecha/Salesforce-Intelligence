@@ -8,9 +8,15 @@ lastModifiedDate: null
 parentId: null
 properties:
   description: Permits awaiting jurisdiction review.
+  doesIncludeBosses: false
   doesSendEmailToMembers: false
   email: null
+  memberChannels: []
   memberCount: 0
+  memberEmails: []
+  memberSource: user-direct
+  queueMembersDeclared: false
+  queueMembersUnparsed: false
   queueRoutingConfig: null
   sobjectTypeCount: 1
 sourcePath: source/main/default/queues/Permit_Review_Queue.queue-meta.xml
@@ -28,9 +34,15 @@ Permits awaiting jurisdiction review.
 
 | Key | Value |
 | --- | --- |
+| doesIncludeBosses | `false` |
 | doesSendEmailToMembers | `false` |
 | email | `null` |
+| memberChannels | `` |
 | memberCount | `0` |
+| memberEmails | `` |
+| memberSource | `user-direct` |
+| queueMembersDeclared | `false` |
+| queueMembersUnparsed | `false` |
 | queueRoutingConfig | `null` |
 | sobjectTypeCount | `1` |
 

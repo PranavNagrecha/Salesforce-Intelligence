@@ -92,7 +92,7 @@ export interface ValueChangeAuditOutput {
   readonly trust: TrustSummary;
   readonly disclosure: string;
   /**
-   * CR-22 opaque continuation token, present ONLY when `rows` was truncated
+   * Opaque continuation token, present ONLY when `rows` was truncated
    * (over `limit`/MAX_ROWS or the byte budget). Echo it back as `cursor` to
    * resume; absent on a whole-fits page so an in-budget response is byte-identical.
    */
@@ -136,11 +136,11 @@ export const valueChangeAuditInputSchema = z.object({
   fieldApiName: z.string().min(1).optional(),
   fields: z.array(z.string()).optional(),
   verbosity: z.enum(['summary', 'detail']).optional(),
-  // CR-22: page size for the risk-ranked `rows` list. Capped at MAX_ROWS so the
+  // Page size for the risk-ranked `rows` list. Capped at MAX_ROWS so the
   // response-size guard holds; default = MAX_ROWS so a no-limit call returns
   // today's first 200 rows byte-identically.
   limit: z.number().int().min(1).max(MAX_ROWS).optional(),
-  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // Continuation cursor: an OPAQUE token echoed back from a prior
   // truncated page's `nextCursor`. When present it supplies the resume offset;
   // omitting it = today's behavior (offset 0).
   cursor: z.string().min(1).optional(),
@@ -305,7 +305,7 @@ export const valueChangeAuditHandler = async (
     (a.fieldId < b.fieldId ? -1 : a.fieldId > b.fieldId ? 1 : 0),
   );
 
-  // Resolve the resume offset: an echoed CR-22 cursor wins; a stale/forged
+  // Resolve the resume offset: an echoed cursor wins; a stale/forged
   // cursor (different object / field-set / verbosity) is rejected. The
   // fingerprint includes `verbosity` because detail vs summary changes a row's
   // byte size and therefore the truncation boundary.

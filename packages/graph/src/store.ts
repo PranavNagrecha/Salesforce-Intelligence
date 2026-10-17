@@ -220,7 +220,7 @@ const EXTERNAL_ACCESS_DISABLED: Readonly<Record<string, string>> = Object.freeze
 
 /**
  * The handle returned by `openGraph` and consumed by every other graph
- * operation in v0.1.
+ * operation.
  *
  * Holds the underlying `DuckDBInstance` (for explicit lifecycle control)
  * and the `DuckDBConnection` used for queries. Callers should treat the
@@ -242,7 +242,7 @@ export interface GraphStore {
  * rather than thrown.
  *
  * The caller is responsible for parent-directory creation: `DuckDBInstance.create`
- * does not `mkdir -p`. v0.1 callers (`sfi refresh`) create `org-kb/graph/`
+ * does not `mkdir -p`. Callers (`sfi refresh`) create `org-kb/graph/`
  * before invoking this.
  *
  * @example

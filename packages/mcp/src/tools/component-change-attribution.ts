@@ -348,7 +348,7 @@ export const componentChangeAttributionHandler = async (
   const allMatched = correlateAuditRows(rows, needles);
 
   // COMPONENT-CHANGE-ATTRIBUTION-CAPPED-TOTAL-NO-RESUME: page the full set
-  // through the shared CR-22 continuation protocol (`paginateLegacy`) instead
+  // through the shared continuation protocol (`paginateLegacy`) instead
   // of truncating the scan and publishing the page length as the total. The
   // fingerprint binds a minted cursor to THIS question, so a token cannot be
   // replayed against a different component / object scope.

@@ -340,7 +340,9 @@ resolver behaves.
 > MCP server but passes no `--vault`, so either launch Claude Code from the
 > folder that holds `org-kb` or set `SFI_VAULT` to the absolute path of
 > `org-kb`. The npm install above gives you the MCP tools and CLI; the plugin
-> layer adds those conveniences.
+> layer adds those conveniences. The two `/sfi-field-audit` agents are optional:
+> the command works without them, and copying `.claude/agents/salesforce-field-*.md`
+> from the repo into your project's `.claude/agents/` enables its parallel path.
 
 For a deeper read on the data flow, the DuckDB graph store, the MCP tools, and
 configuration, see [`architecture.md`](../architecture.md) and

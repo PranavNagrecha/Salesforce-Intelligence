@@ -1,8 +1,7 @@
 /**
  * Handler for the `sfi.explain_field` MCP tool.
  *
- * The second of two v1.6 business-user-tier headline tools (per
- * PLAN-v1.6 §4): given a CustomField canonical id, return the field's
+ * The second of two business-user-tier headline tools: given a CustomField canonical id, return the field's
  * label, description, inline help text, type, required flag, — for
  * formula fields — the formula expression (a non-null `formula` flags the
  * field as a read-only computed value, not a writable one), — for
@@ -30,7 +29,7 @@
  *   - Input validation: `fieldId` must start with `CustomField:`. Any
  *     other prefix surfaces as `invalid-query` from the handler (not
  *     a Zod-level rejection — Zod cannot express the prefix
- *     constraint here). This mirrors the v1.5 `sfi.event_subscribers`
+ *     constraint here). This mirrors the `sfi.event_subscribers`
  *     convention of pinning input-axis prefixes at the handler
  *     boundary.
  *   - A field id with no node resolves to `component-not-found`, but the
@@ -57,7 +56,7 @@
  *     `recordValues` is omitted from the output entirely — present-
  *     but-empty would be misleading (a non-`__mdt` parent has no
  *     CustomMetadataRecord children by definition).
- *   - **Honesty axis** (per PLAN-v1.6 §3): the tool does NOT fabricate
+ *   - **Honesty axis**: the tool does NOT fabricate
  *     records. Records that exist but lack a value for this specific
  *     field are omitted from the list — emitting `value: null` without
  *     context would conflate "no value set" with "the masked value is
@@ -68,7 +67,7 @@
  *     identically. (a) Every record carries an extracted `values` array
  *     and none names this field → `recordValues: []` with NO note: a real
  *     "no record sets this field". (b) One or more records carry no
- *     `values` property AT ALL — a vault refreshed before the v1.6 R2
+ *     `values` property AT ALL — a vault refreshed before the
  *     record-values extractor, which always writes `values` (`[]` when the
  *     record declares none) — or carry one that is not an array →
  *     `recordValuesNote` names those record ids and says the values were
@@ -115,7 +114,7 @@ const CUSTOM_FIELD_PREFIX = 'CustomField:';
 /**
  * The Custom Metadata Type suffix. Parent types whose ApiName ends
  * with `__mdt` are CustomMetadataDefinition objects; their children
- * are the CustomMetadataRecord nodes the v1.6 R2 extractor produces.
+ * are the CustomMetadataRecord nodes the extractor produces.
  */
 const CUSTOM_METADATA_DEFINITION_SUFFIX = '__mdt';
 
@@ -216,7 +215,7 @@ export interface ExplainFieldOutput {
    * The DECLARED value set for a Picklist / MultiselectPicklist field, as
    * the extractor recorded it from the field's inline
    * `<valueSet><valueSetDefinition>` — the literal answer to "what values
-   * are in this picklist?" (P14-ROUTER-picklist-values). `null` for
+   * are in this picklist?". `null` for
    * non-picklist fields AND for picklists whose value set is not inline
    * (commonly a GlobalValueSet reference — the vault does not yet emit the
    * `usesValueSet` link, so the values are not reachable from the field
@@ -226,9 +225,9 @@ export interface ExplainFieldOutput {
    * H10: each entry carries `isActive`. An INACTIVE value is RETAINED but
    * NOT selectable for new records — existing records may still hold it — so
    * it is LISTED-and-marked, never dropped and never presented as current.
-   * Old vaults (pre-CR-10) stored bare strings; those normalize to
+   * Old vaults (legacy) stored bare strings; those normalize to
    * `isActive: true` (active). GVS-resolved values carry the SAME honest
-   * `isActive` as an inline definition (CR-10b — the GlobalValueSet
+   * `isActive` as an inline definition (the GlobalValueSet
    * extractor now captures per-value activation status directly).
    */
   readonly picklistValues: readonly ExplainFieldPicklistValue[] | null;
@@ -236,7 +235,7 @@ export interface ExplainFieldOutput {
    * Present ONLY when `picklistValues` was resolved by FOLLOWING the field's
    * `usesValueSet` edge to a GlobalValueSet (0.1.10+ vaults) — carries the
    * value set's canonical id so the consumer can cite where the values are
-   * declared (P14-USAGE-gvs-edge). Absent for inline definitions.
+   * declared. Absent for inline definitions.
    */
   readonly picklistValuesSource?: string;
   /**
@@ -245,7 +244,7 @@ export interface ExplainFieldOutput {
    * could not resolve it (pre-0.1.10 vault, or the GlobalValueSet was not
    * retrieved) — without this note a `null` would silently read as
    * "no values". Absent when the values WERE resolved from a GlobalValueSet
-   * (`picklistValuesSource` set) — CR-10b: those now carry the same honest
+   * (`picklistValuesSource` set) — those now carry the same honest
    * `isActive` as an inline definition, so no disclosure is needed.
    */
   readonly picklistValuesNote?: string;
@@ -254,14 +253,14 @@ export interface ExplainFieldOutput {
    * Present ONLY when `recordValues` is incomplete for a reason that is NOT
    * "the org sets no value" (R1 typed absence). Two causes: one or more
    * CustomMetadataRecord children carry no extracted `values` property (a
-   * vault built before the v1.6 R2 record-values extractor, which ALWAYS
+   * vault built before the record-values extractor, which ALWAYS
    * writes `values` — `[]` when the record declares none) or carry one that
    * is not an array; or the field node has no `parentId` so there is no
    * Custom Metadata Type to enumerate records from. Absent when every record
    * WAS read — an empty `recordValues` with no note is a verified zero.
    */
   readonly recordValuesNote?: string;
-  /** P13-ANNOT-tools: curated annotations (provenance `annotation`); absent when none. */
+  /** Curated annotations (provenance `annotation`); absent when none. */
   readonly annotations?: AnnotationsBlock;
   /**
    * The `fieldId` the CALLER passed, present ONLY when it differs from the
@@ -336,7 +335,7 @@ const NON_INLINE_VALUE_SET_NOTE =
  * Pull the CustomField's `picklistValues` property — the declared value set
  * the extractor parsed from an inline `<valueSet><valueSetDefinition>`.
  * Routes through the shared H10 normalizer so BOTH the legacy bare-string
- * shape (pre-CR-10 vaults; each string ⇒ an active value) and the new object
+ * shape (legacy vaults; each string ⇒ an active value) and the new object
  * shape `{value,isActive,label?,default?}` are read — the old
  * `typeof === 'string'` filter silently dropped object entries, reporting zero
  * values on a re-extracted vault. An empty array is a real zero-value inline
@@ -379,7 +378,7 @@ const readFieldInlineHelpText = (node: Node): string | null => {
 /**
  * Pull the CustomField's `required` property. The extractor stores a
  * boolean; falls back to `false` for any non-boolean shape since the
- * v1.0 schema's `required` element defaults to `false` when absent.
+ * schema's `required` element defaults to `false` when absent.
  */
 const readFieldRequired = (node: Node): boolean => {
   const raw = node.properties['required'];
@@ -476,7 +475,7 @@ const readRecordValueEntries = (
 /**
  * Pull one record's value for a given field name out of an ALREADY-READ
  * `values` list. Returns `null` when the list has no matching entry for the
- * field — the v1.6 R2 extractor only emits an entry when the record's XML
+ * field — the extractor only emits an entry when the record's XML
  * carries one, so a missing entry semantically means "no value set" and is
  * omitted from the cross-record list (per the honesty-axis design in this
  * module's JSDoc). Callers must route through {@link readRecordValueEntries}
@@ -519,7 +518,7 @@ const compareRecordValues = (
  */
 export interface CollectedRecordValues {
   readonly rows: readonly ExplainFieldRecordValue[];
-  /** Records carrying no `values` property — a pre-v1.6 refresh. */
+  /** Records carrying no `values` property — a legacy refresh. */
   readonly notExtracted: readonly string[];
   /** Records whose `values` is present but not an array — corrupt. */
   readonly unreadable: readonly string[];
@@ -851,7 +850,7 @@ export const explainFieldHandler = async (
   // GlobalValueSet-driven picklist: the inline definition is null, but the
   // usesValueSet edge (0.1.10+ vaults) leads to the declared values — resolve
   // them so the routed "what values are in this picklist?" question gets a
-  // real answer instead of a redirect (P14-USAGE-gvs-edge).
+  // real answer instead of a redirect.
   let resolvedFromValueSet: string | null = null;
   if (picklistValues === null && PICKLIST_DATA_TYPES.has(fieldType)) {
     const fromGvs = await resolveGlobalValueSetValues(ctx, node.id);
@@ -871,7 +870,7 @@ export const explainFieldHandler = async (
     referenceTo: readFieldReferenceTo(node),
     picklistValues,
     ...(resolvedFromValueSet !== null ? { picklistValuesSource: resolvedFromValueSet } : {}),
-    // CR-10b: GVS-resolved values now carry an honestly-captured isActive
+    // GVS-resolved values now carry an honestly-captured isActive
     // (same as an inline definition), so no disclosure note is needed for
     // that case anymore. The not-inline / unresolved case still surfaces
     // NON_INLINE_VALUE_SET_NOTE.

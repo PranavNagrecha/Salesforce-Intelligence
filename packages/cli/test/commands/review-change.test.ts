@@ -292,7 +292,7 @@ describe('runReviewChange (exit-code driver)', () => {
 });
 
 // ===========================================================================
-// R7-C2 — `sfi review-change --against <alias|path>` (cross-vault)
+// `sfi review-change --against <alias|path>` (cross-vault)
 // ===========================================================================
 
 describe('runReviewChange --against (cross-vault)', () => {

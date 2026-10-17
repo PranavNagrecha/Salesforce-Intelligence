@@ -57,7 +57,7 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
-  // CR-CAP-15: CustomPermission DEFINITION nodes (the grant target CR-CAP-10
+  // CustomPermission DEFINITION nodes (the grant target
   // points at). Reuses extractEnterpriseMetadata with a flat top-level config.
   it('extracts a CustomPermission definition node (flat top-level id, no parent)', async () => {
     const dir = await makeTemp();
@@ -294,8 +294,8 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
-  // CR-CAP-13: list-view `<filters><field>` identity capture.
-  it('CR-CAP-13: tags a filter-only field as a filterRef references edge', async () => {
+  // list-view `<filters><field>` identity capture.
+  it('tags a filter-only field as a filterRef references edge', async () => {
     const dir = await makeTemp();
     try {
       const path = join(
@@ -324,7 +324,7 @@ describe('enterprise metadata extractors', () => {
       expect(edge).toBeDefined();
       expect(edge?.edgeType).toBe('references');
       expect(edge?.confidence).toBe('heuristic');
-      // The whole point of CR-CAP-13: a filter-only field is `filterRef`,
+      // The point: a filter-only field is `filterRef`,
       // NOT the column `fieldRef` it was mis-tagged as before this CR.
       expect(edge?.properties['referenceKind']).toBe('filterRef');
       // It must NOT also surface as a column row (no duplicate edge).
@@ -339,7 +339,7 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
-  it('CR-CAP-13: mints NO edge for non-field filter tokens or value-derived dotted phantoms', async () => {
+  it('mints NO edge for non-field filter tokens or value-derived dotted phantoms', async () => {
     const dir = await makeTemp();
     try {
       const path = join(
@@ -379,7 +379,7 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
-  it('CR-CAP-13: PUBLISH_STATUS/LANGUAGE/numeric-value filters mint no edge', async () => {
+  it('PUBLISH_STATUS/LANGUAGE/numeric-value filters mint no edge', async () => {
     const dir = await makeTemp();
     try {
       const path = join(
@@ -414,7 +414,7 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
-  it('CR-CAP-13: a column-only list view is unchanged (single fieldRef, no filterRef)', async () => {
+  it('a column-only list view is unchanged (single fieldRef, no filterRef)', async () => {
     const dir = await makeTemp();
     try {
       const path = join(dir, 'objects', 'Account', 'listViews', 'Enterprise2.listView-meta.xml');
@@ -433,7 +433,7 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
-  it('CR-CAP-13: a field that is both column and filter yields ONE merged columnAndFilter edge', async () => {
+  it('a field that is both column and filter yields ONE merged columnAndFilter edge', async () => {
     const dir = await makeTemp();
     try {
       const path = join(dir, 'objects', 'OA_Project__c', 'listViews', 'Open.listView-meta.xml');
@@ -463,7 +463,7 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
-  it('CR-CAP-13b: ListView <columns> pseudo-columns mint NO edge but real UPPERCASE std fields survive', async () => {
+  it('ListView <columns> pseudo-columns mint NO edge but real UPPERCASE std fields survive', async () => {
     const dir = await makeTemp();
     try {
       const path = join(
@@ -551,7 +551,7 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
-  it('CR-CAP-13b: real custom field ending in _USER survives the audit-user guard', async () => {
+  it('real custom field ending in _USER survives the audit-user guard', async () => {
     const dir = await makeTemp();
     try {
       const path = join(
@@ -649,7 +649,7 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
-  it('CR-CAP-13b: a Report dotted RELATIONSHIP column survives the column guard (cross-type)', async () => {
+  it('a Report dotted RELATIONSHIP column survives the column guard (cross-type)', async () => {
     const dir = await makeTemp();
     try {
       const path = join(dir, 'Acct_Rel.report-meta.xml');
@@ -683,7 +683,7 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
-  it('CR-CAP-13b: a FlexiPage dotted relationship fieldItem survives the column guard', async () => {
+  it('a FlexiPage dotted relationship fieldItem survives the column guard', async () => {
     const dir = await makeTemp();
     try {
       const path = join(dir, 'Account_Record_Page.flexipage-meta.xml');
@@ -705,7 +705,7 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
-  it('CR-CAP-13: a Report `<field>` column still mints a fieldRef edge (no shared-extractor regression)', async () => {
+  it('a Report `<field>` column still mints a fieldRef edge (no shared-extractor regression)', async () => {
     const dir = await makeTemp();
     try {
       const path = join(dir, 'Acct_Cols.report-meta.xml');
@@ -832,7 +832,7 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
-  it('captures FlexiPage sobjectType / pageType / masterLabel + object edge (P11-UI-flexipage-activation)', async () => {
+  it('captures FlexiPage sobjectType / pageType / masterLabel + object edge', async () => {
     const dir = await makeTemp();
     try {
       const path = join(dir, 'Account_Record_Page.flexipage-meta.xml');
@@ -1206,13 +1206,13 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
-  // v2.9 — FlexiPage $Permission.CustomPermission visibility-rule edges.
-  it('v2.9: extractFlexiPage emits a declared references edge for each $Permission.CustomPermission.X in <leftValue>', async () => {
+  // FlexiPage $Permission.CustomPermission visibility-rule edges.
+  it('extractFlexiPage emits a declared references edge for each $Permission.CustomPermission.X in <leftValue>', async () => {
     // Scenario: a Lightning Record Page that gates a component on a custom
     // permission via {!$Permission.CustomPermission.X} inside a
     // <visibilityRule><criteria><leftValue> block. extractFieldRefs only
     // matches <columns>/<field>/<fieldItem>/<fieldApiName> elements — none
-    // of which appear in <leftValue> blocks — so pre-v2.9 this pattern was
+    // of which appear in <leftValue> blocks — so previously this pattern was
     // silently dropped and no graph edge was emitted.
     const dir = await makeTemp();
     try {
@@ -1277,7 +1277,7 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
-  it('v2.9: extractFlexiPage emits no permission edge when no $Permission.CustomPermission pattern is present', async () => {
+  it('extractFlexiPage emits no permission edge when no $Permission.CustomPermission pattern is present', async () => {
     const dir = await makeTemp();
     try {
       const path = join(dir, 'Simple_Page.flexipage-meta.xml');
@@ -1301,7 +1301,7 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
-  it('v2.9: extractFlexiPage deduplicates repeated $Permission.CustomPermission.X occurrences', async () => {
+  it('extractFlexiPage deduplicates repeated $Permission.CustomPermission.X occurrences', async () => {
     const dir = await makeTemp();
     try {
       const path = join(dir, 'Dup_Perm_Page.flexipage-meta.xml');
@@ -2207,7 +2207,7 @@ describe('enterprise metadata extractors', () => {
           'Escalate Case',
           'First Response to Customer',
         ]);
-        // R7-C7: the repeated-element correctness crux — each of the three
+        // the repeated-element correctness crux — each of the three
         // <milestones> blocks carries a DIFFERENT minutesToComplete
         // (240/1440/5760, matching a real verified org file); the flat
         // extraProperties first-occurrence trap this fixes would have
@@ -2577,12 +2577,12 @@ describe('enterprise metadata extractors', () => {
     });
   });
 
-  // R7-C7: Omni-Channel presence configuration — the R6-18 leftover ("the
+  // Omni-Channel presence configuration — the R6-18 leftover ("the
   // <assignments><users> sub-block has no User ComponentType to target").
   // Fixture shapes mirror REAL retrieves from two live orgs (a
   // production-scale university sandbox and a small services org) — no real
   // org identifiers reproduced, per the privacy policy.
-  describe('R7-C7: PresenceUserConfig', () => {
+  describe('PresenceUserConfig', () => {
     it('captures profile assignments as a references edge and user assignments as a property array with NO edge', async () => {
       const dir = await makeTemp();
       try {

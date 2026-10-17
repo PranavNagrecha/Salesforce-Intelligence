@@ -46,5 +46,6 @@ the vault did not retrieve something.
 - `docs/`: user documentation, indexed in `docs/README.md`.
 - `website/`: sfi.auditforce.cloud.
 - `.claude/skills` and `.claude/commands`: shipped by the plugin.
-- `.claude/agents`: maintainer and field-audit agents, not shipped.
+- `.claude/agents`: the two optional `/sfi-field-audit` agents, not shipped;
+  `.claude/agents/maintainer`: agents for working on this repo.
 - `REPO-STRUCTURE.md`: the repository map. `RELEASING.md`: release steps.

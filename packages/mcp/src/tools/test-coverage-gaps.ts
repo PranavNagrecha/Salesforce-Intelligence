@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.test_coverage_gaps` MCP tool.
  *
- * The v2.1 test-coverage-gap surface. Combines three signals to
+ * The test-coverage-gap surface. Combines three signals to
  * classify every non-test ApexClass into one of three coverage
  * statuses — `'uncovered'`, `'fake-coverage'`, or
  * `'low-quality-coverage'` — and surfaces the test classes that
@@ -10,7 +10,7 @@
  *
  * **Three-signal composition:**
  *   1. Test-class identity. `properties.isTest === true` (from the
- *      v0.3 / v1.4 extractor) identifies a class as `@isTest`. Test
+ *      extractor) identifies a class as `@isTest`. Test
  *      classes are never themselves a "coverage gap" — they're
  *      excluded from the scan.
  *   2. Reachability. A non-test class C is "covered" when at least
@@ -21,7 +21,7 @@
  *      to the cap.
  *   3. Assertion meaningfulness. For each covering test class T, we
  *      inspect T's `qualityIssues[]` for the `fake-assertion`
- *      finding (the v2.1 recognizer's tautology / self-equals /
+ *      finding (the recognizer's tautology / self-equals /
  *      literal-equals detector). When EVERY covering test class is
  *      flagged with `fake-assertion`, the class's
  *      `coverageStatus` is `'fake-coverage'` (covered, but the
@@ -47,8 +47,8 @@
  *     reflective invocation. A class genuinely tested via dynamic
  *     dispatch will surface as `'uncovered'` by this heuristic.
  *
- *   - The depth-3 cap matches the v0.3 `find_apex_usages` BFS cap
- *     and the v2.0g `domain_clusters` depth budget. Coverage chains
+ *   - The depth-3 cap matches the `find_apex_usages` BFS cap
+ *     and the `domain_clusters` depth budget. Coverage chains
  *     longer than 3 hops surface as `'uncovered'` even when they
  *     exist.
  *
@@ -117,8 +117,8 @@ const TEST_COVERAGE_GAPS_DEFAULT_LIMIT = 200;
 const TEST_COVERAGE_GAPS_PAYLOAD_BUDGET_BYTES = 38_000;
 
 /**
- * BFS depth cap for the test-class coverage walk. Matches the v0.3
- * `find_apex_usages` BFS cap and the v2.0g `domain_clusters` depth
+ * BFS depth cap for the test-class coverage walk. Matches the
+ * `find_apex_usages` BFS cap and the `domain_clusters` depth
  * budget; coverage chains longer than three hops are heuristically
  * uncovered.
  */
@@ -167,7 +167,7 @@ export const testCoverageGapsInputSchema = z.object({
     .optional(),
   limit: z.number().int().min(1).max(TEST_COVERAGE_GAPS_MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
-  // CR-22 continuation cursor: opaque token from a prior truncated page's
+  // Continuation cursor: opaque token from a prior truncated page's
   // nextCursor; supplies the resume offset. Omit for today's behavior.
   cursor: z.string().min(1).optional(),
 });
@@ -272,10 +272,10 @@ export interface TestCoverageGapsOutput {
    */
   readonly nextOffset?: number;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * Opaque continuation token, present ONLY when this page is truncated
    * (more gaps remain — over `limit` OR byte-trimmed). Echo it back as `cursor`
    * to resume. Absent on a complete page so an in-budget response is
-   * byte-identical to the pre-CR-22 shape.
+   * byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
@@ -547,7 +547,7 @@ export const testCoverageGapsHandler = async (
 
   const limit = input.limit ?? TEST_COVERAGE_GAPS_DEFAULT_LIMIT;
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
+  // Resolve the resume offset (echoed cursor wins over explicit offset);
   // a stale/forged cursor (changed classFilter, different tool, or refreshed
   // vault) is rejected with invalid-query.
   const fingerprint = argsFingerprint({

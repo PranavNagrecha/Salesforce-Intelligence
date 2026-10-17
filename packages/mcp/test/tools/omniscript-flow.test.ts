@@ -34,7 +34,7 @@ const FIXTURE_MANIFEST: VaultManifest = {
 };
 
 /**
- * Synthetic OmniScript XML mirroring the v3.2 R2 extractor's expected
+ * Synthetic OmniScript XML mirroring the extractor's expected
  * shape. Carries a top-level Step + nested CustomLWC child + DR Extract
  * Action + IP Action + Web-Page Navigate (no edge for Web Page). The
  * top-level identity elements match the canonical id
@@ -415,12 +415,12 @@ describe('omniscriptFlowHandler', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.boundaries).toHaveLength(3);
-    // Q180 Native-vs-Vlocity disclosure — the ONE shared sentence.
+    // Native-vs-Vlocity disclosure — the ONE shared sentence.
     expect(r.value.data.boundaries[0]).toBe(NATIVE_VS_VLOCITY_DISCLOSURE);
-    // Q179 record-level boundary.
+    // Record-level boundary.
     expect(r.value.data.boundaries[1]).toMatch(/OmniProcessElement/);
     expect(r.value.data.boundaries[1]).toMatch(/record-level/);
-    // Q180 Apex-coupling scope: calls out are callsApex edges; Apex running OmniStudio by key is an edge from the class.
+    // Apex-coupling scope: calls out are callsApex edges; Apex running OmniStudio by key is an edge from the class.
     expect(r.value.data.boundaries[2]).toMatch(/callsApex/);
     expect(r.value.data.boundaries[2]).toMatch(/IntegrationProcedureService/);
     expect(r.value.data.boundaries[2]).toMatch(/a key built at runtime is not seen/);

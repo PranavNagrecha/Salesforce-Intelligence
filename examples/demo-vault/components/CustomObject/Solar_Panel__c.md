@@ -13,10 +13,12 @@ properties:
   enableHistory: false
   enableReports: false
   enableSearch: false
+  externalSharingModel: null
   label: Solar Panel
   nameFieldLabel: Solar Panel Name
   nameFieldType: Text
   pluralLabel: Solar Panels
+  recordPageOverrides: []
   sharingModel: ReadWrite
   visibility: Public
 sourcePath: source/main/default/objects/Solar_Panel__c/Solar_Panel__c.object-meta.xml
@@ -37,9 +39,11 @@ type: CustomObject
 | enableHistory | `false` |
 | enableReports | `false` |
 | enableSearch | `false` |
+| externalSharingModel | `null` |
 | nameFieldLabel | `Solar Panel Name` |
 | nameFieldType | `Text` |
 | pluralLabel | `Solar Panels` |
+| recordPageOverrides | `` |
 | sharingModel | `ReadWrite` |
 | visibility | `Public` |
 

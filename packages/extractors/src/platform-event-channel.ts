@@ -104,7 +104,7 @@ const parseRoot = (
 };
 
 /**
- * CR-CAP-18: extract a PlatformEventChannel node from a flat
+ * extract a PlatformEventChannel node from a flat
  * `platformEventChannels/{ChannelName}__chn.platformEventChannel-meta.xml`
  * file. The node id is `PlatformEventChannel:{ChannelName}__chn` (the `__chn`
  * fullName suffix is preserved so a member's `<eventChannel>` resolves to
@@ -116,7 +116,7 @@ const parseRoot = (
  *
  * Node-only: the channel→member `parentOf` and member→event `references` edges
  * are emitted by the MEMBER extractor (a member knows its parent channel via
- * `<eventChannel>`; the channel file lists no members). This mirrors the v1.0
+ * `<eventChannel>`; the channel file lists no members). This mirrors the
  * CustomObject↔CustomField split where the child file owns the parent edge.
  *
  * @example
@@ -193,7 +193,7 @@ const isCustomChannel = (eventChannel: string): boolean =>
   eventChannel.endsWith(CUSTOM_CHANNEL_SUFFIX);
 
 /**
- * CR-CAP-18: extract a PlatformEventChannelMember from a flat
+ * extract a PlatformEventChannelMember from a flat
  * `platformEventChannelMembers/{MemberName}__chn.platformEventChannelMember-meta.xml`
  * file. A member binds ONE entity (`<selectedEntity>`) onto one channel
  * (`<eventChannel>`) with an optional per-member `<filterExpression>`.

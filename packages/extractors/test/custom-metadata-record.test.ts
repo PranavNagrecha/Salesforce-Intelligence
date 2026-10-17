@@ -107,7 +107,7 @@ describe('extractCustomMetadataRecord', () => {
       // path. `<value xsi:type="xsd:string">***</value>` MUST produce
       // `{ value: null, valueType: 'string', isMasked: true }` — the
       // extractor MUST NOT fabricate the underlying value (per
-      // PLAN-v1.6.md §3). The record's `hasMaskedValues` flag must be
+      // §3). The record's `hasMaskedValues` flag must be
       // `true` so consumers can quick-filter on it.
       const fixtureAbsPath = resolve(HARNESS_ROOT, CLINICAL_MOD2_FIXTURE_REL);
       const goldenAbsPath = resolve(HARNESS_ROOT, CLINICAL_MOD2_GOLDEN_REL);
@@ -143,7 +143,7 @@ describe('extractCustomMetadataRecord', () => {
       // Per CustomMetadataRecord.md §Edges, the parent is the CMDT type
       // definition (an `__mdt` CustomObject). The suffix MUST be
       // preserved in both the canonical id and the parentId so the edge's
-      // fromId visually aligns with the v1.0 CustomObject id.
+      // fromId visually aligns with the CustomObject id.
       const fixtureAbsPath = resolve(HARNESS_ROOT, MARKETO_DEFAULT_FIXTURE_REL);
       const result = await extractCustomMetadataRecord(fixtureAbsPath);
       expect(result.ok).toBe(true);

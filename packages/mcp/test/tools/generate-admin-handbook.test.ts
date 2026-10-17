@@ -128,7 +128,7 @@ describe('generateAdminHandbookHandler (empty graph)', () => {
     expect(doc.body).toContain('Total extracted components: 0');
   });
 
-  it('surfaces the v1.7 enrichment disclosure when no nodes have lastModifiedDate', async () => {
+  it('surfaces the enrichment disclosure when no nodes have lastModifiedDate', async () => {
     const result = await generateAdminHandbookHandler(ctx, {});
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -196,7 +196,7 @@ describe('generateAdminHandbookHandler (seeded graph, admin default)', () => {
     expect(body).toContain('ApexClass:Foo');
   });
 
-  it('always surfaces the Q125 freshness disclosure', async () => {
+  it('always surfaces the freshness disclosure', async () => {
     const result = await generateAdminHandbookHandler(ctx, {});
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -206,12 +206,12 @@ describe('generateAdminHandbookHandler (seeded graph, admin default)', () => {
 });
 
 // =============================================================================
-// CR-12 — TALLY de-cap. Per-section counts must come from countNodesByType
+// TALLY de-cap. Per-section counts must come from countNodesByType
 // (exact COUNT(*)), not the capped list length. With SFI_NODE_SCAN_LIMIT=2 the
 // fetchNodes list saturates at 2, but the rendered counts must report the FULL
 // node count. Mirrors apex-test-coverage.test.ts past-cap pattern.
 // =============================================================================
-describe('generateAdminHandbookHandler — past-cap tally (CR-12 de-cap)', () => {
+describe('generateAdminHandbookHandler — past-cap tally', () => {
   let store: GraphStore;
   let ctx: Context;
 
@@ -281,7 +281,7 @@ describe('generateAdminHandbookHandler — past-cap tally (CR-12 de-cap)', () =>
   });
 });
 
-describe('generateAdminHandbookHandler — sub-cap byte-identity (CR-12)', () => {
+describe('generateAdminHandbookHandler — sub-cap byte-identity', () => {
   let store: GraphStore;
   let ctx: Context;
 

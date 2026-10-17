@@ -13,6 +13,7 @@ properties:
   externalId: false
   formula: (Contract_Value__c - Total_Invoiced__c) / Contract_Value__c
   inlineHelpText: null
+  isFormula: true
   label: Margin Percent
   length: null
   picklistValues: null
@@ -41,6 +42,7 @@ type: CustomField
 | externalId | `false` |
 | formula | `(Contract_Value__c - Total_Invoiced__c) / Contract_Value__c` |
 | inlineHelpText | `null` |
+| isFormula | `true` |
 | length | `null` |
 | picklistValues | `null` |
 | precision | `5` |

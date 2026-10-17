@@ -175,7 +175,7 @@ describe('snapshot trend tools', () => {
     }
   });
 
-  it('trends securityScore from SnapshotMeta.metrics with null for pre-upgrade snaps (R8-SECURITY-TREND)', async () => {
+  it('trends securityScore from SnapshotMeta.metrics with null for pre-upgrade snaps', async () => {
     const root = await mkdtemp(join(tmpdir(), 'sfi-trend-sec-'));
     try {
       await saveSnapshot(root, {

@@ -1,5 +1,5 @@
 /**
- * The `sfi register-vault` CLI subcommand (v3.1 R7).
+ * The `sfi register-vault` CLI subcommand.
  *
  * Registers a vault alias under a co-resident root, mapping the user-
  * typed name (e.g., `acme-prod`) to an absolute vault path. The
@@ -7,14 +7,14 @@
  * tools (`sfi.compare_vaults` and siblings); this command writes the
  * `registry.json` file those tools read.
  *
- * Per PLAN-v3.1 §12, registration is a one-time setup action and is
+ * Registration is a one-time setup action and is
  * CLI-only — no MCP-tool equivalent. The skill cannot register vaults
  * on the user's behalf; it surfaces the verbatim command and waits.
  *
  * Co-resident root resolution (in order):
  *   1. `--root <path>` flag if provided.
  *   2. `SF_INTELLIGENCE_REGISTRY_PATH` env var when set.
- *   3. Default `~/sf-intelligence-vaults` (the PLAN-v3.1 §3 default).
+ *   3. Default `~/sf-intelligence-vaults` (the default).
  *
  * Vault-path resolution: the second positional argument is resolved
  * to an absolute path (relative paths resolve against `process.cwd()`).
@@ -32,7 +32,7 @@ import { err, ok, type Result } from '@sf-intelligence/core';
 import { registerVault, type RegistryError } from '@sf-intelligence/vault';
 import { Command } from 'commander';
 
-/** Default co-resident root, per PLAN-v3.1 §3. */
+/** Default co-resident root. */
 const DEFAULT_REGISTRY_ROOT_SUBDIR = 'sf-intelligence-vaults' as const;
 
 /**

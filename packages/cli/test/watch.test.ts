@@ -14,7 +14,7 @@ import {
 } from '../src/commands/watch.js';
 
 /**
- * P13-WATCH-daemon — lifecycle units: atomic single-instance lock (live
+ * Lifecycle units: atomic single-instance lock (live
  * refusal, stale recovery, owner-checked release), jitter bounds, the SEPARATE
  * daily tick budget degrading to idle (never API hammering), tick-failure
  * resilience, and the 20-tick mocked soak with a flat RSS.
@@ -155,7 +155,7 @@ describe('soak + resilience', () => {
   });
 });
 
-describe('auto-refresh trigger + throttle (P13-WATCH-auto-refresh)', () => {
+describe('auto-refresh trigger + throttle', () => {
   const staleSweep = async () => ({ ok: true, snapshot: { vaultStale: true } });
   const cleanSweep = async () => ({ ok: true, snapshot: { vaultStale: false } });
 
@@ -226,7 +226,7 @@ describe('auto-refresh trigger + throttle (P13-WATCH-auto-refresh)', () => {
   });
 });
 
-describe('demand-queue drain hook (P13-STAGED-demand-queue)', () => {
+describe('demand-queue drain hook', () => {
   it('drains when the queue has entries, throttles inside the hour, fires again after it', async () => {
     let clock = 0;
     const drains: number[] = [];

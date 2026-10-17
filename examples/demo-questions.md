@@ -52,6 +52,18 @@ the core set runs through `sfi.run_analysis`.
 - **What fields does the Project object have?** *(list_components / field_360)*
 - **Where is `Invoice__c.Amount__c` used across the org?** *(find_field_anywhere)*
 
+## Forms, screens & related lists — "where is this shown?"
+
+- **Where is `Project__c.Expected_Completion__c` used?** — on the Residential
+  layout and as a screen field in the `Project_Site_Survey` screen flow.
+  *(find_component_usages)*
+- **Which components show `Project__c.Utility_Provider__c` on a form?** — only
+  the `projectSummaryCard` Lightning web component, through its
+  `lightning-record-form` field list. *(find_component_usages)*
+- **What shows Installation fields on the Project page?** — the Residential
+  layout's Installations related list, with `Install_Date__c` and
+  `Panels_Installed__c` as columns. *(find_component_usages)*
+
 ## OmniStudio & CPQ
 
 - **Walk the `Customer_Intake` OmniScript step by step.** *(omniscript_flow)*

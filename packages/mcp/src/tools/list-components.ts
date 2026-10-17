@@ -2,8 +2,8 @@
  * Handler for the `sfi.list_components` MCP tool.
  *
  * Surfaces the graph layer's `listNodesByType` query through the MCP
- * envelope. `type` is required for v0.1 — the underlying graph query needs
- * a type to scope its index scan and v0.1 explicitly avoids the "list
+ * envelope. `type` is required — the underlying graph query needs
+ * a type to scope its index scan and it explicitly avoids the "list
  * everything" mode (which would require COUNT(*) plumbing the graph layer
  * does not yet ship). Pagination follows the graph's defaults (limit=50,
  * max=500) and exposes a `hasMore` hint so clients can iterate without a
@@ -149,12 +149,12 @@ export const COMPONENT_TYPES = [
   'PermissionSetAssignment',
   'NamedCredential',
   'ConnectedApp',
-  // v1.1 — sharing & visibility tier.
+  // Sharing & visibility tier.
   'Group',
   'Queue',
   'Role',
   'SharingRule',
-  // v1.2 — record types + UI surfaces tier.
+  // Record types + UI surfaces tier.
   'RecordType',
   'BusinessProcess',
   'CustomTab',
@@ -164,7 +164,7 @@ export const COMPONENT_TYPES = [
   'GlobalValueSet',
   'CustomLabel',
   'StaticResource',
-  // v1.3 — legacy automation + communications tier.
+  // Legacy automation + communications tier.
   'WorkflowRule',
   'ApprovalProcess',
   'AssignmentRule',
@@ -174,12 +174,12 @@ export const COMPONENT_TYPES = [
   'MatchingRule',
   'EmailTemplate',
   'Letterhead',
-  // v1.4 — developer frontend + test mapping tier.
+  // Developer frontend + test mapping tier.
   'LightningComponentBundle',
   'AuraDefinitionBundle',
   'VisualforcePage',
   'VisualforceComponent',
-  // v1.5 — integration topology + event/async/API surface tier.
+  // Integration topology + event/async/API surface tier.
   'AuthProvider',
   'SamlSsoConfig',
   'RemoteSiteSetting',
@@ -187,32 +187,32 @@ export const COMPONENT_TYPES = [
   'ExternalDataSource',
   'ExternalService',
   'NetworkAccess',
-  // v1.6 — declarative custom-permission definition (CR-CAP-15) +
+  // Declarative custom-permission definition +
   // business-user record-value tier.
   'CustomPermission',
   'CustomMetadataRecord',
   'CustomSettingRecord',
-  // v2.0a — conditional-context tier. Synthetic; emitted by the seven
+  // Conditional-context tier. Synthetic; emitted by the seven
   // declarative firer extractors.
   'ConditionalContext',
-  // v2.8 — async + integration deep tier. Promoted from dangling-by-
-  // design v1.3 references.
+  // Async + integration deep tier. Promoted from dangling-by-
+  // design references.
   'OutboundMessage',
-  // v2.9 — WorkflowAlert promotion (email alerts inside *.workflow-meta.xml).
+  // WorkflowAlert promotion (email alerts inside *.workflow-meta.xml).
   'WorkflowAlert',
-  // v2.6a — CPQ specialist tier (SBQQ__ namespace recognition).
+  // CPQ specialist tier (SBQQ__ namespace recognition).
   'CpqProductRule',
   'CpqPriceRule',
   'CpqQuoteTemplate',
   'CpqLookupQuery',
   'CpqConfigurationAttribute',
-  // v3.2 — OmniStudio and decision-table tier.
+  // OmniStudio and decision-table tier.
   'OmniScript',
   'OmniIntegrationProcedure',
   'OmniDataTransform',
   'OmniUiCard',
   'DecisionTable',
-  // v4.0 — enterprise safety coverage tier.
+  // Enterprise safety coverage tier.
   'Report',
   'Dashboard',
   'ListView',
@@ -228,7 +228,7 @@ export const COMPONENT_TYPES = [
   'FieldSet',
   'Index',
   'InstalledPackage',
-  // CR-CAP-18 — platform-event publish/stream-routing topology.
+  // Platform-event publish/stream-routing topology.
   'PlatformEventChannel',
   'PlatformEventChannelMember',
   // Org security-settings + standard-picklist tiers. One source file
@@ -236,24 +236,24 @@ export const COMPONENT_TYPES = [
   'SessionSettings',
   'SecuritySettings',
   'StandardValueSet',
-  // R6-18 — Service Cloud entitlement/SLA + Omni-Channel routing tier.
+  // Service Cloud entitlement/SLA + Omni-Channel routing tier.
   'EntitlementProcess',
   'MilestoneType',
   'ServiceChannel',
   'QueueRoutingConfig',
-  // R6-22 — security-surface tier.
+  // Security-surface tier.
   'Certificate',
   'TransactionSecurityPolicy',
-  // R6-13 — Agentforce / Einstein GenAI tier.
+  // Agentforce / Einstein GenAI tier.
   'GenAiFunction',
   'GenAiPlugin',
   'GenAiPlannerBundle',
   'GenAiPromptTemplate',
-  // R6-17 — Experience Cloud community tier.
+  // Experience Cloud community tier.
   'Network',
   'CustomSite',
   'ExperienceBundle',
-  // R7-C7 — Bot / presence extraction leftovers.
+  // Bot / presence extraction leftovers.
   'Bot',
   'BotVersion',
   'PresenceUserConfig',
@@ -375,13 +375,13 @@ const fitNodesToBudget = (
 /**
  * Zod schema for the `sfi.list_components` tool input.
  *
- *   - `type`: required for v0.1, must be a known `ComponentType`.
+ *   - `type`: required, must be a known `ComponentType`.
  *   - `parentId`: optional; narrows to children of one parent node.
  *   - `limit`: integer in [1, 500]; defaults to 50 in the handler.
  *   - `offset`: non-negative integer; defaults to 0 in the handler.
  */
 /**
- * The v1.5 ApexClass async/interface/API boolean classifiers a caller can
+ * The ApexClass async/interface/API boolean classifiers a caller can
  * filter on (P4-interface-impl). Each maps 1:1 to a `properties.<key>` boolean
  * the apex-class extractor populates, so a query like
  * `{ type: 'ApexClass', isBatchable: true }` lists every Batchable implementer.
@@ -464,7 +464,7 @@ const listComponentsShape = {
   objectId: z.string().trim().min(1).optional(),
   limit: z.number().int().min(1).max(LIST_MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
-  // CR-22 continuation cursor from a prior page's nextCursor. `o` already IS the
+  // Continuation cursor from a prior page's nextCursor. `o` already IS the
   // SQL offset (list_components pages listNodesByType directly), so this is a
   // SINGLE-axis cursor — no separate scan offset.
   cursor: z.string().min(1).optional(),
@@ -516,7 +516,7 @@ export type ListComponentsInput = z.infer<typeof listComponentsInputSchema>;
  *   - `offset`: the actual offset applied.
  *   - `hasMore`: heuristic — true when `components.length === limit`. A
  *     follow-up page may still come back empty; the client should treat
- *     this as a hint, not a guarantee. v0.2 will add a true `total` count.
+ *     this as a hint, not a guarantee.
  */
 export interface ListComponentsOutput {
   readonly components: readonly Node[];
@@ -564,10 +564,10 @@ export interface ListComponentsOutput {
    */
   readonly coverageCaveat?: CoverageCaveat;
   /**
-   * CR-22 opaque continuation token, present ONLY when more rows remain past
+   * Opaque continuation token, present ONLY when more rows remain past
    * this page (over `limit` OR byte-trimmed). Echo it back as `cursor` to
    * resume. Absent on a final page so an in-budget response is byte-identical
-   * to pre-CR-22.
+   * to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /**
@@ -634,7 +634,7 @@ export interface ListComponentsOutput {
  * The `sfi.list_components` MCP tool. Returns a paginated slice of vault
  * nodes of a single `ComponentType`, optionally narrowed by `parentId`.
  * Input is already Zod-validated by `dispatchTool`; this handler enforces
- * the v0.1 "type is required" invariant and surfaces graph failures as
+ * the "type is required" invariant and surfaces graph failures as
  * `internal` errors.
  *
  * @example
@@ -649,9 +649,9 @@ export const listComponentsHandler = async (
   ctx: Context,
   input: ListComponentsInput,
 ): Promise<Result<McpResponse<ListComponentsOutput>, McpError>> => {
-  // v0.1 keeps the "list all node types" mode off the table; the graph
+  // This keeps the "list all node types" mode off the table; the graph
   // query requires a type and the surface area for a list-all is large
-  // enough that it belongs to v0.2 along with COUNT(*) support.
+  // enough that it belongs with COUNT(*) support.
   if (input.type === undefined) {
     return err({
       kind: 'invalid-query',
@@ -730,7 +730,7 @@ export const listComponentsHandler = async (
   const limit = input.limit ?? LIST_DEFAULT_LIMIT;
   const recordTriggered = input.recordTriggered === true;
 
-  // CR-22: the narrowing args this cursor binds to (everything except the paging
+  // The narrowing args this cursor binds to (everything except the paging
   // knobs limit/offset/cursor). A token can't be replayed against a different
   // type / parentId / property filter.
   const fingerprint = argsFingerprint({
@@ -1034,11 +1034,11 @@ export const listComponentsHandler = async (
     totalCount = pageNodes.length;
   }
 
-  // CR-22: emit a continuation cursor ONLY when more rows remain (over `limit`
+  // Emit a continuation cursor ONLY when more rows remain (over `limit`
   // OR byte-trimmed). The next offset is `offset + kept.length` — `o` IS the SQL
   // offset, so the resumed page SQL-scans deeper (reaches node 501+ natively).
   // A final page omits nextCursor/pageInfo, so an in-budget response is
-  // byte-identical to pre-CR-22 (except for the new top-level `totalCount`).
+  // byte-identical to the pre-paging shape (except for the new top-level `totalCount`).
   let cursorFields: { readonly nextCursor: string; readonly pageInfo: PageInfo } | undefined;
   if (hasMore) {
     const nextOffset = offset + kept.length;

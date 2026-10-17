@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>61.0</apiVersion>
+    <description>Screen flow launched from a Project: the surveyor confirms system size and expected completion next to the project summary card.</description>
+    <label>Project Site Survey</label>
+    <processType>Flow</processType>
+    <status>Active</status>
+    <interviewLabel>Project Site Survey {!$Flow.CurrentDateTime}</interviewLabel>
+    <environments>Default</environments>
+    <variables>
+        <name>Project_Record</name>
+        <dataType>SObject</dataType>
+        <isCollection>false</isCollection>
+        <isInput>true</isInput>
+        <isOutput>false</isOutput>
+        <objectType>Project__c</objectType>
+    </variables>
+    <start>
+        <locationX>176</locationX>
+        <locationY>0</locationY>
+        <connector>
+            <targetReference>Survey_Screen</targetReference>
+        </connector>
+    </start>
+    <screens>
+        <name>Survey_Screen</name>
+        <label>Site Survey</label>
+        <locationX>176</locationX>
+        <locationY>134</locationY>
+        <allowBack>false</allowBack>
+        <allowFinish>true</allowFinish>
+        <allowPause>false</allowPause>
+        <fields>
+            <fieldType>ObjectProvided</fieldType>
+            <objectFieldReference>Project_Record.System_Size_kW__c</objectFieldReference>
+        </fields>
+        <fields>
+            <fieldType>ObjectProvided</fieldType>
+            <objectFieldReference>Project_Record.Expected_Completion__c</objectFieldReference>
+        </fields>
+        <fields>
+            <fieldType>ComponentInstance</fieldType>
+            <name>Project_Summary</name>
+            <extensionName>c:projectSummaryCard</extensionName>
+        </fields>
+        <showFooter>true</showFooter>
+        <showHeader>true</showHeader>
+    </screens>
+</Flow>

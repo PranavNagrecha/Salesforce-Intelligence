@@ -533,7 +533,7 @@ describe('renderComponentMarkdown', () => {
   });
 });
 
-describe('renderComponentMarkdown — markdown injection / escaping (CR-16c)', () => {
+describe('renderComponentMarkdown — markdown injection / escaping', () => {
   it('neutralizes structure-breaking chars in label, apiName, and description', () => {
     const node: Node = {
       id: 'CustomObject:Evil__c',
@@ -564,7 +564,7 @@ describe('renderComponentMarkdown — markdown injection / escaping (CR-16c)', (
     expect(headingLines).toHaveLength(1);
 
     // (b) The API Name code span is not closed early by the backtick in
-    // apiName: the whole apiName stays inside the span. CR-16d: a single
+    // apiName: the whole apiName stays inside the span. A single
     // embedded backtick forces a wider (2-backtick) fence, per CommonMark —
     // backslash-escaping the backtick does NOT work inside a code span
     // (backslash escapes are inert there), so the fence must be widened.

@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.domain_clusters` MCP tool.
  *
- * The v2.0g secondary tour tool — pairs with `sfi.org_overview` to
+ * The secondary tour tool — pairs with `sfi.org_overview` to
  * answer the buyer-priority #9 question ("I'm new — give me a tour
  * of this org"). Where `org_overview` returns a flat structured
  * snapshot, this tool surfaces SUGGESTED domain groupings: a greedy
@@ -23,7 +23,7 @@
  *
  *   1. **Candidate enumeration** — fetch all CustomObject + ApexClass
  *      + Flow nodes (the three "domain-shaped" ComponentTypes per
- *      the v2.0g spec). Cap at `CANDIDATE_LIMIT` to keep the
+ *      the spec). Cap at `CANDIDATE_LIMIT` to keep the
  *      response bounded — orgs with more than that surface a
  *      candidate list trimmed to the first chunk by id ASC.
  *
@@ -55,14 +55,14 @@
  *   - The algorithm is intentionally simple — greedy, not optimal.
  *     A more sophisticated clustering (Louvain, label-propagation)
  *     would produce tighter groupings but at higher implementation
- *     cost; v2.0g ships the simple version per the spec.
+ *     cost; this ships the simple version per the spec.
  *   - `minDensity` is bounded `[0.0, 1.0]`. Lower values produce
  *     fewer, looser clusters; higher values produce more, tighter
  *     ones. The default 0.3 is calibrated to surface "obvious"
  *     domains while not over-fragmenting.
  *   - Candidates with zero incident edges (isolated nodes) are
  *     immediately counted as `unclustered` since they can't share
- *     edges with anyone. This matches the v2.0g honesty axis: an
+ *     edges with anyone. This matches the honesty axis: an
  *     unconnected component IS unclustered, not "in a cluster of
  *     one".
  */
@@ -139,7 +139,7 @@ const DOMAIN_CANDIDATE_TYPES: readonly ComponentType[] = [
 export const domainClustersInputSchema = z.object({
   minDensity: z.number().min(MIN_DENSITY_LOWER).max(MIN_DENSITY_UPPER).optional(),
   limit: z.number().int().min(LIMIT_LOWER).max(LIMIT_UPPER).optional(),
-  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior page's
+  // Continuation cursor: an OPAQUE token echoed back from a prior page's
   // `nextCursor`; carries the member offset + which cluster (Domain.id) it
   // advances. Omit = today's behavior.
   cursor: z.string().min(1).optional(),
@@ -217,23 +217,23 @@ export interface DomainClustersOutput {
   /** Present when the cluster list was trimmed to fit the response size limit. */
   readonly note?: string;
   /**
-   * CR-RV12: TRUE when the >500-per-type candidate enumeration cap
+   * TRUE when the >500-per-type candidate enumeration cap
    * (CANDIDATE_LIMIT_PER_TYPE) dropped CustomObject/ApexClass/Flow candidates
    * BEFORE clustering — so the clustering ran on a partial candidate set.
    * Present ONLY when actually true so a ≤500-per-type org's golden does not move.
    */
   readonly candidateTruncated?: boolean;
-  /** CR-RV12: true org-wide candidate counts per type (only when a type was capped). */
+  /** True org-wide candidate counts per type (only when a type was capped). */
   readonly trueCandidateCounts?: {
     readonly CustomObject?: number;
     readonly ApexClass?: number;
     readonly Flow?: number;
   };
   /**
-   * CR-22 opaque continuation token, present ONLY when a cluster's members are
+   * Opaque continuation token, present ONLY when a cluster's members are
    * truncated (members.length < memberCount). Echo it back as `cursor` to page
    * that cluster's members; absent on a whole-fits page so the response is
-   * byte-identical to pre-CR-22.
+   * byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata for the paged cluster's members; truncation only. */
@@ -378,7 +378,7 @@ const renderCluster = (
 ): { domain: Domain; allMembers: readonly DomainMember[] } => {
   const centre = pickCentre(candidates);
   // FULL ordered member list — retained so a section cursor can page past
-  // MAX_MEMBERS_PER_CLUSTER instead of discarding the tail (CR-22).
+  // MAX_MEMBERS_PER_CLUSTER instead of discarding the tail.
   const allMembers: DomainMember[] = candidates
     .map((c) => ({ id: c.node.id, apiName: c.node.apiName, type: c.node.type }))
     .sort(memberCompare);
@@ -588,7 +588,7 @@ export const domainClustersHandler = async (
   );
   const rendered: Domain[] = renderedPairs.map((p) => p.domain);
   // Retain each cluster's FULL ordered member list, keyed by Domain.id, so the
-  // member-axis cursor can page past MAX_MEMBERS_PER_CLUSTER (CR-22).
+  // member-axis cursor can page past MAX_MEMBERS_PER_CLUSTER.
   const fullMembersById = new Map<string, readonly DomainMember[]>();
   for (const p of renderedPairs) fullMembersById.set(p.domain.id, p.allMembers);
   const sorted = [...rendered].sort(compareClustersDesc);
@@ -611,7 +611,7 @@ export const domainClustersHandler = async (
   }
   const shownClusters = data.clusters;
 
-  // CR-RV12: the candidate enumeration is capped at CANDIDATE_LIMIT_PER_TYPE per
+  // The candidate enumeration is capped at CANDIDATE_LIMIT_PER_TYPE per
   // type, so a >500-per-type org clusters on a PARTIAL candidate set silently.
   // Compare TRUE counts against the cap; surface candidateTruncated + true counts
   // ONLY for a capped type so a ≤500-per-type org's golden does not move.
@@ -689,7 +689,7 @@ export const domainClustersHandler = async (
     });
   }
 
-  // CR-22 member-axis cursor: page ONE designated cluster's members (sectionId =
+  // Member-axis cursor: page ONE designated cluster's members (sectionId =
   // Domain.id) and disclose the rest. The cursor is bound to vaultHash +
   // argsFingerprint(minDensity,limit) — clustering is recomputed each call, so
   // a refreshed vault or changed args correctly rejects a stale 'domain-N'.

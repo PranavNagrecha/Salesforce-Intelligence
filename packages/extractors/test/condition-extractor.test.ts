@@ -8,7 +8,7 @@ import {
 } from '../src/condition-extractor.js';
 
 /**
- * v2.0a — Tests for the shared `extractConditions` helper.
+ * Tests for the shared `extractConditions` helper.
  *
  * The helper is consumed by seven extractor extensions
  * (workflow-rule, validation-rule, approval-process, assignment-rule,
@@ -270,7 +270,7 @@ describe('extractConditions', () => {
     });
   });
 
-  describe('$Record global resolution (P10-A3 phantom fix)', () => {
+  describe('$Record global resolution (phantom fix)', () => {
     const refsFor = (field: string, object: string | null): readonly string[] => {
       const result = extractConditions({
         parentId: 'Flow:Some_Record_Flow',
@@ -387,7 +387,7 @@ describe('extractConditions', () => {
         conditionIndex: 0,
       });
       expect(result.conditionNodes[0]!.properties.kind).toBe('flow-decision');
-      // `$Record.X` resolves to the flow's start object (P10-A3): `$Record` IS
+      // `$Record.X` resolves to the flow's start object: `$Record` IS
       // the Opportunity-triggered record, so the ref is the real
       // CustomField:Opportunity.Status__c, not a phantom CustomField:$Record.*.
       expect(result.conditionNodes[0]!.properties.fieldRefs).toEqual([

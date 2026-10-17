@@ -147,7 +147,7 @@ const orderCdcSeed: ExtractionResult = {
 
 // =============================================================================
 // Seed 3: a regular Platform Event (Order_Placed__e) that should NOT be
-// counted as a CDC event — the v2.8 name-pattern recognizer filters it out.
+// counted as a CDC event — the name-pattern recognizer filters it out.
 // =============================================================================
 
 const PLATFORM_EVENT = 'CustomObject:Order_Placed__e';
@@ -455,7 +455,7 @@ describe('cdcSubscribersHandler', () => {
     expect(flow?.source).toBe('flow-extractor');
   });
 
-  it('returns an honest disclosure mentioning the v2.8 name-pattern boundary', async () => {
+  it('returns an honest disclosure mentioning the name-pattern boundary', async () => {
     const result = await cdcSubscribersHandler(ctx, {});
     expect(result.ok).toBe(true);
     if (!result.ok) return;

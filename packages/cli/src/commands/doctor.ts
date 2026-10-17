@@ -6,7 +6,7 @@ import { execHelper } from '@sf-intelligence/core';
 import { probeDuckDBNative } from '@sf-intelligence/graph';
 import { gapLogPath, summarizeRouteGaps } from '@sf-intelligence/mcp';
 // Re-export so `sfi gaps report` (and tests) keep a stable CLI-side import of
-// the canonical summarizer (R8-GAPLOG-SURFACE).
+// the canonical summarizer.
 export { summarizeRouteGaps } from '@sf-intelligence/mcp';
 import {
   computeSourceTreeHash,
@@ -31,8 +31,8 @@ import {
 
 /**
  * Per-call timeout for doctor's `sf` probes (`--version`, `org display`), so a
- * hung/wedged `sf` (e.g. an auth prompt) cannot hang `sfi doctor` forever
- * (CR-01 / H8). Shares the `SFI_SF_QUERY_TIMEOUT_MS` knob with refresh so an
+ * hung/wedged `sf` (e.g. an auth prompt) cannot hang `sfi doctor` forever.
+ * Shares the `SFI_SF_QUERY_TIMEOUT_MS` knob with refresh so an
  * operator sets one value (2 min default). On timeout the child is sent
  * `SIGTERM` so `sf` can clean up.
  */
@@ -113,7 +113,7 @@ const formatVersion = (v: readonly [number, number, number]): string => v.join('
 /**
  * Injectable `sf` runner so tests can drive `doctor` without spawning `sf`.
  * Argv-shaped (binary + args, NOT a single shell string) so the `targetOrg`
- * read from the vault config is never interpreted by a shell (CR-01 / C1).
+ * read from the vault config is never interpreted by a shell.
  */
 export type DoctorExec = (binary: string, args: readonly string[]) => Promise<{ stdout: string }>;
 
@@ -150,7 +150,7 @@ const pathExists = async (p: string): Promise<boolean> => {
 
 /**
  * Read `targetOrg` from the vault config, or null if unreadable / absent / not
- * a valid org alias. The `ORG_ALIAS_RE` gate is defense in depth (CR-01 / C1):
+ * a valid org alias. The `ORG_ALIAS_RE` gate is defense in depth:
  * a poisoned config value never reaches the `sf org display` probe; the
  * existing "no targetOrg" branch fires instead.
  */
@@ -355,7 +355,7 @@ export const runDoctor = async (opts: RunDoctorOptions): Promise<DoctorReport> =
           fix: 'Run `sfi refresh --no-pull` to recompute coverage from existing source without re-retrieving.',
         });
       }
-      // EMPTY vault (P12-FIRSTRUN-failure-ux): a refresh that retrieved nothing
+      // EMPTY vault: a refresh that retrieved nothing
       // builds a manifest + graph but answers nothing — distinguish it from a
       // healthy vault so a newcomer gets the real reason, not "all green".
       const componentTotal = Object.values(manifestResult.value.components ?? {}).reduce(
@@ -385,7 +385,7 @@ export const runDoctor = async (opts: RunDoctorOptions): Promise<DoctorReport> =
     );
   }
 
-  // 7. Route-gap telemetry (P12-ROUTER-confusion-report). Informational, never
+  // 7. Route-gap telemetry. Informational, never
   // blocking — the router appends a local entry whenever a question hits a gap
   // (an unrouted/no-good-tool question, or an honest live-plane disclosure), so
   // the count is a signal of where routing could improve, not a health failure.
@@ -416,7 +416,7 @@ export const runDoctor = async (opts: RunDoctorOptions): Promise<DoctorReport> =
     });
   }
 
-  // P13-WATCH-daemon: watcher status — informational, never blocking. A
+  // Watcher status — informational, never blocking. A
   // running watcher keeps meta/staleness.json current for the drift badges.
   try {
     const { readWatchState } = await import('./watch.js');
@@ -524,7 +524,7 @@ export const formatDoctorReport = (report: DoctorReport): string => {
     'which flags any canonical id in the prose that no tool returned (hallucinatedIds) — never invent ids.',
     '',
   );
-  // Feedback channel (P12-FEEDBACK-loop): a wrong/weak answer or a route gap has a
+  // Feedback channel: a wrong/weak answer or a route gap has a
   // home. `sfi feedback export` writes a scrubbed file (no org PII, nothing uploaded).
   lines.push(
     'Feedback: a weak/wrong answer or a missing capability? `sfi feedback mark "<question>" --wrong`,',

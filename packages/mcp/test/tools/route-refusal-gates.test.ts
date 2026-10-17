@@ -2,7 +2,7 @@
 
 // Router-v2 P2 §2 — refusal-shape gates. Two layers of coverage:
 //   1. the pure `detectRefusalShape` detector — every gate's positives (the
-//      P2-DESIGN §2 example phrasings, synthetic), the evaluation order, and
+//      design-doc example phrasings, synthetic), the evaluation order, and
 //      the must-NOT-gate negatives (permission/hypothetical reads);
 //   2. the wired `routeQuestionHandler` over a fixture vault — the shared
 //      refusal route contract (tools [], refusal field, disclosure head,
@@ -468,8 +468,8 @@ describe('detectRefusalShape — R3 §5b audit-trail-plane / report-definition a
     'who last modified the Zorp_Flow flow?', // component metadata stamp (last_modified)
     'which email templates are unused?',
     'who can see the Sales dashboard?', // folder access read
-    // R7-W6: the who-changed-a-Setup-setting arm was REMOVED — these two used
-    // to gate here, but sfi.live_setup_audit_trail (R6-27) now reads the
+    // The who-changed-a-Setup-setting arm was REMOVED — these two used
+    // to gate here, but sfi.live_setup_audit_trail now reads the
     // SetupAuditTrail roster directly (field-level-security flips, and a
     // temporally-qualified "setup audit trail" ask, are both in its scope), so
     // both are answerable and must NOT gate — they route via

@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.generate_compliance_report` MCP tool.
  *
- * The v2.5 documentation-generation tier compliance-report tool.
+ * The documentation-generation tier compliance-report tool.
  * Composes `sfi.pii_inventory` + `sfi.field_access_audit` (per PII
  * field, capped to keep response bounded) + per-object `sharingModel`
  * lookup into a structured markdown document covering the org's
@@ -14,7 +14,7 @@
  *
  * Output: `{ document, appliedScope?, pageInfo? }`.
  *
- * Honesty axis: every PII classification inherits the v2.0d recognizer's
+ * Honesty axis: every PII classification inherits the recognizer's
  * heuristic confidence — a field flagged as `pii` here may not store
  * PII at runtime, and a field flagged as `public` may. The Boundaries
  * footer carries the recognizer-heuristic disclosure verbatim.

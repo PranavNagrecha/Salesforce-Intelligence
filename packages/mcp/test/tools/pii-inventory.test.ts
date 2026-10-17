@@ -376,7 +376,7 @@ describe('piiInventoryHandler', () => {
     }
   });
 
-  // R6-21: format: 'csv' — fields moves to csv; JSON-facing fields stay.
+  // Format: 'csv' — fields moves to csv; JSON-facing fields stay.
   it('omits csv unless format is csv (default json)', async () => {
     const result = await piiInventoryHandler(ctx, {});
     expect(result.ok).toBe(true);
@@ -592,7 +592,7 @@ describe('piiInventoryHandler — pagination + byte budget (B25)', () => {
     expect(nextOffset).toBe(fields.length);
   });
 
-  // CR-22: the byte-trimmed page must carry an opaque continuation cursor and
+  // The byte-trimmed page must carry an opaque continuation cursor and
   // walking it must cover every field exactly once.
   it('emits a nextCursor on the byte-trimmed page and walks the full inventory via cursor (no gaps/dupes)', async () => {
     const seen = new Set<string>();
@@ -633,7 +633,7 @@ describe('piiInventoryHandler — pagination + byte budget (B25)', () => {
     if (!replay.ok) expect(replay.error.kind).toBe('invalid-query');
   });
 
-  it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical to pre-CR-22)', async () => {
+  it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical to the pre-paging shape)', async () => {
     // The non-bulk 15-field fixture (`ctx`) fits under the default limit and
     // byte budget, so the response carries neither nextCursor nor pageInfo.
     const result = await piiInventoryHandler(ctx, {});
@@ -644,7 +644,7 @@ describe('piiInventoryHandler — pagination + byte budget (B25)', () => {
     expect('pageInfo' in result.value.data).toBe(false);
   });
 
-  // R6-21: format: 'csv' — the byte-trimmed BULK_COUNT (120) page must fit the
+  // Format: 'csv' — the byte-trimmed BULK_COUNT (120) page must fit the
   // csv too, dropping rows tail-first with a truncation comment rather than
   // overflowing the global guard.
   it('fits a csv export of the byte-trimmed bulk page under the global guard', async () => {

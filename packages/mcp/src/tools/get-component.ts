@@ -11,12 +11,12 @@
  * the graph has been imported but the renderer has not run.
  *
  * Frontmatter is returned as the raw YAML string between the opening and
- * the first closing `---` delimiter; the v0.1 contract does not ship a YAML
+ * the first closing `---` delimiter; the contract does not ship a YAML
  * parser through this surface, leaving structured parsing to clients that
  * want it. Splitting on the *first* `\n---\n` after the opening means
  * markdown horizontal rules inside the body remain part of the body.
  *
- * v0.2 STRUCTURED GROUNDING: `data.properties` exposes the component's typed
+ * STRUCTURED GROUNDING: `data.properties` exposes the component's typed
  * properties object (the same record stored in the graph node — for
  * ValidationRules this carries `active`, `errorConditionFormula`, `conditions`,
  * `errorMessage`, etc.) and `data.referenceIds` carries the canonical ids of
@@ -27,7 +27,7 @@
  * than guessing from markdown prose — eliminating false hallucination flags on
  * referenced ids.
  *
- * R6-31 METADATA-PROBE MODE: `maxBodyBytes` historically bounded only `body`.
+ * METADATA-PROBE MODE: `maxBodyBytes` historically bounded only `body`.
  * `frontmatter` (the raw rendered YAML) and `properties`/`referenceIds` (the
  * graph node's own data) were always returned in full — fine for an average
  * component, but a Profile with thousands of `fieldPermissions` renders a
@@ -117,13 +117,13 @@ export const DEFAULT_COMPONENT_BODY_MAX_BYTES = 30_000;
 /**
  * Below this `maxBodyBytes` threshold, `get_component` treats the call as a
  * metadata/existence probe rather than a request for the rendered document
- * and returns the bounded metadata PROJECTION (see R6-31 note above) instead
+ * and returns the bounded metadata PROJECTION instead
  * of the full `frontmatter` / `properties` / `referenceIds`. `0` — the
  * grounding-probe convention (`get_component({ id, maxBodyBytes: 0 })`) — is
  * always inside this range; the threshold also covers small explicit values
  * (e.g. a short body preview) so a huge node can't blow the response budget
  * on `properties`/`frontmatter` alone just because the caller asked for a
- * small body. Explicit values at or above this threshold keep the pre-R6-31
+ * small body. Explicit values at or above this threshold keep the pre
  * behavior (full frontmatter/properties/referenceIds) unchanged.
  */
 export const METADATA_PROBE_MAX_BODY_BYTES = 2_000;
@@ -168,7 +168,7 @@ export type GetComponentInput = z.infer<typeof getComponentInputSchema>;
  *   - `type`: the component's type (from the graph node).
  *   - `path`: vault-relative path of the markdown file that was read.
  *   - `frontmatter`: raw YAML body between the leading and first trailing
- *     `---` delimiters. Parsing left to the client (byte-identical with v0.1).
+ *     `---` delimiters. Parsing left to the client (byte-identical).
  *   - `body`: response-safe markdown body slice following the frontmatter,
  *     with the leading blank line(s) after the closing delimiter trimmed.
  *   - `properties`: the component's typed properties object — the same record
@@ -197,7 +197,7 @@ export interface GetComponentOutput {
    * Structured property bag from the graph node. For ValidationRules:
    * `{ active, errorConditionFormula, conditions, errorMessage, errorDisplayField }`.
    * Additive — `frontmatter` (the raw YAML string) is still present and
-   * byte-identical with v0.1.
+   * byte-identical.
    */
   readonly properties: Readonly<Record<string, unknown>>;
   /**
@@ -227,14 +227,14 @@ export interface GetComponentOutput {
   readonly omittedBodyBytes: number;
   readonly maxBodyBytes: number;
   /**
-   * P13-ANNOT-tools: the component's curated annotations (provenance
+   * The component's curated annotations (provenance
    * `annotation` — human-stated/confirmed meaning, never derived from the
    * snapshot). Absent when the component has none, so annotation-free
    * vaults stay byte-identical.
    */
   readonly annotations?: AnnotationsBlock;
   /**
-   * R6-31: `true` when this response is a bounded metadata PROJECTION
+   * `true` when this response is a bounded metadata PROJECTION
    * (`maxBodyBytes` 0 or below `METADATA_PROBE_MAX_BODY_BYTES`) rather than
    * the component's full frontmatter/properties/referenceIds. Absent
    * (never `false`) on a normal response — the default call and any
@@ -242,7 +242,7 @@ export interface GetComponentOutput {
    */
   readonly metadataOnly?: true;
   /**
-   * R6-31: property keys present on the underlying node but dropped from
+   * Property keys present on the underlying node but dropped from
    * the bounded `properties` projection because they did not fit the
    * metadata budget (e.g. a Profile's `fieldPermissions`/`objectPermissions`
    * arrays). Sorted. Present only when `metadataOnly` is true AND at least
@@ -250,26 +250,26 @@ export interface GetComponentOutput {
    */
   readonly omittedPropertyKeys?: readonly string[];
   /**
-   * R6-31: total outgoing edge count on the node, regardless of how many
+   * Total outgoing edge count on the node, regardless of how many
    * ids the metadata projection could fit into `referenceIds`. Present only
    * when `metadataOnly` is true — on the default path `referenceIds` itself
    * is already the full list, so its `.length` IS the count.
    */
   readonly referenceCount?: number;
   /**
-   * R6-31: count of outgoing edges NOT included in `referenceIds` because
+   * Count of outgoing edges NOT included in `referenceIds` because
    * the metadata projection bounded the list. Present only when
    * `metadataOnly` is true.
    */
   readonly omittedReferenceCount?: number;
-  /** R6-31: `true` when `frontmatter` was capped by the metadata projection (present only when `metadataOnly` is true). */
+  /** `true` when `frontmatter` was capped by the metadata projection (present only when `metadataOnly` is true). */
   readonly frontmatterTruncated?: boolean;
-  /** R6-31: original frontmatter byte length before capping (present only when `metadataOnly` is true). */
+  /** Original frontmatter byte length before capping (present only when `metadataOnly` is true). */
   readonly frontmatterBytes?: number;
-  /** R6-31: returned frontmatter byte length after capping (present only when `metadataOnly` is true). */
+  /** Returned frontmatter byte length after capping (present only when `metadataOnly` is true). */
   readonly returnedFrontmatterBytes?: number;
   /**
-   * R6-31: human-readable summary of exactly what the metadata projection
+   * Human-readable summary of exactly what the metadata projection
    * omitted to guarantee this response fits the global byte budget, e.g.
    * "Metadata-only response (grounding probe): body omitted (maxBodyBytes=0);
    * frontmatter capped at maxBodyBytes=0; 2 of 4 properties not expanded
@@ -375,7 +375,7 @@ export const getComponentHandler = async (
       const split = { frontmatter: doc.frontmatter, body: doc.body.trimStart() };
       const maxBodyBytes = input.maxBodyBytes ?? DEFAULT_COMPONENT_BODY_MAX_BYTES;
       const boundedBody = truncateUtf8(split.body, maxBodyBytes);
-      // R6-31: this fallback already returns empty properties/referenceIds, so
+      // This fallback already returns empty properties/referenceIds, so
       // the only field that can blow the response budget in metadata-probe
       // mode is `frontmatter` — bound it the same way `body` already is.
       const isMetadataProbe =
@@ -445,7 +445,7 @@ export const getComponentHandler = async (
     // structured insufficient-knowledge signal, not a bare not-found. Null when
     // the id has no inbound edges (a genuinely-unknown id).
     const stub = await buildReferenceStub(ctx, id);
-    // P13-STAGED-demand-queue: an automation-critical phantom HIT is demand
+    // An automation-critical phantom HIT is demand
     // signal — a real question needed this component. Queue it so
     // `sfi refresh --drain-demand-queue` (or the watch daemon) pulls exactly
     // what was asked for. Best-effort: a queue write never breaks the answer.
@@ -544,7 +544,7 @@ export const getComponentHandler = async (
   // canonical component ids without needing to parse markdown prose, eliminating
   // false hallucination flags in synthesize_answer on referenced ids.
   //
-  // R1-539: a failed query here MUST propagate as `internal`, not collapse to
+  // A failed query here MUST propagate as `internal`, not collapse to
   // an empty list — `referenceIds: []` (and, on the metadata-probe path,
   // `referenceCount: 0`) is a grounding claim ("this component references
   // nothing"), not a blank. Every other graph failure in this handler
@@ -561,12 +561,12 @@ export const getComponentHandler = async (
     ...new Set(edgesResult.value.map((e) => e.toId)),
   ].sort();
 
-  // R6-31: `maxBodyBytes` 0 or small means the caller is probing existence /
+  // `maxBodyBytes` 0 or small means the caller is probing existence /
   // key metadata, not asking for the rendered document. Below this
   // threshold, build the response from a bounded metadata PROJECTION so a
   // huge node (a Profile with thousands of `fieldPermissions`) can never
-  // trip the global response-size guard on a probe call — see the R6-31
-  // header note for the full rationale.
+  // trip the global response-size guard on a probe call — see the header
+  // note for the full rationale.
   const isMetadataProbe =
     input.maxBodyBytes !== undefined &&
     input.maxBodyBytes <= METADATA_PROBE_MAX_BODY_BYTES;
@@ -765,7 +765,7 @@ const jsonBytes = (value: unknown): number =>
   Buffer.byteLength(JSON.stringify(value) ?? 'null', 'utf8');
 
 /**
- * R6-31: build a byte-budgeted PROJECTION of a node's `properties` for the
+ * Build a byte-budgeted PROJECTION of a node's `properties` for the
  * metadata-probe response shape. Entries are considered smallest-first, so
  * in practice the scalar fields (`active`, `description`, `userLicense`, …)
  * survive and whichever large arrays/objects don't fit the budget (a
@@ -812,7 +812,7 @@ const projectPropertiesForMetadata = (
 };
 
 /**
- * R6-31: build a byte-budgeted PREFIX of `referenceIds` for the
+ * Build a byte-budgeted PREFIX of `referenceIds` for the
  * metadata-probe response shape. `referenceIds` is already sorted for
  * determinism, so keeping a byte-budgeted prefix (rather than resorting by
  * size) keeps the truncation itself deterministic and cheap.
@@ -837,7 +837,7 @@ const projectReferenceIdsForMetadata = (
 };
 
 /**
- * R6-31: compose the honest, human-readable summary attached as
+ * Compose the honest, human-readable summary attached as
  * `data.disclosure` on every metadata-probe response — names exactly what
  * was omitted (body, frontmatter, which property keys, how many edges)
  * rather than leaving the caller to infer it from field absence.

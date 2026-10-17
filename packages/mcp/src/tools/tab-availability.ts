@@ -1,8 +1,8 @@
 /**
- * Handler for the `sfi.tab_availability` MCP tool (P11-UI-tab-availability).
+ * Handler for the `sfi.tab_availability` MCP tool.
  *
  * "What tabs can this profile / permission set see?" — reads the
- * `tabVisibilities` the extractor now emits (P11-UI-app-tab-visibility-extract)
+ * `tabVisibilities` the extractor now emits
  * and reports each tab's visibility enum (`DefaultOn` / `DefaultOff` /
  * `Hidden` on a profile; `Available` / `Visible` / `None` on a permission set),
  * with an `available` flag normalising "the user can reach this tab".
@@ -61,7 +61,7 @@ const tabAvailabilityInputBaseSchema = z.object({
   objectId: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
-  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // Continuation cursor: an OPAQUE token echoed back from a prior
   // truncated page's `nextCursor`. When present it supplies the resume offset;
   // omitting it = today's behavior (offset 0 / explicit `offset`).
   cursor: z.string().min(1).optional(),
@@ -133,7 +133,7 @@ export interface TabAvailabilityOutput {
   readonly hasMore: boolean;
   readonly truncated: boolean;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page was truncated
+   * Opaque continuation token, present ONLY when this page was truncated
    * (more tabs remain past `limit`). Echo it back as `cursor` to resume. Absent
    * on a whole-fits page so an in-budget response stays byte-identical.
    */
@@ -209,7 +209,7 @@ export const tabAvailabilityHandler = async (
   // and `tabVisibilities` (or a duplicated `<tabVisibilities>`) yields two rows
   // with the same `tab` but a different `visibility`. Appending `visibility`
   // (the only other discriminating field — `available` is derived from it)
-  // makes `(tab, visibility)` the row's full stable identity, so a CR-22
+  // makes `(tab, visibility)` the row's full stable identity, so a
   // resume cannot dup or skip on a page boundary.
   rows.sort((a, b) =>
     a.tab < b.tab
@@ -248,7 +248,7 @@ export const tabAvailabilityHandler = async (
   const total = scopedRows.length;
   const limit = input.limit ?? DEFAULT_LIMIT;
 
-  // CR-22: resolve the resume offset — an echoed cursor wins over an explicit
+  // Resolve the resume offset — an echoed cursor wins over an explicit
   // `offset`; a stale/forged cursor (changed componentId, different tool, or
   // refreshed vault) is rejected with `invalid-query`. The object scope is part
   // of the fingerprint so a scoped cursor cannot resume the unscoped list.
@@ -284,7 +284,7 @@ export const tabAvailabilityHandler = async (
   });
   const page = paged.items;
   const hasMore = paged.hasMore;
-  // Preserve the EXACT pre-CR-22 `truncated` expression (true on any non-first
+  // Preserve the EXACT pre-paging `truncated` expression (true on any non-first
   // page even when that page fully fits), independent of the new nextCursor.
   const truncated = hasMore || offset > 0;
   const emitCursor = paged.nextCursor !== null;

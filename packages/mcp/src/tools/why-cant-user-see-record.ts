@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.why_cant_user_see_record` MCP tool.
  *
- * The v1.1 headline tool — the buyer-facing answer to the #1 admin
+ * The headline tool — the buyer-facing answer to the #1 admin
  * call: "why can't this user VIEW / EDIT / DELETE / CREATE this record?". Walks
  * the Salesforce sharing cascade in the order the platform itself evaluates it
  * and returns a structured reasoning chain a caller can either render verbatim
@@ -41,9 +41,9 @@
  *      Edit (or Modify All) for edit; object Delete (or Modify All) for delete;
  *      plus the system perm that covers the level (`ViewAllData`/`ModifyAllData`
  *      for read, `ModifyAllData` only for edit/delete — View All Data is
- *      read-only). R7-W4: it SUBTRACTS group-scoped muting — a CRUD bit a
+ *      read-only). It SUBTRACTS group-scoped muting — a CRUD bit a
  *      PermissionSetGroup member grants but the group's muting permission set
- *      denies is NOT counted (composing the R6-06 shared kernel), so the gate no
+ *      denies is NOT counted (composing the shared kernel), so the gate no
  *      longer OVERSTATES access. When a profile or permission set was supplied and
  *      the precondition is NOT met, the handler returns `restricted` — the only
  *      precondition-driven `restricted`, and ONLY when every supplied container
@@ -55,7 +55,7 @@
  *      routinely unextracted, so those misses are disclosed on the
  *      PermissionSetGroup step and the verdict still resolves.) This kills H1
  *      (zero-perm user on a
- *      Public-Read OWD), CR-RV6 (Read-only user told they can EDIT a
+ *      Public-Read OWD) and (Read-only user told they can EDIT a
  *      ReadWriteTransfer OWD object / Edit-only user told they can DELETE a
  *      FullAccess OWD object), and now the muted-CRUD overstatement (a group's
  *      object Read muted away, so the record is not visible after all — the
@@ -96,7 +96,7 @@
  *
  *   3. **RoleHierarchy** — only when OWD is restricted and the user has
  *      a `roleId`. Walk `inheritsFrom` edges upward from the user's
- *      role. The v1.1 graph cannot tell which role owns records of this
+ *      role. The graph cannot tell which role owns records of this
  *      object (record-level data is out of scope), so this stage always
  *      returns `unknown` with the full role chain in `traversed`. The
  *      admin can then check ownership manually.
@@ -114,7 +114,7 @@
  *      (carrying `inheritance: subordinates | subordinatesInternal`) ALSO
  *      matches when the target role is an ANCESTOR of the user role — i.e.
  *      the user is a SUBORDINATE of the named role — resolved via the
- *      user's upward role-hierarchy chain (CR-CAP-05). One step per rule;
+ *      user's upward role-hierarchy chain. One step per rule;
  *      `visible` if a match, `restricted` if not. **Incomplete-tree
  *      honesty:** if a subordinate-aware rule did NOT match but the user's
  *      ancestor chain was cut short by a role node the refresh never
@@ -129,7 +129,7 @@
  *      so this stage always returns `unknown` with the rule's
  *      `booleanFilter` (or `criteriaItemCount`) surfaced in the reason.
  *
- *   6. **TerritoryAndGuestRules** (CR-CAP-16) — a real per-rule
+ *   6. **TerritoryAndGuestRules** — a real per-rule
  *      enumeration over the attached guest / territory / territoryGroup
  *      sharing rules (the extractor now models them). Each rule surfaces
  *      its declared detail — id, accessLevel, Experience-Cloud site name
@@ -142,7 +142,7 @@
  *
  *   7/8/9. **ManualSharing**, **SharingSets**, **AccountTeams** — always
  *      `unknown` with explanatory reasons; these require record-level data
- *      or org-config beyond v1.1's metadata model. They appear at the tail
+ *      or org-config beyond the metadata model. They appear at the tail
  *      so callers can show admins what was NOT modeled and recommend a
  *      manual check.
  *
@@ -161,18 +161,18 @@
  *     case the handler returned `restricted` before this aggregate ran.
  *
  * **Honesty axis**: this tool never fabricates. Stages whose verdict
- * the v1.1 metadata model cannot decide (criteria filters, manual
+ * the metadata model cannot decide (criteria filters, manual
  * sharing, sharing sets, account teams, role-based ownership) report
  * `unknown` with an explanation the caller can pass to the admin
  * verbatim. A `restricted` verdict from this tool means the cascade
  * exhausted every modeled grant path; an `unknown` verdict means the
- * answer depends on data outside v1.1's read-side scope.
+ * answer depends on data outside the read-side scope.
  *
  * Implementation notes:
  *   - `componentId` is the CustomObject being checked, NOT a User id.
- *     v1.1 has no User node extraction and no record-level data; the
+ *     This has no User node extraction and no record-level data; the
  *     tool's surface is the user's access bundle
- *     (`profileId`/`permissionSetIds`/`roleId`/`groupIds`). v1.7's
+ *     (`profileId`/`permissionSetIds`/`roleId`/`groupIds`). The
  *     Tooling API integration will add a shim that resolves a real
  *     Salesforce User ID to this bundle.
  *   - Synthetic group memberships: when any `userContext` field is
@@ -225,7 +225,7 @@ import { clampedNodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap
  * The set of OWD values that imply records are private and access
  * must be granted by a subsequent stage. `ControlledByParent` (and
  * `ControlledByCampaign`, the CampaignMember OWD) are grouped here
- * because the v1.1 model does not walk to the parent object / campaign
+ * because the model does not walk to the parent object / campaign
  * — the admin still needs to verify the parent's OWD manually.
  */
 const OWD_RESTRICTED: ReadonlySet<string> = new Set([
@@ -332,7 +332,7 @@ const grantSatisfiesObjectRead = (edge: Edge): boolean => {
 };
 
 /**
- * CR-RV6: does a `grantedBy` object-permission edge satisfy the object-CRUD
+ * Does a `grantedBy` object-permission edge satisfy the object-CRUD
  * PRECONDITION for the requested OPERATION? The object precondition is
  * operation-specific in Salesforce: to EDIT a record a user needs object Edit
  * CRUD, to DELETE needs object Delete CRUD; plain object Read satisfies only the
@@ -343,7 +343,7 @@ const grantSatisfiesObjectRead = (edge: Edge): boolean => {
  *   - read  => the broader `grantSatisfiesObjectRead` (Edit/Delete/Create all
  *     imply Read in Salesforce; View All also reads every record)
  *
- * CRITICAL (the false-permissive class CR-RV6 fixes): `viewAllRecords` (object
+ * CRITICAL (the false-permissive class fixes): `viewAllRecords` (object
  * "View All") is READ-ONLY — it must NOT satisfy the edit/delete precondition;
  * and plain `allowRead` must NOT satisfy edit/delete. Mirrors the system-perm
  * bypass encoded in `systemPermsForLevel` (ModifyAllData only for edit/delete).
@@ -506,11 +506,11 @@ export type WhyCantUserSeeRecordInput = z.infer<
 /**
  * One step in the access-reasoning cascade. The structure mirrors the
  * order Salesforce itself evaluates sharing and is the contract the
- * v1.1 `admin-sharing-troubleshooting` skill renders.
+ * `admin-sharing-troubleshooting` skill renders.
  *
  *   - `stage`: which step of the cascade this entry comes from.
  *   - `verdict`: `visible` if this stage grants access, `restricted`
- *     if it denies, `unknown` if the v1.1 model cannot decide.
+ *     if it denies, `unknown` if the model cannot decide.
  *   - `reason`: a plain-English explanation citing the metadata the
  *     verdict rests on. Never empty.
  *   - `traversed`: optional list of component ids the stage walked
@@ -536,7 +536,7 @@ export interface AccessReasoningStep {
   readonly reason: string;
   readonly traversed?: readonly string[];
   /**
-   * R7-W4: muting permission set id(s) that DENIED a would-be object-CRUD grant
+   * Muting permission set id(s) that DENIED a would-be object-CRUD grant
    * this stage relied on, within its owning PermissionSetGroup. Present ONLY on
    * the object-CRUD precondition stage(s) (PermissionGrant / SystemPermission)
    * when group-scoped muting flipped the grant off, so an auditor sees WHICH
@@ -555,7 +555,7 @@ export interface WhyCantUserSeeRecordOutput {
    */
   readonly hardDenyReason?: string;
   /**
-   * R7-W4: muting permission set id(s) that flipped the object-CRUD precondition
+   * Muting permission set id(s) that flipped the object-CRUD precondition
    * from a would-be grant to a deny within a PermissionSetGroup. Present ONLY
    * when group-scoped muting is the determinative reason the precondition failed
    * (read/edit/delete) — or the create gate was muted — so a caller can render
@@ -1030,7 +1030,7 @@ const levelRelevantObjectFlags = (level: AccessLevel): readonly MutingObjectFlag
 
 /**
  * The muting-aware, group-scoped result of the object-CRUD gate for one object +
- * operation. `granted` reflects muting SUBTRACTION (R7-W4); `wouldGrantRaw`
+ * operation. `granted` reflects muting SUBTRACTION; `wouldGrantRaw`
  * ignores muting, so a `wouldGrantRaw && !granted` pair is a muting-caused FLIP.
  */
 interface MutedObjectAccess {
@@ -1042,7 +1042,7 @@ interface MutedObjectAccess {
   readonly mutedBy: readonly string[];
   /** Muting set id(s) that removed ≥1 would-be group grant on this object (any level). */
   readonly mutingApplied: readonly string[];
-  /** Muting nodes present but carrying no muted-perm data (pre-R6-06) — cannot subtract. */
+  /** Muting nodes present but carrying no muted-perm data (legacy) — cannot subtract. */
   readonly presentWithoutData: readonly string[];
   /** Muting ids a group references but that are absent from the vault — cannot subtract. */
   readonly missingMutingIds: readonly string[];
@@ -1104,22 +1104,22 @@ const missingContainerReason = (
 
 /**
  * Plane A — the operation-aware OBJECT-CRUD PRECONDITION, now MUTING-AWARE
- * (R7-W4). To ACT on a record a user needs the object-level CRUD for THAT
+ * To ACT on a record a user needs the object-level CRUD for THAT
  * OPERATION, drawn from the profile UNION any assigned permission set (read
  * needs object Read — Edit/Delete/Create imply it; edit needs object Edit or
  * Modify All; delete needs object Delete or Modify All), OR the system perm that
  * covers the level (ViewAllData/ModifyAllData for read; ModifyAllData only for
- * edit/delete — View All Data is read-only). CR-RV6 made this per-operation.
+ * edit/delete — View All Data is read-only). The check is per-operation.
  *
- * R7-W4 — group-scoped muting SUBTRACTION. A PermissionSetGroup may reference a
+ * Group-scoped muting SUBTRACTION. A PermissionSetGroup may reference a
  * MutingPermissionSet whose perms are REMOVED from that group's member union
  * (muting is group-scoped — it never touches the profile or a permission set
- * assigned OUTSIDE the group). R6-06 made `effective_permissions` subtract these;
+ * assigned OUTSIDE the group). `effective_permissions` subtracts these;
  * this precondition previously did NOT, so a CRUD bit a group member granted but
  * the group's muting set denied was still counted — the yes/no verdict could
  * OVERSTATE access (say a user CAN see a record when muting removed the object
  * Read precondition). This helper composes the SAME shared kernel
- * (`expandPermissionSetGroup` + `loadMutingPermissions`) that R6-06 factored out:
+ * (`expandPermissionSetGroup` + `loadMutingPermissions`) that factored out:
  *   - the profile + directly-assigned permission sets are DIRECT containers
  *     (never muted);
  *   - each `PermissionSetGroup:` id (passed in `permissionSetIds`) is expanded
@@ -1130,9 +1130,9 @@ const missingContainerReason = (
  *
  * Only the MODELED permission classes a muting node carries (object CRUD flags,
  * ViewAllData/ModifyAllData system perms) are subtracted here; a muting node
- * refreshed before the R6-06 extractor (no muted-perm data) or referenced but
+ * refreshed before the extractor (no muted-perm data) or referenced but
  * absent CANNOT be subtracted — it is DISCLOSED (`presentWithoutData` /
- * `missingMutingIds`), never silently treated as "mutes nothing" (per R6-06's
+ * `missingMutingIds`), never silently treated as "mutes nothing" (per the
  * honesty). Record-type visibility is not mutable and is out of this gate.
  *
  * The SAME honesty applies to the containers themselves, but SPLIT by who named
@@ -1508,7 +1508,7 @@ const evaluateSystemPermissions = async (
  *     reaching a genuine top-of-hierarchy role. A missing node yields
  *     zero outgoing `inheritsFrom` edges, which is indistinguishable
  *     from a real top role by edge count alone — so we probe the node's
- *     existence. CR-CAP-05 uses this so a subordinate-aware sharing rule
+ *     existence. The subordinate match uses this so a subordinate-aware sharing rule
  *     that did NOT match on a SHORT chain downgrades to `unknown` rather
  *     than asserting a confident (possibly false) `restricted`.
  */
@@ -1525,7 +1525,7 @@ interface RoleHierarchyWalk {
  * visited-set defends against malformed graphs with cycles.
  *
  * Surfaces `truncated` (see {@link RoleHierarchyWalk}) so callers that
- * need a complete ancestor chain (CR-CAP-05's subordinate match) can
+ * need a complete ancestor chain (the subordinate match) can
  * tell a genuinely-empty walk from one cut short by a missing role node.
  */
 const walkRoleHierarchy = async (
@@ -1569,7 +1569,7 @@ const walkRoleHierarchy = async (
 };
 
 /**
- * Evaluate the RoleHierarchy stage. The v1.1 graph models who is
+ * Evaluate the RoleHierarchy stage. The graph models who is
  * above the user in the role tree (`inheritsFrom`) but cannot tell
  * which role *owns* records of a given object — that requires
  * record-level data. So the verdict is always `unknown`: we surface
@@ -1604,7 +1604,7 @@ const evaluateRoleHierarchy = async (
  * three synthetic groups in the variant table are not auto-included — callers
  * wanting them must pass them in `groupIds` explicitly.
  *
- * CR-CAP-12: this is only the LITERAL membership. `evaluateOwnerSharingRules`
+ * This is only the LITERAL membership. `evaluateOwnerSharingRules`
  * then expands it UPWARD through `hasMember` (so a user typed into a nested
  * group matches a rule granting the enclosing public group); the expansion is
  * NOT folded in here so the literal/expanded split stays auditable.
@@ -1688,7 +1688,7 @@ type OwnerRuleMatch =
    * A subordinate-aware (`roleAndSubordinates`) rule did NOT match on the
    * user's KNOWN ancestor chain, but that chain was TRUNCATED by a missing
    * role node — so the rule MIGHT reach the user via an ancestor the vault
-   * never retrieved. CR-CAP-05: the caller downgrades this to `unknown`
+   * never retrieved. The caller downgrades this to `unknown`
    * (never a confident false-deny). `targetId` is the inheritance-gated
    * role we could neither confirm nor rule out as an ancestor.
    */
@@ -1703,7 +1703,7 @@ type OwnerRuleMatch =
  * receives access — we only check the `sharedTo` edge
  * (`direction === 'to'` or undefined for criteria rules).
  *
- * Matching rule per `sharedTo` edge (CR-CAP-05):
+ * Matching rule per `sharedTo` edge:
  *   - Plain role / group / synthetic / portalRole (NO `inheritance`
  *     prop): EXACT — `membership.has(edge.toId)`. portalRole carries
  *     only `portal: true`, so it stays the named role only.
@@ -1737,7 +1737,7 @@ const ownerRuleMatches = (
   for (const edge of sharedWithEdges) {
     if (edge.properties['direction'] === 'from') continue;
     // Exact membership match always wins (covers the named role itself,
-    // groups [incl. CR-CAP-12 enclosing groups folded into `membership`],
+    // groups [incl. enclosing groups folded into `membership`],
     // synthetic groups, and the plain-role / portalRole cases).
     if (membership.has(edge.toId)) {
       return ok({ kind: 'match', targetId: edge.toId });
@@ -1759,7 +1759,7 @@ const ownerRuleMatches = (
         indeterminate = { targetId: edge.toId };
       }
     } else if (
-      // CR-CAP-12: a Group: target that the EXPANDED membership did not reach,
+      // A Group: target that the EXPANDED membership did not reach,
       // while the upward `hasMember` walk was truncated (a missing enclosing /
       // nested group node), cannot be confidently ruled out — the rule MIGHT
       // reach the user via an unretrieved group. Downgrade to indeterminate
@@ -1785,7 +1785,7 @@ const ownerRuleMatches = (
  *     exact membership, OR (for a `roleAndSubordinates` /
  *     `…Internal` Role target) because the target is an ANCESTOR of the
  *     user role, i.e. the user is a subordinate — AND the rule's access
- *     level satisfies the requested operation (CR-CAP-05).
+ *     level satisfies the requested operation.
  *   - `unknown` when a subordinate-aware rule did NOT match but the
  *     user's ancestor chain was TRUNCATED by a missing role node, so the
  *     rule MIGHT reach the user via an unretrieved ancestor (honesty: no
@@ -1816,7 +1816,7 @@ const evaluateOwnerSharingRules = async (
     ]);
   }
   const literalMembership = buildUserMembership(userContext);
-  // CR-CAP-12: expand the user's literal Group: ids UPWARD through `hasMember`
+  // Expand the user's literal Group: ids UPWARD through `hasMember`
   // so a sharing rule granting an ENCLOSING public group matches a user typed
   // into only a nested member group (the literal set would miss it). Monotone
   // fixpoint; a truncated walk (missing enclosing-group node) downgrades an
@@ -1828,7 +1828,7 @@ const evaluateOwnerSharingRules = async (
     ...expanded.value.groupIds,
   ]);
   const groupMembershipTruncated = expanded.value.truncated;
-  // CR-CAP-05: the ancestor chain only feeds the inheritance-gated path.
+  // The ancestor chain only feeds the inheritance-gated path.
   // Compute it once; an absent roleId means no ancestors (and no truncation).
   let userAncestorRoleIds: ReadonlySet<string> = new Set<string>();
   let userAncestorChainTruncated = false;
@@ -1886,9 +1886,9 @@ const evaluateOwnerSharingRules = async (
         ),
       );
     } else if (match.kind === 'indeterminate') {
-      // Honesty: either the role tree is truncated above the user (CR-CAP-05)
+      // Honesty: either the role tree is truncated above the user
       // OR the group-membership walk hit a missing nested/enclosing group
-      // (CR-CAP-12), so we can neither confirm nor deny the match — never a
+      // so we can neither confirm nor deny the match — never a
       // confident false-deny.
       const reason = match.targetId.startsWith(GROUP_PREFIX)
         ? `owner sharing rule ${rule.id} shares to group ${match.targetId}, but the group-membership graph is incomplete (a nested/enclosing group node was not retrieved), so membership cannot be resolved — run /sfi-refresh or see coverage_report, then re-check`
@@ -1911,7 +1911,7 @@ const evaluateOwnerSharingRules = async (
  * Evaluate the CriteriaSharingRule stage. Emits one step per
  * criteria-typed rule attached to the target object. Always
  * `unknown` because criteria are over record-level field values and
- * v1.1 has no record-level data. The reason cites the rule's
+ * this has no record-level data. The reason cites the rule's
  * `booleanFilter` (or `criteriaItemCount` if no boolean filter is
  * set) so the admin can see what predicate would have to hold.
  */
@@ -1970,7 +1970,7 @@ const evaluateCriteriaSharingRules = (
   return steps;
 };
 
-/** The guest / territory rule families CR-CAP-16 now surfaces in this stage. */
+/** The guest / territory rule families now surfaces in this stage. */
 const TERRITORY_GUEST_RULE_TYPES: ReadonlySet<string> = new Set([
   'guest',
   'territory',
@@ -1978,7 +1978,7 @@ const TERRITORY_GUEST_RULE_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * CR-CAP-16: evaluate the TerritoryAndGuestRules stage. Mirrors
+ * Evaluate the TerritoryAndGuestRules stage. Mirrors
  * `evaluateCriteriaSharingRules` — one step per attached guest / territory /
  * territoryGroup rule. The verdict is ALWAYS `unknown`: a rule's EXISTENCE,
  * `accessLevel`, site / territory name, and predicate are declared in the
@@ -2181,7 +2181,7 @@ const evaluateScopingRules = async (
 };
 
 /**
- * CR-CAP-04: PermissionSetGroup is now MODELED. Any PSG passed in the user's
+ * PermissionSetGroup is now MODELED. Any PSG passed in the user's
  * `permissionSetIds` has already been EXPANDED into its member permission sets
  * by `coerceUserContext`, and those members flow through the real grant cascade
  * (object-CRUD precondition + PermissionGrant + SystemPermission) — so the
@@ -2189,11 +2189,11 @@ const evaluateScopingRules = async (
  * many assigned PSGs were expanded into how many member permission sets, and
  * carries a muting caveat where a group references a muting set.
  *
- * R7-W4: muting IS now subtracted from the object-CRUD PRECONDITION (plane A) —
+ * Muting IS now subtracted from the object-CRUD PRECONDITION (plane A) —
  * `computeMutedObjectAccess` removes a group's muted CRUD bits before deciding
  * whether the user holds object Read/Edit/Delete/Create on this object. So the
  * caveat here reports what muting DID (via the passed `netAccess`): which sets
- * removed a would-be object grant, which could NOT be applied (pre-R6-06 / absent
+ * removed a would-be object grant, which could NOT be applied (legacy / absent
  * → possible OVERSTATEMENT), and that muting is still NOT subtracted from the
  * record-visibility BYPASS stages (object/system View/Modify All) — for the full
  * muting-correct net grant use `sfi.effective_permissions`.
@@ -2283,7 +2283,7 @@ const evaluatePermissionSetGroups = async (
       ),
     );
   }
-  // CR-CAP-16 posture: a stage that was NOT EVALUATED must not wear a denial
+  // Posture: a stage that was NOT EVALUATED must not wear a denial
   // word. Groups DO exist here and any of them could grant access; nothing was
   // checked, because the caller supplied no group. `restricted` reads as "the
   // groups were examined and grant nothing", which is a different — and false —
@@ -2299,13 +2299,13 @@ const evaluatePermissionSetGroups = async (
 };
 
 /**
- * The trailing trio: stages whose verdict the v1.1 model cannot
+ * The trailing trio: stages whose verdict the model cannot
  * decide under any circumstance. The reasons cite the data v1.x
  * would need to model (record-level shares, sharing-set config,
  * account-team membership). Frozen because the steps never vary
  * across invocations — every call appends the same three entries.
  *
- * CR-CAP-16: `TerritoryAndGuestRules` is NO LONGER in this frozen tail — it is
+ * `TerritoryAndGuestRules` is NO LONGER in this frozen tail — it is
  * now a real per-rule evaluator (`evaluateTerritoryAndGuestRules`) that surfaces
  * each attached guest / territory rule's declared detail while keeping the
  * verdict `unknown`. The tail keeps only the genuinely-unmodeled stages.
@@ -2387,7 +2387,7 @@ const aggregateVerdict = (
 /** Canonical-id prefixes for the four userContext id families. */
 const PROFILE_PREFIX = 'Profile:';
 const PERMISSION_SET_PREFIX = 'PermissionSet:';
-/** CR-CAP-04: a PSG id that may be passed in `permissionSetIds`; expanded to members. */
+/** A PSG id that may be passed in `permissionSetIds`; expanded to members. */
 const PERMISSION_SET_GROUP_PREFIX = 'PermissionSetGroup:';
 const ROLE_PREFIX = 'Role:';
 const GROUP_PREFIX = 'Group:';
@@ -2431,7 +2431,7 @@ const coerceGroupId = async (ctx: Context, raw: string): Promise<string> => {
  * context equals the verdict for the equivalent prefixed-id context — the
  * property the unit tests pin.
  *
- * **CR-CAP-04 PSG expansion is also verdict-preserving.** A `PermissionSetGroup:`
+ * **PSG expansion is also verdict-preserving.** A `PermissionSetGroup:`
  * id in `permissionSetIds` is expanded into the member permission sets it
  * DENOTES and those are ADDED to the context (the PSG id is also kept so the
  * PermissionSetGroup reasoning step can report it; it never matches a grant
@@ -2456,7 +2456,7 @@ const coerceUserContext = async (
     const coerced = uc.permissionSetIds.map((p) =>
       coercePrefix(p, [PERMISSION_SET_PREFIX]),
     );
-    // CR-CAP-04: fold every PSG passed here into its member permission sets so
+    // Fold every PSG passed here into its member permission sets so
     // the REAL grant cascade (object-Read precondition, PermissionGrant,
     // SystemPermission, ModifyAll-for-create) decides PSG-derived access. A PSG
     // is detected by its `PermissionSetGroup:` prefix; a member that is a
@@ -2662,7 +2662,7 @@ const evaluateRecordTypeForCreate = async (
  * visible record type. The record-type gate is ANDed onto the permission gate,
  * so a Create grant with no visible record type is `restricted`, not `visible`.
  *
- * R7-W4: the object-Create permission gate is now MUTING-AWARE. `netAccess`
+ * The object-Create permission gate is now MUTING-AWARE. `netAccess`
  * (computed with `level: 'create'` from the RAW context so the PSG boundary
  * survives) subtracts a group's muting set from its members' Create grant. When
  * a group member WOULD grant object Create but the owning group's muting set
@@ -2689,7 +2689,7 @@ const evaluateCreateAccess = async (
 > => {
   const reasoning: AccessReasoningStep[] = [];
 
-  // R7-W4: did group-scoped muting flip a would-be object-Create grant off?
+  // Did group-scoped muting flip a would-be object-Create grant off?
   const muted =
     netAccess !== null &&
     netAccess.wouldGrantRaw &&
@@ -2917,7 +2917,7 @@ export const whyCantUserSeeRecordHandler = async (
   // types, a visible record type. Short-circuit the whole sharing cascade.
   if (level === 'create') {
     const userContext = await coerceUserContext(ctx, rawUserContext);
-    // R7-W4: muting-aware object-Create gate, computed from the RAW context so
+    // Muting-aware object-Create gate, computed from the RAW context so
     // the PermissionSetGroup boundary survives (only when a profile / permission
     // set was supplied — a role/group-only context cannot decide object perms).
     const createProfileOrPermSet =
@@ -3028,7 +3028,7 @@ export const whyCantUserSeeRecordHandler = async (
   // operation-level CRUD => NOT visible, full stop, regardless of OWD.
   //   - kills H1: a zero-permission user is no longer told they can see any
   //     Public-Read object; AND
-  //   - kills CR-RV6: a Read-only user is no longer told they can EDIT every
+  //   - a Read-only user is no longer told they can EDIT every
   //     record on a ReadWriteTransfer OWD object (the OWD `visible` step can no
   //     longer win for an operation the user lacks the CRUD for), and an
   //     Edit-but-not-Delete user is no longer told they can DELETE on a
@@ -3057,11 +3057,11 @@ export const whyCantUserSeeRecordHandler = async (
   // the deny an unreadable container used to produce. NOT reached by a PSG
   // MEMBER miss, which is disclosure-only (`missingGroupMemberIds`).
   let objectCrudUnknownReason: string | null = null;
-  // R7-W4: muting set(s) that flipped the precondition from a would-be grant to
+  // Muting set(s) that flipped the precondition from a would-be grant to
   // a deny within a PermissionSetGroup. Surfaced on the PermissionGrant hard-deny
   // step + the output so an auditor sees WHICH muting set removed access.
   let mutedByForDeny: readonly string[] = [];
-  // R7-W4: the muting-aware object-CRUD gate result, computed from the RAW
+  // The muting-aware object-CRUD gate result, computed from the RAW
   // userContext so the PermissionSetGroup boundary muting is scoped to survives.
   // Threaded into the PermissionSetGroup step so its caveat can report what
   // muting did (and disclose any muting it could not apply).
@@ -3086,7 +3086,7 @@ export const whyCantUserSeeRecordHandler = async (
       // RV11: name the CRUD bit actually required for THIS operation, not Read.
       const levelLabel = objectLevelLabel(level);
       if (netAccess.wouldGrantRaw && netAccess.mutedBy.length > 0) {
-        // R7-W4: the user's group member(s) WOULD grant object ${level}, but the
+        // The user's group member(s) WOULD grant object ${level}, but the
         // owning PermissionSetGroup's muting set removed it — so the precondition
         // fails. Muting is group-scoped: a grant from the profile or a permission
         // set assigned OUTSIDE the group would have survived.
@@ -3134,7 +3134,7 @@ export const whyCantUserSeeRecordHandler = async (
   }
   // When the object-CRUD precondition hard-denied, surface that exact reason on
   // the PermissionGrant stage (the RV11 wording) instead of the generic
-  // "no read-or-better grant" reason, so the chain explains the hard deny. R7-W4:
+  // "no read-or-better grant" reason, so the chain explains the hard deny.
   // when muting caused the deny, attach `mutedBy` so the step names the set.
   // When the precondition was UNDECIDABLE (an absent SUPPLIED container), the
   // honest `unknown` step REPLACES the grant step — whose `restricted` reason
@@ -3231,14 +3231,14 @@ export const whyCantUserSeeRecordHandler = async (
   }
   reasoning.push(...scopingStepsResult.value);
 
-  // Stage 6 (CR-CAP-16): TerritoryAndGuestRules — a real per-rule evaluator over
+  // Stage 6: TerritoryAndGuestRules — a real per-rule evaluator over
   // the already-loaded sharing rules. Each attached guest / territory rule
   // surfaces its declared detail with an `unknown` verdict; absence preserves
   // the not-modeled disclosure (never `restricted`).
   reasoning.push(...evaluateTerritoryAndGuestRules(rulesResult.value, level));
 
   // Stages 7-9: ManualSharing, SharingSets, AccountTeams. Always `unknown` with
-  // explanatory reasons. These document what v1.1 could not check so the admin
+  // explanatory reasons. These document what could not check so the admin
   // knows where to look manually.
   reasoning.push(...UNKNOWN_TAIL);
 
@@ -3260,12 +3260,12 @@ export const whyCantUserSeeRecordHandler = async (
       : objectCrudUnknownReason !== null
         ? 'unknown'
         : aggregateVerdict(reasoning);
-  // R7-W4: expose the muting set(s) that flipped the precondition (top-level, so
+  // Expose the muting set(s) that flipped the precondition (top-level, so
   // a caller need not walk the reasoning chain). Present only on a muted deny.
   const mutedByField =
     mutedByForDeny.length > 0 ? { mutedBy: mutedByForDeny } : {};
-  // R7-W4: when the verdict is NOT a hard deny but a group's muting could not be
-  // applied (pre-R6-06 / absent), object access may be OVERSTATED — disclose it
+  // When the verdict is NOT a hard deny but a group's muting could not be
+  // applied (legacy / absent), object access may be OVERSTATED — disclose it
   // even though the PermissionSetGroup step already carries the detail.
   const mutingCouldNotApply =
     netAccess !== null &&

@@ -1,5 +1,5 @@
 /**
- * Handler for the `sfi.synthesize_answer` MCP tool — the v0.2 "answer layer".
+ * Handler for the `sfi.synthesize_answer` MCP tool — the "answer layer".
  *
  * The other 130+ tools return structured JSON; turning that into a user-facing
  * answer is the caller's job, and an LLM doing it free-hand can fabricate
@@ -9,7 +9,7 @@
  * the headline FACTS into bullets, and — when given a `draft` narrative —
  * flags any canonical id in the draft that is NOT in the source
  * (`hallucinatedIds`). An input reduced by the global response byte budget
- * (a `responseBudget` truncation block, P13-GUARD-global-size) is carried as
+ * (a `responseBudget` truncation block) is carried as
  * an explicit caveat with the dropped/trimmed counts: a synthesis over
  * truncated data must never read absence as evidence.
  *
@@ -223,7 +223,7 @@ const NO_REMEDIATION_CAVEAT =
   'claim(s) yet, so none is surfaced here. Do NOT invent a fix — if one is ' +
   'needed, author it on the concept rule so it ships cited and confidence-tiered.';
 
-// P12-UX-synth-next-action — keys whose string values populate the grounded
+// Keys whose string values populate the grounded
 // Finding → Evidence → Cause → Fix → Risk → Next-action template. Each field is
 // lifted VERBATIM from the source tool output (never invented), so the
 // evidence skeleton stays as grounded as the citations.
@@ -334,7 +334,7 @@ export interface SynthesizeAnswerOutput {
    */
   readonly ungroundedAbsenceClaims?: readonly string[];
   /**
-   * P13-ANNOT-tools laundering check: lifecycle claims ("X is deprecated")
+   * Laundering check: lifecycle claims ("X is deprecated")
    * the draft makes WITHOUT a backing annotation in the source. Present only
    * when a draft was supplied and at least one claim is ungrounded.
    */
@@ -378,7 +378,7 @@ const MAX_HINTS = 8;
 
 /**
  * The grounded Finding → Evidence → Cause → Fix → Risk → Next-action skeleton
- * (P12-UX-synth-next-action). Every field is lifted from the source tool output
+ * Every field is lifted from the source tool output
  * — `null` when the source carried nothing for it (never fabricated).
  * `orphanComponentIds` lists any canonical id mentioned inside a cause/fix/next
  * string that is NOT independently cited (an ungrounded reference to flag).
@@ -536,7 +536,7 @@ const collect = (value: unknown, key: string | null, out: Collected): void => {
       }
     }
     if (key === 'responseBudget') {
-      // P13-GUARD-synth-caveat: a tool response reduced by the global byte
+      // A tool response reduced by the global byte
       // budget must surface as an explicit caveat in the synthesis — absence
       // of a row in truncated input is NOT evidence of absence. One composed
       // caveat (with the counts) replaces the block's generic note; the
@@ -1239,7 +1239,7 @@ export const synthesizeAnswerHandler = async (
     groundedIds = draftIds.filter((id) => out.ids.has(id)).sort();
     hallucinatedIds = draftIds.filter((id) => !out.ids.has(id)).sort();
 
-    // P13-ANNOT-tools LAUNDERING CHECK: lifecycle claims like "X is
+    // LAUNDERING CHECK: lifecycle claims like "X is
     // deprecated" are CURATED knowledge — they ground ONLY in an actual
     // annotation entry in the source, never in vibes. A draft asserting
     // deprecation for an id whose source carries no matching annotation is
@@ -1309,7 +1309,7 @@ export const synthesizeAnswerHandler = async (
       : '') +
     '.';
 
-  // Grounded evidence skeleton (P12-UX-synth-next-action). Each field is the
+  // Grounded evidence skeleton. Each field is the
   // first matching value lifted from the source; nextAction falls back to the
   // recommended fix (also from the source) — nothing is invented.
   const firstOrNull = (arr: readonly string[]): string | null => (arr.length > 0 ? (arr[0] ?? null) : null);

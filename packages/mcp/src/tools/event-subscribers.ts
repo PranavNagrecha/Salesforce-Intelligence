@@ -1,10 +1,10 @@
 /**
  * Handler for the `sfi.event_subscribers` MCP tool.
  *
- * The v1.5 architect-tier companion to `sfi.integration_map`: given a
+ * The architect-tier companion to `sfi.integration_map`: given a
  * Platform Event id (`CustomObject:{ApiName}__e`), return every
  * subscriber (ApexTrigger, ApexClass, Flow) that listens for the
- * event. The v1.5 R3 extractors emit the `listensTo` edge from each
+ * event. The extractors emit the `listensTo` edge from each
  * subscriber into the event node; this tool walks the incoming
  * `listensTo` edges for the supplied event id and resolves each
  * `fromId` to a typed subscriber record.
@@ -16,7 +16,7 @@
  * class, the Flow's `<triggerType>PlatformEvent</triggerType>` mode,
  * the Apex class's `Triggerable<{Event}__e>` interface match).
  *
- * CR-CAP-18: single-event mode also returns `channels` — the
+ * Single-event mode also returns `channels` — the
  * publish-side routing for the event. The tool walks the event's
  * INBOUND `references` edges tagged
  * `referenceKind === 'platformEventChannelMember'` to each
@@ -45,10 +45,10 @@
  *     reports `referencedNotRetrievedEventCount` / `…Events` (and a
  *     matching boundary) when the org names `__e` ids the vault lacks —
  *     otherwise a partial inventory reads as the complete one.
- *   - Subscribers are restricted to the three node types the v1.5 R3
+ *   - Subscribers are restricted to the three node types the
  *     extractors emit `listensTo` from: ApexTrigger, ApexClass, Flow.
  *     Other node types (e.g., a hypothetical future Process Builder
- *     subscriber) are filtered out — the v1.5 contract pins the
+ *     subscriber) are filtered out — the contract pins the
  *     subscriber surface to these three.
  *   - The output's `source` is the EDGE's `source` field (the
  *     extractor name: `'apex-trigger-extractor'`,
@@ -64,7 +64,7 @@
  *     `__e`-suffixed CustomObject is rejected at the handler boundary
  *     with `error.kind: 'invalid-query'`. This is sharper than
  *     letting an obvious typo (`CustomField:Account.Industry__c`)
- *     silently return an empty subscriber list — the v1.5 contract
+ *     silently return an empty subscriber list — the contract
  *     pins the input axis explicitly to Platform Events.
  */
 
@@ -116,7 +116,7 @@ const EVENT_SUBSCRIBERS_MAX_LIMIT = 500;
 const EVENT_SUBSCRIBERS_DEFAULT_LIMIT = 50;
 
 /**
- * The Platform Event id prefix. v1.5 R3 extractors emit `listensTo`
+ * The Platform Event id prefix. Extractors emit `listensTo`
  * edges into `CustomObject:{ApiName}__e` targets; the canonical id
  * form starts with this prefix and ends with the `__e` suffix on the
  * ApiName side.
@@ -125,16 +125,16 @@ const EVENT_ID_PREFIX = 'CustomObject:';
 
 /**
  * The Platform Event API name suffix. Salesforce Platform Events are
- * Standard Objects ending in `__e`; the v1.5 contract pins event ids
+ * Standard Objects ending in `__e`; the contract pins event ids
  * to this suffix.
  */
 const EVENT_API_NAME_SUFFIX = '__e';
 
 /**
  * The set of node types that count as valid Platform Event
- * subscribers. The v1.5 R3 extractors emit `listensTo` only from
+ * subscribers. The extractors emit `listensTo` only from
  * these three node types; other subscriber surfaces are out of scope
- * for v1.5 and would be discarded by this filter.
+ * and would be discarded by this filter.
  */
 const SUBSCRIBER_NODE_TYPES: ReadonlySet<ComponentType> = new Set([
   'ApexTrigger',
@@ -186,7 +186,7 @@ export const eventSubscribersInputSchema = z.object({
   // single-event subscriber list were both cut with `.slice(0, limit)` and the
   // payload said nothing, so 50 of 60 events shipped as a finished inventory
   // and the tail was unreachable by ANY argument. `offset` pages the SAME
-  // ordered list; `cursor` is the opaque CR-22 continuation minted on a
+  // ordered list; `cursor` is the opaque continuation minted on a
   // truncated page (it wins over `offset` when both are supplied) and is bound
   // to the tool + vault hash + the mode/event it was minted for, so a catalog
   // cursor cannot be replayed against a single-event call.
@@ -254,7 +254,7 @@ export interface EventPublisher {
 }
 
 /**
- * CR-CAP-18: one publish-side channel binding for an event. Surfaced by walking
+ * One publish-side channel binding for an event. Surfaced by walking
  * the event's INBOUND `references` edges tagged
  * `referenceKind === 'platformEventChannelMember'` (the member→event edge) to
  * the member, then the member's INBOUND `parentOf` to its PlatformEventChannel.
@@ -309,7 +309,7 @@ export interface EventSubscribersOutput {
    */
   readonly publishers?: readonly EventPublisher[];
   /**
-   * CR-CAP-18: the publish-side channel(s) that route this event, each with the
+   * The publish-side channel(s) that route this event, each with the
    * declared per-member filter. Present only in single-event mode (eventId
    * supplied). Empty when no PlatformEventChannelMember binds the event.
    */
@@ -351,7 +351,7 @@ export interface EventSubscribersOutput {
   /** The `offset` that resumes this list, or `null` when it is exhausted. */
   readonly nextOffset: number | null;
   /**
-   * Opaque CR-22 continuation token, emitted ONLY on a truncated page (over
+   * Opaque continuation token, emitted ONLY on a truncated page (over
    * `limit` or over the byte budget). Bound to this tool, this vault hash and
    * this mode/event, so replaying it against a different query is refused with
    * `invalid-query` rather than silently answering about another list.
@@ -365,7 +365,7 @@ export interface EventSubscribersOutput {
 
 const EVENT_SUB_HEURISTIC_DISCLOSURE =
   'Subscribers are detected from modeled `listensTo` edges (Apex `Triggerable<X__e>` / Flow PlatformEvent triggers / `EventBus.subscribe` to a Platform Event `__e` with a static channel). `EventBus.subscribe` to a Change Event is parsed by the scanner but not yet minted as an edge; dynamically-built channel args and managed-package listeners remain invisible.';
-// CR-CAP-18: publish-side channel routing + declared per-member filters ARE now
+// Publish-side channel routing + declared per-member filters ARE now
 // extracted from `*.platformEventChannel(Member)-meta.xml` (declared XML text,
 // NOT runtime filter evaluation). Surfaced in `channels`.
 const EVENT_SUB_CHANNEL_DISCLOSURE =
@@ -388,7 +388,7 @@ const EVENT_SUB_EMPTY_DISCLOSURE =
 const EVENT_SUB_PUBLISHER_DISCLOSURE =
   'Publishers are detected from modeled `writesTo` edges. Coverage is ASYMMETRIC: a Flow `<recordCreates>` on the event IS modeled and appears here; Apex `EventBus.publish(...)` is NOT — no scanner in this codebase detects it, so an Apex publisher never appears (the renderer would surface such an edge if a future scanner minted one). Dynamically-built publishes and managed-package publishers are also NOT modeled. An empty publishers list means "no modeled Flow publisher", never "nothing publishes this event".';
 /**
- * CR-10: Publisher-vs-subscriber disambiguation disclosure. A Flow that
+ * Publisher-vs-subscriber disambiguation disclosure. A Flow that
  * writes TO a platform event (recordCreates → `writesTo` edge) is a PUBLISHER,
  * not a subscriber. Only components with a `listensTo` edge SUBSCRIBE to the
  * event and receive it when published. A published-but-unsubscribed event means
@@ -488,7 +488,7 @@ const resolveRequestedEventId = (
  * Build an `EventSubscriber` from a resolved node + its incoming `listensTo`
  * edge. Returns `null` when the node is missing (sparse-graph case) or its type
  * is outside the subscriber set; the caller drops those rather than erroring,
- * matching the v0.3 / v1.1 sharp-focus tool conventions.
+ * matching the sharp-focus tool conventions.
  */
 const buildSubscriber = (
   node: Node | undefined,
@@ -593,7 +593,7 @@ const resolvePublishers = async (
 };
 
 /**
- * CR-CAP-18: resolve the publish-side channel bindings for an event. Walks the
+ * Resolve the publish-side channel bindings for an event. Walks the
  * event's INBOUND `references` edges tagged
  * `referenceKind === 'platformEventChannelMember'` (member→event), resolves
  * each member's INBOUND `parentOf` to its PlatformEventChannel, and reads the
@@ -950,7 +950,7 @@ export const eventSubscribersHandler = async (
     detailOffset = decoded.value.o;
   }
 
-  // CR-CAP-18: resolve the publish-side channel routing for this event.
+  // Resolve the publish-side channel routing for this event.
   const channelsResult = await resolveChannelBindings(ctx, requestedEventId);
   if (!channelsResult.ok) {
     return err({

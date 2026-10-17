@@ -1,13 +1,13 @@
 /**
- * P13-AST-spike — parser-grade Apex parsing, measured before it is wired.
+ * parser-grade Apex parsing, measured before it is wired.
  *
  * Wraps `@apexdevtools/apex-parser` (the ANTLR grammar maintained by the
  * apex-dev-tools project; pure JS via the antlr4 runtime, esbuild-bundleable)
  * behind one function. NOTHING in the product imports this module yet — the
  * spike exists to measure parse coverage + timing on real-org code and the
- * bundle-size delta BEFORE any graph change (P13-AST-edges wires it behind
- * `refresh --apex-ast` later; the regex scanner stayed the default all of
- * Phase 13).
+ * bundle-size delta BEFORE any graph change (the edge extractor wires it behind
+ * `refresh --apex-ast` later; the regex scanner stayed the default
+ * meanwhile).
  *
  * Failure posture mirrors the future production posture: a parse error never
  * throws — it reports `ok: false` so the caller can fall back to the scanner

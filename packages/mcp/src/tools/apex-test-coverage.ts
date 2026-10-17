@@ -72,7 +72,7 @@ export const apexTestCoverageInputSchema = z.object({
   classId: z.string().min(1).optional(),
   apexClassId: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
-  // CR-22: page cursor for walking the full untested-class list (org-wide mode
+  // Page cursor for walking the full untested-class list (org-wide mode
   // only) when truncated. Single-class mode never paginates.
   offset: z.number().int().min(0).optional(),
   cursor: z.string().min(1).optional(),
@@ -135,7 +135,7 @@ export interface ApexTestCoverageOutput {
   /**
    * Page size applied to the org-wide `untestedClasses` list. Present ONLY on a
    * PAGED response (`truncated` or a resumed `offset > 0`); omitted on a
-   * whole-fits no-cursor call so that response stays byte-identical to pre-CR-22.
+   * whole-fits no-cursor call so that response stays byte-identical to the pre-paging shape.
    */
   readonly limit?: number;
   /** Zero-based offset of the first returned untested class. Present only when paged (see `limit`). */
@@ -143,9 +143,9 @@ export interface ApexTestCoverageOutput {
   /** Offset to pass on the next call to fetch the following page. Present only when truncated. */
   readonly nextOffset?: number;
   /**
-   * CR-22 opaque continuation token, present ONLY when the org-wide page is
+   * Opaque continuation token, present ONLY when the org-wide page is
    * truncated. Echo it back as `cursor` to resume. Absent on a complete page so
-   * an in-budget response is byte-identical to pre-CR-22.
+   * an in-budget response is byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated org-wide page. */
@@ -310,7 +310,7 @@ export const apexTestCoverageHandler = async (
     a < b ? -1 : a > b ? 1 : 0,
   );
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // Resolve the resume offset (echoed cursor wins over explicit offset).
   // Org-wide mode has NO narrowing arg (classApiName/apexClass select single-
   // class mode), so the fingerprint is a constant — the cursor stays bound to
   // tool + vaultHash. Mint a cursor ONLY in org-wide mode.

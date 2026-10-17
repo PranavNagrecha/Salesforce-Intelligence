@@ -28,13 +28,13 @@ import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js'
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 500;
 
-/** Tool name — used to bind/verify a CR-22 continuation cursor to this query. */
+/** Tool name — used to bind/verify a continuation cursor to this query. */
 const TOOL_NAME = 'sfi.org_history';
 
 export const orgHistoryInputSchema = z.object({
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
-  /** CR-22 continuation cursor from a prior truncated response. Overrides `offset` when present. */
+  /** Continuation cursor from a prior truncated response. Overrides `offset` when present. */
   cursor: z.string().optional(),
 });
 
@@ -92,7 +92,7 @@ export const orgHistoryHandler = async (
   // fingerprint is constant — it still binds a cursor to this tool + vault.
   const fingerprint = argsFingerprint({});
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // Resolve the resume offset (echoed cursor wins over explicit offset).
   let offset = input.offset ?? 0;
   if (input.cursor !== undefined) {
     const decoded = decodeCursor(input.cursor, {
@@ -104,7 +104,7 @@ export const orgHistoryHandler = async (
     offset = decoded.value.o;
   }
 
-  // Most-recent-first ordering, then a typed CR-22 page over it.
+  // Most-recent-first ordering, then a typed page over it.
   const mostRecentFirst = [...history.chronological].reverse();
   const paged = paginateLegacy(mostRecentFirst, {
     offset,

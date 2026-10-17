@@ -28,7 +28,7 @@ describe('prepublishOnly hook', () => {
   });
 });
 
-describe('version-consistency check (R8-VERSION-RECONCILE)', () => {
+describe('version-consistency check', () => {
   it('script exists and documents SoT + exemption flag', () => {
     const script = join(repoRoot, 'scripts/check-version-consistency.mjs');
     const text = readFileSync(script, 'utf8');

@@ -188,7 +188,7 @@ export interface HealthCheckOutput {
     readonly enableHint: string | null;
   };
   /**
-   * P15-PHANTOM-manifest-summary (VAULT-PHANTOM-MANIFEST-SUMMARY) — echo of the
+   * (VAULT-PHANTOM-MANIFEST-SUMMARY) — echo of the
    * refresh-time roll-up of dangling-edge targets by phantom taxonomy bucket
    * (`automation-critical`, `grant-only`, …), written into the manifest by
    * `sfi refresh` (ADR-004 — COUNTS ONLY, never materialized as stub nodes).
@@ -655,7 +655,7 @@ export const healthCheckHandler = async (
   const describeGap = standardFieldDescribeDisclosure(ctx.manifest);
   if (describeGap !== null) issues.push(describeGap);
 
-  // P13-STAGED-tiers: a staged refresh is mid-build. Degraded with explicit
+  // A staged refresh is mid-build. Degraded with explicit
   // tier progress, so consumers qualify every answer until the final tier
   // clears the marker.
   const staged = ctx.manifest.staged;

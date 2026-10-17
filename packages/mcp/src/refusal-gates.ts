@@ -1,5 +1,5 @@
 /**
- * Refusal-shape gates for `sfi.route_question` (router-v2 Phase 2).
+ * Refusal-shape gates for `sfi.route_question`.
  *
  * Score-INDEPENDENT mood/action detectors that run on the RAW question BEFORE
  * intent classification, in both router modes — honesty is mode-independent.
@@ -473,7 +473,7 @@ const PROVENANCE_DISCLOSURE =
 // tools are deliberately absent: inactive/stale users (live_inactive_users),
 // report usage (live_report_usage), recent activity (live_recent_activity),
 // automation fired (live_automation_fired), org limits (live_org_limits).
-// R7-W6: who-changed-a-Setup-setting (FLS/sharing/OWD/session/password-policy/
+// Who-changed-a-Setup-setting (FLS/sharing/OWD/session/password-policy/
 // MFA) and bare "setup audit trail" are ALSO now absent (live_setup_audit_trail).
 /**
  * A PASTED debug log is not runtime telemetry the product cannot see. Since
@@ -644,7 +644,7 @@ const RUNTIME_TRIGGERS: readonly (readonly [RegExp, string, RegExp?])[] = [
   ],
   // R3 §5b AUDIT-TRAIL-PLANE arms: Setup Audit Trail asks — who changed a
   // SETTING (FLS, sharing, OWD, session/password policy) and when — used to
-  // gate here as a genuine gap. R7-W6: sfi.live_setup_audit_trail (R6-27) now
+  // gate here as a genuine gap. sfi.live_setup_audit_trail now
   // reads the SetupAuditTrail roster directly (profile/permission-set edits,
   // field-level-security flips, org-wide-default changes, session/password-
   // policy changes — "every other tracked configuration change" per its own

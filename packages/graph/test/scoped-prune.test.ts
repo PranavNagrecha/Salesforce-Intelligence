@@ -20,7 +20,7 @@ import { IMPORT_BATCH_SIZE, importExtractionResults } from '../src/import.js';
 import { initSchema } from '../src/schema.js';
 import type { GraphStore } from '../src/store.js';
 
-// Part 2 of CR-20: the scoped/pruned WITH-PULL incremental path. A scoped
+// Part 2 of the write batching: the scoped/pruned WITH-PULL incremental path. A scoped
 // `sfi refresh --types Flow` reconciles ONLY type Flow but the graph holds
 // other types (ApexClass, ...). The OLD path routed this through applyChangeSet
 // whose whole-graph self-check (global count == reconciled-only desiredNodeCount)
@@ -126,7 +126,7 @@ const scopedReconcile = async (
   if (!pruned.ok) throw new Error(`pruneStaleNodes failed: ${pruned.error.message}`);
 };
 
-describe('scoped prune — multi-type graph (CR-20 data-safety headline)', () => {
+describe('scoped prune — multi-type graph (data-safety headline)', () => {
   it('prunes stale X, keeps fresh X, and type Y SURVIVES', async () => {
     const store = await makeStore();
     // Graph: type Y (ApexClass:Y1, Y2) + type X (Flow:Xold).
@@ -240,7 +240,7 @@ describe('scoped prune — multi-type graph (CR-20 data-safety headline)', () =>
 // NOT re-run (e.g. QuickAction:N -> Flow:Y, source quick-action-extractor) is
 // absent from `desiredEdges` (its extractor produced no results), touches Flow,
 // and was DELETED even though BOTH endpoints survive — silent permanent loss of
-// an inbound dependency edge. CR-20 `pruneStaleNodes` removed the self-check
+// an inbound dependency edge. `pruneStaleNodes` removed the self-check
 // that used to roll this back, so the loss now commits.
 //
 // The HYBRID criterion: with `pruneNodeTypes` set, delete an absent-from-desired

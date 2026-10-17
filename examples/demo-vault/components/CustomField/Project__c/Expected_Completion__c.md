@@ -68,8 +68,20 @@ type: CustomField
 | --- | --- | --- |
 | `CustomObject:Project__c` | declared | custom-field-extractor |
 
+### readsFrom (incoming, 1)
+
+| Source | Confidence | Producer |
+| --- | --- | --- |
+| `Flow:Project_Site_Survey` | declared | flow-extractor |
+
 ### usedInLayout (incoming, 1)
 
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `Layout:Project__c.Residential Layout` | declared | layout-extractor |
+
+### writesTo (incoming, 1)
+
+| Source | Confidence | Producer |
+| --- | --- | --- |
+| `Flow:Project_Site_Survey` | declared | flow-extractor |

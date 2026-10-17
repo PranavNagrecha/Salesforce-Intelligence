@@ -13,6 +13,7 @@ import { scanFrontendSource, scanLwcHtml } from '@sf-intelligence/parsers';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 import { buildResourceRefEdges, mergeAndSortEdges } from './apex-edges.js';
+import { bundleId } from './bundle-id.js';
 import { buildMarkupFieldBindingEdges } from './frontend-markup-field-edges.js';
 import { deriveBundleApiName } from './path-utils.js';
 
@@ -427,7 +428,7 @@ const buildScannerEdges = (
   }
   // CustomLabel / StaticResource imports → references edges. `declared`:
   // an `import ... from '@salesforce/label/c.X'` statement is as declarative
-  // as the apex imports above (P14-USAGE-label-static-graph).
+  // as the apex imports above.
   raw.push(...buildResourceRefEdges(ownerId, result.value.resourceRefs, EDGE_SOURCE, 'declared'));
 
   let unresolvedFieldBindings: readonly string[] = [];
@@ -464,7 +465,7 @@ const buildScannerEdges = (
  *
  * Reads the bundle's `{Name}.js-meta.xml` (required), `{Name}.js`
  * (required), and `{Name}.html` (optional). The JS source is passed to
- * the v1.4 LWC frontend scanner (`scanFrontendSource(..., 'lwc')` on the
+ * the LWC frontend scanner (`scanFrontendSource(..., 'lwc')` on the
  * `.js` file, {@link scanLwcHtml} on the optional `.html` for
  * `lightning-input-field`, `lightning-output-field`, and
  * `lightning-record-*-form` bindings). Scanner errors surface as
@@ -543,7 +544,7 @@ export const extractLightningComponentBundle = async (
   if (!htmlResult.ok) return htmlResult;
   const htmlSource = htmlResult.value;
 
-  const ownerId = `${ROOT_ELEMENT}:${apiName}`;
+  const ownerId = bundleId(ROOT_ELEMENT, apiName);
   // Objects the bundle declares via `<targetConfig><objects>` are known-real
   // SObjects — pass them so a `js-member` body access against one of them
   // survives the phantom filter (LWC-JS-RECEIVER-FIELD-PHANTOMS).

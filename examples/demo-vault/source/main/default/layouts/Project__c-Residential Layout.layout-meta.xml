@@ -70,6 +70,11 @@
         </layoutColumns>
         <style>TwoColumnsTopToBottom</style>
     </layoutSections>
+    <relatedLists>
+        <fields>Install_Date__c</fields>
+        <fields>Panels_Installed__c</fields>
+        <relatedList>Installation__c.Project__c</relatedList>
+    </relatedLists>
     <showEmailCheckbox>false</showEmailCheckbox>
     <showHighlightsPanel>true</showHighlightsPanel>
     <showInteractionLogPanel>false</showInteractionLogPanel>

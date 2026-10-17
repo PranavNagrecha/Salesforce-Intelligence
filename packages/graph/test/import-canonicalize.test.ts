@@ -155,7 +155,7 @@ describe('canonicalizeApexCallEdgeTargets — GRF-01', () => {
 });
 
 /**
- * R6-03 — CustomField edge-target case canonicalization. Apex and SOQL are
+ * CustomField edge-target case canonicalization. Apex and SOQL are
  * case-insensitive languages, so `[select id from account where
  * custom_flag__c = true]` yields parsed edges targeting
  * `CustomField:account.custom_flag__c` — a dangling id the exact-match edge
@@ -164,7 +164,7 @@ describe('canonicalizeApexCallEdgeTargets — GRF-01', () => {
  * tier 1, `find_dead_code`) would then read the field as unreferenced — a
  * false "safe" on a destructive verdict.
  */
-describe('canonicalizeFieldEdgeTargets — R6-03', () => {
+describe('canonicalizeFieldEdgeTargets', () => {
   it('rewrites a case-variant SOQL-derived readsFrom target to the vaulted field id', () => {
     const nodes = [makeField('Account', 'Custom_Flag__c'), makeClass('Q')];
     const edges: Edge[] = [fieldEdge('CustomField:account.custom_flag__c')];
@@ -484,14 +484,14 @@ describe('mintPolymorphicActivityFieldEdges — D2 (describe-snapshot siblings)'
 });
 
 /**
- * R7-W3 — CustomObject edge-target case canonicalization. Mirrors R6-03 on
+ * CustomObject edge-target case canonicalization. Mirrors the field-side fix on
  * the object side: `[select id from account]` yields a heuristic `readsFrom`
  * edge targeting `CustomObject:account` — a dangling id the exact-match edge
  * walk can never attach to the vaulted `CustomObject:Account` node. Impact/
  * usage/deadness consumers that walk edges (not just declared parentOf) would
  * then miss the reference — a false-negative on impact analysis.
  */
-describe('canonicalizeObjectEdgeTargets — R7-W3', () => {
+describe('canonicalizeObjectEdgeTargets', () => {
   it('rewrites a lowercase SOQL-derived readsFrom target to the vaulted object id', () => {
     const nodes = [makeObject('Account'), makeClass('Q')];
     const edges: Edge[] = [fieldEdge('CustomObject:account')];
@@ -576,7 +576,7 @@ describe('canonicalizeObjectEdgeTargets — R7-W3', () => {
  * source-text casing — a dangling id the exact-match edge walk can never
  * attach to the vaulted `CustomLabel:Foo` node. `find_dead_code`/
  * `unused_components` would then read the label as unreferenced — a false
- * "dead" verdict, the same failure class R6-03/R7-W3 were built to stop.
+ * "dead" verdict, the same failure class the canonicalizers were built to stop.
  */
 describe('canonicalizeLabelEdgeTargets — C-2 (finding 25)', () => {
   it('rewrites a lowercase $Label-derived references target to the vaulted label id', () => {
@@ -659,7 +659,7 @@ describe('canonicalizeResourceEdgeTargets — C-2 (finding 25)', () => {
 });
 
 /**
- * R7-W3 regression — the two canonicalizers operate on disjoint id prefixes
+ * Regression — the two canonicalizers operate on disjoint id prefixes
  * and must not interfere when run in the same pipeline order as
  * `importExtractionResults`/`computeChangeSet` (field pass, then object
  * pass).

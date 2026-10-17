@@ -7,19 +7,36 @@ lastModifiedBy: null
 lastModifiedDate: null
 parentId: null
 properties:
-  conditions: []
+  actionCalls: []
+  conditions:
+    - conditionContextId: ConditionalContext:Flow:Installation_On_Complete.condition-0
+      expression: Status__c EqualTo Completed
+      fieldRefs:
+        - CustomField:Installation__c.Status__c
+      kind: flow-recordtrigger
   description: "When an Installation is Completed, log an Inspection Service Visit and mark the parent Project Complete."
   elementsWithoutFault: 2
+  entryRequiresRecordChange: null
   faultableElementCount: 2
   flowExtractionWarnings: []
+  formulaComparisons: []
+  formulaValueRefs: []
+  hasImmediateConnector: true
   hasUnhandledFaults: true
   interviewLabel: "Installation On Complete {!$Flow.CurrentDateTime}"
   label: Installation On Complete
   processType: AutoLaunchedFlow
   recordTriggerType: CreateAndUpdate
+  runAsyncAfterCommit: false
   runInMode: null
+  scheduleFrequency: null
+  scheduleStartDate: null
+  scheduleStartTime: null
+  scheduledPathCount: 0
+  scheduledPathTypes: []
   status: Active
   triggerObject: Installation__c
+  triggerOrder: null
   triggerType: RecordAfterSave
 sourcePath: source/main/default/flows/Installation_On_Complete.flow-meta.xml
 type: Flow
@@ -44,20 +61,40 @@ When an Installation is Completed, log an Inspection Service Visit and mark the 
 
 | Key | Value |
 | --- | --- |
-| conditions | `` |
+| actionCalls | `` |
+| conditions | `[object Object]` |
 | elementsWithoutFault | `2` |
+| entryRequiresRecordChange | `null` |
 | faultableElementCount | `2` |
 | flowExtractionWarnings | `` |
+| formulaComparisons | `` |
+| formulaValueRefs | `` |
+| hasImmediateConnector | `true` |
 | hasUnhandledFaults | `true` |
 | interviewLabel | `Installation On Complete {!$Flow.CurrentDateTime}` |
+| runAsyncAfterCommit | `false` |
 | runInMode | `null` |
+| scheduleFrequency | `null` |
+| scheduleStartDate | `null` |
+| scheduleStartTime | `null` |
+| scheduledPathCount | `0` |
+| scheduledPathTypes | `` |
+| triggerOrder | `null` |
 
 ## Incident edges
 
-### readsFrom (outgoing, 1)
+### firesWhen (outgoing, 1)
 
 | Target | Confidence | Producer |
 | --- | --- | --- |
+| `ConditionalContext:Flow:Installation_On_Complete.condition-0` | declared | condition-extractor |
+
+### readsFrom (outgoing, 3)
+
+| Target | Confidence | Producer |
+| --- | --- | --- |
+| `CustomField:Installation__c.Id` | declared | flow-extractor |
+| `CustomField:Project__c.Id` | parsed | flow-extractor |
 | `CustomObject:Project__c` | parsed | flow-extractor |
 
 ### triggersOn (outgoing, 1)

@@ -372,7 +372,7 @@ describe('whatIfSplitProfileHandler', () => {
   });
 });
 
-describe('whatIfSplitProfileHandler — CR-22 continuation cursor', () => {
+describe('whatIfSplitProfileHandler — continuation cursor', () => {
   const TARGETS = [CSR_BASE_PS, CSR_EMAIL_PS, CSR_ACCOUNT_PS];
 
   it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {

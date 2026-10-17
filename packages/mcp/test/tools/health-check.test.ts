@@ -187,7 +187,7 @@ describe('healthCheckHandler: vaultHistory enabled (VAULT-GIT-ADOPTION)', () => 
   });
 });
 
-describe('healthCheckHandler: CR-P3-3 confirmed-empty vs unconfirmed-empty coverage', () => {
+describe('healthCheckHandler: confirmed-empty vs unconfirmed-empty coverage', () => {
   let vaultRoot: string;
   let store: GraphStore;
   let realHash: string;
@@ -354,7 +354,7 @@ describe('healthCheckHandler: CR-P3-3 confirmed-empty vs unconfirmed-empty cover
   });
 });
 
-describe('healthCheckHandler: staged build in progress (P13-STAGED-tiers)', () => {
+describe('healthCheckHandler: staged build in progress', () => {
   let vaultRoot: string;
   let store: GraphStore;
   let ctx: Context;

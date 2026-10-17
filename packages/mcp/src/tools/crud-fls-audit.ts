@@ -1,9 +1,9 @@
 /**
  * Handler for the `sfi.crud_fls_audit` MCP tool.
  *
- * The v2.1 CRUD / FLS enforcement audit — Apex classes that perform
+ * The CRUD / FLS enforcement audit — Apex classes that perform
  * DML or SOQL without the relevant security check. Composes over the
- * `properties.qualityIssues[]` array the v2.1 `code-quality-patterns`
+ * `properties.qualityIssues[]` array the `code-quality-patterns`
  * recognizer family populates for ApexClass / ApexTrigger nodes,
  * narrows to the two CRUD/FLS rules, groups by class, and emits the
  * verbatim false-positive disclosure the two recognizers carry (see
@@ -23,7 +23,7 @@
  *     the modern read-FLS pattern, equivalent to `WITH SECURITY_ENFORCED`).
  *
  * Both rules are skipped for test classes (`properties.isTest:
- * true`) — the v2.1 recognizer's own honesty boundary.
+ * true`) — the recognizer's own honesty boundary.
  *
  * **Honesty axis — the verbatim false-positive disclosure.** The CRUD/FLS
  * recognizer has a HIGH false-positive rate because:
@@ -40,7 +40,7 @@
  *     before pattern passes; the embedded SQL is invisible to the
  *     FLS recognizer.
  *
- * The tool surfaces the Q80 disclosure VERBATIM in `boundaries[]`
+ * The tool surfaces the disclosure VERBATIM in `boundaries[]`
  * when the response carries at least one finding. The skill must
  * surface it.
  *
@@ -152,7 +152,7 @@ export const crudFlsAuditInputSchema = z.object({
     .max(CRUD_FLS_MAX_LIMIT)
     .optional(),
   offset: z.number().int().min(0).optional(),
-  // CR-22 continuation cursor: opaque token from a prior truncated page's
+  // Continuation cursor: opaque token from a prior truncated page's
   // nextCursor; supplies the resume offset. Omit for today's behavior.
   cursor: z.string().min(1).optional(),
 });
@@ -259,7 +259,7 @@ export interface CrudFlsAuditOutput {
    * not "clean". A fully-scanned vault omits it and its response is unchanged.
    */
   readonly qualityScanCoverage?: readonly QualityScanTypeCoverage[];
-  /** Verbatim Q80 + dataflow + dynamic-SOQL disclosures. */
+  /** Verbatim + dataflow + dynamic-SOQL disclosures. */
   readonly boundaries: readonly string[];
   /** Page size applied to this response (echoes the request; default 100). */
   readonly limit: number;
@@ -273,10 +273,10 @@ export interface CrudFlsAuditOutput {
    */
   readonly nextOffset?: number;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * Opaque continuation token, present ONLY when this page is truncated
    * (more classes remain — over `limit` OR byte-trimmed). Echo it back as
    * `cursor` to resume. Absent on a complete page so an in-budget response is
-   * byte-identical to the pre-CR-22 shape.
+   * byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
@@ -324,7 +324,7 @@ const trimEntryFindings = (
 
 /**
  * NOTE: the per-page class byte-trim is now done by the shared `paginate()`
- * pager (CR-22). `trimEntryFindings` is still used directly as the pager's
+ * pager. `trimEntryFindings` is still used directly as the pager's
  * `slimItem` forward-progress hook so a single oversized class has its nested
  * `findings` trimmed (and `findingsTruncated` flagged) — behaviorally identical
  * to the previous open-coded `fitClassesToBudget`.
@@ -369,10 +369,10 @@ const compareClassById = (
   a.componentId < b.componentId ? -1 : a.componentId > b.componentId ? 1 : 0;
 
 /**
- * The `sfi.crud_fls_audit` MCP tool. Composes over the v2.1
+ * The `sfi.crud_fls_audit` MCP tool. Composes over the
  * `qualityIssues` property mirror for ApexClass / ApexTrigger nodes
  * and narrows to the two CRUD/FLS rules. See the module JSDoc for
- * the Q80 verbatim false-positive disclosure surfaced in
+ * the verbatim false-positive disclosure surfaced in
  * `boundaries[]`.
  *
  * @example
@@ -398,7 +398,7 @@ export const crudFlsAuditHandler = async (
   let suppressedFindingCount = 0;
 
   // Class-scope: fetch just the one node; org-wide: scan EVERY ApexClass /
-  // ApexTrigger (CR-22 B3 — page the SQL OFFSET forward window-by-window at the
+  // ApexTrigger (page the SQL OFFSET forward window-by-window at the
   // clamped cap so unchecked-CRUD/FLS classes on node 501+ are reachable). The
   // output `classes` is then the COMPLETE matched list, paged by the output
   // cursor below.
@@ -471,7 +471,7 @@ export const crudFlsAuditHandler = async (
 
   const classes = [...perClass.values()].sort(compareClassById);
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // Resolve the resume offset (echoed cursor wins over explicit offset).
   // Bind the fingerprint to the class scope so a cursor minted for a scoped call
   // cannot resume against the (differently-shaped) org-wide list, and vice versa.
   const fingerprint = argsFingerprint(

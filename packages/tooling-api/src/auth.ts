@@ -1,8 +1,8 @@
 /**
- * Auth delegation for the v1.7 Tooling API client.
+ * Auth delegation for the Tooling API client.
  *
  * Per `docs/vendor/salesforce-metadata/ToolingApi.md` §"Authentication —
- * delegation to the `sf` CLI", v1.7 does NOT re-implement Salesforce
+ * delegation to the `sf` CLI", the client does NOT re-implement Salesforce
  * OAuth. The plugin spawns `sf org display --target-org X --json` and
  * parses the JSON payload for `accessToken`, `instanceUrl`, and
  * `apiVersion`. The `sf` CLI owns OS-keychain integration, token refresh,
@@ -89,8 +89,8 @@ export type ExecCommand = (
 ) => Promise<{ readonly stdout: string; readonly stderr: string }>;
 
 /**
- * Production adapter for the `sf org display` auth shellout (RV3 / CR-01
- * follow-up / H8): the shared cross-platform {@link execHelper} from
+ * Production adapter for the `sf org display` auth shellout (hardening
+ * follow-up): the shared cross-platform {@link execHelper} from
  * `@sf-intelligence/core`.
  *
  * `sf org display` can wedge on an interactive auth re-prompt waiting on stdin;

@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.generate_data_dictionary` MCP tool.
  *
- * The v2.5 documentation-generation tier first tool. Given a
+ * The documentation-generation tier first tool. Given a
  * CustomObject canonical id (`CustomObject:{ApiName}`), emits a
  * structured markdown document covering the object's fields,
  * relationships, validation rules, page layouts, and the triggers /
@@ -14,7 +14,7 @@
  * relationships (lookups, master-details). No new ComponentTypes, no
  * new EdgeTypes; just composition.
  *
- * Output shape (the v2.5 `GeneratedDocument` interface; declared in
+ * Output shape (the `GeneratedDocument` interface; declared in
  * this module and re-exported from sibling generators):
  *   - `frontmatter`: { title, generatedAt, sourceTreeHash, componentIds }.
  *   - `body`: structured markdown — H1 (object label) → H2 Overview
@@ -25,11 +25,11 @@
  *   - `boundaries`: verbatim honesty disclosures appended to the
  *     document footer.
  *
- * Honesty axis (per the v2.5 spec): the document is structure, not
+ * Honesty axis: the document is structure, not
  * narrative. Section confidence is inherited from the source edges.
  * The frontmatter timestamp + source-tree hash let downstream
  * consumers detect staleness; the Boundaries section always carries
- * the Q125 freshness disclosure verbatim.
+ * the freshness disclosure verbatim.
  */
 
 import type {
@@ -56,7 +56,7 @@ import { buildEnumerationCoverageCaveatFor } from './coverage-trust.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 
 /**
- * The v2.5 shared output type. Defined here as the first generator
+ * The shared output type. Defined here as the first generator
  * lands; sibling generator modules import the type from this module
  * to keep the contract anchored in one location.
  */
@@ -73,7 +73,7 @@ export interface GeneratedDocument {
 }
 
 /**
- * Verbatim freshness disclosure required by the v2.5 spec (Q125
+ * Verbatim freshness disclosure required by the spec (the freshness
  * honesty anchor). Appears in every generated document's `boundaries`
  * footer and in the Boundaries H2 of the rendered body.
  */
@@ -97,7 +97,7 @@ export const INHERITED_CONFIDENCE_DISCLOSURE =
   'Section confidence is inherited from the source edges; spot-check heuristic entries before treating as authoritative.';
 
 /**
- * R6-19 mermaid `erDiagram` scope disclosure — shared by `generate_data_dictionary`
+ * Mermaid `erDiagram` scope disclosure — shared by `generate_data_dictionary`
  * (per-object) and `generate_architecture_overview` (top-N objects by
  * relationship degree). ALWAYS present, not only when a cap is hit, so a
  * reader never mistakes the diagram for a complete data model.
@@ -134,7 +134,7 @@ const DATA_DICTIONARY_ENUMERATED_FAMILIES: readonly string[] = [
  *     (which takes a bare name). A wrong-type prefix (e.g. `ApexClass:Foo`)
  *     surfaces as `invalid-query`; unknown objects surface as
  *     `component-not-found`.
- *   - `format` (R6-21): optional, `'markdown'` (default) or `'csv'`.
+ *   - `format`: optional, `'markdown'` (default) or `'csv'`.
  *     `'markdown'` returns just the structured `document`. `'csv'` ALSO
  *     returns `csv` — one row per field (label, api name, type, description,
  *     required) — meant to be written to a `.csv` file for a spreadsheet.
@@ -206,7 +206,7 @@ const renderFieldRow = (field: Node): string => {
 const compareByApiName = (a: Node, b: Node): number =>
   a.apiName < b.apiName ? -1 : a.apiName > b.apiName ? 1 : 0;
 
-/** CSV header for the R6-21 `format: 'csv'` Fields export. Column order matches the Fields markdown table. */
+/** CSV header for the `format: 'csv'` Fields export. Column order matches the Fields markdown table. */
 const FIELDS_CSV_HEADER: readonly string[] = [
   'objectApiName',
   'label',
@@ -295,7 +295,7 @@ const renderRelationshipsSection = (fields: readonly Node[]): string => {
 };
 
 /**
- * R6-19: this object's OWN Lookup/Master-Detail fields, expressed as
+ * This object's OWN Lookup/Master-Detail fields, expressed as
  * {@link ErdRelationship} rows (`childObjectApiName` = this object;
  * `parentObjectApiName` = the field's `referenceTo`). Reuses the same
  * dataType/referenceTo extraction {@link renderRelationshipsSection} uses,
@@ -343,7 +343,7 @@ const parseCustomFieldId = (id: string): { readonly object: string; readonly fie
 };
 
 /**
- * R6-19: Entity-Relationship Diagram section — the object's OWN outgoing
+ * Entity-Relationship Diagram section — the object's OWN outgoing
  * Lookup/Master-Detail relationships PLUS every OTHER object's inbound
  * `lookupTo` reference to it, rendered as a mermaid `erDiagram` fence via
  * `@sf-intelligence/renderers`. Both directions are "direct" relationships
@@ -435,7 +435,7 @@ const renderTriggersAndFlowsSection = (
 
 /**
  * Render the closing Boundaries + How To Regenerate footer. The
- * disclosures are emitted verbatim per the v2.5 honesty contract.
+ * disclosures are emitted verbatim per the honesty contract.
  *
  * INVARIANT (load-bearing for `fitDocumentToBudget`): this block is
  * ALWAYS the final element of a generator's `body` array, and it ALWAYS
@@ -472,7 +472,7 @@ export const renderFooter = (
  * guard trips on the FULL serialized envelope, so this reserve is exactly that
  * difference: `envelope_bytes - JSON.stringify(document)_bytes`.
  *
- * MEASURED, not guessed (the CR-08 regression came from over-reserving 8 KB,
+ * MEASURED, not guessed (the regression came from over-reserving 8 KB,
  * which truncated docs that fit fine): the real wrapper overhead around a
  * GeneratedDocument is ~197 B for the plain `{ data: { document }, vaultState,
  * estimatedPayloadBytes }` shell, ~273 B with compliance's `targetMissing[]`,
@@ -887,7 +887,7 @@ export const generateDataDictionaryHandler = async (
     else if (edge.fromId.startsWith('Flow:')) flowIds.push(edge.fromId);
   }
 
-  // R6-19: Entity Relationship Diagram. Outgoing = this object's OWN
+  // Entity Relationship Diagram. Outgoing = this object's OWN
   // Lookup/Master-Detail fields (already computed for the Relationships
   // table above). Inbound = every OTHER object's `lookupTo` edge pointing
   // AT this object — the object's incoming `lookupTo` edges, sourced from
@@ -1018,7 +1018,7 @@ export const generateDataDictionaryHandler = async (
     return ok({ data: { document }, vaultState });
   }
 
-  // R6-21 csv path. Unlike `generate_architecture_overview`'s `html` (which is
+  // The csv path. Unlike `generate_architecture_overview`'s `html` (which is
   // rendered FROM `document.body` and so scales with it), the csv is built
   // from the independent `fields` list — shrinking `document` does not shrink
   // `csv`, so it gets its own budget carved out of what `document` left
@@ -1034,7 +1034,7 @@ export const generateDataDictionaryHandler = async (
     .sort(compareByApiName)
     .map((f) => csvRowForField(object.apiName, f));
 
-  // CR-08/CR-P3-4-style measured fit: `fitCsvRowsToBudget` bounds the RAW csv
+  // Measured fit: `fitCsvRowsToBudget` bounds the RAW csv
   // text, but the assembled envelope re-serializes it through JSON.stringify
   // (which escapes every `\n` to `\\n`, inflating past the raw byte count).
   // Measure the ACTUAL envelope and shrink the csv budget until it fits —

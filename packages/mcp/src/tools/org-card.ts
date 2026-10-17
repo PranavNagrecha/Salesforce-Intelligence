@@ -1,6 +1,6 @@
 /**
  * Handler for the `sfi.org_card` MCP tool — serve the refresh-time org card
- * (P13-CARD-tool): the ≤16 KB orientation snapshot an AI consumer loads
+ * the ≤16 KB orientation snapshot an AI consumer loads
  * BEFORE its first question.
  *
  * READ-ONLY CACHE READ: the card is rendered once per refresh

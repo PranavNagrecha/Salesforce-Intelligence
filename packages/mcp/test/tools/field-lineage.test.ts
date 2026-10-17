@@ -56,14 +56,14 @@ const makeEdge = (
   ...overrides,
 });
 
-// Upstream chain per PLAN-v3.0 §7 Q162:
+// Upstream chain:
 //
 //   Account.Customer_Segment__c  (target)
 //     <- LeadConverter.cls writes it
 //        <- LeadConverter reads Lead.Lead_Score__c
 //           <- LeadScoreCalculator.cls writes Lead.Lead_Score__c
 //              <- LeadScoreCalculator reads Lead.LastModifiedDate
-//                 (Lead.LastModifiedDate is v2.9 source-of-truth — terminal)
+//                 (Lead.LastModifiedDate is source-of-truth — terminal)
 //
 // We model this by writesTo chains: a writer A whose writer chain
 // includes a CustomField B at depth 2 must produce a `writesTo` edge
@@ -88,7 +88,7 @@ const upstreamSeed: ExtractionResult = {
       id: 'CustomField:Lead.LastModifiedDate',
       type: 'CustomField',
       apiName: 'LastModifiedDate',
-      // The v2.9 source-of-truth marker terminates the upstream walk.
+      // The source-of-truth marker terminates the upstream walk.
       properties: { isSourceOfTruth: true },
     }),
     makeNode({
@@ -151,7 +151,7 @@ const upstreamSeed: ExtractionResult = {
   ],
 };
 
-// Downstream chain per PLAN-v3.0 §7 Q163:
+// Downstream chain:
 //
 //   Lead.Lead_Score__c  (target)
 //     -> ApexClass:LeadConverter.shouldConvert() — if-clause (firesWhen)
@@ -260,7 +260,7 @@ afterAll(async () => {
   rmSync(downstreamDir, { recursive: true, force: true });
 });
 
-describe('fieldLineageHandler upstream (Q162)', () => {
+describe('fieldLineageHandler upstream', () => {
   it('walks upstream writers and terminates at source-of-truth fields', async () => {
     const result = await fieldLineageHandler(upstreamCtx, {
       fieldId: TARGET,
@@ -356,7 +356,7 @@ describe('fieldLineageHandler upstream (Q162)', () => {
   });
 });
 
-describe('fieldLineageHandler downstream (Q163)', () => {
+describe('fieldLineageHandler downstream', () => {
   it('walks downstream effects across kinds with firesWhen literals', async () => {
     const result = await fieldLineageHandler(downstreamCtx, {
       fieldId: downstreamTarget,
@@ -407,7 +407,7 @@ describe('fieldLineageHandler downstream (Q163)', () => {
 });
 
 describe('fieldLineageHandler honesty axis', () => {
-  it('surfaces the verbatim Q165 disclosure on every response', async () => {
+  it('surfaces the verbatim disclosure on every response', async () => {
     const result = await fieldLineageHandler(upstreamCtx, {
       fieldId: TARGET,
       direction: 'upstream',
@@ -417,7 +417,7 @@ describe('fieldLineageHandler honesty axis', () => {
     expect(result.value.data.boundaries).toContain(
       FIELD_360_Q165_DISCLOSURE,
     );
-    // CR-CAP-03: the default upstream fixture has no Report/Dashboard coverage
+    // The default upstream fixture has no Report/Dashboard coverage
     // (status 'unknown' -> not-retrieved) and TARGET has no folded usage, so the
     // dynamic dataNotAvailable equals the full not-retrieved baseline.
     expect(result.value.data.dataNotAvailable).toEqual(
@@ -451,7 +451,7 @@ describe('fieldLineageHandler honesty axis', () => {
   });
 });
 
-describe('fieldLineageHandler — CR-CAP-03 coverage-aware analytics (field_360 parity)', () => {
+describe('fieldLineageHandler — coverage-aware analytics (field_360 parity)', () => {
   // A manifest proving Report/Dashboard WERE retrieved (coverage 'complete').
   const COVERAGE_COMPLETE_MANIFEST: VaultManifest = {
     ...FIXTURE_MANIFEST,
@@ -663,7 +663,7 @@ describe('fieldLineageHandler: cross-object formula chain depth (P4-formula-chai
   });
 });
 
-describe('fieldLineageHandler — flow field-level dataflow (R6-11)', () => {
+describe('fieldLineageHandler — flow field-level dataflow', () => {
   // End-to-end across TWO flows, driven by the REAL extractor (not
   // hand-built edges): FlowA writes F1 from F2; FlowB writes F2 from F3.
   // Upstream lineage of F1 must reach F3 through both flows, with the
@@ -740,7 +740,7 @@ describe('fieldLineageHandler — flow field-level dataflow (R6-11)', () => {
         makeNode({ id: 'Flow:Opaque_Enricher', type: 'Flow', apiName: 'Opaque_Enricher' }),
         makeNode({ id: 'CustomField:Order__c.Enriched__c', type: 'CustomField', apiName: 'Enriched__c', parentId: 'CustomObject:Order__c' }),
         // A flow writer whose edge predates the dataflow tracer entirely
-        // (pre-R2-1 vault shape: bare `operation`, no assignedValue at all —
+        // (legacy vault shape: bare `operation`, no assignedValue at all —
         // verified live against a production-scale gate vault). Its inputs
         // are UNKNOWN, which must be disclosed as untraced, not read as
         // "zero inputs".
@@ -866,7 +866,7 @@ describe('fieldLineageHandler — flow field-level dataflow (R6-11)', () => {
   });
 
   it('discloses a pre-tracer vault edge as untraced instead of "zero inputs"', async () => {
-    // The edge carries ONLY `operation` (pre-R2-1 vault shape — no
+    // The edge carries ONLY `operation` (legacy vault shape — no
     // assignedValue, no trace). Its inputs are unknown: the walk must count
     // it as untraced and nudge a re-refresh, never read the absence of
     // trace data as "the flow has no inputs".
@@ -887,7 +887,7 @@ describe('fieldLineageHandler — flow field-level dataflow (R6-11)', () => {
   });
 });
 
-describe('fieldLineageHandler — R7-W2 before-save $Record field write', () => {
+describe('fieldLineageHandler — before-save $Record field write', () => {
   // A RecordBeforeSave flow assigns $Record.Combined_Name__c = {!$Record.Given_Part__c}
   // via an <assignments> element (no DML). Driven by the REAL extractor: the
   // before-save field write must be a first-class writer in field_lineage, and

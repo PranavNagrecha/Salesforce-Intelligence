@@ -21,10 +21,10 @@
  *      (typically 15k–5M) so the live plane can never exhaust org limits; the
  *      `sfi.live_budget` tool cross-checks the real headroom via
  *      `live_org_limits`. A FAILED call is NOT cached, so its budget unit is
- *      REFUNDED (CR-P3) — a flapping alias cannot drain the session one retry at
+ *      REFUNDED — a flapping alias cannot drain the session one retry at
  *      a time.
  *
- *   3. **In-flight de-dup (CR-P3 stampede).** Concurrent identical queries that
+ *   3. **In-flight de-dup (stampede).** Concurrent identical queries that
  *      all miss the cache SHARE one outstanding org call (and ONE budget unit)
  *      via a pending-promise map keyed like the cache, honoring the "exactly one
  *      org query" contract for repeated/concurrent identical reads.
@@ -33,7 +33,7 @@
  * {@link resetLiveSession} (used by tests and a server restart).
  *
  * This module imports the low-level `runSfJson` / `restGet` from the
- * dependency-free leaf `live-exec.ts` (NOT `live-plane.ts`). CR-09: with the raw
+ * dependency-free leaf `live-exec.ts` (NOT `live-plane.ts`). With the raw
  * primitives in the leaf, `live-plane.ts` itself now imports the budgeted seam
  * here ({@link runLiveQuery} / {@link runLiveRest}) and routes EVERY live read
  * through it — so the per-session budget is the single chokepoint for the whole
@@ -48,7 +48,7 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-// CR-09: `runSfJson` / `restGet` now come from the dependency-free leaf
+// `runSfJson` / `restGet` now come from the dependency-free leaf
 // (live-exec.ts), NOT live-plane.ts. That severs the live-session -> live-plane
 // import edge for the raw primitives, so live-plane.ts can safely import the
 // budgeted seam below FROM here without a cycle. `resolveLiveAccess` (the
@@ -83,7 +83,7 @@ const cache = new Map<string, CacheEntry>();
 let budgetUsed = 0;
 
 /**
- * In-flight de-dup map (CR-P3 stampede). While one org call for a given key is
+ * In-flight de-dup map (stampede). While one org call for a given key is
  * outstanding, concurrent identical queries SHARE its promise instead of each
  * spending budget + hitting the org. Keyed by the same `cacheKey` the result
  * cache uses, so a SOQL vector and a `['REST', suffix]` read never collide. An
@@ -149,15 +149,15 @@ export interface LiveQueryOk {
 
 /**
  * Run a live `sf` query through the session cache + budget guard. Used by the
- * Phase 6 hybrid tools so a multi-query answer is cheap and bounded.
+ * hybrid tools so a multi-query answer is cheap and bounded.
  *
  *   - Cache HIT (within TTL): returns the cached value, `cached: true`, the
  *     original `queriedAt`, and spends NO budget.
- *   - In-flight HIT (CR-P3): an identical query already running shares that one
+ *   - In-flight HIT: an identical query already running shares that one
  *     org call + budget unit instead of issuing its own.
  *   - Cache MISS: enforces the budget (fail-closed at zero), spends one unit,
  *     queries live, caches a successful result, returns `cached: false`. A
- *     FAILED call refunds the unit (CR-P3) and is not cached.
+ *     FAILED call refunds the unit and is not cached.
  *
  * Fail-open on the cache (a miss just queries); fail-closed on the budget.
  */
@@ -178,7 +178,7 @@ export const runLiveQuery = async (
     });
   }
 
-  // CR-P3 stampede: if an identical query is already in flight, SHARE its call
+  // Stampede: if an identical query is already in flight, SHARE its call
   // rather than spending another budget unit and hitting the org again. The
   // followers ride the single fresh org read (the leader resolves the promise).
   const inFlight = pending.get(key) as
@@ -199,7 +199,7 @@ export const runLiveQuery = async (
         ? await runSfJson(org, args)
         : await runSfJson(org, args, exec);
       if (!parsed.ok) {
-        // CR-P3 refund: a FAILED call is not cached, so refund the budget unit —
+        // Refund: a FAILED call is not cached, so refund the budget unit —
         // a flapping alias must not drain the whole per-session budget.
         budgetUsed -= 1;
         return parsed;
@@ -248,13 +248,13 @@ export interface LiveRestOk {
  *
  *   - Cache HIT (within TTL): cached body, `cached: true`, original `queriedAt`,
  *     spends NO budget.
- *   - In-flight HIT (CR-P3): an identical REST read already running shares that
+ *   - In-flight HIT: an identical REST read already running shares that
  *     one org call + budget unit.
  *   - Cache MISS: enforces the budget (fail-closed at zero) BEFORE the read,
  *     spends one unit, resolves auth + GETs, caches a successful body.
  *
  * Fail-open on the cache; fail-closed on the budget. An auth/REST failure is
- * returned as the McpError, is NOT cached, and REFUNDS its budget unit (CR-P3),
+ * returned as the McpError, is NOT cached, and REFUNDS its budget unit,
  * so a transient failure does not poison or drain the session.
  */
 export const runLiveRest = async (
@@ -274,7 +274,7 @@ export const runLiveRest = async (
     });
   }
 
-  // CR-P3 stampede: share an identical in-flight REST read (one budget unit,
+  // Stampede: share an identical in-flight REST read (one budget unit,
   // one org hit) across concurrent callers.
   const inFlight = pending.get(key) as
     | Promise<Result<LiveRestOk, McpError>>
@@ -293,13 +293,13 @@ export const runLiveRest = async (
         ? await getLiveAuth(org)
         : await getLiveAuth(org, exec);
       if (!authResult.ok) {
-        // CR-P3 refund: auth failure is not cached — refund the budget unit.
+        // Refund: auth failure is not cached — refund the budget unit.
         budgetUsed -= 1;
         return authResult;
       }
       const body = await restGet(authResult.value, apiPath(authResult.value, suffix));
       if (!body.ok) {
-        // CR-P3 refund: a failed REST read is not cached — refund the budget unit.
+        // Refund: a failed REST read is not cached — refund the budget unit.
         budgetUsed -= 1;
         return body;
       }
@@ -521,7 +521,7 @@ export const liveBudgetHandler = async (
   const org = input.orgAlias?.trim() || ctx.manifest.sourceOrg;
 
   let orgApiHeadroom: OrgApiHeadroom | null = null;
-  // CR-09: `resolveLiveAccess` lives in live-plane.ts, which now imports the
+  // `resolveLiveAccess` lives in live-plane.ts, which now imports the
   // budgeted seam from THIS module — a static import back would re-form the
   // cycle. Pull it lazily here (the only consumer of it in live-session) so the
   // static dependency graph stays acyclic.

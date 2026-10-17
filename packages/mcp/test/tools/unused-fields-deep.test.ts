@@ -62,11 +62,11 @@ const makeEdge = (
 });
 
 // =============================================================================
-// Seeds for the v2.4 cross-walk:
-//   - Account.TrulyUnused__c — zero references anywhere (Q106 happy path)
-//   - Account.RefByFormula__c — referenced by another field's formula (Q107)
-//   - Account.RefByLayout__c — placed on a Layout (Q107 sibling)
-//   - Account.RefBySoql__c — appears in an ApexClass SOQL string (Q107 sibling)
+// Seeds for the cross-walk:
+//   - Account.TrulyUnused__c — zero references anywhere (happy path)
+//   - Account.RefByFormula__c — referenced by another field's formula
+//   - Account.RefByLayout__c — placed on a Layout
+//   - Account.RefBySoql__c — appears in an ApexClass SOQL string
 //   - Account.RefByLwc__c — incoming references edge from LWC bundle
 //   - Account.RefByConditional__c — appears in a ConditionalContext expression
 //   - Account.RefByInteg__c — has incoming `exposes` edge
@@ -572,7 +572,7 @@ describe('unusedFieldsDeepHandler', () => {
     expect(result.value.data.byConfidence.high).toBeGreaterThanOrEqual(1);
   });
 
-  // R6-21: format: 'csv' — fields moves to csv; JSON-facing fields stay.
+  // Format: 'csv' — fields moves to csv; JSON-facing fields stay.
   it('omits csv unless format is csv (default json)', async () => {
     const result = await unusedFieldsDeepHandler(ctx, { parentObjectFilter: 'Account' });
     expect(result.ok).toBe(true);
@@ -685,29 +685,29 @@ describe('unusedFieldsDeepInputSchema', () => {
     ).toBe(true);
   });
 
-  it('accepts offset and cursor (CR-22)', () => {
+  it('accepts offset and cursor', () => {
     expect(
       unusedFieldsDeepInputSchema.safeParse({ offset: 1, cursor: 'abc' }).success,
     ).toBe(true);
   });
 
-  it('accepts the live params (CR-CAP-L5)', () => {
+  it('accepts the live params', () => {
     expect(
       unusedFieldsDeepInputSchema.safeParse({ liveEnabled: true, orgAlias: 'prod' }).success,
     ).toBe(true);
   });
 
-  it('accepts the internal staticOnly composition guard (CR-CAP-L5 timeout fix)', () => {
+  it('accepts the internal staticOnly composition guard (timeout fix)', () => {
     expect(unusedFieldsDeepInputSchema.safeParse({ staticOnly: true }).success).toBe(true);
   });
 });
 
 // =============================================================================
-// CR-CAP-L5 — live population cross-check on `confidence: 'high'` fields.
+// live population cross-check on `confidence: 'high'` fields.
 // Isolated local graph: ONE unused custom field (TargetField__c, zero
 // references — always `high`) so live-check assertions are unambiguous.
 // =============================================================================
-describe('unusedFieldsDeepHandler — live population cross-check (CR-CAP-L5)', () => {
+describe('unusedFieldsDeepHandler — live population cross-check', () => {
   const LIVE_OBJ = 'CustomObject:LiveCheckObj__c';
   const LIVE_FIELD = 'CustomField:LiveCheckObj__c.TargetField__c';
   let dir: string;
@@ -888,7 +888,7 @@ describe('unusedFieldsDeepHandler — live population cross-check (CR-CAP-L5)', 
 });
 
 // =============================================================================
-// CR-CAP-L5 timeout fix — the live cross-check must be BOUNDED so a large
+// timeout fix — the live cross-check must be BOUNDED so a large
 // consented org (many high-confidence fields on one page) never fires hundreds
 // of serial live queries and blows the MCP 60s client timeout. Two bounds:
 //   FIX B — at most LIVE_CROSS_CHECK_CAP live cross-checks fire per page.
@@ -896,7 +896,7 @@ describe('unusedFieldsDeepHandler — live population cross-check (CR-CAP-L5)', 
 // Isolated local graph seeded with MANY zero-reference custom fields on ONE
 // object (all statically `high`) so the cap is observable.
 // =============================================================================
-describe('unusedFieldsDeepHandler — live cross-check is bounded (CR-CAP-L5 timeout fix)', () => {
+describe('unusedFieldsDeepHandler — live cross-check is bounded (timeout fix)', () => {
   const MANY_OBJ = 'CustomObject:ManyHighObj__c';
   const HIGH_FIELD_COUNT = LIVE_CROSS_CHECK_CAP + 5; // strictly more than the cap
   let dir: string;
@@ -1038,11 +1038,11 @@ describe('unusedFieldsDeepHandler — live cross-check is bounded (CR-CAP-L5 tim
 });
 
 // =============================================================================
-// CR-22 B4 — output cursor + byte-trim preserved. A whole-fits no-cursor call
+// output cursor + byte-trim preserved. A whole-fits no-cursor call
 // is byte-identical; a truncated page resumes the full set with no gaps / dupes;
 // totalCount/byParentObject/byConfidence stay UNFILTERED across pages.
 // =============================================================================
-describe('unusedFieldsDeepHandler — output cursor (CR-22)', () => {
+describe('unusedFieldsDeepHandler — output cursor', () => {
   it('whole-fits no-cursor call omits all paging fields', async () => {
     const r = await unusedFieldsDeepHandler(ctx, { parentObjectFilter: 'Account' });
     expect(r.ok).toBe(true);
@@ -1238,7 +1238,7 @@ describe('unusedFieldsDeepHandler — byte budget (oversize fix)', () => {
     }
   });
 
-  // R6-21: the same byte-trimmed page, encoded as csv instead of JSON `fields`.
+  // The same byte-trimmed page, encoded as csv instead of JSON `fields`.
   // `fitCsvRowsToBudget` inside the handler must itself stay under the tool's
   // own byte budget so the FULL envelope never trips the global ~45 KB guard.
   it('fits a csv export of the byte-trimmed page under the global guard', async () => {
@@ -1275,14 +1275,14 @@ describe('unusedFieldsDeepHandler — byte budget (oversize fix)', () => {
 });
 
 // =============================================================================
-// CR-12 — page-to-exhaustion. buildCorpora pages every corpus type (incl. the
+// page-to-exhaustion. buildCorpora pages every corpus type (incl. the
 // high-cardinality CustomField driver and the cross-reference corpora) to
 // exhaustion, not just the first 500. The verdict is destructive: an unused
 // CustomField past the cap must still be enumerated, AND a field referenced
 // only by a corpus member (here a Layout) past the cap must NOT be wrongly
 // flagged unused (over-suppression). SFI_NODE_SCAN_LIMIT=2 drives multi-page.
 // =============================================================================
-describe('unusedFieldsDeepHandler — past-cap corpora completeness (CR-12 de-cap)', () => {
+describe('unusedFieldsDeepHandler — past-cap corpora completeness', () => {
   beforeEach(() => {
     process.env['SFI_NODE_SCAN_LIMIT'] = '2';
   });
@@ -1598,7 +1598,7 @@ describe('unusedFieldsDeepHandler — format: proposal (Finding #35)', () => {
     expect(isWellFormedXml(destructive)).toBe(true);
   });
 
-  it('R6-24-WIRE — proposal evidence names reports/dashboards holding fields out of the unused set', async () => {
+  it('WIRE — proposal evidence names reports/dashboards holding fields out of the unused set', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'sfi-ufd-wire24-'));
     const opened = await openGraph(join(dir, 'wire.db'));
     if (!opened.ok) throw new Error(opened.error.message);

@@ -1,6 +1,5 @@
 /**
  * Handler for the `sfi.who_can_access_object` MCP tool
- * (P11-ACCESS-who-can-see).
  *
  * The REVERSE of `sfi.why_cant_user_see_record`: that tool answers "can
  * THIS user see a record" (single user, forward); this one enumerates
@@ -13,16 +12,16 @@
  *   2. **Object permissions** — Profiles / PermissionSets whose
  *      `grantedBy` edge to the object carries `allowRead` / `allowCreate` /
  *      `allowEdit` / `allowDelete` (records visible per OWD + sharing; each
- *      CRUD bit enumerated independently per CR-04) or `viewAllRecords` /
+ *      CRUD bit enumerated independently) or `viewAllRecords` /
  *      `modifyAllRecords` (ALL records of this object).
  *   3. **System god-mode** — `ViewAllData` / `ModifyAllData` on a profile
  *      or permission set (read / modify every record of every object).
  *   4. **Sharing rules** — the `sharedWith` targets (roles / groups) of
- *      the owner and criteria sharing rules on this object. CR-CAP-12: when a
+ *      the owner and criteria sharing rules on this object. When a
  *      target is a public Group, its members (walked transitively through
  *      nested groups via `hasMember`) are each listed as their own granter
  *      row, not just the group; a dangling member (e.g. a Territory) is listed
- *      but flagged as unresolved. CR-CAP-05b: when a target is a Role carrying a
+ *      but flagged as unresolved. When a target is a Role carrying a
  *      `roleAndSubordinates` / `roleAndSubordinatesInternal` inheritance marker,
  *      it expands to the DESCENDING role subtree (every role below it via
  *      INBOUND `inheritsFrom`) — each subordinate role is its own granter row
@@ -101,7 +100,7 @@ import {
 const WHO_CAN_ACCESS_OBJECT_TOOL = 'sfi.who_can_access_object';
 
 const CUSTOM_OBJECT_PREFIX = 'CustomObject:';
-/** CR-CAP-12: a `sharedWith` target that is a Group whose members we expand. */
+/** A `sharedWith` target that is a Group whose members we expand. */
 const GROUP_MEMBER_PREFIX = 'Group:';
 /** Page size for the granter list (a public object can have hundreds). */
 const DEFAULT_LIMIT = 120;
@@ -208,7 +207,7 @@ export type WhoCanAccessObjectInput = z.infer<typeof whoCanAccessObjectInputSche
 /**
  * How a principal gains access to this object's records.
  *
- * CR-04: object CRUD capabilities (read / create / edit / delete) are
+ * Object CRUD capabilities (read / create / edit / delete) are
  * ORTHOGONAL planes — a grantor can hold any combination, so each is enumerated
  * independently with its OWN `via` value. Distinct `via` values keep the
  * caller's `granterId|via` addressing collision-free FOR OBJECT-PERMISSION AND
@@ -239,7 +238,7 @@ export type AccessVia =
   | 'system-modify-all-data'
   | 'owner-sharing-rule'
   | 'criteria-sharing-rule'
-  // CR-CAP-16: the guest / territory sharing-rule families. Without these the
+  // The guest / territory sharing-rule families. Without these the
   // else branch mislabeled them `owner-sharing-rule`, hiding that they are
   // record-level-context-gated (guest = site guest user; territory = territory
   // assignment) and shaped like criteria rules, not owner rules.
@@ -253,7 +252,7 @@ export interface AccessGranter {
   readonly granterLabel: string;
   readonly via: AccessVia;
   /**
-   * The operation this path grants. CR-04: `create` and `delete` are now
+   * The operation this path grants. `create` and `delete` are now
    * enumerated independently (the old else-if chain dropped `delete` entirely
    * and subsumed lower capabilities); `all` is reserved for the record-scope
    * bypasses (View/Modify-All, god-mode).
@@ -480,7 +479,7 @@ export interface WhoCanAccessObjectOutput {
   readonly blindSpots: readonly string[];
   readonly boundaryNote: string;
   /**
-   * P13-PSA-counts: active-holder counts for the Profile/PermissionSet
+   * Active-holder counts for the Profile/PermissionSet
    * granters on THIS page (`data_snapshot`), when captured — "held by N
    * active users" alongside the static grant.
    */
@@ -503,7 +502,7 @@ const utf8Bytes = (value: unknown): number =>
   Buffer.byteLength(JSON.stringify(value) ?? 'null', 'utf8');
 
 /**
- * The parent CustomObject api name a SharingRule applies to. The v1.1 sharing
+ * The parent CustomObject api name a SharingRule applies to. The sharing
  * extractor sets the rule's `parentId` to `CustomObject:{Object}` and its
  * `apiName` to `{Object}.{RuleName}`; it does NOT emit a `properties.sObjectType`.
  * Keying on that non-existent property silently dropped EVERY sharing rule (the
@@ -801,21 +800,21 @@ export const whoCanAccessObjectHandler = async (
       : '';
 
   const granters: AccessGranter[] = [];
-  // CR-RV10: clamp to the graph's hard cap so an operator with
+  // Clamp to the graph's hard cap so an operator with
   // SFI_NODE_SCAN_LIMIT > 500 gets a 500-row scan, not a hard `internal` error.
   // (Full B3 two-axis conversion is DEFERRED for this tool — it merges THREE
   // node types under one cursor and the SharingRule axis needs an
   // object-FILTERED count that countNodesByType's type-only form can't give.)
   const scanLimit = clampedNodeScanLimit();
   const truncatedTypes: string[] = [];
-  // CR-CAP-12: set when a group's `hasMember` expansion hit a missing
+  // Set when a group's `hasMember` expansion hit a missing
   // nested/enclosing group node, so the member roster is possibly incomplete.
   let groupMembershipTruncated = false;
-  // CR-CAP-05b: set when a roleAndSubordinates descend was capped or referenced
+  // Set when a roleAndSubordinates descend was capped or referenced
   // a subordinate role node not retrieved into the vault — the subtree is
-  // possibly larger than enumerated (mirror CR-CAP-05: disclose, never invent).
+  // possibly larger than enumerated (disclose, never invent).
   let roleSubtreeTruncated = false;
-  // CR-CAP-05b: set when ANY shared target was `roleAndSubordinatesInternal` —
+  // Set when ANY shared target was `roleAndSubordinatesInternal` —
   // the internal-vs-portal exclusion cannot be applied offline (Role nodes carry
   // no portal flag), so the enumerated subtree may include portal/partner roles
   // the real rule excludes. Disclosed, never silently applied.
@@ -844,7 +843,7 @@ export const whoCanAccessObjectHandler = async (
       granterLabel: grantor.label ?? grantor.apiName,
       ...audienceFields(grantor),
     };
-    // CR-04: object CRUD bits are ORTHOGONAL — evaluate each independently
+    // Object CRUD bits are ORTHOGONAL — evaluate each independently
     // rather than in an exclusive else-if chain (the old chain dropped Delete
     // entirely and let a higher capability subsume lower ones). A grantor with
     // Read+Edit+Modify-All now emits multiple rows, each individually
@@ -911,7 +910,7 @@ export const whoCanAccessObjectHandler = async (
     if (sharingRuleObjectApiName(rule) !== objectApiName) continue;
     const ruleType = stringProp(rule.properties, 'ruleType');
     const accessLevel = stringProp(rule.properties, 'accessLevel') || 'Read';
-    // CR-CAP-16: map each family to its own `via` so guest / territory rules are
+    // Map each family to its own `via` so guest / territory rules are
     // not mislabeled `owner-sharing-rule` by the else branch.
     const via: AccessVia =
       ruleType === 'criteria'
@@ -955,7 +954,7 @@ export const whoCanAccessObjectHandler = async (
                 ? `${ruleType} sharing rule ${rule.id} (${accessLevel}) shares records matching \`${predicate || '(predicate not extracted)'}\` by territory assignment (record-level + territory context required)`
                 : `owner sharing rule ${rule.id} (${accessLevel}) shares this user/group's owned records`,
       });
-      // CR-CAP-12: a rule shared with a Group also reaches every member that
+      // A rule shared with a Group also reaches every member that
       // group contains (transitively, through nested groups), so list each
       // member as its own granter row instead of stopping at the group. The
       // member edges are `declared` (the group's `<related>` rows). A dangling
@@ -994,7 +993,7 @@ export const whoCanAccessObjectHandler = async (
           });
         }
       }
-      // CR-CAP-05b: a rule shared with a Role carrying a `subordinates` /
+      // A rule shared with a Role carrying a `subordinates` /
       // `subordinatesInternal` inheritance marker also reaches every role BELOW
       // it in the role hierarchy. Walk the descending subtree (INBOUND
       // `inheritsFrom`) and list each subordinate role as its own granter row,
@@ -1086,7 +1085,7 @@ export const whoCanAccessObjectHandler = async (
   };
 
   const total = rows.length;
-  // CR-04: in `paths` view a grantor holds several independent capabilities, so
+  // In `paths` view a grantor holds several independent capabilities, so
   // it spans multiple rows. `total` is the ROW count; `distinctGranters` is the
   // ACTOR count consumers should use when "how many principals" matters.
   const distinctGranters = new Set(rows.map((g) => g.granterId)).size;
@@ -1226,7 +1225,7 @@ export const whoCanAccessObjectHandler = async (
   // repro after the first pass of this fix and seeing the global guard
   // engage anyway.
   const buildData = (pageLimit: number): WhoCanAccessObjectOutput => {
-    // ADOPT the shared CR-22 pager rather than re-slicing here. It owns the
+    // ADOPT the shared pager rather than re-slicing here. It owns the
     // slice, `totalCount`, `returnedCount`, `hasMore` and the `nextOffset`
     // pointer in ONE place shared with ~50 other tools, so this tool cannot
     // drift from them again — a hand-rolled second copy of exactly this

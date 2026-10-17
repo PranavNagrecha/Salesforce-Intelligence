@@ -2,7 +2,7 @@
 
 import { ORG_ALIAS_RE, validateOrgAlias } from '../../src/commands/org-alias.js';
 
-describe('org-alias validation (CR-01 / C1)', () => {
+describe('org-alias validation', () => {
   // Real `sf` aliases and email-style usernames must pass unchanged.
   const ACCEPT = ['prod', 'MyOrg', 'me@example.com', 'my-sandbox', 'a.b_c@d-e.org', 'me@my-sandbox.example.com'];
   // The PoC payload from the brief plus a battery of shell metacharacters.

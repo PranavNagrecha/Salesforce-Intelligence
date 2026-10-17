@@ -2,17 +2,17 @@
  * Handler for the `sfi.test_coverage_for_method` MCP tool.
  *
  * Answers the developer's "which test classes cover this Apex class?"
- * (or, when v2.7.1 ships, this method) question. Composes an upstream
+ * (or, later, this method) question. Composes an upstream
  * BFS from `classApiName` over incoming `callsApex` AND
  * `dispatchesAsync` edges and filters the BFS-reached set to nodes with
  * `properties.isTest === true`.
  *
- * **Granularity (v2.7 honesty boundary, load-bearing)**: v2.7 ships
+ * **Granularity (honesty boundary, load-bearing)**: this ships
  * CLASS-level coverage. A class is "covered" when at least one test
  * class can reach it via incoming `callsApex` / `dispatchesAsync` edges
  * within the depth cap. The `methodName` input is ACCEPTED and echoed
  * verbatim into the response so callers can pipeline through a future
- * v2.7.1 method-scoped resolution — but v2.7 does NOT subset coverage
+ * method-scoped resolution — but this tool does NOT subset coverage
  * by method.
  *
  * **Composition model**:
@@ -21,7 +21,7 @@
  *   2. `getNodeById` against the target — unknown surfaces as
  *      `component-not-found`.
  *   3. BFS upstream over incoming `callsApex` AND `dispatchesAsync`
- *      edges, bounded by the v2.1 depth-3 cap inherited from
+ *      edges, bounded by the depth-3 cap inherited from
  *      `sfi.test_coverage_gaps`. Following `dispatchesAsync` catches
  *      tests that exercise a batch/queueable/schedulable class via
  *      async dispatch (`Database.executeBatch(new XBatch())`), which
@@ -89,8 +89,8 @@ import {
 } from './test-coverage-reach.js';
 
 /**
- * BFS depth cap. Matches the v2.1 `sfi.test_coverage_gaps`
- * `MAX_COVERAGE_DEPTH` and the v0.3 `find_apex_usages` BFS budget.
+ * BFS depth cap. Matches the `sfi.test_coverage_gaps`
+ * `MAX_COVERAGE_DEPTH` and the `find_apex_usages` BFS budget.
  */
 const COVERAGE_BFS_DEPTH = TEST_SELECTION_MAX_DEPTH;
 
@@ -163,8 +163,8 @@ const TRIGGER_MEDIATED_DISCLOSURE =
   'TRIGGER/DML-MEDIATED COVERAGE IS NOT AN EDGE IN THIS GRAPH. The coversTest edge type is declared but emitted by NO extractor, graph-build mint, or enricher in this product, so no vault contains one; and a test that covers this code by doing DML on an object whose trigger calls it has no callsApex/dispatchesAsync path to it. totalCoveringCount therefore counts only tests that reach this component through a CALL path — a 0 means "no calling test found among the edge types walked", NEVER "no test covers this". triggerMediatedCoverage reconstructs the missing path from the edges that DO exist: the ApexTriggers on the upstream call path, the objects they fire on (triggersOn), and the test classes that write fields on those objects (writesTo) or construct a record of one (references to the object type). Those candidates are HEURISTIC — a field write in a test is strong evidence of DML but is not proof the record is inserted or updated, and a test that only reads is not listed. soundness.blindSpots names, in unwalkedEdgeTypes, every usage edge type this walk did not traverse. Do not delete, rename, or resign a method on the strength of a zero here: read the named candidate tests, or run the deploy against a sandbox.';
 
 /**
- * Verbatim v2.7 honesty disclosure. Method-level granularity promised
- * for v2.7.1; dynamic dispatch is invisible to the heuristic.
+ * Verbatim honesty disclosure. Method-level granularity is a later
+ * promise; dynamic dispatch is invisible to the heuristic.
  */
 const COVERAGE_DISCLOSURE =
   'test_coverage_for_method ships CLASS granularity for a class-level query (no methodName). The upstream walk follows both callsApex and dispatchesAsync incoming edges, so coverage exercised via async dispatch (Database.executeBatch, System.enqueueJob, System.schedule) is included. A test class is a coverage SINK — it is recorded as covering but the walk never traverses THROUGH it, so a test is never credited with covering a class its own production code never references. Dynamic dispatch (Type.forName) and reflective invocation are still invisible. BFS is capped at depth 3; coverage chains longer than 3 hops surface as uncovered even when they exist. calloutCoverage (present only when the target implements Database.AllowsCallouts) cross-references covering tests against mock usage: setsMock is heuristic — derived from a test implementing an Apex mock interface (HttpCalloutMock / WebServiceMock), so a test that instead references a SEPARATE mock class via Test.setMock(MyMock.class) reads false; coveredOnlyByMockLessTests flags the inflated-coverage anti-pattern (callout code covered, but no covering test installs a mock). ' +
@@ -183,8 +183,8 @@ const COVERAGE_METHOD_DISCLOSURE =
  *     `ApexClass:` / `ApexTrigger:` id; non-matching prefixes surface as
  *     `invalid-query` at the handler boundary. Disagreeing selectors are
  *     `invalid-query` (never a silent pick); at least one is required.
- *   - `methodName`: optional. v2.7 echoes the value verbatim into the
- *     response; v2.7.1 will use it to subset coverage at the method
+ *   - `methodName`: optional. This echoes the value verbatim into the
+ *     response; a later version will use it to subset coverage at the method
  *     edge level.
  */
 export const testCoverageForMethodInputSchema = z.object({
@@ -295,7 +295,7 @@ export interface CoveringTestClass {
   /**
    * P4-test-reachability: present ONLY when `methodName` was supplied. `true`
    * when this test's shortest reaching path enters the target via a `callsApex`
-   * edge whose `methods[]` (P4-C5) includes `methodName` — i.e. the test
+   * edge whose `methods[]` includes `methodName` — i.e. the test
    * actually exercises the CHANGED method, not merely the class. `false` means
    * it reaches the class but (on its shortest path) not via that method.
    */
@@ -452,9 +452,9 @@ const setsMock = (node: Node): boolean =>
   implementsList(node).some((i) => MOCK_INTERFACES.has(i));
 
 /**
- * Whether a `callsApex` edge invokes `methodName` on its target (P4-C5).
+ * Whether a `callsApex` edge invokes `methodName` on its target.
  * Prefers the complete `methods[]`; falls back to the scalar `methodName` for
- * pre-P4-C5 vaults. `dispatchesAsync` edges carry no method index → false.
+ * legacy vaults. `dispatchesAsync` edges carry no method index → false.
  */
 const edgeCallsMethod = (
   edge: { readonly edgeType: EdgeType; readonly properties: Readonly<Record<string, unknown>> },
@@ -610,7 +610,7 @@ const buildTriggerMediatedCoverage = async (
 
 /**
  * The `sfi.test_coverage_for_method` MCP tool. Returns the list of
- * test classes that cover the target class (or method, in v2.7.1) via
+ * test classes that cover the target class (or method) via
  * upstream `callsApex` walks.
  *
  * @example

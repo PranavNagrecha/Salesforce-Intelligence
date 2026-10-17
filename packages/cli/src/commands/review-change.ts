@@ -22,7 +22,7 @@
  * which may have drifted from what is actually deployed. That boundary is
  * printed on every run and carried in the handler's `disclosure`.
  *
- * CROSS-VAULT (`--against <alias|path>`, R7-C2): pass a registered vault alias
+ * CROSS-VAULT (`--against <alias|path>`): pass a registered vault alias
  * or a path to an org-kb to review the changeset against THAT vault's graph
  * instead of `--vault` — the release-manager "will this break PROD?" question.
  * The flag is handed to `sfi.review_change`'s `againstVault`; the exit-1 gate

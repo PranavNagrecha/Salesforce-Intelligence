@@ -1,5 +1,5 @@
 /**
- * `sfi watch` (P13-WATCH-daemon) — a small detached daemon that runs one
+ * `sfi watch` — a small detached daemon that runs one
  * `stale-sweep` tick per interval, so `meta/staleness.json` stays current and
  * the trust `orgDrift` badges (next item) have something fresh to read.
  *
@@ -152,7 +152,7 @@ export const runWatchLoop = async (options: {
   readonly dayOf?: () => string;
   readonly log?: (line: string) => void;
   /**
-   * P13-WATCH-auto-refresh: when a tick's sweep reports drift, trigger a
+   * When a tick's sweep reports drift, trigger a
    * refresh — at most once per `minIntervalMs` (default 1h). This CONTACTS
    * THE ORG (`sf project retrieve`) from the background daemon, unprompted —
    * real network traffic, not just local extraction/graph caching. The
@@ -166,7 +166,7 @@ export const runWatchLoop = async (options: {
     readonly nowMs?: () => number;
   };
   /**
-   * P13-STAGED-demand-queue: optionally drain queued automation-critical
+   * Optionally drain queued automation-critical
    * phantom hits after a tick — at most once per `minIntervalMs` (default
    * 1h, shared clock with autoRefresh). `peek` returns how many ids are
    * queued (0 → nothing happens); `drain` runs the demand-retrieve. A
@@ -239,7 +239,7 @@ export const runWatchLoop = async (options: {
             log('watch: drift detected but auto-refresh throttled (max 1 per hour) — skipped');
           }
         }
-        // P13-STAGED-demand-queue: drain queued phantom hits, throttled.
+        // Drain queued phantom hits, throttled.
         if (options.drainQueue !== undefined) {
           try {
             const queued = await options.drainQueue.peek(options.cwd);

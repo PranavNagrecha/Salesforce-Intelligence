@@ -365,7 +365,7 @@ describe('findHardcodedValuesHandler', () => {
 });
 
 // =============================================================================
-// CR-12 / CR-22 B3 — the scan now WINDOWS past the per-type cap. Historically a
+// the scan now WINDOWS past the per-type cap. Historically a
 // single capped listNodesByType page dropped the scan TAIL (node 501+ findings
 // unreachable). B3 pages the SQL OFFSET forward window-by-window until the type
 // is exhausted, so a low cap no longer makes the enumeration INCOMPLETE — it
@@ -373,7 +373,7 @@ describe('findHardcodedValuesHandler', () => {
 // `scanTruncated` disclosure now fires only for a pathological residual cap
 // (FULL_SCAN_MAX_NODES), never for a normal multi-class org.
 // =============================================================================
-describe('findHardcodedValuesHandler — full multi-window scan (CR-22 B3)', () => {
+describe('findHardcodedValuesHandler — full multi-window scan', () => {
   it('does NOT emit a Scan-capped boundary under the default cap (byte-identical happy path)', async () => {
     const r = await findHardcodedValuesHandler(ctx, {});
     expect(r.ok).toBe(true);
@@ -423,11 +423,11 @@ describe('findHardcodedValuesHandler — full multi-window scan (CR-22 B3)', () 
 });
 
 // =============================================================================
-// CR-22 — output-axis cursor. A truncated page emits an opaque nextCursor that
+// output-axis cursor. A truncated page emits an opaque nextCursor that
 // resumes with no gaps / no dupes; a whole-fits no-cursor call is byte-identical
 // (no limit/offset/nextCursor/pageInfo fields).
 // =============================================================================
-describe('findHardcodedValuesHandler — output cursor (CR-22)', () => {
+describe('findHardcodedValuesHandler — output cursor', () => {
   it('whole-fits no-cursor call omits all paging fields (byte-identical)', async () => {
     const r = await findHardcodedValuesHandler(ctx, {});
     expect(r.ok).toBe(true);

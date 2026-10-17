@@ -408,7 +408,7 @@ describe('scanFrontendSource — determinism', () => {
   });
 });
 
-describe('scanFrontendSource — resourceRefs (P14-USAGE-label-static-graph)', () => {
+describe('scanFrontendSource — resourceRefs', () => {
   it('LWC: detects label and resourceUrl imports as resourceRefs', () => {
     const result = scanFrontendSource(
       [

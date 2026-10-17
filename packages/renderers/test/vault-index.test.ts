@@ -4,7 +4,7 @@ import type { Node } from '@sf-intelligence/contracts';
 
 import { renderVaultIndex } from '../src/vault-index.js';
 
-// Build a synthetic Node with v0.1 defaults; overrides override only what
+// Build a synthetic Node with defaults; overrides override only what
 // each test cares about. Keeps each test's intent localized — what the
 // test asserts is what the test sets.
 const buildNode = (overrides: {
@@ -213,7 +213,7 @@ describe('renderVaultIndex', () => {
   });
 });
 
-describe('renderVaultIndex — bullet label escaping (CR-16c)', () => {
+describe('renderVaultIndex — bullet label escaping', () => {
   it('keeps a newline in node.label from splitting the bullet or injecting a new one', () => {
     const evil = buildNode({
       id: 'CustomObject:Evil__c',

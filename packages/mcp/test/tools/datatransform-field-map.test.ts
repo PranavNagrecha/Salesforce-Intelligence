@@ -1,11 +1,11 @@
 /// <reference types="vitest/globals" />
 
 /**
- * Tests for the `sfi.datatransform_field_map` MCP tool (v3.2 R3c).
+ * Tests for the `sfi.datatransform_field_map` MCP tool.
  *
  * Coverage:
  *   - happy path: per-row mapping table reflects XML row order, the
- *     metadata block carries the v3.2-R2c extractor fields verbatim,
+ *     metadata block carries the extractor fields verbatim,
  *     and both honesty disclosures surface in `boundaries[]`.
  *   - per-row confidence axis: rows whose source/target paths use the
  *     `{ObjectAlias}:{fieldPath}` convention surface as `parsed`; rows
@@ -15,7 +15,7 @@
  *   - operation-type fallback: when `<interfaceClass>` is absent but
  *     `<type>` is present, `metadata.interfaceClass` falls back to the
  *     `<type>` value AND `operationType` pins the raw `<type>` element.
- *     This mirrors the v3.2-R2c extractor's behavior per journal 0167.
+ *     This mirrors the extractor's behavior.
  *   - `sourceObject` and `targetObject` surface the top-level source
  *     SObject and the best-effort target (first non-`json`
  *     `outputObjectName`); `targetObject` is null when every row's
@@ -29,8 +29,7 @@
  *   - source-file-missing surfaces as `internal` rather than crashing.
  *   - Native-vs-Vlocity disclosure verbatim on every response.
  *
- * The Native-vs-Vlocity disclosure pin: the verbatim phrase from
- * PLAN-v3.2 §4 honesty axis 1 MUST appear in `boundaries[]` on every
+ * The Native-vs-Vlocity disclosure pin: the verbatim phrase MUST appear in `boundaries[]` on every
  * response. The per-row-confidence disclosure pin mirrors the
  * `OmniDataTransform.md` §"Field-name path conventions" axis — both
  * pins are load-bearing.
@@ -338,7 +337,7 @@ describe('datatransformFieldMapHandler', () => {
     if (!result.ok) return;
     const mappings = result.value.data.mappings;
     // Rows 1 + 2 use `ContactInput:` / `ContactOutput:` colon-prefix
-    // aliases — `parsed` per the v3.2-R2c edge confidence axis.
+    // aliases — `parsed` per the edge confidence axis.
     expect(mappings[0]?.confidence).toBe('parsed');
     expect(mappings[1]?.confidence).toBe('parsed');
     // Row 3 uses flat names (`FlatId` / `FlatOut`) — `declared`
@@ -353,7 +352,7 @@ describe('datatransformFieldMapHandler', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const boundaries = result.value.data.boundaries;
-    // The Native-vs-Vlocity disclosure (PLAN-v3.2 §4 honesty axis 1) — the ONE shared sentence.
+    // The Native-vs-Vlocity disclosure — the ONE shared sentence.
     expect(boundaries).toContain(NATIVE_VS_VLOCITY_DISCLOSURE);
     // The per-row confidence disclosure (load-bearing for this tool).
     expect(

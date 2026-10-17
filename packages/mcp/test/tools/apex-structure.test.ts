@@ -78,7 +78,7 @@ const makeEdge = (
   ...overrides,
 });
 
-/** The v1.5 async / API-surface classifier bag every real ApexClass node carries. */
+/** The async / API-surface classifier bag every real ApexClass node carries. */
 const CLASSIFIERS = {
   isQueueable: false,
   isSchedulable: false,

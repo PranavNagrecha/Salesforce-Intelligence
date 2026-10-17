@@ -13,10 +13,12 @@ properties:
   enableHistory: false
   enableReports: false
   enableSearch: false
+  externalSharingModel: null
   label: Permit
   nameFieldLabel: Permit Name
   nameFieldType: Text
   pluralLabel: Permits
+  recordPageOverrides: []
   sharingModel: Private
   visibility: Public
 sourcePath: source/main/default/objects/Permit__c/Permit__c.object-meta.xml
@@ -37,9 +39,11 @@ type: CustomObject
 | enableHistory | `false` |
 | enableReports | `false` |
 | enableSearch | `false` |
+| externalSharingModel | `null` |
 | nameFieldLabel | `Permit Name` |
 | nameFieldType | `Text` |
 | pluralLabel | `Permits` |
+| recordPageOverrides | `` |
 | sharingModel | `Private` |
 | visibility | `Public` |
 

@@ -502,7 +502,7 @@ describe('lifecycleProcessHandler — RecordType/BusinessProcess scope', () => {
   });
 });
 
-describe('lifecycleProcessHandler — CR-22 continuation cursor', () => {
+describe('lifecycleProcessHandler — continuation cursor', () => {
   it('in-budget whole-fits call emits NO cursor/pageInfo and no stepIndex on rows', async () => {
     const r = await lifecycleProcessHandler(ctx, { objectApiName: 'Opportunity', event: 'update' });
     expect(r.ok).toBe(true); if (!r.ok) return;

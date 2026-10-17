@@ -27,7 +27,7 @@ import {
 import { dispatchTool } from '../src/tools/index.js';
 
 /**
- * P13-REMOTE-http — bearer auth (401s, constant-time compare), the live
+ * Bearer auth (401s, constant-time compare), the live
  * plane HARD-DISABLED over HTTP even with env enablement (a TEST, not a doc
  * line), stdio↔HTTP parity, and the no-absolute-paths leak check.
  */
@@ -277,7 +277,7 @@ describe('stdio↔HTTP parity + leak check', () => {
   });
 });
 
-describe('per-caller tokens (R8-PERCALLER-TOKENS)', () => {
+describe('per-caller tokens', () => {
   const SYNTH_ALICE = 'synth-token-alice-aaaaaaaaaaaaaaaa';
   const SYNTH_BOB = 'synth-token-bob-bbbbbbbbbbbbbbbbbb';
 

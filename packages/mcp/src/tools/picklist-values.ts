@@ -4,7 +4,7 @@
  * live_picklist_usage).
  *
  * BACK-COMPAT (H10): `properties.picklistValues` changed from a bare `string[]`
- * (pre-CR-10 vaults) to an object `Array<{value,isActive,label?,default?}>`
+ * (legacy vaults) to an object `Array<{value,isActive,label?,default?}>`
  * (re-extracted vaults). The three consumers each previously did a
  * `typeof entry === 'string'` filter that SILENTLY DROPPED object entries — so
  * on a re-extracted vault they reported ZERO picklist values for affected
@@ -86,18 +86,18 @@ export const normalizePicklistValues = (
 /**
  * For a GlobalValueSet-driven picklist (inline values null), follow the
  * field's outgoing `usesValueSet` edge to the GlobalValueSet node and return
- * its declared `properties.values` (P14-USAGE-gvs-edge — the edge and the
+ * its declared `properties.values` (the edge and the
  * values both land on vaults refreshed at 0.1.10+). Returns `null` when the
  * edge or the target node is absent (pre-0.1.10 vault, or the value set was
  * not retrieved) — the caller falls back to the honesty note, and must NOT
  * read that `null` as "this field has no values".
  *
- * CR-10b: the GlobalValueSet extractor now emits the same H10 object shape
+ * The GlobalValueSet extractor now emits the same H10 object shape
  * `{value, isActive, label?, default?}` as the CustomField inline picklist
  * reader, with an honestly-captured `isActive` (a deactivated GVS value is
  * RETAINED, not filtered — see `global-value-set.ts`). Routing through the
  * shared `normalizePicklistValues` gets that shape for free AND stays
- * backward-compatible with a pre-CR-10b vault's bare-string `values` (each
+ * backward-compatible with a legacy vault's bare-string `values` (each
  * string normalizes to `{value, isActive: true}`), so an un-refreshed vault
  * degrades to the old behavior instead of returning nothing.
  *

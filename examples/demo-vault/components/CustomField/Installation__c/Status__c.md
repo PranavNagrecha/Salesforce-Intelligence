@@ -36,6 +36,7 @@ properties:
   referenceTo: null
   relationshipName: null
   required: false
+  restricted: false
   scale: null
   trackHistory: false
   unique: false
@@ -63,6 +64,7 @@ type: CustomField
 | referenceTo | `null` |
 | relationshipName | `null` |
 | required | `false` |
+| restricted | `false` |
 | scale | `null` |
 | trackHistory | `false` |
 | unique | `false` |
@@ -81,6 +83,12 @@ type: CustomField
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `CustomObject:Installation__c` | declared | custom-field-extractor |
+
+### readsFrom (incoming, 1)
+
+| Source | Confidence | Producer |
+| --- | --- | --- |
+| `ConditionalContext:Flow:Installation_On_Complete.condition-0` | declared | condition-extractor |
 
 ### usedInLayout (incoming, 1)
 

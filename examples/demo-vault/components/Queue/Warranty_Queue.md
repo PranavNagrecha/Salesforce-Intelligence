@@ -8,9 +8,15 @@ lastModifiedDate: null
 parentId: null
 properties:
   description: Warranty claims awaiting triage.
+  doesIncludeBosses: false
   doesSendEmailToMembers: false
   email: null
+  memberChannels: []
   memberCount: 0
+  memberEmails: []
+  memberSource: user-direct
+  queueMembersDeclared: false
+  queueMembersUnparsed: false
   queueRoutingConfig: null
   sobjectTypeCount: 1
 sourcePath: source/main/default/queues/Warranty_Queue.queue-meta.xml
@@ -28,9 +34,15 @@ Warranty claims awaiting triage.
 
 | Key | Value |
 | --- | --- |
+| doesIncludeBosses | `false` |
 | doesSendEmailToMembers | `false` |
 | email | `null` |
+| memberChannels | `` |
 | memberCount | `0` |
+| memberEmails | `` |
+| memberSource | `user-direct` |
+| queueMembersDeclared | `false` |
+| queueMembersUnparsed | `false` |
 | queueRoutingConfig | `null` |
 | sobjectTypeCount | `1` |
 

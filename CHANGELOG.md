@@ -5,6 +5,21 @@ adheres to [Semantic Versioning](https://semver.org).
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-11-03
+
+No new tools and no envelope change. The second real-org defect from the October review is closed, a dangling reference from 0.6.0 is fixed, and the demo org shows what the extractors can see.
+
+### Added
+- The demo org shows the three 0.6.0 reference families: a screen flow with `ObjectProvided` fields, a Lightning web component with `lightning-record-form` field bindings, and a Project layout related list with Installation columns, each with a demo question whose answer cites it.
+
+### Changed
+- `verify-doc-sync` now fails when a relative Markdown link in README, CONTRIBUTING, RELEASING, SECURITY, `llms-install.md`, or `docs/**` points at a path that does not exist.
+- `/sfi-field-audit` now checks first whether its two agents (`salesforce-field-auditor`, `salesforce-field-refuter`) are available in the session; without them it runs the per-field audit and the three refutation lenses inline and says so once. The plugin ships no agents, so this is the path plugin users get. Maintainer-only agents moved to `.claude/agents/maintainer/`.
+
+### Fixed
+- Flow screen components now link to the Lightning web component they show. The `c:` prefix on the component name was kept in the link target, so every screen-to-component reference pointed at an id no component had and the component listed no usages. The flow, LWC and Aura extractors now build bundle ids through one shared helper, so the two sides cannot drift apart again; quick actions that open a Lightning component go through the same helper, so a `c:` prefix there cannot mint a dangling link either.
+- OmniScript save-for-later URL patterns (`saveURLPatterns` on the script's top-level settings) now show up in field where-used: each pattern key that names a field on the object the script declares for saving gets a `writesTo` link to that field. If the script does not declare which object is saved, the pattern is listed on the OmniScript as unresolved instead of guessing from the key name.
+
 ## [0.6.0] — 2026-10-16
 
 ### Changed

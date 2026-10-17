@@ -93,7 +93,7 @@ interface ComponentMeta {
 
 /**
  * Parse the `<ApexComponent>` companion metadata XML and return the values
- * required by the v1.4 node. Validates the root element name and the
+ * required by the node. Validates the root element name and the
  * required child elements per the vendored `ApexComponent.md` spec.
  */
 const parseMetaXml = (
@@ -217,7 +217,7 @@ const readComponentSource = async (
  * Project scanner output (`fieldAccesses`, `apexCalls`, `componentRefs`)
  * onto graph edges owned by `ownerId`. Identical projection to
  * `visualforce-page.ts` — the VF scanner is shared, and the edge
- * confidence + role conventions match the v1.4 spec for both component
+ * confidence + role conventions match the spec for both component
  * types.
  *
  * Scanner errors (`empty-source`, etc.) surface as a warning string the
@@ -286,7 +286,7 @@ const buildScannerEdges = (
     });
   }
   // $Label.X / $Resource.X / $Setup.X__c value-provider tokens →
-  // references edges (heuristic regex tokens; P14-USAGE-label-static-graph).
+  // references edges (heuristic regex tokens).
   raw.push(...buildResourceRefEdges(ownerId, result.value.resourceRefs, SCANNER_SOURCE, 'heuristic'));
   return {
     edges: raw,
@@ -306,7 +306,7 @@ const buildScannerEdges = (
  * Reads both the `.component` markup and its companion
  * `.component-meta.xml`, parses the `<apex:component>` opening-tag
  * attributes for declared `controller=` / `extensions=` references, and
- * runs the v1.4 frontend scanner (`'vf'` dialect) over the full markup
+ * runs the frontend scanner (`'vf'` dialect) over the full markup
  * body for `{!Object.Field}` reads, `{!ClassName.method()}` calls, and
  * `<c:OtherComponent>` references.
  *

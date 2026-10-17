@@ -17,7 +17,7 @@ In the order you will need them.
 | [First refresh](./guides/first-refresh.md) | `sfi init` and `sfi refresh`, what the vault contains, what to commit |
 | [Guided onboarding](./guides/onboarding.md) | The `/sfi-onboard` path in Claude Code |
 | [Asking questions](./guides/asking-questions.md) | What you can ask, what the tool refuses and why, worked sessions |
-| [Upgrading](./guides/upgrading.md) | Bump, restart, refresh; what changed in 0.5.0 and 0.6.0 |
+| [Upgrading](./guides/upgrading.md) | Bump, restart, refresh; what changed in 0.5.0, 0.6.0 and 0.7.0 |
 | [Troubleshooting](./guides/troubleshooting.md) | What each error means (`invalid-query`, `component-not-found`, oversize answers, setup mode, "not directly invokable") and what to do |
 | [Configuration](./configuration.md) | Every environment variable: live plane, network policy, response budget, tool profile, timeouts |
 | [The `sfi` command line](./cli.md) | Every command and its options |
@@ -37,7 +37,9 @@ Reports, each a measurement rather than a promise:
 
 | Report | What it measures |
 | --- | --- |
+| [0.7.0 release report](./reports/release-0.7.0.md) | What shipped and what was measured on a real OmniStudio sandbox and the demo org (counts only) |
 | [0.6.0 release report](./reports/release-0.6.0.md) | What shipped and how it was verified on real orgs (counts only) |
+| [0.5.0 release report](./reports/release-0.5.0.md) | The 16-tool default, smaller answers, two real-org verdict fixes |
 | [Scale certification](./reports/scale-certification.md) | Import and resolve timings at 50,000 components, and what the benchmark does not cover |
 | [SAST accuracy](./reports/sast-accuracy-report.md) | Precision and recall of the heuristic code-quality rules on a labelled corpus |
 | [Phantom taxonomy audit](./reports/phantom-taxonomy-audit.md) | What the referenced-but-unretrieved ids on real orgs consist of, and the design that followed |

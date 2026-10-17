@@ -1,5 +1,5 @@
 /**
- * Handler for the `sfi.user_ability` MCP tool (P11-USER-ability-run).
+ * Handler for the `sfi.user_ability` MCP tool.
  *
  * "What can this profile / permission set RUN or DO?" — beyond record CRUD
  * (which `object_access_audit` / `why_cant_user_see_record` cover). Surfaces:
@@ -24,7 +24,7 @@
  *     class of system permissions present on the container (filtered from
  *     `userPermissions`), the ones that aren't object CRUD or pure admin.
  *   - **customPermissions** — the custom permissions the container CONFERS via
- *     its `<customPermissions>` grants (CR-CAP-10). Each carries `targetMissing`
+ *     its `<customPermissions>` grants. Each carries `targetMissing`
  *     (true when the granted name has no `CustomPermission` definition in the
  *     vault — managed-package or not-retrieved; declared but not resolvable).
  *
@@ -252,7 +252,7 @@ const userAbilityInputBaseSchema = z.object({
   objectApiName: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
-  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // Continuation cursor: an OPAQUE token echoed back from a prior
   // truncated page's `nextCursor`. When present it supplies the resume offset;
   // omitting it = today's behavior (offset 0 / explicit `offset`).
   cursor: z.string().min(1).optional(),
@@ -321,7 +321,7 @@ export interface UserAbilityOutput {
   /** The action/ability system permissions present (sorted). */
   readonly actionPermissions: readonly string[];
   /**
-   * CR-CAP-10: the custom permissions this container CONFERS (sorted by name).
+   * The custom permissions this container CONFERS (sorted by name).
    * `targetMissing` is true when the granted name has no `CustomPermission`
    * definition node in this vault (a managed-package perm like `APXTConga4__*`,
    * or a vault refreshed before the definition was retrieved) — the grant is
@@ -416,7 +416,7 @@ export interface UserAbilityOutput {
   readonly hasMore: boolean;
   readonly truncated: boolean;
   /**
-   * CR-22 opaque continuation token, present ONLY when the runnableFlows page
+   * Opaque continuation token, present ONLY when the runnableFlows page
    * was truncated (more flows remain past `limit`). Echo it back as `cursor` to
    * resume. Absent on a whole-fits page so an in-budget response stays
    * byte-identical.
@@ -473,7 +473,7 @@ export const userAbilityHandler = async (
   // container (from_id/edge_type/source all fixed), so each flow id appears at
   // most once. Belt-and-suspenders: dedup with a Set before sorting so the
   // total-order guarantee doesn't silently rely on the extractor's PK invariant
-  // — a CR-22 resume over the deduped list can't dup or skip.
+  // — a resume over the deduped list can't dup or skip.
   const flowTargetMissing = new Map<string, boolean>();
   for (const e of edgesResult.value) {
     if (e.properties['flowAccess'] !== true || !e.toId.startsWith('Flow:')) continue;
@@ -499,7 +499,7 @@ export const userAbilityHandler = async (
     .filter((p) => ACTION_PERMISSIONS.has(p))
     .sort();
 
-  // CR-CAP-10: custom permissions this container confers. The extractor emits a
+  // Custom permissions this container confers. The extractor emits a
   // `grantedBy` edge to `CustomPermission:{name}` per enabled `<customPermissions>`
   // block; resolve each name's definition node so a managed-package grant whose
   // definition is not in the vault is DISCLOSED (targetMissing), not dropped and
@@ -523,7 +523,7 @@ export const userAbilityHandler = async (
     });
   }
   const missingCustomPerms = customPermissions.filter((c) => c.targetMissing).length;
-  // CR-CAP-10 unchecked-zero: the extractor writes `customPermissionGrantCount`
+  // Unchecked-zero: the extractor writes `customPermissionGrantCount`
   // on every container it processes, INCLUDING containers granting zero, so the
   // key's absence means the family was never extracted. The empty edge set above
   // is then "not modeled", never a verified "no custom permissions".
@@ -719,7 +719,7 @@ export const userAbilityHandler = async (
   const total = runnable.length;
   const limit = input.limit ?? DEFAULT_LIMIT;
 
-  // CR-22: resolve the resume offset — an echoed cursor wins over an explicit
+  // Resolve the resume offset — an echoed cursor wins over an explicit
   // `offset`; a stale/forged cursor (changed componentId, different tool, or
   // refreshed vault) is rejected with `invalid-query`. The field scope binds the
   // fingerprint too, so a field-scoped cursor cannot resume an unscoped call.

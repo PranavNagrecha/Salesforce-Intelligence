@@ -173,7 +173,7 @@ describe('changedSinceInputSchema', () => {
     expect(r.success).toBe(false);
   });
 
-  it('accepts offset and cursor (CR-22)', () => {
+  it('accepts offset and cursor', () => {
     const r = changedSinceInputSchema.safeParse({
       since: '2026-05-01',
       offset: 1,
@@ -184,11 +184,11 @@ describe('changedSinceInputSchema', () => {
 });
 
 // =============================================================================
-// CR-22 B4 — output cursor + full type scan. A whole-fits no-cursor call stays
+// output cursor + full type scan. A whole-fits no-cursor call stays
 // byte-identical (no limit/offset/nextCursor/pageInfo/boundaries); a truncated
 // page resumes the full set with no gaps / dupes.
 // =============================================================================
-describe('changedSinceHandler — output cursor (CR-22)', () => {
+describe('changedSinceHandler — output cursor', () => {
   it('whole-fits no-cursor call omits all paging + boundary fields', async () => {
     const r = await changedSinceHandler(ctx, { since: '2026-01-01' });
     expect(r.ok).toBe(true);

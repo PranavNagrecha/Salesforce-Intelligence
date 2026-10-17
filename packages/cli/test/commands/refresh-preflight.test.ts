@@ -5,7 +5,7 @@ import {
   LARGE_ORG_COMPONENT_THRESHOLD,
 } from '../../src/commands/refresh-preflight.js';
 
-describe('assessRefreshSize (P12-FIRSTRUN-refresh-preflight)', () => {
+describe('assessRefreshSize', () => {
   it('warns with a --types hint when the prior refresh was large and unscoped', () => {
     const r = assessRefreshSize({ priorComponentCount: LARGE_ORG_COMPONENT_THRESHOLD + 4000, scoped: false, noPull: false });
     expect(r.level).toBe('warn');

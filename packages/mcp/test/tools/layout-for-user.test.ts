@@ -121,7 +121,7 @@ const explicitOnlyProfileSeed: ExtractionResult = {
 
 // =============================================================================
 // Seed 3: a profile whose `properties` lacks `layoutAssignments` entirely —
-// the v0.1 extractor's status quo. Used to exercise the honesty axis.
+// the extractor's status quo. Used to exercise the honesty axis.
 // =============================================================================
 
 const NO_ASSIGNMENTS_PROFILE = 'Profile:No Assignments';
@@ -141,7 +141,7 @@ const noAssignmentsProfileSeed: ExtractionResult = {
 // Seed 4: a profile with ONLY explicit per-record-type layoutAssignments (no
 // `recordType: null` master entry) PLUS a recordTypeVisibilities default. When
 // the caller omits a record type, the cascade must route via the profile's
-// DEFAULT record type's layout (P2-BL-06-full depth), not return unknown.
+// DEFAULT record type's layout, not return unknown.
 // =============================================================================
 
 const DEFAULT_RT_PROFILE = 'Profile:Default RT';
@@ -224,7 +224,7 @@ afterAll(async () => {
 });
 
 describe('layoutForUserHandler', () => {
-  it('routes via the profile default record type when no recordType is given and there is no master assignment (P2-BL-06-full)', async () => {
+  it('routes via the profile default record type when no recordType is given and there is no master assignment', async () => {
     const result = await layoutForUserHandler(ctx, {
       objectApiName: 'Case',
       profileId: DEFAULT_RT_PROFILE,

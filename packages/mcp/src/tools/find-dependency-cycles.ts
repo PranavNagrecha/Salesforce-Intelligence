@@ -69,7 +69,7 @@ export const findDependencyCyclesInputSchema = z
     componentId: z.string().min(1).optional(),
     nameContains: z.string().min(1).optional(),
     limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
-    // CR-22: page cursor for walking the full cycle list when truncated.
+    // Page cursor for walking the full cycle list when truncated.
     offset: z.number().int().min(0).optional(),
     cursor: z.string().min(1).optional(),
   })
@@ -154,9 +154,9 @@ export interface FindDependencyCyclesOutput {
   };
   readonly boundaries: readonly string[];
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * Opaque continuation token, present ONLY when this page is truncated
    * (more cycles remain). Echo it back as `cursor` to resume. Absent on a
-   * complete page so an in-budget response is byte-identical to pre-CR-22.
+   * complete page so an in-budget response is byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
@@ -299,7 +299,7 @@ export const findDependencyCyclesHandler = async (
   const { componentId: scopeComponent, nameContains: scopeName } = scopeRes.value;
   const scoped = scopeComponent !== null || scopeName !== null;
 
-  // CR-22 B4: scan EVERY Apex node by paging the SQL OFFSET forward (window-by-
+  // Scan EVERY Apex node by paging the SQL OFFSET forward (window-by-
   // window) so cycles touching node 501+ are computed — the old single capped
   // `listNodesByType` silently dropped Apex nodes past 500, dropping any cycle
   // that touched them. The output cycle list is then paged on the output axis
@@ -376,7 +376,7 @@ export const findDependencyCyclesHandler = async (
 
   const largestClusterSize = scopedCycles.reduce((m, c) => Math.max(m, c.size), 0);
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // Resolve the resume offset (echoed cursor wins over explicit offset).
   // Bind the fingerprint to the scope so a cursor minted for one scope cannot
   // resume against a different (differently-filtered) cluster list.
   const fingerprint = argsFingerprint({

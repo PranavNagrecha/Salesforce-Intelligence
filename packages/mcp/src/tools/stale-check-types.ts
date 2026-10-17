@@ -33,7 +33,7 @@ export const STALE_CHECK_TYPES = [
   'Layout',
   'Flow',
   'CustomField',
-  // P13-WATCH-sweep widening — closes the permission-drift hole (a Profile or
+  // Widening — closes the permission-drift hole (a Profile or
   // PermissionSet edited in the org silently invalidated access answers) and
   // covers the UI/record-type surfaces. A type the org's Tooling API rejects
   // lands in erroredTypes honestly, never fatal.

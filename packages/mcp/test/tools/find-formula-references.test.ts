@@ -253,7 +253,7 @@ describe('findFormulaReferencesHandler', () => {
     );
   });
 
-  // CR-13: truncation honesty. The same silent-slice dishonesty as
+  // Truncation honesty. The same silent-slice dishonesty as
   // find_apex_usages — a paged list must disclose the TRUE total + a truncation
   // note + pagination cursors so the full set is reachable.
   it('discloses the true total, hasMore, and a truncation note when paged below the referencer count', async () => {
@@ -275,7 +275,7 @@ describe('findFormulaReferencesHandler', () => {
     expect(data.note).toContain('2');
   });
 
-  it('pages the full referencer set and omits the note when exhausted (CR-13)', async () => {
+  it('pages the full referencer set and omits the note when exhausted', async () => {
     const result = await findFormulaReferencesHandler(ctx, {
       fieldId: 'CustomField:Account.Industry__c',
       offset: 1,
@@ -296,7 +296,7 @@ describe('findFormulaReferencesHandler', () => {
     expect('note' in data).toBe(false);
   });
 
-  it('leaves the fully-contained case byte-identical: counts present, no note (CR-13 guard)', async () => {
+  it('leaves the fully-contained case byte-identical: counts present, no note', async () => {
     // Both referencers fit under the default limit → additive scalar fields
     // only, `note` omitted entirely.
     const result = await findFormulaReferencesHandler(ctx, {
@@ -386,7 +386,7 @@ describe('findFormulaReferencesHandler — componentId / fieldApiName selectors'
   });
 });
 
-describe('findFormulaReferencesHandler — CR-22 continuation cursor', () => {
+describe('findFormulaReferencesHandler — continuation cursor', () => {
   const FIELD = 'CustomField:Account.Industry__c';
 
   it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
@@ -488,7 +488,7 @@ describe('findFormulaReferencesInputSchema', () => {
     expect(parsed.success).toBe(false);
   });
 
-  it('accepts a non-negative offset (CR-13 pagination)', () => {
+  it('accepts a non-negative offset (pagination)', () => {
     const parsed = findFormulaReferencesInputSchema.safeParse({
       fieldId: 'CustomField:Account.Industry__c',
       offset: 1,

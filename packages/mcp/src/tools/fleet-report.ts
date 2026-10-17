@@ -1,5 +1,5 @@
 /**
- * Handler for the `sfi.generate_fleet_report` MCP tool (R7-C6).
+ * Handler for the `sfi.generate_fleet_report` MCP tool.
  *
  * The "state of my orgs" digest: a single `GeneratedDocument` composed
  * across EVERY vault in the multi-vault registry, so a fleet operator

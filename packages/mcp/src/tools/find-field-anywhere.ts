@@ -1,8 +1,8 @@
 /**
  * Handler for the `sfi.find_field_anywhere` MCP tool.
  *
- * The v2.2 universal "find this field everywhere it's touched" surface —
- * the canonical Q86-style discovery question for a single field id.
+ * The universal "find this field everywhere it's touched" surface —
+ * the canonical discovery question for a single field id.
  * Composes incoming edges of every code/declarative kind that
  * references a CustomField, groups them by the referrer's
  * `ComponentType`, and surfaces a structured cross-component-type
@@ -33,7 +33,7 @@
  * (`references` edge with `source: 'formula-tokenizer'` vs.
  * `source: 'metadata-dependency'`).
  *
- * **v2.2 honesty axis:** the v0.3 / v1.4 / v2.1 string-stripping
+ * **Honesty axis:** the string-stripping
  * discipline means dynamic SOQL strings, reflective field access
  * (`obj.get('FieldName')`), and managed-package code are INVISIBLE to
  * the graph edges this tool walks. The `boundaries` array surfaces the
@@ -248,7 +248,7 @@ export const findFieldAnywhereInputSchema = z.object({
     .max(FIND_FIELD_ANYWHERE_MAX_LIMIT)
     .optional(),
   componentTypes: z.array(z.string().min(1)).optional(),
-  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // Continuation cursor: an OPAQUE token echoed back from a prior
   // truncated page's `nextCursor`; carries the resume offset + which
   // ComponentType section it advances. Omit = today's behavior.
   cursor: z.string().min(1).optional(),
@@ -385,10 +385,10 @@ export interface FindFieldAnywhereOutput {
   readonly boundaries: readonly string[];
   readonly truncated: boolean;
   /**
-   * CR-22 opaque continuation token, present ONLY when truncated (the designated
+   * Opaque continuation token, present ONLY when truncated (the designated
    * ComponentType section overflowed `limit`/the byte budget). Echo it back as
    * `cursor` to resume; absent on a whole-fits page so the response is
-   * byte-identical to pre-CR-22.
+   * byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata for the designated section; truncation only. */
@@ -867,7 +867,7 @@ export const findFieldAnywhereHandler = async (
   // order). Typed as string[] so a cursor's `listId` (string) can index it.
   const sortedTypes: readonly string[] = [...byType.keys()].sort();
 
-  // CR-22 section cursor over the per-ComponentType buckets. `limit` is now the
+  // Section cursor over the per-ComponentType buckets. `limit` is now the
   // per-SECTION page size (was a cross-group running cap). On a whole-fits call
   // (no cursor, every section ≤ limit) the response is byte-identical: every
   // section is emitted with its full references and NO cursor block. When a

@@ -6,7 +6,7 @@
  * `live_stale_check` queries {@link STALE_CHECK_TYPES} — 15 types. Its MCP
  * roster description, `fleet_drift_ranking`'s roster description, and
  * `fleet_drift_ranking`'s own response disclosure all hand-listed the SIX
- * original types and were never updated when the P13-WATCH widening added the
+ * original types and were never updated when the widening added the
  * other nine. The nine omitted ones are exactly the permission / security drift
  * families (Profile, PermissionSet, PermissionSetGroup, SharingRules) plus the
  * UI / record-type surfaces — the most valuable half of the check — so a host

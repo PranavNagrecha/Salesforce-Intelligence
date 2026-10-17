@@ -253,7 +253,7 @@ describe('synthesizeAnswerHandler', () => {
     expect(d.provenance.stamp).toBe('offline_snapshot');
   });
 
-  it('P3-SYNTH-eval: grounding holds across 10+ representative tool-output chains', async () => {
+  it('grounding holds across 10+ representative tool-output chains', async () => {
     // Each entry is a realistic tool-output shape from a different family. A
     // draft built ONLY from its canonical ids must ground cleanly (empty
     // hallucinatedIds); an injected orphan id must be flagged. Synthetic ids.
@@ -606,7 +606,7 @@ describe('synthesizeAnswerInputSchema', () => {
   });
 });
 
-describe('grounded evidence template (P12-UX-synth-next-action)', () => {
+describe('grounded evidence template', () => {
   it('builds Finding → Evidence → Cause → Fix → Risk → Next-action ONLY from the source', async () => {
     const toolOutput = {
       verdict: 'restricted',
@@ -661,7 +661,7 @@ describe('grounded evidence template (P12-UX-synth-next-action)', () => {
   });
 });
 
-describe('responseBudget truncation carry (P13-GUARD-synth-caveat)', () => {
+describe('responseBudget truncation carry', () => {
   it('composes an explicit caveat (with counts) from a truncated tool input — golden chain', async () => {
     // Simulates the global byte budget having reduced a prior tool's payload:
     // the synthesis over that input must disclose the reduction, with counts,
@@ -707,7 +707,7 @@ describe('responseBudget truncation carry (P13-GUARD-synth-caveat)', () => {
   });
 });
 
-describe('annotation laundering check (P13-ANNOT-tools)', () => {
+describe('annotation laundering check', () => {
   const annotatedSource = {
     data: {
       fieldId: 'CustomField:Contact.Fax__c',

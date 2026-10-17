@@ -1,7 +1,7 @@
 /// <reference types="vitest/globals" />
 
 /**
- * Router-v2 Phase 4 — targeted fixes, pinned:
+ * Router-v2 targeted fixes, pinned:
  *
  * 1. CLARIFY-OPTION HYGIENE + BLOCKED-MISS CONVERSIONS
  *    - option hygiene: fuzzy/junk rivals (the SSN → {ASN,BSN,MSN} acronym

@@ -1,12 +1,12 @@
 /**
  * Handler for the `sfi.tech_debt_score` MCP tool.
  *
- * The v2.4 org-wide tech-debt composite — the rollup buyers compile
+ * The org-wide tech-debt composite — the rollup buyers compile
  * from the prior hygiene tools into a single weighted 0-100 score
- * with category breakdown. Composes over v2.0b `unused_components`,
- * v2.4 `unused_fields_deep`, v2.4 `process_builder_migration_candidates`,
- * v2.4 `unassigned_permission_sets`, v2.4 `empty_queues_and_groups`,
- * v2.1's `qualityIssues` data (when present), v1.7 freshness data
+ * with category breakdown. Composes over `unused_components`,
+ * `unused_fields_deep`, `process_builder_migration_candidates`,
+ * `unassigned_permission_sets`, `empty_queues_and_groups`,
+ * the `qualityIssues` data (when present), freshness data
  * (when present), and Apex API-version distribution.
  *
  * **Score direction (counterintuitive)** — higher means MORE debt
@@ -15,7 +15,7 @@
  * `admin-tech-debt-audit` skill surfaces this verbatim on every
  * response so users understand the inversion.
  *
- * **Weighting (PLAN-v2.4 §15)** — default weights:
+ * **Weighting** — default weights:
  *   - unused fields (deadWeight): 0.20
  *   - legacy automation: 0.20
  *   - code quality: 0.15
@@ -26,15 +26,15 @@
  * The score is `weighted_sum(contributions) / sum(applicable_weights)`
  * normalized to [0, 100]. The user may override `weights` per-call.
  *
- * **Exclude vs assume-zero (Q115 honesty anchor)** — a category whose
+ * **Exclude vs assume-zero (honesty anchor)** — a category whose
  * underlying extractor has not run is EXCLUDED from the score, not
  * assumed to be zero. The `excludedCategories` array names the
  * reason; when ANY category is excluded with reason
  * `'extractor-not-run'`, the response's `boundaries[]` appends the
- * verbatim Q115 disclosure so the skill can surface it BEFORE the
+ * verbatim disclosure so the skill can surface it BEFORE the
  * score band. An axis excluded because a scan was CAPPED (the data
  * exists, it just was not all read) carries `'insufficient-data'`
- * instead, precisely so the Q115 "run the appropriate refresh
+ * instead, precisely so the "run the appropriate refresh
  * command" remedy is NOT emitted for a cap no refresh can lift.
  */
 
@@ -148,7 +148,7 @@ const loadAllNodes = async (
 };
 
 /**
- * The default weighting scheme per PLAN-v2.4 §15. Weights are
+ * The default weighting scheme. Weights are
  * surfaced verbatim in the response so the user knows the bias.
  */
 const DEFAULT_WEIGHTS: Readonly<Record<TechDebtCategory, number>> = Object.freeze({
@@ -160,7 +160,7 @@ const DEFAULT_WEIGHTS: Readonly<Record<TechDebtCategory, number>> = Object.freez
   unassignedGrants: 0.15,
 });
 
-/** The Q115 verbatim disclosure. */
+/** The verbatim disclosure. */
 const Q115_DISCLOSURE =
   'this score reflects only the axes that were extracted; missing axes are EXCLUDED, not assumed zero, and the score is not directly comparable to a score from a fully-extracted vault. To compute the missing categories, run the appropriate refresh command.';
 
@@ -177,7 +177,7 @@ const WEIGHT_SCHEME_DISCLOSURE =
  * the score. That axis is built from the heuristic Apex scanner (regex/token,
  * not a compiler), so per the product's trust contract its issue counts carry
  * `confidence: heuristic` and the axis's contribution must be cited as such
- * rather than read as exact (P10-A4 honesty invariant: heuristic tier always
+ * rather than read as exact (honesty invariant: heuristic tier always
  * cited).
  */
 const CODE_QUALITY_HEURISTIC_DISCLOSURE =
@@ -188,7 +188,7 @@ const CODE_QUALITY_HEURISTIC_DISCLOSURE =
  * componentsNeverModifiedSinceCreation detail is always null because the vault
  * does not capture a per-component createdDate (only lastModifiedDate is
  * extracted/enriched) — so this honest boundary replaces what used to be a
- * fabricated 0 (CR-16a).
+ * fabricated 0.
  */
 const NEVER_MODIFIED_UNAVAILABLE_DISCLOSURE =
   'the "never modified since creation" count is not available — the vault does not capture a per-component createdDate (only lastModifiedDate is extracted/enriched), so this metric is reported as null rather than a fabricated 0.';
@@ -228,7 +228,7 @@ type TechDebtCategory =
  * family was never confirmed-retrieved. `coverage_report` listed it in
  * `trust.completeness.missingCoverage` and `list_components` called it "not
  * retrieved, not proof of absence" — while this composite called the same
- * signal ZERO, contradicting its own printed Q115 boundary ("missing axes are
+ * signal ZERO, contradicting its own printed boundary ("missing axes are
  * EXCLUDED, not assumed zero"). Same defect on `deadWeight`'s
  * `unusedEmailTemplatesCount`.
  *
@@ -299,7 +299,7 @@ const MIN_SCORED_WEIGHT_FRACTION = 0.5;
  *   {@link Q115_DISCLOSURE}).
  * - `'insufficient-data'` — the family WAS extracted but the measurement is
  *   incomplete (e.g. a sub-tool capped its scan), so the count would be a sum
- *   with an unchecked term. A refresh cannot fix this, so the Q115 refresh
+ *   with an unchecked term. A refresh cannot fix this, so the refresh
  *   remedy is deliberately NOT emitted; the per-exclusion `note` carries the
  *   remedy that actually applies.
  */
@@ -648,8 +648,8 @@ const computeCodeQualityCounts = async (
 
 /**
  * Compute the freshness category counts from the `lastModifiedDate`
- * node field. When NO node carries non-null `lastModifiedDate` (v1.7
- * R2 / Tooling-API enrichment hasn't run), returns null.
+ * node field. When NO node carries non-null `lastModifiedDate` (Tooling-API
+ * enrichment hasn't run), returns null.
  *
  * `neverModified` ("never modified since creation") is ALWAYS null/unknown:
  * computing it requires a per-component `createdDate` to diff against
@@ -766,7 +766,7 @@ export const readPriorTechDebtScore = async (
 
 /**
  * The `sfi.tech_debt_score` MCP tool. See module JSDoc for the
- * weighted composition, score direction, and Q115 honesty anchor.
+ * weighted composition, score direction, and honesty anchor.
  */
 export const techDebtScoreHandler = async (
   ctx: Context,
@@ -829,7 +829,7 @@ export const techDebtScoreHandler = async (
   if (!ucRes.ok) return err(ucRes.error);
   const uc = ucRes.value.data;
   // staticOnly: this composition reads ONLY `ufd.totalCount` (the static count),
-  // so it must NOT trigger the CR-CAP-L5 live-population cross-check. Without
+  // so it must NOT trigger the live-population cross-check. Without
   // this guard, a standing-consent org would fire ~2 live SELECT COUNT() reads
   // per high-confidence unused field from inside the score roll-up — hundreds of
   // serial live queries pushing tech_debt_score (and org_risk_report /
@@ -880,14 +880,14 @@ export const techDebtScoreHandler = async (
   // -- apiVersions category
   const apiVersionsRaw = deprecatedApiVersionApexCount;
 
-  // -- codeQuality category — null when v2.1 hasn't shipped to this vault.
+  // -- codeQuality category — null when the recognizers have not run on this vault.
   const cqRes = await computeCodeQualityCounts(ctx, scanIncompleteTypes);
   if (!cqRes.ok) return err({ kind: 'internal', message: cqRes.error });
   const cq = cqRes.value;
   const codeQualityRaw = cq === null ? 0 : cq.critical + cq.high;
   const codeQualityExtractorRan = cq !== null;
 
-  // -- freshness category — null when v1.7 R2 hasn't run.
+  // -- freshness category — null when Tooling API enrichment has not run.
   const frRes = await computeFreshnessCounts(ctx, scanIncompleteTypes);
   if (!frRes.ok) return err({ kind: 'internal', message: frRes.error });
   const fr = frRes.value;
@@ -972,7 +972,7 @@ export const techDebtScoreHandler = async (
   // extractor DID run and the family IS retrieved — the sub-tool's per-type
   // page cap is what made the term unchecked. That distinction is
   // load-bearing, because `'extractor-not-run'` is the key that appends the
-  // verbatim Q115 boundary ("To compute the missing categories, run the
+  // verbatim boundary ("To compute the missing categories, run the
   // appropriate refresh command") further down, and no refresh can lift a
   // 500-node scan cap — emitting it here would be a dead-end remedy stated as
   // fact by a disclosure tool. The note below carries the remedy that DOES
@@ -1218,7 +1218,7 @@ export const techDebtScoreHandler = async (
         // Always null/unknown — "never modified since creation" needs a
         // per-component createdDate that the vault/graph does not capture, so we
         // report null (not measured) rather than a fabricated 0. Null in BOTH
-        // the data-present and freshness-excluded paths. (CR-16a)
+        // the data-present and freshness-excluded paths.
         componentsNeverModifiedSinceCreation: fr?.neverModified ?? null,
       },
     },
@@ -1298,8 +1298,8 @@ export const techDebtScoreHandler = async (
     );
 
   // Compose boundaries: always include direction + weight scheme +
-  // exclusion note (verbatim Q115 disclosure when extractor-not-run).
-  // The gate is deliberately `'extractor-not-run'` only — Q115's remedy is
+  // exclusion note (verbatim disclosure when extractor-not-run).
+  // The gate is deliberately `'extractor-not-run'` only — the remedy is
   // "run the appropriate refresh command", which is true for a family that
   // was never extracted and FALSE for an `'insufficient-data'` exclusion
   // (a capped scan; refreshing re-reads the same capped window).
@@ -1310,7 +1310,7 @@ export const techDebtScoreHandler = async (
   if (excluded.some((e) => e.reason === 'extractor-not-run')) {
     boundaries.push(Q115_DISCLOSURE);
   }
-  // The scan-cap exclusion's own prose. Q115 above deliberately does NOT cover
+  // The scan-cap exclusion's own prose. The disclosure above deliberately does NOT cover
   // it (its remedy is a refresh, which cannot lift a page cap), so without
   // this line the axis vanished from `boundaries` entirely.
   if (legacyScanCapBoundary !== undefined) {
@@ -1350,7 +1350,7 @@ export const techDebtScoreHandler = async (
     );
   }
   // TECH-DEBT-UNCHECKED-ZERO-SCORED-AS-CLEAN. The composite used to print the
-  // Q115 "missing axes are EXCLUDED, not assumed zero" boundary while scoring
+  // "missing axes are EXCLUDED, not assumed zero" boundary while scoring
   // a never-retrieved family as a clean zero, and carried no `coverageCaveat`
   // anywhere for a host to render. Emit the standard caveat naming exactly
   // which families were never confirmed-retrieved, plus a boundary that says

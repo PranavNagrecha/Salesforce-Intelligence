@@ -22,7 +22,7 @@ import { formatRefreshSummary, runRefresh } from '../src/commands/refresh.js';
 /**
  * Stage a minimal vault with one ApexClass source file + meta-xml under
  * `source/main/default/classes/` so the refresh pipeline's extractor
- * walker emits at least one node the v1.7 enricher can hydrate.
+ * walker emits at least one node the enricher can hydrate.
  */
 const seedVault = async (cwd: string): Promise<{ readonly vaultRoot: string }> => {
   const vaultRoot = join(cwd, 'org-kb');
@@ -81,7 +81,7 @@ const buildStubClient = (): {
       if (soql.includes('FROM ApexClass')) {
         return ok(STUB_TOOLING_RESPONSE as unknown as readonly T[]);
       }
-      // The enrichment runner iterates over the v1.7 R2 dispatch
+      // The enrichment runner iterates over the dispatch
       // table; types not present in the seeded vault still issue a
       // query when their node count is non-zero. The fixture only
       // emits ApexClass, so every other branch returns an empty

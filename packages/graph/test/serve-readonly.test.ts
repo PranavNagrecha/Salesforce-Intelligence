@@ -14,13 +14,13 @@ import { getNodeById } from '../src/queries.js';
 import { openGraphServeReadOnly } from '../src/serve-readonly.js';
 import { closeGraph, openGraph } from '../src/store.js';
 
-// CR-19 amended: the read-only serving ladder must DEFER an additive migration
+// The read-only serving ladder must DEFER an additive migration
 // (instead of hard-failing the read-write re-open) when the vault is held under
 // a cross-process read-only lock. DuckDB's lock only fires across processes, so
 // the contention is exercised with the real `vault-holder.mjs` child fixture
 // (mirroring fleet-serving.test.ts), not in-process where one DuckDBInstance is
 // shared and no conflict arises. This is the gate scenario that broke the
-// router/coverage harnesses against the repo's stale org-kb vault: a pre-CR-19
+// router/coverage harnesses against the repo's stale org-kb vault: a legacy
 // vault reads schema version 0, needsMigration=true, and the self-heal's own
 // read-write re-open collided with the held read-only handle.
 
@@ -91,7 +91,7 @@ const stopHolder = (child: ChildProcess): Promise<void> =>
 /**
  * Build a STALE (pre-versioning) vault on disk: seed the base schema + a row via
  * openGraph (which also creates the schema_version ledger), then DROP the ledger
- * so the file reads as schema version 0 — exactly a pre-CR-19 vault.
+ * so the file reads as schema version 0 — exactly a legacy vault.
  */
 const buildStaleVault = async (dbPath: string): Promise<void> => {
   const opened = await openGraph(dbPath);
@@ -110,14 +110,14 @@ afterAll(() => {
   rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
-describe('openGraphServeReadOnly: deferred migration under a read-only lock (CR-19 amended)', () => {
+describe('openGraphServeReadOnly: deferred migration under a read-only lock', () => {
   it('serves a STALE vault READ-ONLY (no lock error) when another process holds it read-only, deferring the migration', async () => {
     const dbPath = join(tempDir, 'stale-locked.duckdb');
     await buildStaleVault(dbPath);
     const holder = await spawnHolder(dbPath);
     try {
       const served = await openGraphServeReadOnly(dbPath);
-      // The pre-CR-19-amended behavior dropped RO and re-opened RW, which
+      // The previous behavior dropped RO and re-opened RW, which
       // collides with the held read-only lock -> a `locked` GraphError. The
       // best-effort fallback must instead serve read-only.
       expect(served.ok).toBe(true);

@@ -1,5 +1,5 @@
 /**
- * Snapshot persistence helpers for the v2.0c diff infrastructure.
+ * Snapshot persistence helpers for the diff infrastructure.
  *
  * A snapshot is a structured capture of a single point-in-time vault
  * graph state. Each snapshot lives at `{vaultRoot}/snapshots/{label}/`
@@ -175,7 +175,7 @@ export interface SnapshotMeta {
   readonly componentCount: number;
   readonly edgeCount: number;
   /**
-   * Optional capture-time scalar bag (R8-SECURITY-TREND). Written at
+   * Optional capture-time scalar bag. Written at
    * `sfi snapshot create` / refresh auto-capture. Keys are metric names;
    * values are numbers (`securityScore` 0–100, `securityGrade` GPA 0–4).
    * Absent on pre-upgrade snapshots — trend discloses that honestly.

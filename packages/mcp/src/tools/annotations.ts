@@ -1,5 +1,5 @@
 /**
- * Handlers for the annotations overlay tools (P13-ANNOT-tools + R8-ANNOTATION-REVIEW):
+ * Handlers for the annotations overlay tools:
  *
  *   - `sfi.annotations` — read the materialized overlay (whole vault or one
  *     component): the curated meaning (owner / status / glossary / domain /
@@ -42,7 +42,7 @@ const ANNOTATIONS_DEFAULT_LIMIT = 200;
 const ANNOTATIONS_MAX_LIMIT = 1000;
 
 /**
- * Prefer the HTTP caller identity when known (R8-PERCALLER-TOKENS);
+ * Prefer the HTTP caller identity when known;
  * otherwise the historical solo/stdio fallback (`ai` / `human`).
  */
 const attributedAuthor = (ctx: Context, fallback: string): string => {
@@ -129,7 +129,7 @@ export const annotationsHandler = async (
     componentExists = node.ok && node.value !== null;
   }
 
-  // R2 (BRIEF 063): page through the shared CR-22 continuation protocol
+  // R2 (BRIEF 063): page through the shared continuation protocol
   // instead of returning the whole filtered overlay unbounded — a vault-wide
   // read with no componentId returns the ENTIRE overlay otherwise, with no
   // resume pointer once the response is trimmed.
@@ -545,7 +545,7 @@ export const rejectAnnotationHandler = async (
 };
 
 /**
- * Consumer embedding (P13-ANNOT-tools): the annotations block a component
+ * Consumer embedding: the annotations block a component
  * tool attaches when the subject has annotations. Returns undefined when
  * none exist, so annotation-free vaults stay byte-identical.
  */

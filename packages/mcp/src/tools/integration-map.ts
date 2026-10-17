@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.integration_map` MCP tool.
  *
- * The v1.5 architect-tier headline tool: returns a structured topology
+ * The architect-tier headline tool: returns a structured topology
  * of every integration surface an org exposes — AuthProviders, Named-
  * Credentials, RemoteSiteSettings, CspTrustedSites, ExternalDataSources,
  * ExternalServices, ConnectedApps, and NetworkAccess entries — plus the
@@ -156,10 +156,9 @@ const INTEGRATION_TYPE_SET: ReadonlySet<ComponentType> = new Set(
 
 /**
  * The `references` edge type used for the cross-type connections. The
- * v1.5 integration topology extractors emit `references` (not a new
+ * integration topology extractors emit `references` (not a new
  * EdgeType) to link an ExternalDataSource to its AuthProvider, an
- * AuthProvider to its issuing ConnectedApp, etc. — see
- * PLAN-v1.5.md §3 for the rationale.
+ * AuthProvider to its issuing ConnectedApp, etc.
  */
 const REFERENCES_EDGE_TYPE: EdgeType = 'references';
 
@@ -217,7 +216,7 @@ export const integrationMapInputSchema = z.object({
 export type IntegrationMapInput = z.infer<typeof integrationMapInputSchema>;
 
 /**
- * One node in the integration map. Mirrors a v1.5 integration node
+ * One node in the integration map. Mirrors an integration node
  * with just the fields callers need to render a map: identity (`id`,
  * `type`, `apiName`, `label`) plus the extracted `properties` blob
  * carrying surface-specific data (callout URL for RemoteSiteSetting,
@@ -655,7 +654,7 @@ const compareEdges = (a: IntegrationMapEdge, b: IntegrationMapEdge): number => {
 };
 
 /**
- * Resolve a `properties.role` value into a typed string. The v1.5
+ * Resolve a `properties.role` value into a typed string. The
  * integration extractors emit a string `role` field on each
  * `references` edge (`'authProvider'`, `'namedCredential'`, etc.) but
  * the JSON-backed properties blob is `unknown` at the type level. This

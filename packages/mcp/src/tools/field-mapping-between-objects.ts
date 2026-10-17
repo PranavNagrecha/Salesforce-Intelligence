@@ -1,8 +1,8 @@
 /**
  * Handler for the `sfi.field_mapping_between_objects` MCP tool.
  *
- * The v3.1 Q174 honesty-anchor tool — "map Lead fields to Contact
- * fields for the conversion" (PLAN-v3.1 §4). Unlike the prior three
+ * The honesty-anchor tool — "map Lead fields to Contact
+ * fields for the conversion". Unlike the prior three
  * tools, this operates on TWO objects within the SAME vault. The
  * output is a heuristic field pairing the user MUST verify.
  *
@@ -15,7 +15,7 @@
  * disclosure; any other alias gets the alias-not-found refusal plus a
  * hint that omitting `vault` uses the served vault.
  *
- * The verbatim Q174 disclosure appears in `boundaries[]` on EVERY
+ * The verbatim disclosure appears in `boundaries[]` on EVERY
  * response, regardless of similarity-threshold result:
  *
  *   "field-mapping suggestions are heuristic — labels are matched by
@@ -33,14 +33,14 @@
  *      type compatibility (unless `includeTypeIncompatible: true`).
  *   4. Sort by similarity DESC and emit.
  *
- * Type-compatibility table (per PLAN-v3.1 §4):
+ * Type-compatibility table:
  *
  *   text ↔ text                    : compatible
  *   number ↔ number / currency     : compatible
  *   picklist ↔ picklist            : compatible (overlap not verified)
  *   reference ↔ reference          : compatible when referenced
  *                                    objects match (we treat all
- *                                    refs as compatible per v3.1's
+ *                                    refs as compatible per the
  *                                    intentionally-simple algorithm)
  *   any other combination           : incompatible
  */
@@ -233,16 +233,16 @@ const tokenize = (s: string): readonly string[] => {
 };
 
 /**
- * Token-overlap similarity. v3.1 uses the SØRENSEN-DICE coefficient
+ * Token-overlap similarity. This uses the SØRENSEN-DICE coefficient
  * (2 * |A ∩ B| / (|A| + |B|)) rather than pure Jaccard because the
- * Lead↔Contact mapping example in PLAN-v3.1 §4 / Q173 expects
+ * Lead↔Contact mapping example expects
  * `Lead_Score__c` ↔ `Contact_Score__c` to pair at ≥0.50 (with
  * `{lead, score}` ↔ `{contact, score}`, Jaccard is 1/3 ≈ 0.33; Dice
  * is 2*1/(2+2) = 0.50 — passes the 0.50 default threshold) and
  * `Industry_Vertical__c` ↔ `Vertical__c` likewise (Dice = 2*1/3 ≈
  * 0.67). The metric remains symmetric, bounded in [0, 1], and
- * intentionally simple — the v3.1 honesty discipline is that the
- * pairings are HEURISTIC and the user must verify (Q174).
+ * intentionally simple — the honesty discipline is that the
+ * pairings are HEURISTIC and the user must verify.
  */
 const jaccard = (
   a: readonly string[],
@@ -358,8 +358,8 @@ const resolveObjectSide = async (
 };
 
 /**
- * THE Q174 honesty anchor — surfaced verbatim on every response.
- * A v3.1 release without this phrase is a contract violation per the
+ * THE honesty anchor — surfaced verbatim on every response.
+ * A release without this phrase is a contract violation per the
  * PLAN §10 constitutional axis.
  */
 const HEURISTIC_MAPPING_DISCLOSURE =

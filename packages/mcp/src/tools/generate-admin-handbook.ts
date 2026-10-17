@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.generate_admin_handbook` MCP tool.
  *
- * The v2.5 documentation-generation tier admin-handbook tool. Returns
+ * The documentation-generation tier admin-handbook tool. Returns
  * a structured markdown document covering the org's purpose, main
  * objects, automation summary, permission structure, integration
  * topology, and recent changes — composed over the same graph layer
@@ -15,10 +15,10 @@
  *     Integration Topology; `'business-user'` keeps the default
  *     ordering but trims the codebase-tier rows.
  *
- * Output: `{ document: GeneratedDocument }` per the v2.5 contract.
+ * Output: `{ document: GeneratedDocument }` per the contract.
  *
  * Honesty axis: the handbook is structure, not narrative. Recent
- * Changes depends on v1.7 enrichment — when no nodes carry
+ * Changes depends on the enrichment — when no nodes carry
  * `lastModifiedDate`, the section surfaces a verbatim disclosure
  * naming the enrichment command rather than fabricating activity.
  */
@@ -264,7 +264,7 @@ const renderIntegrationSection = (
 
 /**
  * Render the Recent Changes H2. When no node in the supplied list
- * carries a non-null `lastModifiedDate`, surface the v1.7-enrichment
+ * carries a non-null `lastModifiedDate`, surface the enrichment
  * disclosure verbatim rather than fabricating activity.
  */
 const renderRecentChangesSection = (
@@ -410,7 +410,7 @@ export const generateAdminHandbookHandler = async (
     vfCount.value;
 
   // The Recent Changes candidate pool: every code-tier node, since the
-  // v1.7 enricher targets those types. An empty enrichment surfaces a
+  // enricher targets those types. An empty enrichment surfaces a
   // disclosure rather than a fabricated list.
   const recentCandidates: Node[] = [
     ...apexResult.value,

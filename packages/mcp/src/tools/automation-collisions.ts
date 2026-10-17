@@ -1273,7 +1273,7 @@ export const automationCollisionsHandler = async (
   }
   const allCycles = [...cyclesResult.value.cycles].sort(cycleSort);
 
-  // --- Byte-budget + limit the two findings lists (CR-22 `paginate`, no
+  // --- Byte-budget + limit the two findings lists (`paginate`, no
   // resumable cursor exposed — this tool's input contract is intentionally
   // just `{ object, limit }`; a truncated list tells the caller to narrow the
   // object or raise `limit` rather than page with a cursor). ---

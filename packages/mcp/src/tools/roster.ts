@@ -3,7 +3,7 @@
  *
  * Contains: MCP protocol annotation helpers, ToolDefinition types,
  * inline JSON Schema definitions for every tool, and the V01_TOOLS array
- * that is advertised via `tools/list`. Split from tools/index.ts (R7-F2)
+ * that is advertised via `tools/list`. Split from tools/index.ts
  * to remove the merge hotspot on that file.
  *
  * @see tool-dispatch.ts  — handler imports + dispatchTool + jsonResult
@@ -127,7 +127,7 @@ export const mcpProtocolAnnotationsFor = (
  *   - `name`: the JSON-RPC tool name the client invokes.
  *   - `description`: a one-line summary the client surfaces to users.
  *   - `inputSchema`: a JSON Schema object describing the tool's input.
- *     v0.1 ships placeholder schemas (`{type: 'object'}`); Phase F's
+ *     This ships placeholder schemas (`{type: 'object'}`); the
  *     `mcp-tool-X` tasks replace the entry with the real Zod-derived
  *     JSON Schema.
  *   - `annotations`: MCP protocol ToolAnnotations (MCP-01) — stamped on
@@ -332,7 +332,7 @@ const LIST_ANALYSES_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.fre
     },
     limit: { type: 'integer', minimum: 1, maximum: 200 },
     offset: { type: 'integer', minimum: 0 },
-    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    // Continuation cursor: opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
   },
 });
@@ -460,7 +460,7 @@ const GET_EDGES_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze(
     },
     limit: { type: 'integer', minimum: 1, maximum: 1000 },
     offset: { type: 'integer', minimum: 0 },
-    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    // Continuation cursor: opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
   },
   required: ['nodeId'],
@@ -543,7 +543,7 @@ const LIST_COMPONENTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.f
     parentId: { type: 'string', minLength: 1 },
     limit: { type: 'integer', minimum: 1, maximum: 500 },
     offset: { type: 'integer', minimum: 0 },
-    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    // Continuation cursor: opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
     // P4-interface-impl: ApexClass async/interface/API boolean filters.
     isQueueable: { type: 'boolean' },
@@ -605,7 +605,7 @@ const SEARCH_APEX_SOURCE_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Objec
     regex: { type: 'boolean' },
     limit: { type: 'integer', minimum: 1, maximum: 200 },
     offset: { type: 'integer', minimum: 0 },
-    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    // Continuation cursor: opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
   },
   required: ['query'],
@@ -940,7 +940,7 @@ const LIVE_USER_PERMSETS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
- * Concrete JSON Schema for `sfi.live_setup_audit_trail` (R6-27). Mirrors
+ * Concrete JSON Schema for `sfi.live_setup_audit_trail`. Mirrors
  * `liveSetupAuditTrailInputSchema` in `live-plane.ts`. `days` bounds the
  * SetupAuditTrail window (default 30, max 180 — Salesforce's own retention
  * ceiling for this object); `limit` caps the detail page (default 100, max
@@ -1441,7 +1441,7 @@ const FIND_FORMULA_REFERENCES_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       fieldApiName: { type: 'string', minLength: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
   });
@@ -1461,7 +1461,7 @@ const FIND_APEX_USAGES_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       targetId: { type: 'string', minLength: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
       edgeTypes: {
         type: 'array',
@@ -1479,13 +1479,13 @@ const FIND_APEX_USAGES_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
  * `findCodeUsagesInputSchema`. The `limit` upper bound (`500`), the
  * `edgeTypes` enum (the four code-emitted edge types), and the
  * `nodeTypes` enum (the six code node types — `ApexClass`,
- * `ApexTrigger`, plus the v1.4 frontend tier `LightningComponentBundle`,
+ * `ApexTrigger`, plus the frontend tier `LightningComponentBundle`,
  * `AuraDefinitionBundle`, `VisualforcePage`, `VisualforceComponent`)
  * are duplicated from the Zod schema in `find-code-usages.ts`; drift
  * between Zod and this schema is a code-review concern.
  *
  * `references` is included in the `edgeTypes` enum because LWC/Aura/VF
- * extractors emit `references` to other components — the v0.3-era
+ * extractors emit `references` to other components — the original
  * Apex-only enum (`readsFrom`/`writesTo`/`callsApex`) is a strict
  * subset of this one.
  */
@@ -1652,7 +1652,7 @@ const EFFECTIVE_PERMISSIONS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       objectId: { type: 'string', minLength: 1 },
       limit: { type: 'number', minimum: 1, maximum: 200 },
       offset: { type: 'number', minimum: 0 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
       perContainer: { type: 'boolean' },
     },
@@ -1680,7 +1680,7 @@ const LIST_VIEW_SHARING_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       nameContains: { type: 'string', minLength: 1 },
       limit: { type: 'number', minimum: 1, maximum: 120 },
       offset: { type: 'number', minimum: 0 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
     anyOf: atLeastOneOf('componentId', 'object', 'objectApiName', 'objectId'),
@@ -1696,14 +1696,14 @@ const WHO_CAN_RUN_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freez
     componentId: { type: 'string', minLength: 1 },
     limit: { type: 'number', minimum: 1, maximum: 500 },
     offset: { type: 'number', minimum: 0 },
-    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    // Continuation cursor: opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
   },
   required: ['componentId'],
 });
 
 /**
- * Concrete JSON Schema for `sfi.explain_error` (R6-09). Mirrors
+ * Concrete JSON Schema for `sfi.explain_error`. Mirrors
  * `explainErrorInputSchema` — a required `errorText` (the pasted error string)
  * plus an optional `object` SObject narrowing hint. The natural aliases
  * `error` / `message` / `errorMessage` / `text` are accepted for `errorText`
@@ -1796,7 +1796,7 @@ const WHO_CAN_ACCESS_OBJECT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
- * Concrete JSON Schema for `sfi.guest_exposure_report` (R6-17). Mirrors
+ * Concrete JSON Schema for `sfi.guest_exposure_report`. Mirrors
  * `guestExposureReportInputSchema`. Two optional, composable scope axes plus
  * paging — no required field (a bare call audits every modeled Experience
  * Cloud / Site surface):
@@ -1926,7 +1926,7 @@ const LAYOUT_ASSIGNMENTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       objectId: { type: 'string', minLength: 1, description: 'Object id' },
       limit: { type: 'number', minimum: 1, maximum: 250 },
       offset: { type: 'number', minimum: 0 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
     anyOf: atLeastOneOf('componentId', 'object', 'objectApiName', 'objectId'),
@@ -1958,7 +1958,7 @@ const USER_ABILITY_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.free
     objectApiName: { type: 'string', minLength: 1 },
     limit: { type: 'number', minimum: 1, maximum: 500 },
     offset: { type: 'number', minimum: 0 },
-    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    // Continuation cursor: opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
   },
 });
@@ -2012,7 +2012,7 @@ const LIGHTNING_PAGES_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.f
     profileName: { type: 'string', minLength: 1 },
     limit: { type: 'number', minimum: 1, maximum: 250 },
     offset: { type: 'number', minimum: 0 },
-    // CR-22 continuation cursor (object mode): opaque token from a prior page's nextCursor.
+    // Continuation cursor (object mode): opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
   },
   anyOf: atLeastOneOf('componentId', 'object', 'objectApiName', 'objectId'),
@@ -2093,7 +2093,7 @@ const APP_ACCESS_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze
     nameContains: { type: 'string', minLength: 1 },
     limit: { type: 'number', minimum: 1, maximum: 250 },
     offset: { type: 'number', minimum: 0 },
-    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    // Continuation cursor: opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
   },
 });
@@ -2125,7 +2125,7 @@ const TAB_AVAILABILITY_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.
     objectId: { type: 'string', minLength: 1 },
     limit: { type: 'number', minimum: 1, maximum: 500 },
     offset: { type: 'number', minimum: 0 },
-    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    // Continuation cursor: opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
   },
 });
@@ -2157,7 +2157,7 @@ const LIFECYCLE_PROCESS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       businessProcess: { type: 'string', minLength: 1 },
       limit: { type: 'number', minimum: 1, maximum: 200 },
       offset: { type: 'number', minimum: 0 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
     // `objectApiName` is no longer listed as required: now that `objectId` is
@@ -2248,7 +2248,7 @@ const EVENT_SUBSCRIBERS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       eventApiName: { type: 'string', minLength: 1, description: 'Platform Event API name' },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
   });
@@ -2332,7 +2332,7 @@ const SAFE_TO_DELETE_FIELD_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       componentId: { type: 'string', minLength: 1 },
       // Finding #35: 'proposal' emits a LOCAL destructiveChanges.xml for the field.
       format: { type: 'string', enum: ['json', 'checklist', 'proposal'] },
-      // CR-CAP-L5: opt-in live population cross-check on a `safe` verdict.
+      // Opt-in live population cross-check on a `safe` verdict.
       liveEnabled: { type: 'boolean' },
       orgAlias: { type: 'string', minLength: 1 },
     },
@@ -2401,7 +2401,7 @@ const DIFF_SNAPSHOTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       fromLabel: { type: 'string', minLength: 1 },
       toLabel: { type: 'string', minLength: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
       // STEP-2: 'summary' mode adds the compact churn digest (folded-in churn).
       summary: { type: 'boolean' },
@@ -2434,7 +2434,7 @@ const COMPARE_COMPONENTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
  * duplicated from the Zod schema in `pii-inventory.ts`; drift between
  * Zod and this schema is a code-review concern. The `limit` upper
  * bound (`500`) is shared with the other enumeration-style tools.
- * `format` (R6-21) is an optional `'json'` (default) / `'csv'` enum.
+ * `format` is an optional `'json'` (default) / `'csv'` enum.
  */
 const PII_INVENTORY_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
@@ -2459,9 +2459,9 @@ const PII_INVENTORY_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
-      // R6-21: 'csv' returns `csv` (rows serialized as CSV) instead of `fields`.
+      // 'csv' returns `csv` (rows serialized as CSV) instead of `fields`.
       format: { type: 'string', enum: ['json', 'csv'] },
     },
   });
@@ -2469,7 +2469,7 @@ const PII_INVENTORY_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
 /**
  * Concrete JSON Schema for `sfi.history_tracking_gaps`. Mirrors
  * `historyTrackingGapsInputSchema` in `history-tracking-gaps.ts`. Same
- * `objectId`/`objectApiName` alias + CR-22 pagination shape as `pii_inventory`.
+ * `objectId`/`objectApiName` alias + pagination shape as `pii_inventory`.
  */
 const HISTORY_TRACKING_GAPS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
@@ -2584,15 +2584,15 @@ const RECORDTYPE_AVAILABILITY_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
- * Concrete JSON Schema for `sfi.field_360` (v3.0 R4). Mirrors
+ * Concrete JSON Schema for `sfi.field_360`. Mirrors
  * `field360InputSchema`. The `fieldId` accepts either canonical
  * `CustomField:Object.Field` or short `Object.Field` form (the
  * handler normalises); non-matching shapes surface as
- * `invalid-query`. `maxRowsPerSection` upper bound (`200`) is the Q165 hard
+ * `invalid-query`. `maxRowsPerSection` upper bound (`200`) is the hard
  * cap.
  *
  * FIELD-360-ADVERTISED-SECTIONS-UNDERSTATE-SCHEMA: `includeSections` used to
- * hand-list "the ten content sections defined in PLAN-v3.0 §4" and had fallen
+ * hand-list "the ten content sections" and had fallen
  * two behind the Zod schema — `rollups` and `listViews` were missing, so a host
  * that validates arguments against this advertised schema REJECTED the two
  * sections the handler had gained (and which exist precisely to stop roll-up
@@ -2620,7 +2620,7 @@ const FIELD_360_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
         enum: ['source', 'edge-type', 'confidence'],
       },
       maxRowsPerSection: { type: 'integer', minimum: 1, maximum: 200 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
       includeConceptReasoning: {
         type: 'boolean',
@@ -2634,7 +2634,7 @@ const FIELD_360_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
- * Concrete JSON Schema for `sfi.field_lineage` (v3.0 R5). Mirrors
+ * Concrete JSON Schema for `sfi.field_lineage`. Mirrors
  * `fieldLineageInputSchema`. The `direction` enum mirrors the three
  * walk modes; `maxDepth` bounds (`[1, 5]`) duplicate the cap shared
  * with `sfi.call_graph`. `includeFieldsOfTruth` / `includeFiresWhen`
@@ -2695,7 +2695,7 @@ const DOMAIN_CLUSTERS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     properties: {
       minDensity: { type: 'number', minimum: 0, maximum: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 50 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
       // Optional SEED — "which domain owns {X}?". A canonical `Type:` id or a
       // bare api name; returns the cluster CONTAINING it (+ `appliedScope`).
@@ -2720,7 +2720,7 @@ const DOMAIN_CLUSTERS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
  * hand-copy carrying 47 of 101 types while this comment claimed it "mirrors
  * the contracts `ComponentType` union", so a host validating against the
  * advertised schema rejected 54 types the Zod validator accepts. The `limit`
- * upper bound (`500`) is the v1.7 honesty cap, and the schema is the v1.7
+ * upper bound (`500`) is the honesty cap, and the schema is the
  * R2 freshness headline answer to the buyer-priority gap "when was
  * X modified?".
  */
@@ -2748,7 +2748,7 @@ const CHANGED_SINCE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
  * `lastModifiedInputSchema`. `componentId` is a non-empty string; the
  * canonical `{Type}:{ApiName}` form is enforced downstream by the
  * graph lookup (an unknown id yields `component-not-found`, not a
- * Zod-level rejection). The v1.7 R3 per-component freshness lookup;
+ * Zod-level rejection). The per-component freshness lookup;
  * the response carries the `enriched: boolean` honesty flag and the
  * verbatim disclosure naming the CLI command to populate missing
  * fields. Drift between Zod and this schema is a code-review concern.
@@ -2871,7 +2871,7 @@ const ORDER_OF_EXECUTION_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       // PER EVENT, not across the four — see `paging.note` on the response.
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
     // No key is individually required: the object is named by any ONE of the
@@ -3028,7 +3028,7 @@ const PICKLIST_INTEGRITY_SCAN_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     properties: {
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
       scope: APP_SCOPE_INPUT_JSON_SCHEMA,
     },
@@ -3061,8 +3061,8 @@ const FLOW_TRACE_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze
  * constraint (must start with `ApexClass:` or `ApexTrigger:`) is not
  * expressible in JSON Schema; non-matching prefixes surface as
  * `invalid-query` at the handler boundary. `methodName` is carried
- * verbatim into the response — v2.0f does NOT subset by method (the
- * method-level narrative is deferred to v2.7).
+ * verbatim into the response — this does NOT subset by method (the
+ * method-level narrative is deferred).
  */
 const EXPLAIN_APEX_METHOD_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
@@ -3130,7 +3130,7 @@ const EXPORT_MANIFEST_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
  * `excludeManagedPackage` / `excludeStandardFields` toggles default to
  * `true` at the handler. `objectId` (added FLD-01) is the primary
  * object-scope parameter; the legacy `parentObjectFilter` (bare api name)
- * remains for back-compat. `format` (R6-21) is an optional `'json'`
+ * remains for back-compat. `format` is an optional `'json'`
  * (default) / `'csv'` enum. Drift between Zod and this schema is a code-
  * review concern.
  */
@@ -3147,10 +3147,10 @@ const UNUSED_FIELDS_DEEP_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
       cursor: { type: 'string', minLength: 1 },
-      // CR-CAP-L5: opt-in live population cross-check on `high`-confidence fields.
+      // Opt-in live population cross-check on `high`-confidence fields.
       liveEnabled: { type: 'boolean' },
       orgAlias: { type: 'string', minLength: 1 },
-      // R6-21: 'csv' returns `csv` (rows serialized as CSV) instead of `fields`.
+      // 'csv' returns `csv` (rows serialized as CSV) instead of `fields`.
       // STEP-2: 'cleanup' adds a ranked findings[] roster + report/dashboard
       // caveat (the folded-in field_cleanup_candidates MODE).
       // Finding #35: 'proposal' attaches a LOCAL destructiveChanges.xml bundle.
@@ -3194,7 +3194,7 @@ const PROCESS_BUILDER_MIGRATION_CANDIDATES_INPUT_SCHEMA: Readonly<
       enum: ['complexity', 'object', 'name'],
     },
     limit: { type: 'integer', minimum: 1, maximum: 500 },
-    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    // Continuation cursor: opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
     // PROCESS-BUILDER-MIGRATION-IGNORES-OBJECT-SCOPE: object identifiers narrow
     // each list to candidates parented to that object (+ `appliedScope`),
@@ -3218,7 +3218,7 @@ const UNASSIGNED_PERMISSION_SETS_INPUT_SCHEMA: Readonly<
     includeManagedPackage: { type: 'boolean' },
     includeMutingPermissionSets: { type: 'boolean' },
     limit: { type: 'integer', minimum: 1, maximum: 500 },
-    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    // Continuation cursor: opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
   },
 });
@@ -3420,7 +3420,7 @@ const COMPONENT_CHANGE_ATTRIBUTION_INPUT_SCHEMA: Readonly<Record<string, unknown
         description: 'Max matched SetupAuditTrail rows to return (default 50).',
       },
       offset: { type: 'integer', minimum: 0 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
     anyOf: atLeastOneOf('componentId', 'objectApiName'),
@@ -3467,7 +3467,7 @@ const EMPTY_QUEUES_AND_GROUPS_INPUT_SCHEMA: Readonly<
     nameContains: { type: 'string', minLength: 1 },
     includeManagedPackage: { type: 'boolean' },
     limit: { type: 'integer', minimum: 1, maximum: 500 },
-    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    // Continuation cursor: opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
   },
 });
@@ -3517,8 +3517,8 @@ const TECH_DEBT_SCORE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
 /**
  * Concrete JSON Schema for `sfi.code_quality_audit`. Mirrors
  * `codeQualityAuditInputSchema`. The `severityFilter` enum mirrors the
- * v2.1 five-tier scale plus the `'all'` sentinel; the `ruleFilter`
- * array of rule ids is open-ended (the v2.1 catalog ships 15 rules but
+ * five-tier scale plus the `'all'` sentinel; the `ruleFilter`
+ * array of rule ids is open-ended (the catalog ships 15 rules but
  * future recognizer additions append without contract changes). The
  * `limit` upper bound (`500`) is shared with the enumeration-style
  * tools. Drift between Zod and this schema is a code-review concern.
@@ -3547,7 +3547,7 @@ const CODE_QUALITY_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
     // Mirrors the Zod `.strict()`: an unknown key on a SCOPING tool is rejected
@@ -3571,7 +3571,7 @@ const GOVERNOR_LIMIT_RISKS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       apiName: { type: 'string', minLength: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
   });
@@ -3601,7 +3601,7 @@ const FIND_HARDCODED_VALUES_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       excludeTestClasses: { type: 'boolean' },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
   });
@@ -3624,7 +3624,7 @@ const CRUD_FLS_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       apiName: { type: 'string', minLength: 1 },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
   });
@@ -3646,7 +3646,7 @@ const TEST_COVERAGE_GAPS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
   });
@@ -3687,7 +3687,7 @@ const VALUE_CHANGE_AUDIT_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       fields: { type: 'array', items: { type: 'string' } },
       verbosity: { type: 'string', enum: ['summary', 'detail'] },
       limit: { type: 'integer', minimum: 1, maximum: 200 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
     additionalProperties: false,
@@ -3853,7 +3853,7 @@ const WHAT_IF_MERGE_PROFILES_INPUT_SCHEMA: Readonly<
     profileIdB: { type: 'string', minLength: 1 },
     limit: { type: 'integer', minimum: 1, maximum: 2000 },
     offset: { type: 'integer', minimum: 0 },
-    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    // Continuation cursor: opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
     // Finding #35: 'proposal' attaches a LOCAL package.xml pulling both profiles.
     format: { type: 'string', enum: ['json', 'proposal'] },
@@ -3884,7 +3884,7 @@ const WHAT_IF_SPLIT_PROFILE_INPUT_SCHEMA: Readonly<
     },
     limit: { type: 'integer', minimum: 1, maximum: 2000 },
     offset: { type: 'integer', minimum: 0 },
-    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    // Continuation cursor: opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
   },
   required: ['profileId', 'targetPermSets'],
@@ -3915,7 +3915,7 @@ const WHAT_IF_PERMSET_INPUT_SCHEMA: Readonly<
     },
     limit: { type: 'integer', minimum: 1, maximum: 2000 },
     offset: { type: 'integer', minimum: 0 },
-    // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+    // Continuation cursor: opaque token from a prior page's nextCursor.
     cursor: { type: 'string', minLength: 1 },
   },
   required: ['permissionSetId'],
@@ -3926,7 +3926,7 @@ const WHAT_IF_PERMSET_INPUT_SCHEMA: Readonly<
  * `generateDataDictionaryInputSchema`. The `objectId` prefix constraint
  * (must start with `CustomObject:`) is not expressible in JSON Schema;
  * non-matching prefixes surface as `invalid-query` at the handler
- * boundary. `format` (R6-21) is an optional `'markdown'` (default) /
+ * boundary. `format` is an optional `'markdown'` (default) /
  * `'csv'` enum, mirroring `generate_architecture_overview`'s `format`
  * plumbing. Drift between Zod and this schema is a code-review concern.
  */
@@ -4020,7 +4020,7 @@ const GENERATE_COMPLIANCE_REPORT_INPUT_SCHEMA: Readonly<
     componentId: { type: 'string', minLength: 1 },
     limit: { type: 'integer', minimum: 1, maximum: 100 },
     offset: { type: 'integer', minimum: 0 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
   },
   additionalProperties: false,
@@ -4029,7 +4029,7 @@ const GENERATE_COMPLIANCE_REPORT_INPUT_SCHEMA: Readonly<
 /**
  * Concrete JSON Schema for `sfi.generate_onboarding_doc`. Mirrors
  * `generateOnboardingDocInputSchema`. The `personaFocus` enum mirrors
- * the two persona values the v2.5 onboarding-doc generator supports
+ * the two persona values the onboarding-doc generator supports
  * (`'admin' | 'developer'`); omitted defaults to `'admin'` at the
  * handler.
  */
@@ -4129,8 +4129,8 @@ const INTERPRET_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.freeze(
  * constraint (must start with `ApexClass:` or `ApexTrigger:`) is not
  * expressible in JSON Schema; non-matching prefixes surface as
  * `invalid-query`. `methodName` is optional and echoed verbatim into
- * the response — v2.7 does NOT subset coverage by method (deferred to
- * v2.7.1). Drift between Zod and this schema is a code-review concern.
+ * the response — this does NOT subset coverage by method (deferred).
+ * Drift between Zod and this schema is a code-review concern.
  */
 const TEST_COVERAGE_FOR_METHOD_INPUT_SCHEMA: Readonly<
   Record<string, unknown>
@@ -4425,7 +4425,7 @@ const ENDPOINT_CATALOG_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
- * Concrete JSON Schema for `sfi.field_meaning` (v2.9 R4). Mirrors
+ * Concrete JSON Schema for `sfi.field_meaning`. Mirrors
  * `fieldMeaningInputSchema` — `fieldId` is the required CustomField
  * canonical id. Drift between Zod and this schema is a code-review
  * concern.
@@ -4440,7 +4440,7 @@ const FIELD_MEANING_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
- * Concrete JSON Schema for `sfi.disambiguate_concepts` (v2.9 R4).
+ * Concrete JSON Schema for `sfi.disambiguate_concepts`.
  * Mirrors `disambiguateConceptsInputSchema` — `conceptA` and
  * `conceptB` are required concept tokens; `limit` is optional and
  * caps each bucket's matchingFields slice. The `200` upper bound is
@@ -4459,7 +4459,7 @@ const DISAMBIGUATE_CONCEPTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
- * Concrete JSON Schema for `sfi.field_provenance` (v2.9 R4). Mirrors
+ * Concrete JSON Schema for `sfi.field_provenance`. Mirrors
  * `fieldProvenanceInputSchema` — `fieldId` is the required CustomField
  * canonical id.
  */
@@ -4473,7 +4473,7 @@ const FIELD_PROVENANCE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
- * Concrete JSON Schema for `sfi.find_field_anywhere` (v2.2 R2). Mirrors
+ * Concrete JSON Schema for `sfi.find_field_anywhere`. Mirrors
  * `findFieldAnywhereInputSchema`. The CustomField id is supplied as
  * `targetId` OR its alias `fieldId` (field-tool-family parity); exactly one
  * is required and must start with `CustomField:` — a missing/empty id or a
@@ -4494,14 +4494,14 @@ const FIND_FIELD_ANYWHERE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
         type: 'array',
         items: { type: 'string', minLength: 1 },
       },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
     anyOf: [{ required: ['targetId'] }, { required: ['fieldId'] }],
   });
 
 /**
- * Concrete JSON Schema for `sfi.find_semantic_field` (v2.2 R2). Mirrors
+ * Concrete JSON Schema for `sfi.find_semantic_field`. Mirrors
  * `findSemanticFieldInputSchema`. `description` is the natural-
  * language concept. `objectIds` optionally filters the candidate
  * field set. `limit` defaults to 10 and is capped at 50; `minScore`
@@ -4526,8 +4526,8 @@ const FIND_SEMANTIC_FIELD_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
- * Concrete JSON Schema for `sfi.find_hardcoded_values_anywhere` (v2.2
- * R2). Mirrors `findHardcodedValuesAnywhereInputSchema`. At least one
+ * Concrete JSON Schema for `sfi.find_hardcoded_values_anywhere`.
+ * Mirrors `findHardcodedValuesAnywhereInputSchema`. At least one
  * of `value` / `category` must be supplied (enforced at the handler
  * boundary — JSON Schema cannot express "or"). The `scope` enum
  * narrows the corpora searched; default is all four. `limit` defaults
@@ -4576,7 +4576,7 @@ const FIND_HARDCODED_VALUES_ANYWHERE_INPUT_SCHEMA: Readonly<
 });
 
 /**
- * Concrete JSON Schema for `sfi.find_clone_patterns` (v2.2 R2). Mirrors
+ * Concrete JSON Schema for `sfi.find_clone_patterns`. Mirrors
  * `findClonePatternsInputSchema`. `componentId` is required;
  * non-Apex / non-Flow prefixes surface as `invalid-query` at the
  * handler boundary. `limit` defaults to 10 and is capped at 50;
@@ -4594,7 +4594,7 @@ const FIND_CLONE_PATTERNS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
- * Concrete JSON Schema for `sfi.find_dead_code` (v2.2 R2). Mirrors
+ * Concrete JSON Schema for `sfi.find_dead_code`. Mirrors
  * `findDeadCodeInputSchema`. `types` is an optional array of
  * ComponentTypes; default is `['ApexClass', 'ApexTrigger', 'Flow',
  * 'CustomField']`. `includeUncertain` defaults to false. `limit`
@@ -4627,7 +4627,7 @@ const FIND_DEAD_CODE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
- * Concrete JSON Schema for `sfi.cpq_rule_chain` (v2.6a R2). Mirrors
+ * Concrete JSON Schema for `sfi.cpq_rule_chain`. Mirrors
  * `cpqRuleChainInputSchema` — `ruleId` is the required CPQ rule
  * canonical id. The prefix constraint (`CpqProductRule:` or
  * `CpqPriceRule:`) is not expressible in JSON Schema, so callers that
@@ -4646,7 +4646,7 @@ const CPQ_RULE_CHAIN_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
 
 /**
  * Concrete JSON Schema for `sfi.cpq_quote_template_breakdown`
- * (v2.6a R2). Mirrors `cpqQuoteTemplateBreakdownInputSchema` —
+ * Mirrors `cpqQuoteTemplateBreakdownInputSchema` —
  * `templateId` is the required CpqQuoteTemplate canonical id. The
  * prefix constraint (`CpqQuoteTemplate:`) is not expressible in JSON
  * Schema; callers with non-CpqQuoteTemplate ids are rejected at the
@@ -4664,7 +4664,7 @@ const CPQ_QUOTE_TEMPLATE_BREAKDOWN_INPUT_SCHEMA: Readonly<
 });
 
 /**
- * Concrete JSON Schema for `sfi.cpq_dependency_map` (v2.6a R2).
+ * Concrete JSON Schema for `sfi.cpq_dependency_map`.
  * Mirrors `cpqDependencyMapInputSchema` — both fields are optional.
  * When `cpqComponentId` is set, the prefix constraint (any of the five
  * CPQ-typed prefixes) is enforced at the handler boundary because JSON
@@ -4684,10 +4684,10 @@ const CPQ_DEPENDENCY_MAP_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
- * Concrete JSON Schema for `sfi.compare_vaults` (v3.1). Mirrors
+ * Concrete JSON Schema for `sfi.compare_vaults`. Mirrors
  * `compareVaultsInputSchema`. Both alias inputs are required non-empty
  * strings. Optional `objectFilter` / `typeFilter` narrow the diff;
- * `includeVolatileProperties` toggles the v2.0c-inherited noise filter.
+ * `includeVolatileProperties` toggles the inherited noise filter.
  */
 const COMPARE_VAULTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   Object.freeze({
@@ -4701,7 +4701,7 @@ const COMPARE_VAULTS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
       format: { type: 'string', enum: ['json', 'markdown'] },
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
     required: ['vaultA', 'vaultB'],
@@ -4720,7 +4720,7 @@ const PROMOTION_READINESS_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
- * Concrete JSON Schema for `sfi.compare_object_across_vaults` (v3.1).
+ * Concrete JSON Schema for `sfi.compare_object_across_vaults`.
  * Mirrors `compareObjectAcrossVaultsInputSchema`.
  */
 const COMPARE_OBJECT_ACROSS_VAULTS_INPUT_SCHEMA: Readonly<
@@ -4737,7 +4737,7 @@ const COMPARE_OBJECT_ACROSS_VAULTS_INPUT_SCHEMA: Readonly<
 });
 
 /**
- * Concrete JSON Schema for `sfi.compare_profile_across_vaults` (v3.1).
+ * Concrete JSON Schema for `sfi.compare_profile_across_vaults`.
  * Mirrors `compareProfileAcrossVaultsInputSchema` — including the 0.3.3 paging
  * knobs, which the Zod schema enforces and this one must therefore advertise.
  */
@@ -4778,10 +4778,10 @@ const COMPARE_PROFILE_ACROSS_VAULTS_INPUT_SCHEMA: Readonly<
 });
 
 /**
- * Concrete JSON Schema for `sfi.field_mapping_between_objects` (v3.1).
+ * Concrete JSON Schema for `sfi.field_mapping_between_objects`.
  * Mirrors `fieldMappingBetweenObjectsInputSchema`. Single-vault tool —
  * `vault` is OPTIONAL and defaults to the SERVED vault, so the normal
- * registry-less deployment works out of the box. The Q174 honesty
+ * registry-less deployment works out of the box. The honesty
  * anchor surfaces the verbatim heuristic-mapping disclosure on every
  * response.
  */
@@ -4809,7 +4809,7 @@ const FIELD_MAPPING_BETWEEN_OBJECTS_INPUT_SCHEMA: Readonly<
 });
 
 /**
- * Concrete JSON Schema for `sfi.integration_procedure_chain` (v3.2 R3b).
+ * Concrete JSON Schema for `sfi.integration_procedure_chain`.
  * Mirrors `integrationProcedureChainInputSchema`. The
  * `OmniIntegrationProcedure:` prefix constraint is not expressible
  * in JSON Schema, so callers that supply a non-IP id are rejected at
@@ -4982,7 +4982,7 @@ const OMNI_SAVE_TRACE_INPUT_SCHEMA: Readonly<Record<string, unknown>> = Object.f
 });
 
 /**
- * Concrete JSON Schema for `sfi.omniscript_flow` (v3.2 R3). Mirrors
+ * Concrete JSON Schema for `sfi.omniscript_flow`. Mirrors
  * `omniscriptFlowInputSchema`. The `omniScriptId` prefix constraint
  * (must start with `OmniScript:`) is not expressible in JSON Schema;
  * non-matching prefixes surface as `invalid-query` at the handler
@@ -5000,8 +5000,8 @@ const OMNISCRIPT_FLOW_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
- * Concrete JSON Schema for `sfi.omniuicard_widget_breakdown` (v3.2
- * R3). Mirrors `omniuicardWidgetBreakdownInputSchema` — the
+ * Concrete JSON Schema for `sfi.omniuicard_widget_breakdown`.
+ * Mirrors `omniuicardWidgetBreakdownInputSchema` — the
  * `omniUiCardId` prefix constraint (must start with `OmniUiCard:`)
  * is not expressible in JSON Schema; callers that supply a
  * non-OmniUiCard id are rejected at the handler boundary with
@@ -5019,7 +5019,7 @@ const OMNIUICARD_WIDGET_BREAKDOWN_INPUT_SCHEMA: Readonly<
 });
 
 /**
- * Concrete JSON Schema for `sfi.datatransform_field_map` (v3.2). Mirrors
+ * Concrete JSON Schema for `sfi.datatransform_field_map`. Mirrors
  * `datatransformFieldMapInputSchema`. The `dataTransformId` prefix
  * constraint (must start with `OmniDataTransform:`) is not expressible
  * in JSON Schema; callers that supply a non-OmniDataTransform id are
@@ -5037,7 +5037,7 @@ const DATATRANSFORM_FIELD_MAP_INPUT_SCHEMA: Readonly<
 });
 
 /**
- * Concrete JSON Schema for `sfi.decision_table_browse` (v3.2). Mirrors
+ * Concrete JSON Schema for `sfi.decision_table_browse`. Mirrors
  * `decisionTableBrowseInputSchema`. The `decisionTableId` prefix
  * constraint (must start with `DecisionTable:`) is not expressible in
  * JSON Schema; callers that supply a non-DecisionTable id are rejected
@@ -5054,44 +5054,42 @@ const DECISION_TABLE_BROWSE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
   });
 
 /**
- * The 49 tools the MCP server advertises: the original 10 from v0.1,
- * the two architect-facing semantic-edge tools added in v0.2
- * (`sfi.get_impact` and `sfi.find_formula_references`), the
- * developer-facing `sfi.find_apex_usages` added in v0.3 alongside the
- * heuristic Apex scanner, the admin-facing
- * `sfi.why_cant_user_see_record` headline tool added in v1.1 alongside
- * the sharing & visibility extractors, the v1.2 layout-routing
- * headline `sfi.layout_for_user` added alongside the record-types +
- * UI-surfaces tier, the v1.5 architect integration-topology pair
- * (`sfi.integration_map`, `sfi.event_subscribers`) added alongside the
- * integration-surface and platform-event extractors, the v1.4
- * broadened developer tool `sfi.find_code_usages` added alongside the
- * LWC/Aura/VF frontend extractors (the strict superset of
- * `sfi.find_apex_usages` that also surfaces frontend referrers and the
- * `references` edge type they emit), the v1.6 business-user
- * record-value pair (`sfi.lookup_record`, `sfi.explain_field`) added
- * alongside the CustomMetadataRecord + CustomSettingRecord extractors,
- * the v2.0b buyer-priority composition pair
+ * The 49 tools the MCP server advertises: the original 10, the two
+ * architect-facing semantic-edge tools (`sfi.get_impact` and
+ * `sfi.find_formula_references`), the developer-facing
+ * `sfi.find_apex_usages` added alongside the heuristic Apex scanner, the
+ * admin-facing `sfi.why_cant_user_see_record` headline tool added alongside
+ * the sharing & visibility extractors, the layout-routing headline
+ * `sfi.layout_for_user` added alongside the record-types + UI-surfaces
+ * tier, the architect integration-topology pair (`sfi.integration_map`,
+ * `sfi.event_subscribers`) added alongside the integration-surface and
+ * platform-event extractors, the broadened developer tool
+ * `sfi.find_code_usages` added alongside the LWC/Aura/VF frontend
+ * extractors (the strict superset of `sfi.find_apex_usages` that also
+ * surfaces frontend referrers and the `references` edge type they emit),
+ * the business-user record-value pair (`sfi.lookup_record`,
+ * `sfi.explain_field`) added alongside the CustomMetadataRecord +
+ * CustomSettingRecord extractors, the buyer-priority composition pair
  * (`sfi.safe_to_delete_field`, `sfi.unused_components`) added as pure
  * compositions over existing edges — no new extractors, no new
- * contracts, no new EdgeTypes — the v2.0c snapshot + diff pair
+ * contracts, no new EdgeTypes — the snapshot + diff pair
  * (`sfi.diff_snapshots`, `sfi.compare_components`) added alongside
  * the snapshot CLI infrastructure that answers buyer-priority #8
  * ("what changed in this org since last week?") and #10 ("compare
- * profiles / perm sets / flow versions"), the v2.0d compliance/privacy
+ * profiles / perm sets / flow versions"), the compliance/privacy
  * pair (`sfi.pii_inventory`, `sfi.field_access_audit`) added alongside
  * the `pii-detection` pattern recognizer that answers buyer-priority
  * #5 ("which fields contain PII and who can see/export them?"), and
- * the v2.0g org-tour pair (`sfi.org_overview`, `sfi.domain_clusters`)
+ * the org-tour pair (`sfi.org_overview`, `sfi.domain_clusters`)
  * added as pure compositions over the existing graph queries to
  * answer buyer-priority #9 ("I'm new — give me a tour of this org"),
- * the v2.0e lifecycle-narrator trio
+ * the lifecycle-narrator trio
  * (`sfi.what_happens_on_save`, `sfi.why_field_changed`,
  * `sfi.order_of_execution`) added as pure compositions over the
- * v2.0a `firesWhen` ConditionalContext primitive to answer buyer-
+ * `firesWhen` ConditionalContext primitive to answer buyer-
  * priority #1 ("why did this field get updated?"), #2 ("what happens
  * when I save this record?"), and #3 ("what's the order of execution
- * for THIS object update in THIS org?"), and the v1.7 R3 per-component
+ * for THIS object update in THIS org?"), and the per-component
  * freshness tool `sfi.last_modified` added alongside `sfi.changed_since`
  * to complete the freshness tool surface — the per-id sibling of the
  * range-scan tool, both reading the Tooling-API-enriched
@@ -5099,8 +5097,7 @@ const DECISION_TABLE_BROWSE_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
  * with backward-compat fallback to the legacy top-level fields.
  * Order is the order they appear in `tools/list` responses; clients
  * should not assume meaning from it but stability is helpful for
- * fixture-based tests. v0.2, v0.3, v1.1, v1.2, v1.4, v1.5, v1.6,
- * v2.0b, v2.0c, v2.0d, v2.0g, and v2.0e entries are appended at the
+ * fixture-based tests. Later entries are appended at the
  * tail so existing fixtures keyed off the prefix continue to match.
  *
  * Per `build-mcp-tool/SKILL.md`, each tool's real input schema is
@@ -5269,7 +5266,7 @@ const ORG_HISTORY_INPUT_SCHEMA: Readonly<Record<string, unknown>> =
     properties: {
       limit: { type: 'integer', minimum: 1, maximum: 500 },
       offset: { type: 'integer', minimum: 0 },
-      // CR-22 continuation cursor: opaque token from a prior page's nextCursor.
+      // Continuation cursor: opaque token from a prior page's nextCursor.
       cursor: { type: 'string', minLength: 1 },
     },
     additionalProperties: false,
@@ -6298,10 +6295,10 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     description: "ORG-WIDE only — to document ONE object for a new hire use `sfi.object_360` with `format: \"handbook\"`. Composes a structured markdown new-admin / new-developer tour chaining `sfi.generate_admin_handbook` + `sfi.generate_architecture_overview` + `sfi.org_overview` for top objects + a custom-field-label glossary builder (heuristic on labels appearing in fewer than 5 objects). Body covers What This Org Does, Main Data Model (top 3 objects), Common Workflows, How Security Works, Naming Conventions, Glossary, Key Contacts (or disclosure when enrichment absent), and Where To Go Next (persona-specific tool hints). Optional `personaFocus` (`'admin' | 'developer'`, default `'admin'`). Returns a `GeneratedDocument` payload. Honesty axis: glossary entries are heuristic — a label on a single object MAY be org-specific terminology or may simply be an underused standard label. The glossary tallies and the Key Contacts ranking are built by scanning the COMPLETE CustomField and ApexClass/ApexTrigger/Flow populations (the SQL OFFSET is windowed forward, so they are not the top of an alphabetical first page); a residual full-scan ceiling appends an explicit note rather than silently shortening the list. Key Contacts depends on enrichment.",
     inputSchema: GENERATE_ONBOARDING_DOC_INPUT_SCHEMA,
   },
-  // v2.7 R2 — deep code understanding tier (call-graph / downstream-effects /
+  // Deep code understanding tier (call-graph / downstream-effects /
   // test-coverage-for-method / meaningful-test-audit / method-reachability).
   // All five operate at CLASS granularity; method-level edge resolution is
-  // deferred to v2.7.1.
+  // deferred.
   {
     name: 'sfi.call_graph',
     description: "Deep code tool: given a root `ApexClass:` or `ApexTrigger:` id and an optional `direction` (`'downstream' | 'upstream' | 'both'`; defaults to `'both'`), BFS over `callsApex` edges up to `maxDepth` hops (default 3, max 5). Returns the discovered nodes (each labelled with the shortest-path hop count from the root), the traversed edges — each carrying `methods` (the methods of the target class the source invokes) — a `cycleDetected: boolean`, the `maxDepthReached`, and the disclosure. The optional `method` arg narrows the root's DIRECT edges to those involving that method, e.g. `direction:'upstream' + method:'deleteRecord'` answers \"who calls Root.deleteRecord\" (deeper hops are unfiltered). Cycle detection is keyed by node id; a back-edge during the walk flips the flag without aborting. Both-direction walks dedupe overlapping nodes/edges. THE DEFAULT WALK IS `callsApex` ONLY, deliberately — a static-type `references` edge is not a call, and drawing one in a call graph would misstate control flow. To keep that narrowness honest the response also carries `walkedEdgeTypes` (what was traversed) and `otherUsageInEdges` (`{count, byType}` — ALWAYS present; the root's incoming usage edges this walk did NOT follow, so `edges: []` reads as \"no callsApex call was modelled\" and never as \"no callers\", and a count of 0 there is a CHECKED zero rather than an absent field). Pass `edgeTypes` to widen the walk — e.g. `['callsApex','dispatchesAsync']` to include async dispatch — and `soundness` reports `complete: false` naming the un-walked types whenever a strict subset was traversed. Honesty axis (verbatim): method-level call TARGETS are surfaced via `methods`; AST-extracted edges (`source: 'apex-ast'`) ALSO carry `callerMethods` — the method(s) of the SOURCE class that contain the call-site, as a class-level UNION (the source methods that call ANY method of the target, NOT partitioned to the specific target method even when the `method` filter is applied). Edges WITHOUT it (the heuristic Apex scanner, Flow/declared callers, or a pre-upgrade vault) leave the caller method UNKNOWN — absence is not 'no caller'. Invalid prefix surfaces as `invalid-query`; unknown root resolves to an empty walk (root-only response, NOT an error envelope).",
@@ -6397,7 +6394,7 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
       "WHEN to reach for this: the user asks what a component structurally IMPLIES, or the CONSEQUENCES of a design — 'what happens to child records if I delete this parent?', 'is this field derived/formula or a roll-up (read-only)?', 'why can't I see these records by default?', 'do I have stacked record-triggered automations on this object (execution order undefined)?', 'why did my save fail with this status code?', 'does this territory sharing rule grant access based on the user's territory assignment?'. You may pass a NATURAL identifier (`Account.Amount__c`, a bare object name, a class name) — it is put through the same shared resolver `sfi.resolve` uses and the chosen anchor is echoed in `resolvedFrom`; an identifier matching several components returns `invalid-query` naming every candidate, never a silent pick. A canonical id skips resolution entirely. Call this tool, then fold the returned `claim` text into your answer with `sfi.synthesize_answer` (which carries the `groundedIn` ids as citations). RM-wire reasoning surface — the 'what does this component STRUCTURALLY imply?' tool. Given ONE component `componentId` (any canonical id, e.g. `CustomField:Account.Amount__c`, `CustomObject:Order__c`, `Flow:Order_Sync`), runs the DETERMINISTIC concept-rule reasoning engine over an offline graph slice assembled for it and returns grounded, CITED interpretations — never an LLM inference, never a live read. For each applicable curated `ConceptRule` (status-code cross-reference, master-detail cascade + roll-up, junction structural-pattern detection (an object with two master-detail parents — the many-to-many signature, not a proven pure-connector intent), field derived/formula source detection, automation collision [stacked / co-resident record-triggered automations, execution order undefined], OWD sharing posture, coupled-write [firer-anchored], async-boundary [Queueable/Batch/Scheduled/@future Apex, and dispatchesAsync call sites, run in a SEPARATE transaction — writes not visible to the enqueuing save, effect deferred], external-api-surface [an Apex class annotated @RestResource / @AuraEnabled / @InvocableMethod exposes an entry point reachable OUTSIDE the record UI and its automation — an integration/security surface where FLS/CRUD are NOT auto-enforced in Apex and must be coded, while record-level sharing depends on the class-level with/without-sharing declaration — a separate concern; it does NOT assert the endpoint is insecure or WHO calls it], apex-sharing-mode [an Apex class declared `without sharing` runs in SYSTEM context and does NOT enforce the running user's record-level sharing (often intentional, not by itself a vulnerability); `inherited sharing` enforces the caller's sharing only when the class is the entry point, so enforcement depends on the execution context; FLS/CRUD are a SEPARATE concern and the declaration is class-level, not per-method — the DECLARED posture, not a proven access outcome], system-context-external-surface [an Apex class that is BOTH declared `without sharing` AND externally reachable via @RestResource / @AuraEnabled / @InvocableMethod — an external caller can reach code that runs in SYSTEM context and does NOT enforce the running user's record-level sharing, so the COMBINATION is a security-REVIEW priority; it may still be intentional and is NOT by itself a vulnerability, FLS/CRUD are a SEPARATE concern, and it is the DECLARED posture, not a proven access outcome], view-modify-all object grant [a permission set or profile that grants object-level View All Records / Modify All Records on an object — holders can READ (View All), or read/edit/delete (Modify All), EVERY record of that object regardless of the org-wide default, sharing rules, role hierarchy, or manual shares, so it OVERRIDES record-level sharing even when OWD reads Private (closing the OWD concept's acknowledged gap); Modify All is the stronger form that INCLUDES View All, so on a Modify-All grant both fire as one escalating grant; object-level only — does NOT bypass field-level security, is NOT the org-wide View All Data / Modify All Data SYSTEM permission, says nothing about other objects, and does NOT assert WHO HOLDS the permission set/profile (an assignment/live question) — the DECLARED grant, not a proven per-user access outcome; many grantors on one object read as an ENUMERATED SET]) it emits at most one `Interpretation` carrying the `claim`, the `groundedIn` component ids it is grounded in (no citation ⇒ no claim), a `confidence` that is the WEAKEST of the rule ceiling and its matched edges (never asserted above its ground), the firing `ruleId`/`concept`, and a per-rule `coverageCaveat`. Optional ADDITIVE filters narrow which rules run: `concepts` (keep only rules for these concept ids) and `ruleIds` (keep only these rule ids) — an EMPTY array matches NO rule. Claims are PAGED: `limit` (default 10) / `offset`, with `page.nextOffset` for the next page; `groundedInLimit` (default 25) samples each claim's citations (`groundedInTotal` is the full count). Output carries `rulesConsidered` / `rulesFired`, a `sliceTruncated` flag (a hub whose edge count exceeds the cap forces coverage to at most `partial` so an absence rule can never read `complete` over a clipped slice), a `trust` block (`provenance: 'offline_snapshot'`, confidence = weakest across fired interpretations or `unknown` when none, completeness from coverage), and a `disclosure`. HONESTY: when NO rule fires, `rendered` + `disclosure` say 'no concept rule fired for this component — this is NOT a claim that nothing depends on it', so an absence of matched rules is never read as an absence of dependencies. Unknown id surfaces as `component-not-found` (phantom-aware). When a natural identifier was resolved, `resolvedFrom` names the identifier, the match kind and the score — relay it, because the user named one thing and the claims are about another.",
     inputSchema: INTERPRET_INPUT_SCHEMA,
   },
-  // v2.2 R2 — universal find-anywhere + discovery surface.
+  // Universal find-anywhere + discovery surface.
   {
     name: 'sfi.find_field_anywhere',
     description: "Universal-search surface — answers 'where is this field used anywhere in the org?' for one CustomField id, passed as `targetId` or its alias `fieldId` (field-tool-family parity). Walks every incoming non-parentOf edge to the field and groups the referrers by ComponentType: ApexClass / ApexTrigger reads/writes, Flow record-ops, Layout placements, ValidationRule formula refs, SharingRule criteria refs, etc. Each reference carries the referrer's identity, the edge type (`readsFrom` / `writesTo` / `references` / `usedInLayout`), the edge's source extractor, the stored confidence (`declared` for layout/formula edges, `parsed` for Apex edges the default-on AST resolved — including fields referenced only inside inline static SOQL or constant-string Database.query literals — and `heuristic` for regex apex-scanner / lwc-scanner edges), and the per-edge properties. Returns `byEdgeType` counts across the FULL set (not the truncated slice). When a ComponentType bucket overflows `limit`, that section is paged via `nextCursor` and the rest are disclosed by count + `otherSections` (echo `nextCursor` back as `cursor` to walk section-by-section). Honesty axis (verbatim): string-BUILT dynamic SOQL, reflective field access (`obj.get('FieldName')`), and managed-package code are invisible to the graph edges this tool walks — inline STATIC SOQL and constant-string Database.query field references ARE resolved (parsed Apex edges). METHOD IS TYPED: `searchMethod: 'graph-edge-walk'` — this tool opens no file and runs no text pass at call time; use `sfi.search_apex_source` / `sfi.search_flow_metadata` to search the vaulted files themselves. UNRESOLVED-ID AXIS (always present, never folded into `groups` / `totalCount`): `unresolvedApiNameMatches` reports edges the graph holds against a DIFFERENT, unresolvable `CustomField:` id carrying this field's api name — an extractor that built its target from a RELATIONSHIP ALIAS rather than the object api name, from a case-variant object spelling, or from an object the refresh never retrieved — the blind spot that makes a bare zero look verified. `idsTotal` / `idsScanned` disclose how much of the id set was walked for ROWS; `referenceCount` and `byComponentType` are EXACT over ALL `idsTotal` ids from one aggregate, never a walked-subset tally; `referrers` and `unresolvedTargetIds` are SAMPLES when `truncated`. `scanned: true` with `referenceCount: 0` is a CHECKED empty, not a skipped section. An api-name match is a LEAD, not a proven usage — for a common api name most rows are other objects' same-named fields, which is why they are published separately. A `totalCount: 0` additionally carries an explicit `boundaries[]` statement that the zero is a GRAPH zero, not a verified 'used nowhere'. Invalid prefix → `invalid-query`. EXISTENCE-GATED and phantom-aware: an id that no node carries AND that no non-parentOf edge references → `component-not-found` with ranked `resolveSuggestions`, so a typo, a WRONG-CASE id (ids are case-sensitive) and a never-retrieved field are no longer answered with the same confident `totalCount: 0` as a field that is genuinely referenced nowhere; a PHANTOM id — referenced by real edges but whose own definition was never retrieved — still ANSWERS from those edges and carries a `boundaries[]` entry stating that its definition is absent and the folded report/dashboard flags could NOT be read, so report usage there is UNKNOWN rather than absent.",
@@ -6433,8 +6430,8 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
       "Managed-package boundary surface — 'what does the {namespace} package touch, and what of MINE breaks if I uninstall/upgrade it?'. Package membership is derived from the API-name NAMESPACE PREFIX (a leaf name splitting into >= 3 '__'-segments — `NS__Object__c` — is namespaced; `Object__c` and standard names are not). INVENTORY mode (no `namespace`) scans every node and lists the packages visible in the vault with component counts, most-entangled first — including packages present ONLY via your EXTENSIONS (`extensionCount` > 0 with `componentCount` 0: components you parented under a package's objects), so a package whose own objects are phantoms (e.g. HEDA `hed`, whose managed objects come down as phantom references) is still surfaced as installed instead of reading as 'no packages'. IMPACT mode (`namespace`, e.g. 'SBQQ' — OR a `namespacePrefix` / `packageId` / `componentId` selector: the Salesforce-shaped `namespacePrefix` synonym a host reaches for, a bare namespace, or the `InstalledPackage:<namespace>` id the catalog returns, each resolved to the namespace instead of silently falling back to INVENTORY; an unrecognized selector is an `invalid-query`, never a silent full inventory; and when the vault manifest reports `InstalledPackage` coverage status `complete` AND the roster is non-empty, a `namespace` found in NEITHER that roster NOR any component, extension or dependency (phantom targets included), on a scan that ran to completion, is itself an `invalid-query` (path: `namespace`) whose message names the real installed namespaces — a near-miss typo is refused out loud instead of returning the soft `no-detected-dependencies`. Coverage that is `partial` or `unknown` can NEVER deny: the honest soft / `review` verdict is returned instead) returns the package's visible components, `yourDependencies` (incoming non-parentOf edges from components OUTSIDE the namespace — the uninstall blast radius, each carrying fromId/fromType/edgeType/confidence), and `yourExtensions` (your components parented UNDER a package component — custom fields you added to `SBQQ__Quote__c`, orphaned on uninstall). Verdict is staged so it can NEVER read soft-safe while a touchpoint or blind spot is present: `has-dependencies`; `members-present-no-static-inbound` (the package HAS visible members but no STATIC inbound reference — you are carrying its metadata, NOT 'safe to uninstall'); `incomplete-scan` (the node/edge scan was truncated); `review` (no visible members but the absence is un-provable — a producer family was not fully retrieved); or the bare `no-detected-dependencies` ONLY when nothing hides a touchpoint (no members, complete scan, no coverage gap) — the caveat and the verdict AGREE (NEVER 'safe to uninstall'). Honesty axis (verbatim): managed Apex referenced via dot-notation (NS.ClassName) and namespaced components without a standard suffix are invisible; a package's INTERNAL components are usually never retrieved, so packageComponentCount reflects what you can SEE; even `no-detected-dependencies` means no STATIC evidence in retrieved metadata (dynamic SOQL, Type.forName, merge-field references, and unretrieved metadata are invisible) — validate every uninstall in a sandbox first.",
     inputSchema: PACKAGE_IMPACT_INPUT_SCHEMA,
   },
-  // v2.6a R2 — CPQ specialist tier. Three tools layered on top of the
-  // v1.6 record extractors via the `cpq-extractor` heuristic
+  // CPQ specialist tier. Three tools layered on top of the
+  // record extractors via the `cpq-extractor` heuristic
   // specialization. All three carry the verbatim recognition-axis
   // disclosure on every emitted response; the `SBQQ__` namespace prefix
   // is the structural recognition signal.
@@ -6453,9 +6450,9 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     description: "Walks the values mirror of every requested CPQ-typed node and surfaces every string-encoded `SBQQ__`-prefixed field reference as a heuristic dependency entry. When `cpqComponentId` is provided, the walker scans only that one component; when omitted, it scans every CPQ-typed node in the vault and pages the resulting dependency list by `limit` (default 50, max 200) — a truncated page returns a `nextCursor` to resume. Each dependency entry carries `fromComponentId`, `fromComponentType`, `fromApiName`, the matched `referencedFieldToken`, and an `occurrenceCount`. Honesty axis (verbatim, surfaced ALWAYS): CPQ dependency mapping is heuristic — string-value scanning catches direct field references but misses formula-walked dependencies, numeric id references, and dynamic-dispatch resolutions. Use this output as a starting point for impact analysis, not as an authoritative dependency graph.",
     inputSchema: CPQ_DEPENDENCY_MAP_INPUT_SCHEMA,
   },
-  // v3.0 — unified field forensics synthesis tier (PLAN-v3.0).
-  // Two compositional tools over the v0.1-v2.9 extracted graph;
-  // surfaces the verbatim Q165 disclosure naming the v1.x extraction
+  // Unified field forensics synthesis tier.
+  // Two compositional tools over the extracted graph;
+  // surfaces the verbatim disclosure naming the v1.x extraction
   // gap (`dataNotAvailable: ['list-view-filters', 'reports',
   // 'dashboards']`) on every response. The single accompanying
   // extraction extension (EmailTemplate body merge) ships in the
@@ -6472,11 +6469,11 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     description: "Trace where a field's value comes from and what it feeds — its data provenance upstream (which automations, formulas, code, or integrations set it) and its downstream effects (what reads it, what fires because of it). Answers \"where does this field get its value\", \"what depends on this field\", \"trace this field across automation and code\". provenance + downstream-effects walker. Given a CustomField canonical id (or short `<Object>.<Field>` form) and a `direction` (`'upstream' | 'downstream' | 'both'`), walks the writers (upstream) or effects (downstream) graph up to `maxDepth` hops (default 3, max 5). PAGED: `upstream.sourceCount` / `downstream.effectCount` are the TRUE pre-page totals (`sources.length` / `effects.length` are PAGE lengths once a response is paged), and `limit` (default 200, max 500) / `offset` / `cursor` / `section` (`'upstream.sources' | 'downstream.effects'`) page ONE designated list while the other still publishes its total. Paging keys are emitted ONLY when the response is actually paged, so an in-budget answer is byte-identical. A hub field whose lineage used to exceed the response budget now returns a first page with a `note` naming the true total instead of an opaque `oversize` error. `section` defaults to the section that exists for the requested `direction`; NAMING a section this direction did not produce is a named `invalid-query`. Upstream sources carry `sourceKind` (`'workflow-field-update' | 'flow-assignment' | 'apex-write' | 'process-builder-assignment' | 'formula-source' | 'flow-input-field' | 'integration-inbound' | 'source-of-truth-field'`), `depth`, `confidence`, and `reachableVia[]` for the per-source path. flow dataflow: a FLOW writer no longer dead-ends the upstream walk — the extractor traces each DML input assignment back through the flow's internal assignment chain (variables, formulas, record-lookup outputs, loops), and the walk surfaces those record fields as `flow-input-field` sources one hop past the flow and RECURSES into them, so a field written by Flow A from a field written by Flow B chains end-to-end. Per-hop confidence is the trace label: `declared` ONLY for direct $Record / single-record-lookup chains (incl. clean single-Assign variable hops), `heuristic` through formulas/loops/non-Assign operators; inputs the extractor could not statically resolve (ambiguous reassigned variables, relationship traversals, action/screen outputs, chains past the trace depth cap) surface as the DISCLOSED `upstream.flowDataflow.unresolvedInputCount` — never as guessed fields — and flow write edges from a pre-tracer vault are counted in `flowDataflow.untracedFlowWriteEdges` (re-refresh to trace them). Downstream effects carry `effectKind` (`'flow-decision-branch' | 'apex-if-clause' | 'workflow-fire' | 'validation-fire' | 'integration-outbound' | 'email-fire' | 'formula-recompute' | 'flow-field-write'`), `conditionId` when the effect was sourced from a ConditionalContext, and the verbatim `firesWhen` literal when the edge carries one; a `flow-field-write` effect is the downstream mirror of the flow dataflow (a Flow READS this field and writes its value onward into `targetFields[]` — the walk continues into each written field at depth + 1). The upstream payload also carries a `formulaChain { maxDepth, crossesObject }` summary computed from the `formula-source` entries — `maxDepth >= 2` means this field's formula references ANOTHER formula (a multi-hop recompute cascade), and `crossesObject` flags a cross-object formula reference. source-of-truth fields are terminal in the upstream walk; cycle-detection + depth-bound discipline applies in both directions. `includeFieldsOfTruth` / `includeFiresWhen` default to true. Honesty axis (verbatim, ALWAYS): conditions in `firesWhen` are listed but NOT EVALUATED; the walk is depth-bounded — deeper transitive provenance is NOT walked; lineage inherits the same `dataNotAvailable[]` disclosure as `sfi.field_360`. Invalid prefix surfaces as `invalid-query`; unknown ids surface as `component-not-found`.",
     inputSchema: FIELD_LINEAGE_INPUT_SCHEMA,
   },
-  // v3.1 — cross-org / sandbox-vs-prod comparison tier (4 tools). Reads
+  // Cross-org / sandbox-vs-prod comparison tier (4 tools). Reads
   // two registered vaults through `@sf-intelligence/vault`'s registry
   // primitives, then composes per-pair diff over the existing
-  // v0.1-v3.0 extraction surface. No new ComponentTypes / EdgeTypes /
-  // properties — pure composition tier per PLAN-v3.1 §1.
+  // extraction surface. No new ComponentTypes / EdgeTypes /
+  // properties — pure composition tier.
   {
     name: 'sfi.compare_vaults',
     description: "Given two registered vault aliases, returns a structured diff identifying `added` (in B only), `removed` (in A only), and `shapeModified` (in both with at least one non-volatile property differing) components. Optional `objectFilter` narrows to one object's parented graph; optional `typeFilter` narrows to one ComponentType family. The volatile-property filter (default ON) suppresses lastModifiedDate / lastModifiedBy / source-tree-hash / manifest-timestamp drift inherited verbatim from. : `edgeDrift` covers what node-hash comparison alone misses — for every component present in BOTH vaults (independent of whether its own properties matched), it diffs the two vaults' OUTGOING edge sets (identity = edgeType + toId + referenceKind when present) and reports per-component `edgesAdded[]` / `edgesRemoved[]` (capped at 200 components / 50 rows each, `edgeDrift.summary` holds the true totals); a referenceKind change on an otherwise-identical edge appears as one removed + one added row, not a single 'modified' row. `extractorVersionCaveat` is present when the two vaults' manifests report different sf-intelligence product versions — an edge-set (or node) difference between differently-extracted vaults may reflect an EXTRACTOR change, not a real org change. `boundaries[]` ALWAYS surfaces (1) the volatile-filter disclosure naming the suppressed property paths and the `includeVolatileProperties: true` opt-out, (2) the api-name-match correspondence disclosure (renamed components appear as remove+add, NOT as modified), and (3) the edgeDrift scope disclosure. Unknown alias surfaces as the verbatim `vault alias '{alias}' is not registered. Run \\`sfi register-vault {alias} <path>\\` first, or \\`sfi list-vaults\\` to see what's registered.` refusal — the honesty anchor. The `shapeModified` bucket is BYTE-bound, not row-bound: it is fitted to the response byte budget rather than clipped at a fixed row count. When it is fitted, `shapeModifiedPage` is present with `{limit, offset, hasMore, nextOffset, nextCursor, byteTrimmed}` — `hasMore: true` means the bucket is a PARTIAL page of `summary.shapeModifiedCount`; echo `nextCursor` (or advance `offset` by `shapeModified.length`) to fetch the rest, and `byteTrimmed: true` means a row or an individual drift value was shortened to fit. Absent means the bucket is complete. Optional `limit` / `offset` / `cursor` drive that pager directly. `truncated: true` ALSO fires when any single drift property value exceeded 2,000 bytes and shipped as an `{ __omitted: true, bytes, preview }` marker instead of the value — the disclosure names that case explicitly. Pass `format: 'markdown'` to also get a rendered `markdown` drift dashboard (summary counts + added/removed/shape-modified/edge-drift tables with per-property A→B drift) over the same buckets. : `sfi.compare_object_across_vaults` shares this SAME edgeDrift axis (reusing the identical diff primitive), scoped to one object's own components.",
@@ -6503,8 +6500,8 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     description: "Map the fields of one object onto another for a conversion or migration — which field on object A corresponds to which field on object B, and which fields have no match and would lose data. Answers \"map {A} fields to {B} for conversion\", \"which {A} fields lose data converting to {B}\", \"what's the field mapping between these two objects\" (the classic Lead-to-Contact conversion mapping). honesty-anchor tool: given TWO CustomObject api-names, returns a heuristic field pairing for migration mapping (the Lead-vs-Contact conversion case). `vault` is OPTIONAL — omit it (the normal single-vault install) to map within the SERVED vault; supply a registered alias only in a multi-vault-registry deployment. With no registry, a self-referential alias (the served vault's directory name or path) still answers from the served vault with a single-vault disclosure; any other alias gets an honest alias-not-found refusal plus the omit-`vault` hint. Each `FieldPair` carries `fieldA` / `fieldB` shape (apiName, label, type), the Jaccard `labelSimilarity` over tokenized api-name + label tokens, the `typeCompatible` flag from the static type-compatibility table (text↔text, number↔number, date↔date, picklist↔picklist, reference↔reference), and `confidence: 'heuristic'`. `counts` publishes the TRUE total for all three lists (`suggestedPairs`, `unpairedFromA`, `unpairedFromB`) and `reconciliation` asserts the invariant `pairs + unpaired === fieldCount` per side — when it does NOT hold the response says so in `boundaries[]` rather than printing a total its own rows do not add up to. `limit` (default 100, max 500) / `offset` / `cursor` / `section` page ONE designated list while the other two still publish their counts; paging keys appear only when the response is actually paged. Optional `similarityThreshold` (default 0.50) suppresses pairs below the floor; `includeTypeIncompatible: true` retains label-matched pairs whose types disagree (each flagged `typeMismatch: true`). `unpairedFromA` / `unpairedFromB` list fields without a suggested match. `objectA` and `objectB` are VERIFIED against the vault before any field is loaded: an api name no `CustomObject` node matches is refused as `invalid-query` naming the offending argument (`path` = `objectA` or `objectB`), rather than answered with `fieldCount: 0` and a `reconciliation.balanced: true` that only holds because `0 === 0`. Salesforce api names are case-INSENSITIVE, so `contact` resolves to the vault's `Contact`; the echoed `objectA.apiName` / `objectB.apiName` are always the VAULT's casing, never the caller's, and two objects differing only by CASE are refused rather than silently picked between. `boundaries[]` ALWAYS surfaces the verbatim phrase: 'field-mapping suggestions are heuristic — labels are matched by token overlap and types by compatibility table. Verify each suggested pair against your business rules before relying on the mapping for a migration script.' A release without this phrase is a contract violation regardless of test-suite green (PLAN- §10 constitutional axis).",
     inputSchema: FIELD_MAPPING_BETWEEN_OBJECTS_INPUT_SCHEMA,
   },
-  // v3.2 — OmniStudio composition tier. The
-  // `sfi.datatransform_field_map` tool composes the v3.2-R2c
+  // OmniStudio composition tier. The
+  // `sfi.datatransform_field_map` tool composes the
   // OmniDataTransform extractor (journal 0167) into a readable
   // source-to-target field-mapping table; the per-row
   // `declared`/`parsed` confidence is the load-bearing honesty axis,
@@ -6515,9 +6512,9 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     description: "Given an OmniDataTransform canonical id (`OmniDataTransform:{Name}_{VersionNumber}`), returns the DataRaptor's source-to-target field mapping plus the operation-type metadata (Extract / Load / Transform). Composes the -R2c extractor's node (top-level `<sourceObject>`, `<inputType>`, `<interfaceClass>` with `<type>` fallback, `<active>` flag, `<description>`) with a fresh re-parse of the source XML (for a managed-package DataRaptor, its Vlocity DataPack export, converted to the same shape) for the per-row `<omniDataTransformItem>` table. Each `mappings[]` row carries `name`, `sourceField` (verbatim `<inputFieldName>`), `targetField` (verbatim `<outputFieldName>`), `outputObjectName`, `upsertKey`, `requiredForUpsert`, `disabled`, and a per-row `confidence` — `declared` when both field paths arrive as direct XML elements with no colon-prefix alias, `parsed` when either path uses the designer-controlled `{ObjectAlias}:{fieldPath}` convention (the -R2c extractor's edge-level confidence split). `sourceObject` and `targetObject` surface the top-level source SObject and the best-effort target SObject (first non-`json` `outputObjectName`); `operationType` pins the raw `<type>` element verbatim. `inputSampleJson` / `outputSampleJson` carry the designer's `<expectedInputJson>` / `<expectedOutputJson>` payloads when present. `boundaries[]` ALWAYS surfaces (1) the Native-vs-Vlocity disclosure and (2) the per-row confidence disclosure explaining the `declared`/`parsed` axis. Invalid prefix surfaces as `invalid-query`; unknown id surfaces as `component-not-found`.",
     inputSchema: DATATRANSFORM_FIELD_MAP_INPUT_SCHEMA,
   },
-  // v3.2 — OmniStudio declarative-process tier. The
-  // `sfi.decision_table_browse` tool is the Q179 row-data honesty
-  // anchor of the v3.2 wave; row content is NEVER enumerated and
+  // OmniStudio declarative-process tier. The
+  // `sfi.decision_table_browse` tool is the row-data honesty
+  // anchor of the wave; row content is NEVER enumerated and
   // the verbatim refusal phrase surfaces in `boundaries[]` on every
   // response.
   {
@@ -6525,13 +6522,13 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     description: "Given a DecisionTable canonical id (`DecisionTable:{SetupName}`), returns the table's parameter shape — `dataSourceType` (`CsvUpload` | `SObject` | `Manual`), `executionType` (`HBASE` | `OnPrem`), `inputParams[]` (each `{ name, type, defaultValue }` ordered by `<sequence>`) and `outputParams[]` (each `{ name, type }`) — and ALWAYS sets `rows: null`. will NOT enumerate row content; row data lives in the CSV uploaded to Salesforce Files, in the `sourceObject` SObject records, or in the OmniStudio designer's row-editor UI. The honesty anchor: `boundaries[]` ALWAYS carries the verbatim phrase 'DecisionTable rows live in CSV uploads or SObject records, not in the metadata XML. cannot enumerate row content. To see the actual rows, query the row data source (SObject record query or the original CSV).' followed by a dataSourceType-specific row-store hint, then the Native-vs-Vlocity disclosure for discipline consistency. Invalid prefix surfaces as `invalid-query`; unknown id surfaces as `component-not-found`.",
     inputSchema: DECISION_TABLE_BROWSE_INPUT_SCHEMA,
   },
-  // v3.2 R3b — the "walk this IP's action chain" Q177 surface.
-  // Composes the v3.2-R2 OmniIntegrationProcedure node metadata with
+  // The "walk this IP's action chain" surface.
+  // Composes the OmniIntegrationProcedure node metadata with
   // a fresh re-parse of the source XML (for per-action shape and the
   // terminal Response Action's `additionalOutput`) and a per-step
   // endpoint classification (REST / DataRaptor / nested IP / Remote
   // Action). REST URLs and Apex `class.method` targets are surfaced
-  // verbatim with `parsed` confidence — v3.2 does NOT probe URLs and
+  // verbatim with `parsed` confidence — this does NOT probe URLs and
   // resolves Apex calls to ApexClass nodes. Four
   // verbatim boundary disclosures surface ALWAYS — Native-vs-Vlocity,
   // Apex-coupling scope, OmniProcessElement record-level,
@@ -6541,8 +6538,8 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     description: "Given an OmniIntegrationProcedure canonical id, returns the IP's identity metadata (`omniProcessKey`, `versionNumber`, `subType`, `type`, `uniqueName`, `isActive`) and its steps — top-level AND nested inside Conditional / Loop / Try-Catch blocks — in runtime order (siblings by sequenceNumber, depth-first), each with `name`, `type`, `description`, `sequenceNumber`, `isActive`, `executionConditionalFormula`, `path` / `depth`, and the element catalog's `canonicalType` and `role`, so every spelling of an action (`Data Mapper Load Action`, `HTTP Action`, …) is read the same way. `externalEndpoints[]` (each with `stepName` / `stepPath`) follow the extractor's edge rules: ANY element naming a `bundle` calls that DataMapper (`dataraptor`), an `integrationProcedureKey` that IP (`integration-procedure`), a `remoteClass` that Apex class (`remote-action`, resolved to its ApexClass node or `not-in-vault`) \u2014 except a Remote Action on the managed runtime's IntegrationProcedureService, which runs the IP its method names (`integration-procedure`); HTTP steps surface their verbatim URL and named credential (`rest`); a Delete Action its objects (`delete`). DataMapper / IP targets take the graph's import-time resolution — `targetResolution` `resolved` (one version) / `active-version` (several; the active one runs — an IP's `isActive` is the runtime switch) / `highest-version` (a DataMapper with several versions and no single active one) / `no-active-version` (an IP none of whose versions is active: nothing runs, `targetId` null) / `ambiguous` (several active) / `not-in-vault` (a COMPLETE scan found none — the only value asserting absence) / `unresolved` (scan capped) / `lookup-failed` (graph read errored) / `not-applicable` (REST URLs) — with every version in `targetCandidateIds`. A resolved DataMapper carries `dataAccess` {reads, writes} (objects, from its field-level edges); the response's `dataAccess` sums the chain's own footprint {reads, writes, deletes, apexClasses, ipsCalled, mappersCalled} (nested IPs' steps are not folded in — follow `ipsCalled`). Plus the parsed `responseShape` from the terminal Response Action's `additionalOutput`. Optional `includeChildPropertySetConfig: true` attaches each action's parsed `propertySetConfig` (1-10kB per action). REST URLs are `parsed` — never probed. `boundaries[]` ALWAYS carries FOUR verbatim disclosures: (1) Native-vs-Vlocity-Legacy, (2) Apex-coupling scope (calls out resolved; what the Apex does is answered elsewhere; Apex that runs this IP by a literal key is an incoming `dispatchesOmniAction` edge, `via: apex`, listed by the usage tools), (3) the OmniProcessElement record-level boundary, (4) the REST-endpoint reachability caveat. Non-IP prefixes surface as `invalid-query`; unknown well-formed ids as `component-not-found`; missing source files as `component-not-found` with the verbatim source path.",
     inputSchema: INTEGRATION_PROCEDURE_CHAIN_INPUT_SCHEMA,
   },
-  // v3.2 R3a — the "walk this OmniScript end-to-end" Q176 surface.
-  // Composes the v3.2-R2 OmniScript node properties with a fresh re-
+  // The "walk this OmniScript end-to-end" surface.
+  // Composes the OmniScript node properties with a fresh re-
   // parse of the source XML (for per-step shape) and the outgoing
   // `dispatchesOmniAction` edge family (for the IP / DataRaptor / OS
   // dispatch targets). Three verbatim boundary disclosures surface
@@ -6553,8 +6550,8 @@ const V01_TOOLS_BASE: readonly ToolDefinitionBase[] = [
     description: "Given an OmniScript canonical id (`OmniScript:{ApiName}`), returns the parsed step sequence (the `<omniProcessElements>` children walked recursively, sorted by `level` ASC then `sequenceNumber` ASC), the downstream IP / DataRaptor / sibling-OmniScript dispatches resolved through `dispatchesOmniAction` outgoing edges (each entry carries `stepName`, `stepType`, `targetId` — null when dangling — `targetRawName`, and edge `confidence`), and the OmniScript's identity metadata (`omniProcessType`, `versionNumber`, `language`, `subType`, `type`, `uniqueName`, `isActive`, `isWebCompEnabled`) sourced from the R2 extractor's node properties. Optional `includeChildPropertySetConfig: true` attaches each step's parsed `propertySetConfig` JSON blob to its entry (off by default — blobs can be kilobytes per step). The / / honesty anchors surface ALWAYS in `boundaries[]`: (1) Native-vs-Vlocity: a managed-package (Vlocity) OmniScript is read from its DataPack export under org-kb/source/vlocity/ \u2014 never from the retrieve \u2014 and is in the vault only when that export is; (2) OmniProcessElement record-level data is out of scope; (3) Apex coupling — calls out are `callsApex` edges, and Apex that runs an IP or DataRaptor by a literal key is a `dispatchesOmniAction` edge from the class (`via: apex`). Invalid prefix surfaces as `invalid-query`; unknown id surfaces as `component-not-found`.",
     inputSchema: OMNISCRIPT_FLOW_INPUT_SCHEMA,
   },
-  // v3.2 R3d — the "what's inside this FlexCard" surface. Composes
-  // the v3.2 R2 OmniUiCard extractor's node properties (identity,
+  // The "what's inside this FlexCard" surface. Composes
+  // the OmniUiCard extractor's node properties (identity,
   // dataSourceType, dataSourceContextVariables) with a fresh
   // re-parse of the source XML's `<propertySetConfig>` JSON blob
   // (for the recursive widget tree) and the outgoing
@@ -6748,7 +6745,7 @@ const TOOL_BY_NAME: ReadonlyMap<string, ToolDefinition> = new Map(
 export { KNOWN_TOOL_NAMES, TOOL_BY_NAME };
 
 /**
- * Route a `tools/call` request to its per-tool handler. v0.1 implements
+ * Route a `tools/call` request to its per-tool handler. Implements
  * one handler at a time; the dispatcher matches by `toolName`, runs the
  * tool's Zod parse against `args`, calls the handler, and serializes the
  * `McpResponse` or `McpError` envelope through `jsonResult`. Any tool

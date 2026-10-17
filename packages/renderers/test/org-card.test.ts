@@ -7,7 +7,7 @@ import {
 } from '../src/org-card.js';
 
 /**
- * P13-CARD-render — pure-renderer tests: determinism (same input → same
+ * pure-renderer tests: determinism (same input → same
  * bytes), the 16KB hard cap with deterministic trimming, every number in the
  * body traceable to the input, and the wall-clock stamp confined to the
  * frontmatter.

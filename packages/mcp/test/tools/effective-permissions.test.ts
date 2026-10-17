@@ -95,7 +95,7 @@ const seed: ExtractionResult = {
     node({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),
     node({ id: 'CustomField:Account.Amount__c', type: 'CustomField', apiName: 'Account.Amount__c' }),
     node({ id: 'ApexClass:DealService', type: 'ApexClass', apiName: 'DealService' }),
-    // CR-CAP-10: a defined CustomPermission; the managed-package one below has no node.
+    // A defined CustomPermission; the managed-package one below has no node.
     node({ id: 'CustomPermission:SkipValidation', type: 'CustomPermission', apiName: 'SkipValidation' }),
   ],
   edges: [
@@ -180,7 +180,7 @@ describe('effectivePermissionsHandler', () => {
     expect(r.value.data.disclosures.some((d) => d.includes('App visibility is a separate surface'))).toBe(true);
   });
 
-  // CR-CAP-10: custom permissions are unioned with per-container attribution and
+  // Custom permissions are unioned with per-container attribution and
   // targetMissing disclosure; they are NOT folded into systemPermissions.
   it('unions granted custom permissions with attribution + targetMissing, distinct from system perms', async () => {
     const r = await effectivePermissionsHandler(ctx, {
@@ -269,7 +269,7 @@ describe('effectivePermissionsHandler', () => {
   });
 });
 
-describe('effectivePermissionsHandler — CR-22 section cursor', () => {
+describe('effectivePermissionsHandler — section cursor', () => {
   let dir: string;
   let st: GraphStore;
   let cx: Context;
@@ -361,13 +361,13 @@ describe('effectivePermissionsHandler — CR-22 section cursor', () => {
 });
 
 // ===========================================================================
-// R6-06 — MUTING permission sets are SUBTRACTED, group-scoped, with mutedBy.
+// MUTING permission sets are SUBTRACTED, group-scoped, with mutedBy.
 // A PSG with 2 members + 1 muting set. Mute denies: Account Delete, SSN FLS
 // (both directions), ModifyAllData, SkipValidation (custom), DangerService
 // (apex). A grant that survives OUTSIDE the group (profile ModifyAllData,
 // Account Edit) is NOT muted; a second, non-muted group's grant survives too.
 // ===========================================================================
-describe('effectivePermissionsHandler — R6-06 muting subtraction', () => {
+describe('effectivePermissionsHandler — muting subtraction', () => {
   let dir: string;
   let st: GraphStore;
   let cx: Context;
@@ -386,7 +386,7 @@ describe('effectivePermissionsHandler — R6-06 muting subtraction', () => {
       node({ id: 'PermissionSet:M1', type: 'PermissionSet', apiName: 'M1', properties: { userPermissions: ['ModifyAllData'] } }),
       node({ id: 'PermissionSet:M2', type: 'PermissionSet', apiName: 'M2', properties: {} }),
       node({ id: 'PermissionSet:M3', type: 'PermissionSet', apiName: 'M3', properties: {} }),
-      // The muting set — R6-06 muted-perm node properties.
+      // The muting set — muted-perm node properties.
       node({
         id: 'MutingPermissionSet:Mute',
         type: 'MutingPermissionSet',
@@ -532,7 +532,7 @@ describe('effectivePermissionsHandler — R6-06 muting subtraction', () => {
   });
 
   it('a muting node WITHOUT muted-perm data cannot be subtracted and is disclosed', async () => {
-    // Simulate a vault refreshed before the R6-06 extractor: the muting node
+    // Simulate a vault refreshed before the extractor: the muting node
     // exists but carries no muted-perm properties. Its perms must NOT be
     // subtracted and the OVERSTATEMENT risk must be disclosed.
     const legacyDir = mkdtempSync(join(tmpdir(), 'sfi-eff-perms-muting-legacy-'));

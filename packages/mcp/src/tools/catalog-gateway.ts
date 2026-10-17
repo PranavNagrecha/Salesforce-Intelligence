@@ -1,5 +1,5 @@
 /**
- * Catalog gateway (P13-GW-meta-tools) — three meta-tools that make the
+ * Catalog gateway — three meta-tools that make the
  * 160+-tool roster navigable for an LLM client without advertising every
  * input schema up front (163 schemas ≈ tens of thousands of tokens in
  * clients that do not defer tool definitions):
@@ -74,7 +74,7 @@ export const listAnalysesInputSchema = z.object({
   query: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIST_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
-  // CR-22 continuation cursor: opaque token from a prior truncated page's
+  // Continuation cursor: opaque token from a prior truncated page's
   // nextCursor; supplies the resume offset. Omit for today's behavior.
   cursor: z.string().min(1).optional(),
 });
@@ -94,10 +94,10 @@ export interface ListAnalysesOutput {
   readonly categories: readonly string[];
   readonly next: string;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * Opaque continuation token, present ONLY when this page is truncated
    * (more entries remain past `limit`). Echo it back as `cursor` to resume.
    * Absent on a complete page so an in-budget response is byte-identical to the
-   * pre-CR-22 shape.
+   * pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
@@ -202,7 +202,7 @@ export const listAnalysesHandler = async (
           return queryWords.every((w) => hay.includes(w));
         });
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
+  // Resolve the resume offset (echoed cursor wins over explicit offset);
   // a stale/forged cursor (changed `category`, different tool, or refreshed
   // vault) is rejected with invalid-query. The roster is a STABLE declared
   // array (`V01_TOOLS`) with unique tool names, so the slice order is already a

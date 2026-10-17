@@ -1,1 +1,3 @@
 {"refreshedAt":"2026-06-25T15:19:46.650Z","sourceTreeHash":"ec3078be5664a9ac51be30123be8bbf4b2747acc85fbd99aa38f2c22e45e8824","techDebtScore":7.29}
+{"refreshedAt":"2026-10-17T15:45:35.113Z","sourceTreeHash":"937e69c4140fa1b350bf5c90b68d850e6b314bf005122976ccf07520ce92cb33","techDebtScore":5,"scoredAxes":["apiVersions","codeQuality","legacyAutomation"],"scoreModel":2}
+{"refreshedAt":"2026-10-17T16:10:41.527Z","sourceTreeHash":"937e69c4140fa1b350bf5c90b68d850e6b314bf005122976ccf07520ce92cb33","techDebtScore":5,"scoredAxes":["apiVersions","codeQuality","legacyAutomation"],"scoreModel":2}

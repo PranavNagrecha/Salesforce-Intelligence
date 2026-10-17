@@ -62,7 +62,7 @@ describe('recordFeedback + buildFeedbackExport', () => {
     }
   });
 
-  // P14-FEEDBACK-gaplog-scope (FINDINGS P-GAPLOG-GLOBAL): the gap log file is
+  // Scope (FINDINGS P-GAPLOG-GLOBAL): the gap log file is
   // machine-global, so the EXPORT must scope to one vault — an export from
   // vault A may never contain vault B's question text.
   it('scopes the export to the given vault: other vaults and unstamped legacy entries are excluded', async () => {

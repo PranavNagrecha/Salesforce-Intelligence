@@ -55,8 +55,8 @@ export interface ExtendedVaultManifest extends VaultManifest {
    */
   readonly referencedButAbsentTypes?: readonly string[];
   /**
-   * Present only while a staged refresh (`sfi refresh --staged`,
-   * P13-STAGED-tiers) is mid-build: which tier last completed, how many
+   * Present only while a staged refresh (`sfi refresh --staged`)
+   * is mid-build: which tier last completed, how many
    * tiers the plan has, and which metadata types are still queued. The
    * final tier runs as a full monolithic refresh whose manifest omits the
    * marker, so absence means "not staged / staged build complete".
@@ -65,7 +65,7 @@ export interface ExtendedVaultManifest extends VaultManifest {
    */
   readonly staged?: StagedBuildMarker;
   /**
-   * P13-AST-edges: present when the last refresh ran `--apex-ast` — how many
+   * present when the last refresh ran `--apex-ast` — how many
    * Apex files the ANTLR pass parsed and how many fell back to scanner-only.
    */
   readonly apexAst?: {
@@ -73,10 +73,10 @@ export interface ExtendedVaultManifest extends VaultManifest {
     readonly parseErrors: number;
   };
   /**
-   * P13-REPORTS-default: present when the default usage-ranked
+   * present when the default usage-ranked
    * report/dashboard pull ran — org totals vs what the pull delivered. A
    * capped pull also marks the Report/Dashboard coverage rows `pending`.
-   * P14-USAGE-reports-retrieve-fidelity: `requested` is the manifest member
+   * `requested` is the manifest member
    * count and `retrieved` the files that actually LANDED on disk —
    * `requested > retrieved` means the Metadata API silently dropped members.
    * Manifests written before 0.1.10 lack `requested` (their `retrieved` was
@@ -144,7 +144,7 @@ export interface ExtendedVaultManifest extends VaultManifest {
     readonly disclosure: string;
   };
   /**
-   * P15-PHANTOM-manifest-summary: refresh-time roll-up of dangling edge
+   * refresh-time roll-up of dangling edge
    * targets by phantom taxonomy bucket (ADR-004 — counts only, no stub nodes).
    */
   readonly phantomSummary?: {
@@ -218,7 +218,7 @@ export interface StandardFieldDescribeSummary {
   readonly offline: boolean;
 }
 
-/** Mid-build progress marker for a staged refresh (P13-STAGED-tiers). */
+/** Mid-build progress marker for a staged refresh. */
 export interface StagedBuildMarker {
   /** Highest tier that has fully completed (0 = skeleton only). */
   readonly tier: number;
@@ -236,7 +236,7 @@ export interface StagedBuildMarker {
  * "none".
  */
 /**
- * Metadata families with no extractor yet. v4.0 enterprise extractors
+ * Metadata families with no extractor yet. The enterprise extractors
  * model Reports, dashboards, UI, and visibility rules — the list stays
  * empty so coverage summaries do not mark them `neverModeled` by default.
  */
@@ -379,7 +379,7 @@ export const readSkippedDirectories = (
 };
 
 /**
- * CR-CAP-20 — one ranked "uncovered family" row. A family is a retrieve
+ * one ranked "uncovered family" row. A family is a retrieve
  * subdirectory whose files were RETRIEVED but NOT MODELED by any
  * extractor (it appears in `skippedDirectories`). This is NEVER a claim
  * that the family is absent from the org — only that this build did not
@@ -404,7 +404,7 @@ export interface UncoveredFamily {
 }
 
 /**
- * CR-CAP-20 — turn the raw `skippedDirectories` map into a ranked list of
+ * turn the raw `skippedDirectories` map into a ranked list of
  * uncovered families, sorted by skipped-file volume (desc), tiebroken by
  * family name (asc). Each raw dir is mapped through `SKIPPED_DIR_COVERAGE`
  * to its canonical `ComponentType` (`modeledType: true`) when known, else
@@ -442,7 +442,7 @@ export const rankUncoveredFamilies = (
   );
 };
 
-/** Read the optional v4.0 coverage array with a back-compatible default. */
+/** Read the optional coverage array with a back-compatible default. */
 export const readCoverageEntries = (
   manifest: VaultManifest | ExtendedVaultManifest | undefined,
 ): readonly CoverageEntry[] => {
@@ -585,7 +585,7 @@ export const summarizeCoverage = (
   //                                       "not confirmed": routed into
   //                                       partial/missingCoverage so absence
   //                                       caveats keep firing.
-  // A `pending` row (P13-STAGED-tiers / reports-cap) is excluded from BOTH
+  // A `pending` row (reports-cap) is excluded from BOTH
   // covered branches by the `pending !== true` guard, so a capped/dropped pull
   // can never read as confirmed-empty even if it carries retrieveConfirmed.
   //  (b') retrieved === 0 AND retrieveConfirmed === true AND the type is

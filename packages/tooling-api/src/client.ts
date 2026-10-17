@@ -1,5 +1,5 @@
 /**
- * The v1.7 Tooling API HTTP client.
+ * The Tooling API HTTP client.
  *
  * Per `docs/vendor/salesforce-metadata/ToolingApi.md`, this client owns
  * three concerns:
@@ -251,7 +251,7 @@ export const createToolingApiClient = (
     let path: string | undefined = initialPath;
     // Bounded so a misbehaving server cannot trap the client in an
     // infinite loop. 200 pages × 2000/page = 400k records, an order of
-    // magnitude beyond v1.7's expected scale.
+    // magnitude beyond the expected scale.
     const PAGE_CAP = 200;
     for (let i = 0; i < PAGE_CAP; i++) {
       if (path === undefined) break;

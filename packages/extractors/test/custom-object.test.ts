@@ -1186,8 +1186,8 @@ describe('deriveEntityVariant', () => {
     expect(deriveEntityVariant('CustomerProject__c', false)).toBe('CustomObject');
   });
 
-  it('treats a missing suffix as StandardObject (out of v0.1 extractor scope)', () => {
-    // The extractor never runs on standard objects in v0.1; this branch
+  it('treats a missing suffix as StandardObject (out of extractor scope)', () => {
+    // The extractor never runs on standard objects; this branch
     // exists only so the type covers the full match-precedence table.
     expect(deriveEntityVariant('Account', false)).toBe('StandardObject');
   });

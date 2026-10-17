@@ -60,7 +60,7 @@ describe('renderValueAsBacktickedString', () => {
   });
 });
 
-describe('escapeMarkdownInline (CR-16d)', () => {
+describe('escapeMarkdownInline', () => {
   it('wraps a clean value (no backticks) in the minimal single-backtick fence', () => {
     // Byte-identical to the old "caller wraps in one backtick" contract for
     // every current caller — all feed backtick-free SF identifiers.

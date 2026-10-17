@@ -56,7 +56,7 @@ const tableExists = async (
 };
 
 /**
- * Build the PRE-versioning ("old") schema directly: the v0.1 base tables only,
+ * Build the PRE-versioning ("old") schema directly: the base tables only,
  * with NO schema_version table. This is what a vault built by code before this
  * change looks like on disk.
  */

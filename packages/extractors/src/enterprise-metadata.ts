@@ -29,7 +29,7 @@ interface ChildRefSpec {
 }
 
 /**
- * R7-C7: an XML element whose repeated text values are captured as a plain
+ * an XML element whose repeated text values are captured as a plain
  * property array — NO edge is emitted. Mirrors {@link ChildRefSpec} minus the
  * edge-emission side; used when the referenced entity has no ComponentType
  * node in this vault (e.g. a `PresenceUserConfig`'s assigned usernames —
@@ -56,7 +56,7 @@ interface EnterpriseExtractorConfig {
    */
   readonly childRefs?: readonly ChildRefSpec[];
   /**
-   * R7-C7: elements captured as plain property arrays with NO edge — see
+   * elements captured as plain property arrays with NO edge — see
    * {@link ArrayPropertySpec}.
    */
   readonly arrayProperties?: readonly ArrayPropertySpec[];
@@ -68,7 +68,7 @@ interface EnterpriseExtractorConfig {
    */
   readonly captureSharedTo?: boolean;
   /**
-   * CR-CAP-13: parse the list view's `<filters><field>` predicate fields as
+   * parse the list view's `<filters><field>` predicate fields as
    * field IDENTITY references (which view filters on a field), distinct from
    * its `<columns>` (which view shows a field). Set ONLY for `ListView`. When
    * set, the generic `<field>` column sweep AND the whole-XML `dottedFieldRe`
@@ -188,7 +188,7 @@ interface EnterpriseExtractorConfig {
    */
   readonly transactionSecurityAction?: boolean;
   /**
-   * R7-C7: parse EACH `<milestones>` block's OWN `minutesToComplete` /
+   * parse EACH `<milestones>` block's OWN `minutesToComplete` /
    * `useCriteriaStartTime`, scoped per-block — the repeated-element trap
    * this extractor's own doc comment named and deliberately did NOT ship at
    * R6-18: `extraProperties` reads only the FIRST occurrence of a repeated
@@ -545,10 +545,10 @@ const extractFieldRefs = (
     parentObjectApiName ?? inferReportObjectApiName(xml);
   const refs = new Set<string>();
   let skippedLegacyDotted = 0;
-  // CR-CAP-13: for a ListView, the generic `<field>` sweep is suppressed —
+  // for a ListView, the generic `<field>` sweep is suppressed —
   // ListView XML uses `<field>` ONLY inside `<filters>`, which the dedicated
   // guarded filter parser now owns. `<columns>` is the only column source here.
-  // CR-CAP-13b: each column token is gated through `isWellFormedColumnField`
+  // each column token is gated through `isWellFormedColumnField`
   // (the column-path sibling of the filter guard) so platform pseudo-columns do
   // not mint phantom field edges. The guard is deliberately MORE permissive than
   // the filter guard — it keeps real all-UPPERCASE standard fields and mixed-
@@ -557,7 +557,7 @@ const extractFieldRefs = (
   const columnElements = options?.listViewFilterScoped
     ? ['columns', 'fieldItem', 'fieldApiName']
     : ['columns', 'field', 'fieldItem', 'fieldApiName'];
-  // CR-CAP-13b: gate every column token through `isWellFormedColumnField` so a
+  // gate every column token through `isWellFormedColumnField` so a
   // non-field platform operand (CREATED_DATE, OWNER.ALIAS, OWNER_ID, …) never
   // mints a `targetMissing` phantom `CustomField:` edge. ONE site — covers all
   // five column-routing ComponentTypes (Report / Dashboard / ReportType /
@@ -586,7 +586,7 @@ const extractFieldRefs = (
     for (const ref of reportCriteriaColumnRefs(xml, scopeObject)) refs.add(ref);
   }
 
-  // CR-CAP-13: the whole-XML dotted scan mints `CustomField:` from any
+  // the whole-XML dotted scan mints `CustomField:` from any
   // `Object.Field`-shaped substring, INCLUDING a list view's
   // `<value>Evaluation__c.Student_Evaluation</value>` (a RecordType developer
   // name, not a field). Suppress it for the ListView column path so the filter
@@ -605,17 +605,17 @@ const extractFieldRefs = (
 };
 
 /**
- * CR-CAP-13 / CR-CAP-13b: non-field pseudo-columns that may appear in a list
+ * non-field pseudo-columns that may appear in a list
  * view's `<filters><field>` OR in a `<columns>` sweep but are NOT real fields —
  * special platform operands the engine resolves itself (record type, owner,
  * audit users/dates, KB article state/language). `isWellFormedFieldRef` returns
  * TRUE for all of these (it only rejects `$`-prefixed and empty-segment-dotted
  * tokens), so this denylist carries the real phantom guard.
  *
- * CR-CAP-13b: the column path mints a phantom from a broader set of operands
+ * the column path mints a phantom from a broader set of operands
  * than the filter path. The four added here (`OWNER_ID`, `SETUP_TYPE`,
  * `ARCHIVED_DATE`, `LAST_PUBLISHED_DATE`) appear in real list-view `<columns>`
- * but were absent from the original CR-CAP-13 filter set. Each is also a valid
+ * but were absent from the original filter set. Each is also a valid
  * filter operand, so the set stays shared (it never collides with a real custom
  * `__c` or mixed-case standard field). NOTE: `ARCHIVEDBY_USER`,
  * `CREATEDBY_USER.ALIAS`, and `OWNER.FIRST_NAME` are intentionally NOT listed —
@@ -634,7 +634,7 @@ const LIST_VIEW_FILTER_PSEUDO_FIELDS: ReadonlySet<string> = new Set([
   'LANGUAGE',
   'ARTICLE_NUMBER',
   'VERSION_NUMBER',
-  // CR-CAP-13b column-path additions.
+  // Column-path additions.
   'OWNER_ID',
   'SETUP_TYPE',
   'ARCHIVED_DATE',
@@ -674,7 +674,7 @@ const isLegacyDottedAddress = (field: string): boolean =>
   field.includes('.') && !field.includes('__') && /^[A-Z0-9_.]+$/.test(field);
 
 /**
- * CR-CAP-13b: is this `<columns>` token a real field worth a reference edge?
+ * is this `<columns>` token a real field worth a reference edge?
  *
  * Mirrors {@link isWellFormedFilterField} EXCEPT it deliberately OMITS the
  * all-UPPERCASE-no-`__` rule. Real all-UPPERCASE STANDARD fields appear in
@@ -695,7 +695,7 @@ const isLegacyDottedAddress = (field: string): boolean =>
  *   (e) a relationship-into-user `*.ALIAS` / an `OWNER.*` traversal — but ONLY
  *       when the relationship HEAD is the all-UPPERCASE platform operand shape,
  *       so a legitimate mixed-case relationship column (`Owner.Name`,
- *       `CreatedBy.Name`, `Account.Owner.Alias`) survives (CR-CAP-13b design
+ *       `CreatedBy.Name`, `Account.Owner.Alias`) survives (design
  *       review hardening: these are common real Report/FlexiPage columns and
  *       must not be over-dropped).
  *
@@ -731,7 +731,7 @@ const isWellFormedColumnField = (field: string): boolean => {
 };
 
 /**
- * CR-CAP-13: is this `<filters><field>` token a real field worth a reference
+ * is this `<filters><field>` token a real field worth a reference
  * edge? Rejects (a) `$`-prefixed and degenerate-dotted via
  * {@link isWellFormedFieldRef}; (b) the known non-field pseudo-columns; (c)
  * `*_USER` audit-user shapes and any `*.ALIAS` dotted relationship into a
@@ -754,7 +754,7 @@ const isWellFormedFilterField = (field: string): boolean => {
 };
 
 /**
- * CR-CAP-13: parse a list view's `<filters>` blocks for predicate field
+ * parse a list view's `<filters>` blocks for predicate field
  * IDENTITY. Reads ONLY `<field>` from each (repeatable) block — never
  * `<operation>` or `<value>` (values include `3`, `en_US`, `Open`, picklist
  * CSVs, and the dotted RecordType name `Evaluation__c.Student_Evaluation`,
@@ -1223,7 +1223,7 @@ interface MilestoneDetail {
 }
 
 /**
- * R7-C7: parse EACH `<milestones>` block of an `EntitlementProcess` file for
+ * parse EACH `<milestones>` block of an `EntitlementProcess` file for
  * its OWN `<milestoneName>` / `<minutesToComplete>` / `<useCriteriaStartTime>`
  * — scoped PER BLOCK via a block-bounded regex (mirrors
  * {@link extractReportCriteriaItems} / {@link parseReportGroupingBlock}'s
@@ -1376,7 +1376,7 @@ const extractEnterpriseMetadata = async (
     reportCriteriaColumns: config.type === 'Report',
   });
   const fieldRefs = fieldRefResult.refs;
-  // CR-CAP-13: list-view filter-predicate field identity. `filterFieldRefs` is
+  // list-view filter-predicate field identity. `filterFieldRefs` is
   // the set of well-formed fields a `<filters>` block predicates on; a field
   // that is ALSO a column appears in BOTH sets and is merged into one
   // `columnAndFilter` edge below (the edge PK cannot hold two `references`).
@@ -1435,7 +1435,7 @@ const extractEnterpriseMetadata = async (
     ? extractTransactionSecurityAction(text.value)
     : null;
 
-  // R7-C7: EntitlementProcess per-milestone minutesToComplete /
+  // EntitlementProcess per-milestone minutesToComplete /
   // useCriteriaStartTime — see {@link extractMilestoneDetails}.
   // EntitlementProcess-only (config.captureMilestones).
   const milestoneDetails = config.captureMilestones === true
@@ -1500,7 +1500,7 @@ const extractEnterpriseMetadata = async (
     },
   }));
 
-  // R7-C7: plain property-array elements (no edge; e.g. PresenceUserConfig's
+  // plain property-array elements (no edge; e.g. PresenceUserConfig's
   // assigned usernames — no User ComponentType to target). Deduplicated +
   // sorted; every occurrence is captured, never just the first (the R6-18
   // repeated-element trap `extraProperties` alone would fall into).
@@ -1591,7 +1591,7 @@ const extractEnterpriseMetadata = async (
     label,
   );
 
-  // CR-CAP-13: ONE `references` edge per (ListView, field). The edge PK is
+  // ONE `references` edge per (ListView, field). The edge PK is
   // `(fromId,toId,edgeType,source)` — emitting separate fieldRef + filterRef
   // edges to the same field would collide and one would be silently dropped at
   // import. Merge the role into a single `referenceKind`: a field that is a
@@ -1718,11 +1718,11 @@ export const extractReportType = (path: string): Promise<Result<ExtractionResult
   });
 
 /**
- * CR-CAP-15: extract a CustomPermission DEFINITION node from a flat
+ * extract a CustomPermission DEFINITION node from a flat
  * `customPermissions/{DeveloperName}.customPermission-meta.xml` file. The node
  * id is `CustomPermission:{DeveloperName}` (no parent scope) — the exact target
  * a PermissionSet/Profile `<customPermissions><name>X</name>` grant resolves to
- * (CR-CAP-10's `grantedBy` edge). Definition-node only: the optional
+ * (the `grantedBy` edge). Definition-node only: the optional
  * `<requiredPermission>` dependency edges and `<connectedApp>` reference are a
  * deferred follow-up (the generic field scanner emits no useful edges for a
  * CustomPermission's plain-text label/description).
@@ -1882,7 +1882,7 @@ const extractFlexiPageEmbeddedFlows = (xml: string): readonly string[] => {
  * edge FlexiPage → `CustomObject:{sobjectType}` so "what Lightning pages are
  * for object X" is answerable. fieldRefs are scoped by sobjectType.
  *
- * v2.9: also scans for `{!$Permission.CustomPermission.X}` patterns in
+ * also scans for `{!$Permission.CustomPermission.X}` patterns in
  * `<leftValue>` elements (visibilityRule criteria) and emits a declared
  * `references` edge FlexiPage → `CustomPermission:{Name}` tagged
  * `referenceKind: 'visibilityRulePermission'` for each match. This makes
@@ -1977,7 +1977,7 @@ export const extractFlexiPage = async (
   const pageType =
     extractXmlValues(text.value, 'type').find((t) => FLEXIPAGE_PAGE_TYPES.has(t)) ?? null;
   const fieldRefs = extractFieldRefs(text.value, sobjectType).refs;
-  // v2.9: visibility-rule custom-permission references.
+  // visibility-rule custom-permission references.
   const permissionRefs = extractFlexiPagePermissionRefs(text.value);
   // FLEXIPAGE-EMBEDDED-FLOW-UNGRAPHED: Screen Flows embedded via
   // `flowruntime:interview` components (previously invisible → false safe-to-delete).
@@ -2017,7 +2017,7 @@ export const extractFlexiPage = async (
       properties: { referenceKind: 'flexiPageObject' },
     });
   }
-  // v2.9: emit one declared `references` edge per custom-permission gate.
+  // emit one declared `references` edge per custom-permission gate.
   for (const permId of permissionRefs) {
     edges.push({
       fromId: nodeId,
@@ -2163,7 +2163,7 @@ export const extractScopingRule = (path: string): Promise<Result<ExtractionResul
  * `<milestoneName>` occurrences regardless of nesting, which is exactly the
  * flat list of milestones this process touches.
  *
- * **Per-milestone detail (R7-C7)**: the `milestones` property additionally
+ * **Per-milestone detail**: the `milestones` property additionally
  * carries EACH block's own `minutesToComplete` and `useCriteriaStartTime` —
  * `[{ milestoneName, minutesToComplete, useCriteriaStartTime }, …]`, in file
  * order. This was DELIBERATELY NOT shipped at R6-18: the generic
@@ -2180,7 +2180,7 @@ export const extractScopingRule = (path: string): Promise<Result<ExtractionResul
  *
  * **Honesty boundary** (load-bearing for `sfi.lifecycle_process` /
  * `sfi.what_happens_on_save`): this extractor answers WHICH milestones apply
- * to an object, whether the process is active, and (as of R7-C7) each
+ * to an object, whether the process is active, and each
  * milestone's TARGET minutes — it does NOT answer whether a specific case is
  * currently on-track or breached (that is live, per-record timer data this
  * offline vault cannot hold).
@@ -2210,7 +2210,7 @@ export const extractEntitlementProcess = (
         referenceKind: 'entitlementMilestone',
       },
     ],
-    // R7-C7: per-milestone minutesToComplete / useCriteriaStartTime — see
+    // per-milestone minutesToComplete / useCriteriaStartTime — see
     // {@link extractMilestoneDetails}.
     captureMilestones: true,
   });
@@ -2340,7 +2340,7 @@ export const extractQueueRoutingConfig = (
     ],
   });
 
-// R7-C7: Omni-Channel presence configuration — the R6-18 leftover ("the
+// Omni-Channel presence configuration — the R6-18 leftover ("the
 // <assignments><users> sub-block has no User ComponentType to target").
 // Folder/suffix + the <assignments> shape below were verified against REAL
 // scoped retrieves (`sf project retrieve start --metadata

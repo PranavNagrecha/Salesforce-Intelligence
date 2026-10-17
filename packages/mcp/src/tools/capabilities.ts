@@ -7,7 +7,7 @@
  * answers that in one no-argument call: a categorized catalog of what the
  * knowledge base can answer, with example natural-language questions per
  * category, the canonical conversational pattern (resolve-first → clarify →
- * refresh-or-stop), the three slash commands, and the v0.1 honesty boundary.
+ * refresh-or-stop), the three slash commands, and the honesty boundary.
  *
  * Design:
  *   - The category map + example questions are CURATED — there is no way to
@@ -140,7 +140,7 @@ export interface CapabilitiesOutput {
   readonly conversationalGuidance: ConversationalGuidance;
   readonly routingGuidance: ConversationalGuidance;
   readonly commands: readonly CommandInfo[];
-  /** The v0.1 read-only/offline honesty boundary, surfaced verbatim. */
+  /** The read-only/offline honesty boundary, surfaced verbatim. */
   readonly boundaries: readonly string[];
   readonly disclosure: string;
   /**
@@ -159,7 +159,7 @@ export interface CapabilitiesOutput {
    */
   readonly trustGlossary: TrustGlossary;
   /**
-   * Open route-gap count from the local opt-in gap log (R8-GAPLOG-SURFACE).
+   * Open route-gap count from the local opt-in gap log.
    * `nudge` is non-null only above the threshold so a quiet machine stays quiet.
    * Category/count only — never includes question text.
    */
@@ -701,8 +701,8 @@ const COMMANDS: readonly CommandInfo[] = [
 ];
 
 /**
- * The v0.1 capability boundary, surfaced verbatim so the caller never
- * over-promises. Mirrors the CLAUDE.md "v0.1 capability boundary" section.
+ * The capability boundary, surfaced verbatim so the caller never
+ * over-promises. Mirrors the CLAUDE.md capability-boundary section.
  */
 const ROUTING_GUIDANCE: ConversationalGuidance = {
   startHere:

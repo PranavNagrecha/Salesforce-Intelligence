@@ -251,7 +251,7 @@ describe('getImpactHandler', () => {
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
   });
 
-  it('R6-19: renders a graph TD mermaid diagram when the impact slice is under the diagram node cap', async () => {
+  it('renders a graph TD mermaid diagram when the impact slice is under the diagram node cap', async () => {
     const result = await getImpactHandler(ctx, {
       componentId: 'CustomField:Account.Industry__c',
       hops: 1,
@@ -266,7 +266,7 @@ describe('getImpactHandler', () => {
     expect(diagram.endsWith('```')).toBe(true);
   });
 
-  it('R6-19: the root node renders as a circle (double-paren shape), other nodes as boxes', async () => {
+  it('the root node renders as a circle (double-paren shape), other nodes as boxes', async () => {
     const result = await getImpactHandler(ctx, {
       componentId: 'CustomField:Account.Industry__c',
       hops: 1,
@@ -284,7 +284,7 @@ describe('getImpactHandler', () => {
     expect(otherLine).toContain('[');
   });
 
-  it('R6-19: node labels carry the component-type prefix and edge labels carry edgeType', async () => {
+  it('node labels carry the component-type prefix and edge labels carry edgeType', async () => {
     const result = await getImpactHandler(ctx, {
       componentId: 'CustomField:Account.Industry__c',
       hops: 1,
@@ -298,7 +298,7 @@ describe('getImpactHandler', () => {
     expect(diagram).toMatch(/-->\|references\|/);
   });
 
-  it('R6-19: mermaid entity ids are sanitized (dots/colons never leak into an id token)', async () => {
+  it('mermaid entity ids are sanitized (dots/colons never leak into an id token)', async () => {
     const result = await getImpactHandler(ctx, {
       componentId: 'CustomField:Account.Industry__c',
       hops: 1,
@@ -879,11 +879,11 @@ describe('getImpactHandler', () => {
     }
   });
 
-  // CR-17: the BFS expansion batches incoming-edge fetches into ONE
+  // The BFS expansion batches incoming-edge fetches into ONE
   // `listEdgesForNodes` query per hop instead of one `listEdges` per
   // (frontier node × edgeType). Spy on the underlying DuckDB driver to prove
   // the round-trip count is O(hops), not O(nodes).
-  it('issues O(hops) edge queries per walk, not O(nodes) (CR-17)', async () => {
+  it('issues O(hops) edge queries per walk, not O(nodes)', async () => {
     const spy = vi.spyOn(store.connection, 'runAndReadAll');
     const result = await getImpactHandler(ctx, {
       componentId: 'CustomField:Account.Industry__c',
@@ -905,12 +905,12 @@ describe('getImpactHandler', () => {
     spy.mockRestore();
   });
 
-  // CR-17 requiredChange #1: exercise the COUNT caps (not just the post-BFS
+  // requiredChange #1: exercise the COUNT caps (not just the post-BFS
   // byte budget). >200 distinct incoming referencers trip the node cap inside
   // the BFS mid-loop break, so the surviving prefix is order-sensitive. Assert
   // the batched walk yields a DETERMINISTIC node-cap result and that
   // `truncationReason.reason` is exactly `node-cap`.
-  it('hits the node-cap with a deterministic prefix (CR-17 caps-identity)', async () => {
+  it('hits the node-cap with a deterministic prefix (caps-identity)', async () => {
     const capDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-get-impact-nodecap-'));
     try {
       const dbPath = join(capDir, 'nodecap.db');
@@ -1019,10 +1019,10 @@ describe('getImpactHandler', () => {
     }
   });
 
-  // CR-17 requiredChange #1: the EDGE cap path. <=200 distinct referencers but
+  // requiredChange #1: the EDGE cap path. <=200 distinct referencers but
   // >400 edges (multiple edge types per referencer) trips the edge cap inside
   // the BFS, again on an order-sensitive prefix.
-  it('hits the edge-cap with a deterministic prefix (CR-17 caps-identity)', async () => {
+  it('hits the edge-cap with a deterministic prefix (caps-identity)', async () => {
     const capDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-get-impact-edgecap-'));
     try {
       const dbPath = join(capDir, 'edgecap.db');
@@ -1116,7 +1116,7 @@ describe('getImpactHandler', () => {
     }
   });
 
-  // CR-RV7: get_impact must never emit a DANGLING edge — one whose endpoint is
+  // get_impact must never emit a DANGLING edge — one whose endpoint is
   // absent from impact.nodes — on the under-budget EARLY-RETURN path (the trim
   // path already filters; the early return did NOT). A consumer
   // (e.g. blast_radius_live) derefs impact.nodes per edge, so a dangling edge is
@@ -1128,7 +1128,7 @@ describe('getImpactHandler', () => {
   // dangles unless `enforceGraphPayloadBudget` filters it. The slice is small
   // (well under GRAPH_MAX_PAYLOAD_BYTES), so the budget takes the early return
   // (trimmed:false) — exactly the path the fix must cover.
-  it('CR-RV7: drops an edge whose endpoint has no node row on the early-return path (0 dangling)', async () => {
+  it('drops an edge whose endpoint has no node row on the early-return path (0 dangling)', async () => {
     const ghostDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-get-impact-ghost-'));
     try {
       const dbPath = join(ghostDir, 'ghost.db');
@@ -1192,7 +1192,7 @@ describe('getImpactHandler', () => {
       if (!result.ok) return;
 
       // The slice is tiny, so the byte budget took the EARLY RETURN, not the
-      // trim path — this is precisely the branch the CR-RV7 fix had to cover.
+      // trim path — this is precisely the branch the fix had to cover.
       // GET-IMPACT-PHANTOM-ENDPOINT-EDGE-LOSS: this assertion USED to be
       // `truncated: false`. Dropping the dangling edge is right (a consumer
       // must never deref a node missing from the slice), but `GhostVR` is a
@@ -1239,11 +1239,11 @@ describe('getImpactHandler', () => {
     }
   });
 
-  // R6-19: the diagram cap (30) is deliberately far below the node cap (200)
+  // The diagram cap (30) is deliberately far below the node cap (200)
   // — a slice comfortably under the OVERALL truncation ceiling can still be
   // too big to render readably, and must OMIT the diagram (never silently
   // render a partial one) rather than reuse the node-cap truncation path.
-  it('R6-19: omits the diagram (with a reason naming the count) above IMPACT_DIAGRAM_MAX_NODES, even when the overall impact slice is NOT truncated', async () => {
+  it('omits the diagram (with a reason naming the count) above IMPACT_DIAGRAM_MAX_NODES, even when the overall impact slice is NOT truncated', async () => {
     const diagCapDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-get-impact-diagramcap-'));
     try {
       const dbPath = join(diagCapDir, 'diagramcap.db');
@@ -1397,7 +1397,7 @@ describe('getImpactInputSchema', () => {
     expect(r.ok).toBe(true);
   });
 
-  it('refuses an un-type-resolved Apex receiver root as invalid-query (P14-PHANTOM-edges)', async () => {
+  it('refuses an un-type-resolved Apex receiver root as invalid-query', async () => {
     // CustomField:app.Id / ApexClass:oldMap are heuristic-scanner parse
     // artifacts keyed on local variables — walking "what depends on them"
     // would dress parse noise up as a blast radius.
@@ -1529,11 +1529,11 @@ describe('getImpactInputSchema', () => {
 });
 
 // =============================================================================
-// P4-C5: get_impact returns full Edge objects, so the method-level callers of
+// get_impact returns full Edge objects, so the method-level callers of
 // an Apex method are visible via the callsApex edge's `methods` property.
 // =============================================================================
 
-describe('getImpactHandler: method-level callers via callsApex methods[] (P4-C5)', () => {
+describe('getImpactHandler: method-level callers via callsApex methods[]', () => {
   let dir2: string;
   let store2: GraphStore;
   let ctx2: Context;
@@ -1584,7 +1584,7 @@ describe('getImpactHandler: method-level callers via callsApex methods[] (P4-C5)
   });
 });
 
-describe('R6-24 Option B — get_impact names folded report/dashboard dependents', () => {
+describe('get_impact names folded report/dashboard dependents', () => {
   it('surfaces usedInReports/usedInDashboards on reportUsage + disclosure (no Report edges)', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'sfi-impact-reportb-'));
     const opened = await openGraph(join(dir, 'reportb.db'));

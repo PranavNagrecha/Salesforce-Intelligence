@@ -319,13 +319,13 @@ describe('governorLimitRisksHandler', () => {
 });
 
 // =============================================================================
-// CR-22 B3 — the scan now WINDOWS past the per-type cap (was: drop the tail).
+// the scan now WINDOWS past the per-type cap (was: drop the tail).
 // A low cap no longer makes the verdict INCOMPLETE — it scans in smaller windows
 // and still reaches every risky class, including ones in the SECOND scanned type
 // (the pre-B3 unreachable tail). `scanTruncated` fires only for a pathological
 // residual cap (FULL_SCAN_MAX_NODES).
 // =============================================================================
-describe('governorLimitRisksHandler — full multi-window scan (CR-22 B3)', () => {
+describe('governorLimitRisksHandler — full multi-window scan', () => {
   it('does NOT emit a Scan-capped boundary under the default cap (byte-identical happy path)', async () => {
     const r = await governorLimitRisksHandler(ctx, {});
     expect(r.ok).toBe(true);
@@ -374,11 +374,11 @@ describe('governorLimitRisksHandler — full multi-window scan (CR-22 B3)', () =
 });
 
 // =============================================================================
-// CR-22 — output-axis cursor. A truncated page emits an opaque nextCursor that
+// output-axis cursor. A truncated page emits an opaque nextCursor that
 // resumes with no gaps / no dupes; a whole-fits no-cursor call is byte-identical
 // (no limit/offset/nextCursor/pageInfo fields).
 // =============================================================================
-describe('governorLimitRisksHandler — output cursor (CR-22)', () => {
+describe('governorLimitRisksHandler — output cursor', () => {
   it('whole-fits no-cursor call omits all paging fields (byte-identical)', async () => {
     const r = await governorLimitRisksHandler(ctx, {});
     expect(r.ok).toBe(true);
@@ -438,12 +438,12 @@ describe('governorLimitRisksInputSchema', () => {
 });
 
 // =============================================================================
-// CR-22-B6 — the ENTRY_PATH_MAX_PATHS(=12) walk cap was previously JSDoc-only.
+// the ENTRY_PATH_MAX_PATHS(=12) walk cap was previously JSDoc-only.
 // A risky class with a wide fan-in (13 distinct ApexTriggers each calling it
 // directly) forces the bounded walk to stop short of exploring every caller,
 // so `entryPathsTruncated` + the response-level boundary must both fire.
 // =============================================================================
-describe('governorLimitRisksHandler — entry-path walk cap disclosure (CR-22-B6)', () => {
+describe('governorLimitRisksHandler — entry-path walk cap disclosure', () => {
   const WIDE_FANIN_COUNT = 13;
   const RISKY_CLASS = 'ApexClass:WideFanInSvc';
   let dir: string;

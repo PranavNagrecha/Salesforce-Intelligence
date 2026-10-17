@@ -36,6 +36,7 @@ properties:
   referenceTo: null
   relationshipName: null
   required: false
+  restricted: true
   scale: null
   trackHistory: false
   unique: false
@@ -65,6 +66,7 @@ How the payment was tendered.
 | referenceTo | `null` |
 | relationshipName | `null` |
 | required | `false` |
+| restricted | `true` |
 | scale | `null` |
 | trackHistory | `false` |
 | unique | `false` |

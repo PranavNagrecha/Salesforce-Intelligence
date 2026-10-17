@@ -77,7 +77,7 @@ export interface RunInitSuccess {
 export const runInit = async (
   opts: RunInitOptions,
 ): Promise<Result<RunInitSuccess, InitError>> => {
-  // Reject a poisoned org alias at creation (CR-01 / C1), so a config that a
+  // Reject a poisoned org alias at creation, so a config that a
   // later `sfi refresh` would refuse is never written in the first place.
   const aliasCheck = validateOrgAlias(opts.targetOrg);
   if (!aliasCheck.ok) {

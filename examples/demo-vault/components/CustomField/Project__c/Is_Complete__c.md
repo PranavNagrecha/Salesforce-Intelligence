@@ -13,6 +13,7 @@ properties:
   externalId: false
   formula: "ISPICKVAL(Status__c,\"Complete\")"
   inlineHelpText: null
+  isFormula: true
   label: Is Complete
   length: null
   picklistValues: null
@@ -41,6 +42,7 @@ type: CustomField
 | externalId | `false` |
 | formula | `ISPICKVAL(Status__c,"Complete")` |
 | inlineHelpText | `null` |
+| isFormula | `true` |
 | length | `null` |
 | picklistValues | `null` |
 | precision | `null` |

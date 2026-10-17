@@ -103,7 +103,7 @@ describe('extractEscalationRule', () => {
           active: false,
           ruleEntryCount: 0,
           actionCount: 0,
-          // v2.0a — empty mirror when no rule entries are present.
+          // empty mirror when no rule entries are present.
           conditions: [],
         });
         expect(result.value.edges).toHaveLength(1);
@@ -155,7 +155,7 @@ describe('extractEscalationRule', () => {
     });
   });
 
-  describe('v2.0a — ConditionalContext extraction', () => {
+  describe('ConditionalContext extraction', () => {
     it('emits one ConditionalContext per <ruleEntry> carrying criteria', async () => {
       const xml = `<?xml version="1.0"?>
 <EscalationRules xmlns="http://soap.sforce.com/2006/04/metadata">

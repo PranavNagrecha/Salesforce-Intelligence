@@ -1,11 +1,11 @@
 /**
  * Handler for the `sfi.what_if_change_field_type` MCP tool.
  *
- * v2.3 R2a — the forward-looking complement to v2.0b's
+ * The forward-looking complement to the
  * `sfi.safe_to_delete_field`. Given a `CustomField:{Object}.{Field}` id
  * and a proposed new field type, composes every incoming dependency
  * edge into a structured per-finding impact list classified into the
- * v2.3 `WhatIfImpactItem` shape: a compatibility verdict
+ * `WhatIfImpactItem` shape: a compatibility verdict
  * (`forward-compatible` / `lossy` / `breaking`), an aggregated severity
  * verdict (`safe` / `review` / `risky` / `blocking`), and a verbatim
  * boundary-disclosure string the caller may surface to the user.
@@ -40,7 +40,7 @@
  *
  * **Per-finding emission rules.** Only edges that match the transition's
  * impact rule emit a finding. For `forward-compatible` transitions, only
- * type-sensitive references emit (currently a minimal set; v2.3 errs on
+ * type-sensitive references emit (currently a minimal set; this errs on
  * the side of fewer findings to keep the surface honest). For `lossy`
  * and `breaking` transitions, every recognised incoming edge becomes a
  * finding so the caller sees the full reference set.
@@ -84,7 +84,7 @@
  *   - For each incoming edge, `getNodeById(edge.fromId)` resolves the
  *     referrer's identity. Sparse-graph misses are dropped silently.
  *   - The currentType is read from `node.properties.type` (the canonical
- *     CustomField property emitted by the v0.1 extractor); when absent,
+ *     CustomField property emitted by the extractor); when absent,
  *     `currentType` is reported as `'Unknown'` and the disclosure flags
  *     the gap.
  */
@@ -183,10 +183,10 @@ type Category =
 
 /**
  * One impact entry in the response's `impacts` array. Mirrors the
- * `WhatIfImpactItem` interface defined in `PLAN-v2.3.md` § 3, scoped
- * to the fields v2.3 R2a populates. v2.3 R1b's full contract addition
- * (with `location` + `suggestedAction`) is deferred to the R1b plan
- * worker; this slice ships the fields the three R2a tools share.
+ * `WhatIfImpactItem` interface, scoped
+ * to the fields this tool populates. The full contract addition
+ * (with `location` + `suggestedAction`) is deferred; this slice ships
+ * the fields the three field-level what-if tools share.
  */
 export interface WhatIfImpactItem {
   readonly category: Category;
@@ -527,7 +527,7 @@ const classifyCategory = (edge: Edge, fromNode: Node): Category => {
   // Validation rules: declarative metadata that will fail to compile
   // under a breaking type change.
   if (t === 'ValidationRule') return 'metadata-blocker';
-  // Flow record reads / writes: metadata-declared per the v0.2 walker;
+  // Flow record reads / writes: metadata-declared per the walker;
   // a type change invalidates the recordLookups / recordUpdates element.
   if (t === 'Flow') return 'metadata-blocker';
   // WorkflowRule field-update actions: declarative writes.
@@ -538,10 +538,10 @@ const classifyCategory = (edge: Edge, fromNode: Node): Category => {
   // roll-up summary coupling (rollup-summary). The classification is the same
   // for all three, so this branch stays source-agnostic on purpose.
   if (t === 'CustomField') return 'metadata-blocker';
-  // Apex classes and triggers: heuristic per the v0.3 scanner. A type
+  // Apex classes and triggers: heuristic per the scanner. A type
   // change requires updating the source.
   if (t === 'ApexClass' || t === 'ApexTrigger') return 'code-needs-update';
-  // Frontend tier (v1.4): LWC / Aura / VF references need source updates.
+  // Frontend tier: LWC / Aura / VF references need source updates.
   if (
     t === 'LightningComponentBundle' ||
     t === 'AuraDefinitionBundle' ||
@@ -550,7 +550,7 @@ const classifyCategory = (edge: Edge, fromNode: Node): Category => {
   ) {
     return 'code-needs-update';
   }
-  // Integration tier (v1.5): External Service / Data Source schemas.
+  // Integration tier: External Service / Data Source schemas.
   if (t === 'ExternalService' || t === 'ExternalDataSource') {
     return 'integration-touch';
   }

@@ -25,7 +25,7 @@ import {
 } from '../../src/tools/annotations.js';
 
 /**
- * P13-ANNOT-tools + R8-ANNOTATION-REVIEW — sfi.annotations (read) +
+ * sfi.annotations (read) +
  * sfi.propose_annotation + review/confirm/reject.
  */
 
@@ -256,7 +256,7 @@ describe('sfi.propose_annotation', () => {
   });
 });
 
-describe('sfi.review_annotations / confirm / reject (R8-ANNOTATION-REVIEW)', () => {
+describe('sfi.review_annotations / confirm / reject', () => {
   it('lists only unconfirmed proposals and filters by componentId/key/author', async () => {
     const at = '2026-06-10T01:00:00.000Z';
     await appendAnnotationEvent(tempDir, {
@@ -408,7 +408,7 @@ describe('sfi.review_annotations / confirm / reject (R8-ANNOTATION-REVIEW)', () 
     expect(missingReject.ok).toBe(false);
   });
 
-  it('attributes propose/confirm/reject to Context.callerIdentity when known (R8-PERCALLER-TOKENS)', async () => {
+  it('attributes propose/confirm/reject to Context.callerIdentity when known', async () => {
     const identified: Context = {
       ...ctx,
       callerIdentity: { id: 'synth-alice', label: 'Alice Synth' },

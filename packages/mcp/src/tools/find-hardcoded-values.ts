@@ -1,8 +1,8 @@
 /**
  * Handler for the `sfi.find_hardcoded_values` MCP tool.
  *
- * The v2.1 "find me hardcoded IDs / emails / usernames / sandbox-test-
- * data" surface — narrows the v2.1 quality recognizer catalog to the
+ * The "find me hardcoded IDs / emails / usernames / sandbox-test-
+ * data" surface — narrows the quality recognizer catalog to the
  * four hardcoded-literal rules and returns each match's location plus
  * (where the recognizer extracts it) the literal value the recognizer
  * saw. Composes over the `properties.qualityIssues[]` array the
@@ -54,13 +54,13 @@
  * rather than answered with an empty scan of the class the caller named.
  *
  * Implementation notes:
- *   - The v2.1 recognizer's `location` string carries
+ *   - The recognizer's `location` string carries
  *     `line {N}` for raw-line matches; the `explanation` carries the
  *     quoted literal value (e.g., `Hardcoded Salesforce ID literal
  *     '0015g00000Abc' — IDs differ between sandbox/production. ...`).
  *     We do NOT separately extract the literal into a `matchedValue`
  *     field — the explanation already names it, and the recognizer's
- *     v2.1 output contract does not expose a separate "matched
+ *     output contract does not expose a separate "matched
  *     substring" field on every rule.
  *   - `limit` defaults to 100 and is capped at 500 by Zod. The slice
  *     is over individual matches, not classes.
@@ -122,7 +122,7 @@ const SCANNED_TYPES: readonly ComponentType[] = [
   'ApexTrigger',
 ];
 
-/** The five-tier severity scale used by the v2.1 catalog. */
+/** The five-tier severity scale used by the catalog. */
 type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info';
 
 const SEVERITY_SET: ReadonlySet<string> = new Set([
@@ -188,7 +188,7 @@ export const findHardcodedValuesInputSchema = z.object({
     .min(1)
     .max(FIND_HARDCODED_MAX_LIMIT)
     .optional(),
-  // CR-22: page cursor for walking the full match list when truncated.
+  // Page cursor for walking the full match list when truncated.
   offset: z.number().int().min(0).optional(),
   cursor: z.string().min(1).optional(),
 });
@@ -212,7 +212,7 @@ export interface HardcodedValueMatch {
   readonly location: string;
   readonly explanation: string;
   /**
-   * True when the parent ApexClass is `@isTest` (per the v2.1
+   * True when the parent ApexClass is `@isTest` (per the
    * extractor's `properties.isTest` mirror). Surfaces alongside the
    * `boundaries` refusal-pattern disclosure so consumers can render
    * the test-class caveat per-match.
@@ -300,7 +300,7 @@ export interface FindHardcodedValuesOutput {
   /**
    * Page size applied to this response. Present only on a PAGED response
    * (`truncated` or a resumed `offset > 0`); omitted on a whole-fits no-cursor
-   * call so that response stays byte-identical to the pre-CR-22 shape.
+   * call so that response stays byte-identical to the pre-paging shape.
    */
   readonly limit?: number;
   /** Zero-based offset of the first returned match. Present only when paged (see `limit`). */
@@ -311,9 +311,9 @@ export interface FindHardcodedValuesOutput {
    */
   readonly nextOffset?: number;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * Opaque continuation token, present ONLY when this page is truncated
    * (more matches remain). Echo it back as `cursor` to resume. Absent on a
-   * complete page so an in-budget response is byte-identical to the pre-CR-22
+   * complete page so an in-budget response is byte-identical to the pre-paging shape
    * shape.
    */
   readonly nextCursor?: string;
@@ -369,7 +369,7 @@ const ruleToCategory = (
  *
  * componentId-first matches the scan/id order so the sort is scan-consistent
  * (a deeper scan window only appends rows that sort AFTER earlier ones). The
- * `explanation` tiebreak (CR-22) makes the order a STRICT TOTAL order: two
+ * `explanation` tiebreak makes the order a STRICT TOTAL order: two
  * qualityIssues with the SAME rule at the SAME line in one class (line-granular
  * locations collide) previously compared equal (returned 0), so an offset
  * resume could dup or skip at that tie cluster. `explanation` carries the
@@ -401,7 +401,7 @@ const isTestClass = (node: Node): boolean =>
 
 /**
  * The `sfi.find_hardcoded_values` MCP tool. Returns every hardcoded-
- * literal finding across the v2.1-scanned Apex types, optionally
+ * literal finding across the scanned Apex types, optionally
  * narrowed by literal category. See the module JSDoc for the
  * category-to-rule mapping and the test-class refusal-pattern axis.
  *
@@ -437,7 +437,7 @@ export const findHardcodedValuesHandler = async (
 
   const collected: HardcodedValueMatch[] = [];
 
-  // CR-22 B3: scan EVERY node of each Apex type by paging the SQL OFFSET forward
+  // Scan EVERY node of each Apex type by paging the SQL OFFSET forward
   // (window-by-window at the clamped cap) so findings on node 501+ are reachable
   // — the single capped page used to drop the scan TAIL silently. The output is
   // then the COMPLETE match list, paged on the output axis below; no second `s`
@@ -551,7 +551,7 @@ export const findHardcodedValuesHandler = async (
   // test-class row to caveat.
   const sawTestClassFinding = testFixtureCount > 0;
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // Resolve the resume offset (echoed cursor wins over explicit offset).
   // The fingerprint covers the one narrowing arg `category` so a token minted
   // for one category can't be replayed against another.
   const fingerprint = argsFingerprint({
@@ -665,7 +665,7 @@ export const findHardcodedValuesHandler = async (
   // Emit the paging fields ONLY on a paged response (truncated OR a resumed
   // offset>0). A whole-fits no-cursor call omits limit/offset/nextOffset/
   // nextCursor/pageInfo entirely, so its data shape is byte-identical to the
-  // pre-CR-22 output (golden does not move).
+  // pre-paging output (golden does not move).
   const isPaged = truncated || offset > 0;
 
   return ok({

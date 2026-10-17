@@ -1,8 +1,8 @@
 /**
- * Data-shape capture (P13-FACTS-capture) — `sfi refresh --with-data-shape`.
+ * Data-shape capture — `sfi refresh --with-data-shape`.
  *
  * Captures a SMALL, budgeted set of record-DATA observations from the live
- * org into the graph's `facts` table (P13-FACTS-store):
+ * org into the graph's `facts` table:
  *
  *   1. Approximate per-object record counts — ONE REST call
  *      (`/limits/recordCount`), written for objects that exist as graph
@@ -15,7 +15,7 @@
  *      SOQL per object over its most recently modified rows
  *      (`method: 'recent-sample'`, or `'exact-sample'` when the object's
  *      whole population fit inside the sample).
- *   3. Permission-holder AGGREGATE counts (P13-PSA-counts) — two GROUP-BY
+ *   3. Permission-holder AGGREGATE counts — two GROUP-BY
  *      SOQL queries: active-assignee counts per PermissionSet and active-user
  *      counts per Profile (`method: 'aggregate-soql'`). COUNTS ONLY — the
  *      queries never select AssigneeId/username, and the PII grep test pins
@@ -110,7 +110,7 @@ export interface DataShapeSummary {
   readonly budgetExhausted: boolean;
   readonly recordCountFacts: number;
   readonly fillRateFacts: number;
-  /** P13-PSA-counts: aggregate active-holder counts (PermissionSet/Profile). */
+  /** Aggregate active-holder counts (PermissionSet/Profile). */
   readonly holderFacts: number;
 }
 
@@ -254,7 +254,7 @@ export const captureDataShape = async (
     fillRateFacts += wrote.ok ? wrote.value : 0;
   }
 
-  // --- 3. permission-holder aggregates (P13-PSA-counts): COUNTS ONLY ------
+  // --- 3. permission-holder aggregates: COUNTS ONLY ------
   let holderFacts = 0;
   const holderQueries: ReadonlyArray<{
     readonly soql: string;

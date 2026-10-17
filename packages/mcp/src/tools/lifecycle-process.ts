@@ -1,5 +1,5 @@
 /**
- * Handler for the `sfi.lifecycle_process` MCP tool (P11-LIFECYCLE-process).
+ * Handler for the `sfi.lifecycle_process` MCP tool.
  *
  * "What happens when {Object}.{field} becomes {value}?" — a value / stage
  * LIFECYCLE view, not a bare DML-event view. `order_of_execution` and
@@ -131,7 +131,7 @@ const lifecycleProcessInputBaseSchema = z.object(
   businessProcess: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
-  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // Continuation cursor: an OPAQUE token echoed back from a prior
   // truncated page's `nextCursor`. When present it supplies the resume offset;
   // omitting it = today's behavior (offset 0 / explicit `offset`).
   cursor: z.string().min(1).optional(),
@@ -274,7 +274,7 @@ export interface LifecycleProcessOutput {
   readonly hasMore: boolean;
   readonly truncated: boolean;
   /**
-   * CR-22 opaque continuation token, present ONLY when the process page was
+   * Opaque continuation token, present ONLY when the process page was
    * truncated (more steps remain past `limit`). Echo it back as `cursor` to
    * resume. Absent on a whole-fits page so an in-budget response stays
    * byte-identical.
@@ -288,9 +288,9 @@ export interface LifecycleProcessOutput {
 
 /**
  * Internal page carrier: a {@link LifecycleStep} plus the SOE `stepIndex` used
- * as the CR-22 cursor's UNIQUE total-order key. `stepIndex` is NEVER emitted
+ * as the cursor's UNIQUE total-order key. `stepIndex` is NEVER emitted
  * (the page is mapped back to bare LifecycleStep before serialization) so the
- * visible output stays byte-identical to pre-CR-22. It is the right tiebreak:
+ * visible output stays byte-identical to the pre-paging shape. It is the right tiebreak:
  * an ApexTrigger registered for BOTH before and after events appears as a
  * `pre-save-triggers` row AND an `after-triggers` row with identical
  * componentId/componentType/apiName (only `phase` differs, and `phase` is not
@@ -574,7 +574,7 @@ export const lifecycleProcessHandler = async (
   const total = perEvent.summary.totalSteps - rawExcludedStepCount;
   const limit = input.limit ?? DEFAULT_LIMIT;
 
-  // CR-22: resolve the resume offset — an echoed cursor wins over an explicit
+  // Resolve the resume offset — an echoed cursor wins over an explicit
   // `offset`; a stale/forged cursor (changed object/field/value/event, different
   // tool, or refreshed vault) is rejected with `invalid-query`. argsFingerprint
   // binds the narrowing args so a different transition can't replay the cursor.

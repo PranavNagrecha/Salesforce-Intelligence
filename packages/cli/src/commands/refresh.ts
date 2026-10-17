@@ -220,7 +220,7 @@ export interface RefreshResult {
    */
   readonly profileGrantDisclosure?: string;
   /**
-   * Populated only when `--with-tooling-api` (PLAN-v1.7 R2) runs. The
+   * Populated only when `--with-tooling-api` runs. The
    * per-run summary surfaces the live-data axis as a separate block in
    * the CLI output; default `sfi refresh` leaves this `undefined` and
    * the printed summary never mentions the Tooling API.
@@ -259,7 +259,7 @@ export interface RefreshResult {
    */
   readonly pulse?: RefreshPulse;
   /**
-   * P13-REPORTS-default + P14-USAGE-reports-retrieve-fidelity: present when
+   * Present when
    * the usage-ranked report/dashboard pull ran — per type: the org total,
    * the manifest members `requested`, and the files that actually LANDED on
    * disk (`retrieved`). `requested > retrieved` means the Metadata API
@@ -363,7 +363,7 @@ export interface RefreshPulse {
   /** The graph headline followed by per-domain watch-lines. */
   readonly highlights: readonly string[];
   /**
-   * P13-ANNOT-store: annotated component ids that no longer exist in the
+   * Annotated component ids that no longer exist in the
    * fresh graph (deleted/renamed in the org since the annotation was made).
    * The annotation is curated knowledge whose subject vanished — surfaced
    * here so a human re-points or unsets it. ABSENT when there are none, so
@@ -414,7 +414,7 @@ export interface ChangeSummary {
 }
 
 /**
- * Per-run summary of the v1.7 R2 Tooling API enrichment pass. Surfaced
+ * Per-run summary of the Tooling API enrichment pass. Surfaced
  * in `formatRefreshSummary` as a separate block so the live-data axis
  * is visible to operators even when no nodes were touched (e.g., the
  * enricher's dispatch table missed every type the vault has).
@@ -486,7 +486,7 @@ export interface RunRefreshOptions {
   /** Comma-separated type filter ("CustomObject,Flow"). */
   readonly types?: string;
   /**
-   * Opt-in to the v1.7 Tooling API enrichment pass. Off by default —
+   * Opt-in to the Tooling API enrichment pass. Off by default —
    * the default refresh stays fully offline. When set, the pipeline
    * runs the offline path to completion, then drives the
    * `tooling-api` freshness enrichment against the in-memory graph and
@@ -496,7 +496,7 @@ export interface RunRefreshOptions {
    */
   readonly withToolingApi?: boolean;
   /**
-   * P13-FACTS-capture: opt-in budgeted record-data capture into the facts
+   * Opt-in budgeted record-data capture into the facts
    * table after the refresh (also requires live consent — skips honestly
    * without it). Best-effort: capture failure never flips refresh status.
    */
@@ -550,7 +550,7 @@ export interface RunRefreshOptions {
    */
   readonly incrementalGraph?: boolean;
   /**
-   * P13-AST-flip: parser-grade Apex edges run BY DEFAULT (user decision
+   * Parser-grade Apex edges run BY DEFAULT (user decision
    * 2026-06-10). Each .cls/.trigger is re-parsed with the vendored ANTLR
    * grammar; resolved field reads/writes and cross-class calls land as
    * `confidence: 'parsed'`, `source: 'apex-ast'` edges. A heuristic
@@ -562,7 +562,7 @@ export interface RunRefreshOptions {
    */
   readonly apexAst?: boolean;
   /**
-   * P13-STAGED-tiers: skip the Markdown render (and the post-render hooks
+   * Skip the Markdown render (and the post-render hooks
    * that presume a complete graph — history, pulse, risk scores, onboarding
    * doc, org card, snapshot). Manifest counts come from graph GROUP-BY
    * queries instead of the render drain. Used by mid-build staged tiers so
@@ -571,7 +571,7 @@ export interface RunRefreshOptions {
    */
   readonly skipRender?: boolean;
   /**
-   * P13-STAGED-tiers: force the side-build path even when the graph file is
+   * Force the side-build path even when the graph file is
    * not locked — build into `graph.duckdb.rebuild` and atomically rename
    * over the target only on success. A failure (or a kill) mid-run leaves
    * the previous graph byte-untouched, which is the staged final tier's
@@ -579,7 +579,7 @@ export interface RunRefreshOptions {
    */
   readonly forceSideBuild?: boolean;
   /**
-   * P13-STAGED-tiers: stamp this mid-build marker into the manifest and mark
+   * Stamp this mid-build marker into the manifest and mark
    * its `pendingTypes` as `pending` coverage rows. Set by the staged driver
    * for non-final tiers only — the final tier omits it, which is what clears
    * the marker (and the degraded health status) on completion.
@@ -709,7 +709,7 @@ const saveExtractCache = async (
  *   const result = await runRefresh({ cwd: process.cwd(), noPull: true });
  */
 /**
- * P13-AST-edges: run the parser-grade extractor over every walked Apex file
+ * Run the parser-grade extractor over every walked Apex file
  * and append `source: 'apex-ast'`, `confidence: 'parsed'` edges. Field
  * reads/writes map to `CustomField:Object.Field` (first two chain segments);
  * cross-class calls map to `callsApex` on known vault classes (system
@@ -916,7 +916,7 @@ export const applyApexAstEdges = async (
         callsByClass.set(cls, list);
       }
     }
-    // CR-CAP-06: thread per-target-class CALLER-method attribution onto the
+    // Thread per-target-class CALLER-method attribution onto the
     // SAME single edge per target class — property-only, edge PK/count are
     // byte-identical (one callsApex edge per target class as before). Two
     // ADDITIVE keys, AST-PATH-ONLY:
@@ -996,7 +996,7 @@ export const applyApexAstEdges = async (
       fieldEdge(read, 'readsFrom');
     }
     for (const write of extracted.writes) fieldEdge(write, 'writesTo');
-    // P13-AST-flip: a heuristic scanner edge with an IDENTICAL
+    // A heuristic scanner edge with an IDENTICAL
     // (from, to, type) parsed twin is redundant — drop it so consumers
     // never double-count one real reference. Scanner-only edges stay
     // (recall the parser may lack); parsed edges win on duplicates.
@@ -1005,7 +1005,7 @@ export const applyApexAstEdges = async (
         .filter((edge) => (edge as { source?: string }).source === 'apex-ast')
         .map((edge) => `${edge.fromId}|${edge.toId}|${edge.edgeType}`),
     );
-    // P14-USAGE-scanner-fp-downgrade: on a successfully PARSED file the AST
+    // On a successfully PARSED file the AST
     // also proves which receivers are CLASS TYPES (inner classes + the class
     // itself) — the scanner's `CustomField:{Type}.{prop}` edges keyed on them
     // are typed false positives (`CustomField:ReportWrapper.id` for an inner
@@ -1065,7 +1065,7 @@ const runRefreshBody = async (opts: RunRefreshOptions): Promise<RefreshResult> =
   if (!configResult.ok) return failed(started, configResult.error, []);
   const paths = vaultPaths(configResult.value.vaultRoot);
   const targetOrg = opts.targetOrg ?? configResult.value.targetOrg;
-  // Defense in depth (CR-01 / C1): the `--target-org` flag bypasses config.json
+  // Defense in depth: the `--target-org` flag bypasses config.json
   // (which loadVaultConfig already gates), so validate the flag override too.
   if (opts.targetOrg !== undefined) {
     const aliasCheck = validateOrgAlias(opts.targetOrg);
@@ -1086,7 +1086,7 @@ const runRefreshBody = async (opts: RunRefreshOptions): Promise<RefreshResult> =
   let retrieveFailures: readonly RetrieveTypeFailure[] = [];
 
   if (!opts.noPull) {
-    // Preflight: set expectations before a long retrieve (P12-FIRSTRUN-refresh-preflight).
+    // Preflight: set expectations before a long retrieve.
     const priorManifest = await loadManifest(configResult.value.vaultRoot);
     const priorComponentCount = priorManifest.ok
       ? Object.values(priorManifest.value.components ?? {}).reduce(
@@ -1189,8 +1189,7 @@ const runRefreshBody = async (opts: RunRefreshOptions): Promise<RefreshResult> =
   }
 
   // Folder-based Report / Dashboard metadata is invisible to the
-  // `<members>*</members>` retrieve. Three modes (P13-REPORTS-default,
-  // user decision 2026-06-10):
+  // `<members>*</members>` retrieve. Three modes (user decision 2026-06-10):
   //   --with-reports  → FULL folder pull (uncapped; slow on big orgs)
   //   default         → SMART pull: top SFI_REPORTS_CAP (500) by USAGE
   //                     (Report.LastRunDate / Dashboard.LastViewedDate,
@@ -1259,7 +1258,7 @@ const runRefreshBody = async (opts: RunRefreshOptions): Promise<RefreshResult> =
             `smart report pull lost ${smart.value.batchErrors.length} batch(es) (non-fatal, recorded): ${smart.value.batchErrors[0] ?? ''}`,
           );
         }
-        // P14-USAGE-reports-retrieve-fidelity: `retrieved` records what
+        // `retrieved` records what
         // actually LANDED on disk, not what the manifest requested — the
         // Metadata API can silently drop members (a live run delivered 78 of
         // 83 requested dashboards). requested > retrieved means drops, and
@@ -1353,7 +1352,7 @@ const runRefreshBody = async (opts: RunRefreshOptions): Promise<RefreshResult> =
   // describe step, so standard lookup fields are in the node set).
   walked = { ...walked, results: resolveRecordFilterPathEdges(walked.results) };
 
-  // P13-AST-edges: opt-in parser-grade Apex edge pass (lazy import — the
+  // Opt-in parser-grade Apex edge pass (lazy import — the
   // default path never loads the ANTLR grammar). Best-effort per file:
   // parse failures fall back to scanner-only and are counted.
   let apexAstStats: { readonly filesParsed: number; readonly parseErrors: number } | undefined;
@@ -1375,7 +1374,7 @@ const runRefreshBody = async (opts: RunRefreshOptions): Promise<RefreshResult> =
   if (opts.incremental) await saveExtractCache(paths.meta, walked.cache);
 
   await mkdir(paths.graph, { recursive: true });
-  // P13-WATCH-epoch: when an open MCP server holds the graph file (DuckDB
+  // When an open MCP server holds the graph file (DuckDB
   // refuses a writer while ANY process holds a handle, read-only included),
   // build into a SIDE file and atomically rename it over the target at the
   // end — on POSIX the rename succeeds despite open handles; the server's old
@@ -1389,7 +1388,7 @@ const runRefreshBody = async (opts: RunRefreshOptions): Promise<RefreshResult> =
   let renameOver = false;
   let storeResult: Awaited<ReturnType<typeof openGraph>>;
   if (opts.forceSideBuild === true) {
-    // P13-STAGED-tiers: transactional full build — never touch the live
+    // Transactional full build — never touch the live
     // graph file until the whole tier succeeded.
     graphTarget = `${paths.graphDb}.rebuild`;
     await rm(graphTarget, { force: true });
@@ -1687,7 +1686,7 @@ interface RunWithOpenGraphArgs {
 }
 
 /**
- * Build the additive v4.0 manifest coverage rows from what this refresh
+ * Build the additive manifest coverage rows from what this refresh
  * actually rendered plus what the walker skipped. The generated package.xml
  * requests every supported type unless the operator supplied `--types`, so the
  * coverage row's `requested` flag reflects that narrowed run.
@@ -1927,7 +1926,7 @@ export const buildCoverageEntries = (
 };
 
 /**
- * P13-STAGED-tiers: mark the staged marker's still-queued types as `pending`
+ * Mark the staged marker's still-queued types as `pending`
  * coverage rows. A pending row keeps `requested: true, retrieved: 0`, so
  * readers that predate the flag partition it as partial coverage — absence
  * caveats still fire — while new readers can say "queued, build in progress"
@@ -1973,13 +1972,13 @@ export interface ReportsCapEvidence {
 }
 
 /**
- * P13-REPORTS-default: when the usage-ranked pull was CAPPED (org holds more
+ * When the usage-ranked pull was CAPPED (org holds more
  * reports/dashboards than the cap), the Report/Dashboard coverage rows go
  * `capped` — the un-pulled tail was NOT checked, so absence claims about
  * report usage must stay qualified (same downstream effect as staged pending
  * rows: excluded from `covered`, folded into `missingCoverage`). Fully-pulled
  * orgs (total ≤ cap) read as plainly covered.
- * P14-USAGE-reports-retrieve-fidelity: `retrieved` is what actually LANDED
+ * `retrieved` is what actually LANDED
  * on disk, so the same `total > retrieved` test now also keeps rows capped
  * when the retrieve silently dropped requested members.
  *
@@ -2128,7 +2127,7 @@ export const decorateReportPullCoverage = (
 };
 
 /**
- * P13-STAGED-tiers: manifest counts without the render drain — one GROUP BY
+ * Manifest counts without the render drain — one GROUP BY
  * per table. `listNodesByType` applies no filter beyond `type = ?`, so for
  * supported types these totals equal what a render-derived count would
  * report; mid-build manifests use them so the expensive Markdown render runs
@@ -2232,9 +2231,9 @@ const importGraph = async (
     //   - no extraction `failures`: a file that failed to parse is absent from
     //     `results`; truncating would drop its node on a transient parse error.
     // A full, clean, no-pull rebuild is byte-identical to the upsert result when
-    // nothing was deleted (P10-A7), and correctly drops what was. A with-pull
+    // nothing was deleted, and correctly drops what was. A with-pull
     // full refresh with zero failures uses the same path once source/ is
-    // reconciled against the authoritative retrieve set (P15-VAULT-a7b).
+    // reconciled against the authoritative retrieve set.
     const sourceAuthoritative =
       opts.noPull === true && requestedTypes === null && failures.length === 0;
     const pullFullyAuthoritative =
@@ -2254,7 +2253,7 @@ const importGraph = async (
       // type-scoped (a delete entry's node/edge endpoint type ∈ `reconciledTypes`),
       // so a surviving, never-re-extracted type can never appear in them.
       //
-      // CR-20: this prunes via `pruneStaleNodes` (chunked DELETE transactions),
+      // This prunes via `pruneStaleNodes` (chunked DELETE transactions),
       // NOT `applyChangeSet`. `applyChangeSet`'s whole-graph post-apply self-check
       // compares the GLOBAL row count to a reconciled-ONLY desired count, which is
       // wrong for a partial reconcile — on any multi-type graph it tripped, rolled
@@ -2412,7 +2411,7 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     }
   }
 
-  // v1.7 R2: optional Tooling API enrichment. On a side-build this belongs to
+  // Optional Tooling API enrichment. On a side-build this belongs to
   // phase 1 because it mutates the graph; phase 2 carries its summary forward.
   let toolingApiSummary = args.toolingApiSummary;
   if (opts.withToolingApi === true && args.buildOnly === true) {
@@ -2446,7 +2445,7 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     };
   }
 
-  // P13-STAGED-tiers: a mid-build tier carries a staged marker; it defers the
+  // A mid-build tier carries a staged marker; it defers the
   // Markdown render and every post-render hook that presumes a complete graph.
   const midBuild = opts.stagedMarker !== undefined;
 
@@ -2752,7 +2751,7 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
       }
     }
 
-    // P13-GITHIST-enable: when the vault keeps its own git history AND the
+    // When the vault keeps its own git history AND the
     // source tree actually changed, auto-commit the new state with a delta
     // summary. Best-effort by contract; non-enabled vaults are a no-op.
     if (changeSummary.sourceTreeHashChanged) {
@@ -2778,7 +2777,7 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     // rides on the in-memory result regardless of whether this write succeeds.
     pulse = buildRefreshPulse(changeSummary);
 
-    // P13-ANNOT-store: annotations are keyed by component id and survive the
+    // Annotations are keyed by component id and survive the
     // refresh — but their SUBJECT may not. Report orphans (annotated ids no
     // longer in the fresh graph) in the pulse so a human re-points or unsets
     // them. Best-effort; annotation-free vaults add nothing to the pulse.
@@ -2804,7 +2803,7 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     }
   }
 
-  // Refresh epoch (P13-WATCH-epoch): bump the marker an open MCP server
+  // Refresh epoch: bump the marker an open MCP server
   // watches so it reopens its read connection — retiring the
   // restart-after-refresh / stale-loaded-vault class. Best-effort.
   try {
@@ -2824,7 +2823,7 @@ const runWithOpenGraph = async (args: RunWithOpenGraphArgs): Promise<RefreshResu
     // fresh graph into the gitignored docs/onboarding.md. Best-effort.
     await writeOnboardingDoc(paths.root, manifest, store);
 
-    // Org card (P13-CARD-render): the ≤16KB orientation document an AI loads
+    // Org card: the ≤16KB orientation document an AI loads
     // before its first question — docs/org-card.md + meta/org-card.json,
     // regenerated from the fresh graph. Best-effort.
     await writeOrgCard(paths.root, paths.meta, manifest, store);
@@ -3076,7 +3075,7 @@ const writeOnboardingDoc = async (
 };
 
 /**
- * Org-card refresh hook (P13-CARD-render): derive every card number from the
+ * Org-card refresh hook: derive every card number from the
  * fresh graph/manifest (`buildOrgCardInput`), render the ≤16KB card with the
  * pure renderer, and write `docs/org-card.md` + `meta/org-card.json`.
  * Best-effort: a card failure never flips refresh status. The wall-clock
@@ -3151,7 +3150,7 @@ const signedDelta = (n: number): string => (n > 0 ? `+${n}` : `${n}`);
  * deep tool a human should run next.
  */
 /**
- * P13-ANNOT-store: annotated component ids with no node in the fresh graph.
+ * Annotated component ids with no node in the fresh graph.
  * Bounded by the number of DISTINCT annotated ids (one indexed lookup each);
  * any read failure yields an empty report — orphan detection is advisory.
  */
@@ -3221,7 +3220,7 @@ export const computeChangeSummary = (
 });
 
 /**
- * Set of ComponentTypes the v1.7 R2 Tooling API dispatch table covers
+ * Set of ComponentTypes the Tooling API dispatch table covers
  * (per `docs/vendor/salesforce-metadata/ToolingApi.md` §"Per-type queries").
  * The enrichment pass loops over this list, queries each type's
  * freshness columns in batches, and folds the rows back into the
@@ -3245,7 +3244,7 @@ const TOOLING_API_ENRICHED_TYPES = [
 const ENRICH_CANDIDATE_PAGE_SIZE = 500;
 
 /**
- * Drive the v1.7 R2 (+ R4 dependency) enrichment pass against the open
+ * Drive the freshness (+ dependency) enrichment pass against the open
  * graph, given an ALREADY-RESOLVED client. Returns a structured
  * `ToolingApiRefreshSummary` regardless of outcome so the CLI can render
  * the live-data axis as a separate block. Malformed responses and per-type
@@ -3671,7 +3670,7 @@ export const loadVaultConfig = async (cwd: string): Promise<Result<VaultConfig, 
   if (typeof parsed.targetOrg !== 'string' || parsed.targetOrg.length === 0) {
     return err(`Vault config missing 'targetOrg': ${configPath}`);
   }
-  // Defense in depth (CR-01 / C1): this is the single chokepoint every refresh
+  // Defense in depth: this is the single chokepoint every refresh
   // path reads `targetOrg` through, so reject a poisoned alias here before it
   // can reach any `sf` call — even though the exec sites are now shell-free.
   if (!ORG_ALIAS_RE.test(parsed.targetOrg)) {
@@ -3761,7 +3760,7 @@ const METADATA_API_NAME: Partial<Record<ComponentType, string>> = {
   // this change (recommended, not required — see the ComponentType doc
   // comment in @sf-intelligence/contracts).
   FieldServiceSettings: 'Settings',
-  // CR-CAP-18: PlatformEventChannel / PlatformEventChannelMember are exposed
+  // PlatformEventChannel / PlatformEventChannelMember are exposed
   // by the org describe under their own singular xmlNames (added API v45.0 /
   // v47.0), so they need NO alias — `toApiName` falls through to the type name.
   // PRE-SHIP VERIFY: confirm against a real-org `sf org list metadata-types`
@@ -3788,8 +3787,8 @@ const SF_MAX_BUFFER = 256 * 1024 * 1024;
  * because a full retrieve on a large org legitimately runs several minutes
  * (the refresh itself warns "this can take several minutes"). On timeout the
  * child is sent `SIGTERM` (graceful — lets `sf` clean up) so a hung/wedged
- * retrieve can never block a refresh or the unattended watch daemon forever
- * (CR-01 / H8). Override with `SFI_SF_RETRIEVE_TIMEOUT_MS`.
+ * retrieve can never block a refresh or the unattended watch daemon forever.
+ * Override with `SFI_SF_RETRIEVE_TIMEOUT_MS`.
  */
 const SF_RETRIEVE_TIMEOUT_MS = (() => {
   const n = Number(process.env['SFI_SF_RETRIEVE_TIMEOUT_MS']);
@@ -3799,7 +3798,7 @@ const SF_RETRIEVE_TIMEOUT_MS = (() => {
 /**
  * Per-call timeout for a `sf data query` / `sf org list metadata-types`
  * describe (2 min default). These are short read-only calls; a hung one must
- * not wedge the refresh (CR-01 / H8). Override with `SFI_SF_QUERY_TIMEOUT_MS`.
+ * not wedge the refresh. Override with `SFI_SF_QUERY_TIMEOUT_MS`.
  */
 const SF_QUERY_TIMEOUT_MS = (() => {
   const n = Number(process.env['SFI_SF_QUERY_TIMEOUT_MS']);
@@ -3809,7 +3808,7 @@ const SF_QUERY_TIMEOUT_MS = (() => {
 /**
  * The shell-free `sf` runner. Spawns the `sf` binary directly with an argv
  * array — NOT via a shell — so no value (including a `targetOrg` read from
- * `--target-org`/`config.json`) is ever interpreted by a shell (CR-01 / C1): a
+ * `--target-org`/`config.json`) is ever interpreted by a shell: a
  * metacharacter alias is one inert argv element, never executed. Every `sf` call
  * in this module routes through here.
  *
@@ -5180,7 +5179,7 @@ const REPORT_META_SUFFIXES = {
 const REPORT_DIR_MARKERS = { Report: 'reports', Dashboard: 'dashboards' } as const;
 
 /**
- * P14-USAGE-reports-retrieve-fidelity: a foldered Report/Dashboard retrieve
+ * A foldered Report/Dashboard retrieve
  * can land FEWER files than the manifest requested — members deleted between
  * the ranking query and the pull, folder renames, or members the Metadata API
  * drops without raising an error (a live run delivered 78 of 83 requested
@@ -5317,14 +5316,14 @@ export const runSfRetrieveFolderedReports = async (
   return ok({ reports, dashboards, batchErrors: outcome.batchErrors });
 };
 
-/** Cap for the default usage-ranked report/dashboard pull (P13-REPORTS-default). */
+/** Cap for the default usage-ranked report/dashboard pull. */
 const reportsCap = (): number => {
   const raw = Number(process.env['SFI_REPORTS_CAP']);
   return Number.isFinite(raw) && raw >= 0 ? Math.floor(raw) : 500;
 };
 
 /**
- * P13-REPORTS-default (user decision 2026-06-10): the DEFAULT refresh pulls
+ * Default (user decision 2026-06-10): the DEFAULT refresh pulls
  * the TOP-N foldered Reports/Dashboards ranked by actual USAGE — Reports by
  * `LastRunDate`, Dashboards by `LastViewedDate`, both falling back to
  * `LastModifiedDate` — via read-only SOQL, then retrieves exactly those
@@ -5344,7 +5343,7 @@ export const runSfRetrieveSmartReports = async (
       readonly reports: number;
       readonly dashboards: number;
       readonly totals: { readonly reports: number; readonly dashboards: number };
-      /** Requested members whose meta file actually LANDED on disk (P14-USAGE-reports-retrieve-fidelity). */
+      /** Requested members whose meta file actually LANDED on disk. */
       readonly landed: { readonly reports: number; readonly dashboards: number };
       /** `Type:Folder/Name` members requested but not delivered by the retrieve. */
       readonly missing: readonly string[];
@@ -5611,7 +5610,7 @@ export const formatRefreshSummary = (result: RefreshResult): string => {
 };
 
 /**
- * P14-USAGE-reports-retrieve-fidelity: the requested-vs-landed block of the
+ * The requested-vs-landed block of the
  * usage-ranked report/dashboard pull. Three honest numbers per type: org
  * total, manifest members requested, files that landed. A requested member
  * the retrieve silently dropped is called out — it was NOT checked, so
@@ -5719,7 +5718,7 @@ const formatSkippedWarning = (
 };
 
 /**
- * Format the v1.7 R2 Tooling API summary as a single one-line block.
+ * Format the Tooling API summary as a single one-line block.
  * Surfaced beneath the offline pipeline's component/edge counts so the
  * live-data axis stays visually separate from the offline output.
  */
@@ -5772,7 +5771,7 @@ interface RefreshCliFlags {
   readonly pull?: boolean;
   readonly types?: string;
   readonly withToolingApi?: boolean;
-  /** P13-FACTS-capture: opt-in record-data capture into the facts table. */
+  /** Opt-in record-data capture into the facts table. */
   readonly withDataShape?: boolean;
   /** #39: opt-in SetupAuditTrail persistence to meta/setup-audit-trail.jsonl. */
   readonly withAuditTrail?: boolean;
@@ -5785,11 +5784,11 @@ interface RefreshCliFlags {
   readonly withReports?: boolean;
   /** `--no-reports` sets this false (commander negation of `reports`). */
   readonly reports?: boolean;
-  /** P13-STAGED-tiers: build the vault in tiers (skeleton → priority → full). */
+  /** Build the vault in tiers (skeleton → priority → full). */
   readonly staged?: boolean;
-  /** P13-STAGED-demand-queue: drain queued automation-critical phantom hits. */
+  /** Drain queued automation-critical phantom hits. */
   readonly drainDemandQueue?: boolean;
-  /** P13-AST-edges: opt-in parser-grade Apex edge pass. */
+  /** Opt-in parser-grade Apex edge pass. */
   readonly apexAst?: boolean;
 }
 
@@ -5797,7 +5796,7 @@ interface RefreshCliFlags {
  * Register the `sfi refresh` subcommand on `program`. Exits 0 on success,
  * 1 on partial or failed. Thin shim around `runRefresh`.
  *
- * The optional `--with-tooling-api` flag (PLAN-v1.7 R2/R4) triggers the
+ * The optional `--with-tooling-api` flag triggers the
  * live freshness enrichment pass and the MetadataComponentDependency
  * confirmation pass after the offline pipeline completes; default refresh
  * is fully offline.
@@ -5927,7 +5926,7 @@ export const classifyForDemandRetrieve = async (
  * (a plain `sfi refresh`) is unchanged.
  */
 /**
- * P13-STAGED-demand-queue: record each processed id's drain outcome in the
+ * Record each processed id's drain outcome in the
  * vault's demand queue. Append-only and best-effort — outcomes for ids the
  * queue never saw are ignored at read time, so unconditional marking is
  * safe and a re-drain of an already-drained id is a no-op (idempotent).
@@ -5977,7 +5976,7 @@ export const runDemandRetrieve = async (opts: {
   if (!configResult.ok) return { status: 'failed', ...empty, message: configResult.error };
   const paths = vaultPaths(configResult.value.vaultRoot);
   const targetOrg = opts.targetOrg ?? configResult.value.targetOrg;
-  // Defense in depth (CR-01 / C1): validate the `--target-org` flag override,
+  // Defense in depth: validate the `--target-org` flag override,
   // which bypasses the config.json check in loadVaultConfig.
   if (opts.targetOrg !== undefined) {
     const aliasCheck = validateOrgAlias(opts.targetOrg);
@@ -6134,7 +6133,7 @@ export const registerRefreshCommand = (program: Command): void => {
           'WARNING — --with-tooling-api is ignored by a targeted pull (--components / --drain-demand-queue): no Tooling enrichment and no permission-dependency capture run. Use a full `sfi refresh --with-tooling-api` for those.\n',
         );
       }
-      // P13-STAGED-demand-queue: drain queued phantom hits via the
+      // Drain queued phantom hits via the
       // demand-retrieve gate.
       if (flags.drainDemandQueue === true) {
         const configResult = await loadVaultConfig(cwd);
@@ -6161,7 +6160,7 @@ export const registerRefreshCommand = (program: Command): void => {
         if (dr.status !== 'success') process.exit(1);
         return;
       }
-      // P13-STAGED-tiers: the tiered build path. Lazy import — the staged
+      // The tiered build path. Lazy import — the staged
       // driver imports runRefresh from this module, so a static import here
       // would create a cycle.
       if (flags.staged === true) {

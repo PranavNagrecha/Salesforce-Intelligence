@@ -53,8 +53,9 @@ A payment amount must be greater than zero.
 | --- | --- | --- |
 | `CustomObject:Payment__c` | declared | validation-rule-extractor |
 
-### references (outgoing, 1)
+### references (outgoing, 2)
 
 | Target | Confidence | Producer |
 | --- | --- | --- |
 | `CustomField:Payment__c.Amount__c` | parsed | formula-tokenizer |
+| `CustomField:Payment__c.Amount__c` | declared | validation-rule-extractor |

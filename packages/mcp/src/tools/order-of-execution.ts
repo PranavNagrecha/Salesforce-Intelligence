@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.order_of_execution` MCP tool.
  *
- * v2.0e W1 — the order-of-execution overview headline. Sibling of
+ * The order-of-execution overview headline. Sibling of
  * `sfi.what_happens_on_save` without the event filter: emits the
  * generic SOE structure with every potential automation for the
  * target object across every event type. Lets callers render the
@@ -696,7 +696,7 @@ export const orderOfExecutionInputSchema = z
     /** Resume offset applied PER EVENT. */
     offset: z.number().int().min(0).optional(),
     /**
-     * CR-22 continuation cursor echoed back from a prior paged response's
+     * Continuation cursor echoed back from a prior paged response's
      * `paging.nextCursor`. Supplies the resume offset; a stale/forged token
      * (different object / phase / vault) is rejected with `invalid-query`.
      */

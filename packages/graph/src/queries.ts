@@ -67,7 +67,7 @@ export interface Subgraph {
    * SUBGRAPH-PHANTOM-ENDPOINT-EDGE-LOSS: present ONLY when ≥1 collected edge
    * was removed from `edges` because an ENDPOINT has no row in `nodes`.
    *
-   * The self-contained-slice contract (CR-13) rightly filters those edges — a
+   * The self-contained-slice contract rightly filters those edges — a
    * consumer must never deref a node the slice omitted — but the removal used
    * to be INVISIBLE: `truncated` stayed false and the handler still opened
    * "Complete subgraph within N hop(s)". Measured on a real vault: a subgraph
@@ -174,7 +174,7 @@ export interface ListNodesOptions {
 
 /**
  * Optional narrows for `countNodesByType` — the SAME WHERE-clause filters
- * `listNodesByType` accepts (CR-22 B3), so a caller can get a TRUE total for a
+ * `listNodesByType` accepts, so a caller can get a TRUE total for a
  * filtered enumeration (e.g. ListViews of ONE object, or every `isBatchable`
  * ApexClass) rather than over-counting the whole type.
  */
@@ -353,7 +353,7 @@ const queryFailed = (label: string, e: unknown): GraphError => ({
 /**
  * Synthesize a minimal boundary `Node` for a `getSubgraph` edge endpoint that
  * has no real `nodes` row — used only under `includeUnresolved` so a surfaced
- * phantom edge does not dangle against the returned node set (CR-13). The
+ * phantom edge does not dangle against the returned node set. The
  * `type`/`apiName` are parsed best-effort from the canonical `Type:apiName`
  * ComponentId by splitting on the FIRST `:` (the apiName itself may contain
  * `.`, e.g. `CustomField:Account.Industry__c`). An id without a `:` falls back
@@ -447,7 +447,7 @@ export const getNodeById = async (
  * one row (a node id is unique), matching a per-id loop that fetches the same
  * row twice but produces a set.
  *
- * The N+1 batching primitive for `get_impact`'s `fetchNodes` (CR-17);
+ * The N+1 batching primitive for `get_impact`'s `fetchNodes`;
  * `getNodeById` stays unchanged for its single-id callers.
  *
  * @example
@@ -525,7 +525,7 @@ export const listNodesByType = async (
  * per-type counts) must use this rather than measuring `listNodesByType(...).length`,
  * which saturates at 500 and under-reports large types.
  *
- * CR-22 B3: accepts the SAME `parentId` / `propertyEquals` narrows as
+ * accepts the SAME `parentId` / `propertyEquals` narrows as
  * `listNodesByType`, so a TRUE total can back a FILTERED paginated enumeration
  * (e.g. ListViews of one object, or `{type, isBatchable:true}`) instead of
  * over-counting the whole type. With no options the SQL is unchanged (a bare
@@ -656,7 +656,7 @@ export const listChildren = async (
  * edge_type)` keys are unchanged, so any group with at most one edge per
  * `(to_id, edge_type)` keeps its previous order byte-for-byte; the
  * `(from_id, source)` tiebreak only ever decides order WITHIN a same-endpoint
- * group, which was previously DuckDB-unspecified. CR-22: offset-resumed paging
+ * group, which was previously DuckDB-unspecified. Offset-resumed paging
  * (`get_edges`) requires this unique final tiebreak so a resume cannot skip or
  * duplicate an edge that shares `(to_id, edge_type)` with its neighbor. The
  * `(from_id, source)` pair is unique per `(to_id, edge_type)` because the
@@ -735,7 +735,7 @@ const compareEdgesByEndpoint = (a: Edge, b: Edge): number => {
  * deterministic — `listEdges`' `(to_id, edge_type)` sort left the intra-group
  * order undefined.
  *
- * This is the N+1 batching primitive for CR-17: callers that previously ran
+ * This is the N+1 batching primitive: callers that previously ran
  * `listEdges` once per frontier/page node (`get_impact`'s BFS,
  * `renderVault`'s per-node render) issue O(1) queries per batch instead of
  * O(nodes). `listEdges` itself is intentionally left unchanged for its ~84
@@ -1217,7 +1217,7 @@ const bfsExpand = async (
  * `truncated` flag is set. Heuristic phantom edges (`targetMissing`) are
  * omitted by default; pass `includeUnresolved: true` to surface them.
  *
- * Self-contained-slice contract (CR-13): every returned edge has BOTH
+ * Self-contained-slice contract: every returned edge has BOTH
  * endpoints in the returned node set — no edge dangles. A node-capped clip
  * drops edges to the omitted (clipped) nodes; under `includeUnresolved`, a
  * surfaced GENUINE phantom edge's endpoint (a heuristic+`targetMissing` edge
@@ -1282,7 +1282,7 @@ export const getSubgraph = async (
       [...ids],
     );
     const returnedNodes: Node[] = nodeRows.map(rowToNode);
-    // CR-13 self-contained-slice contract: an edge must never point at a node
+    // Self-contained-slice contract: an edge must never point at a node
     // absent from the returned node set. The dangling-edge guard must filter
     // against the RETURNED nodes (`sortedNodes`), NOT the visited-id set — a
     // visited id can lack a `nodes` row (node-capped clip, or an

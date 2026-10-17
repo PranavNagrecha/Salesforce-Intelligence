@@ -234,7 +234,7 @@ const writeObject = async (vaultRoot: string, name: string): Promise<void> => {
  * removed from `source/` used to ORPHAN in the graph. A full, clean, no-pull
  * refresh now `fullRebuild`s so it reflects the authoritative source — while a
  * scoped or pulled refresh stays upsert-only so a partial extract / flaky
- * retrieve never wipes live data. (P10-A7 follow-up.)
+ * retrieve never wipes live data.
  */
 describe('runRefresh default import — deletion reconciliation', () => {
   it('a FULL no-pull refresh DROPS a component removed from source (no orphan)', async () => {

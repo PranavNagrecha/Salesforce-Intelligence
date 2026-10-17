@@ -18,7 +18,7 @@ import {
 import { dispatchTool, V01_TOOLS } from '../../src/tools/index.js';
 
 /**
- * P13-GW-meta-tools — the catalog gateway. The load-bearing contract is
+ * The catalog gateway. The load-bearing contract is
  * BYTE-IDENTITY: `run_analysis` returns the target tool's envelope verbatim
  * (its dispatch case returns `dispatchTool`'s result without re-wrapping).
  * The full-roster sweep runs in the qa harness against the fixture vault;
@@ -87,7 +87,7 @@ describe('sfi.list_analyses', () => {
     expect(r.value.data.categories).toContain('what-if');
   });
 
-  describe('CR-22 continuation cursor', () => {
+  describe('continuation cursor', () => {
     it('emits a nextCursor on a truncated page and resumes; pages concat with no gaps/dupes', async () => {
       const first = await listAnalysesHandler(ctx, { limit: 20 });
       expect(first.ok).toBe(true);

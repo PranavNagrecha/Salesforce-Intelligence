@@ -14,15 +14,15 @@
  * source, extractor-internal bookkeeping) is excluded so it cannot
  * manufacture false drift the way a `lastModifiedDate` node property would.
  *
- * Originally built in `compare-vaults.ts` (R6-12, whole-vault scope);
- * extracted here in R7-W10 so `compare-object-across-vaults.ts` can reuse
+ * Originally built in `compare-vaults.ts` (whole-vault scope);
+ * extracted here so `compare-object-across-vaults.ts` can reuse
  * the identical axis scoped to one object's components (the object node
  * itself plus its paired CustomFields) without duplicating the diff logic.
  * Both callers keep the SAME caps and disclosure text — see
  * `EDGE_DRIFT_MAX_COMPONENTS` / `EDGE_DRIFT_MAX_ROWS_PER_COMPONENT` /
  * `EDGE_DRIFT_SCOPE_DISCLOSURE` below.
  *
- * Also carries `buildExtractorVersionCaveat` (R6-12): when the two vaults'
+ * Also carries `buildExtractorVersionCaveat`: when the two vaults'
  * manifests report different sf-intelligence product versions, callers
  * surface both versions so a drift is never silently attributed to the org
  * when it might reflect an EXTRACTOR change between versions. A manifest

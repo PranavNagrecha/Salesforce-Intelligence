@@ -253,7 +253,7 @@ const extractAliasMap = (
  * `<sourceObject>` element, collect distinct SObject candidates, and
  * emit one `references` edge per candidate.
  *
- * Per PLAN-v3.2 R2c task spec: this LEAF extractor emits `references`
+ * Per task spec: this LEAF extractor emits `references`
  * edges to source/target SObjects via the field-mapping rows (parsing
  * the colon-separated path convention) PLUS the direct SObject element
  * surfaces (`<sourceObject>`, `<inputObjectName>`, `<outputObjectName>`).
@@ -530,7 +530,7 @@ const buildFieldEdges = (
  *   - Edges: zero or more `references` edges to `CustomObject:*` per
  *     the rules in `buildEdges` above.
  *
- * v3.2 design choice: `interfaceClass` is the doc's canonical
+ * Design choice: `interfaceClass` is the doc's canonical
  * classification key (Extract / Load / Transform), but the source XML
  * observed in Globex populates a top-level `<type>` element with
  * that same discriminant (e.g., `<type>Extract</type>`,

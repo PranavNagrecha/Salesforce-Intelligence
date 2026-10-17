@@ -1,5 +1,5 @@
 /**
- * Deterministic enterprise synthesis reports (v4.0 R7).
+ * Deterministic enterprise synthesis reports.
  *
  * Each tool composes existing handlers — no duplicated graph logic.
  */
@@ -1518,7 +1518,7 @@ const analyzeOverPrivilege = async (
   // is noted but NOT subtracted (a v1 honesty boundary).
   for (const psg of psgNodes) {
     scanned.permissionSetGroups += 1;
-    // CR-CAP-04: membership RESOLUTION is delegated to the shared helper —
+    // Membership RESOLUTION is delegated to the shared helper —
     // its `memberPermissionSetIds` are `PermissionSet:<name>` ids, identical
     // to the old inline `PermissionSet:${member}` reconstruction, so the
     // `permsetRisk` lookup key and this risk aggregation are UNCHANGED.
@@ -1847,7 +1847,7 @@ export interface PermissionRiskReportOutput extends SynthesisBase {
   /** Over-privilege rosters: god-mode system perms + object-level escalation. */
   readonly privilege: PrivilegeSummary;
   /**
-   * P13-PSA-counts: active-holder counts for the god-mode grantors
+   * Active-holder counts for the god-mode grantors
    * (`data_snapshot`), when captured — holder-weighted risk: a god-mode
    * permission set held by 40 active users outranks one held by none.
    */

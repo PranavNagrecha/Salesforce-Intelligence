@@ -1,6 +1,5 @@
 /**
  * Handler for the `sfi.layout_assignments` MCP tool
- * (P11-ACCESS-layout-reverse).
  *
  * The REVERSE of `sfi.layout_for_user`: given a page Layout, list every
  * (Profile × RecordType) assignment that targets it. `layout_for_user`
@@ -96,7 +95,7 @@ const layoutAssignmentsInputBaseSchema = z
     objectId: z.string().min(1).optional(),
     limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
     offset: z.number().int().min(0).optional(),
-    // CR-22 continuation cursor from a prior truncated page's nextCursor.
+    // Continuation cursor from a prior truncated page's nextCursor.
     cursor: z.string().min(1).optional(),
   })
   .refine(
@@ -206,9 +205,9 @@ export interface LayoutAssignmentsOutput {
   /** Disclosure when the layout-assignment surface was not extracted, or scope caveats. */
   readonly boundaryNote: string;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * Opaque continuation token, present ONLY when this page is truncated
    * (more assignment rows remain). Echo it back as `cursor` to resume. Absent
-   * on a complete page so an in-budget response is byte-identical to pre-CR-22.
+   * on a complete page so an in-budget response is byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
@@ -307,7 +306,7 @@ export const layoutAssignmentsHandler = async (
         return dot > 0 ? afterPrefix.slice(0, dot) : afterPrefix;
       })();
 
-  // CR-22 B3: scan EVERY Profile by paging the SQL OFFSET forward (window-by-
+  // Scan EVERY Profile by paging the SQL OFFSET forward (window-by-
   // window at the clamped cap) so assignments owned by Profile 501+ are
   // reachable — the single capped page used to drop the scan TAIL silently. The
   // derived assignment list is then COMPLETE and paged on the output axis below.
@@ -357,7 +356,7 @@ export const layoutAssignmentsHandler = async (
     }
   }
 
-  // CR-22: total-order tiebreak. In OBJECT mode the layout is the leading key
+  // Total-order tiebreak. In OBJECT mode the layout is the leading key
   // (rows span multiple layouts); then profileId, recordType, and the raw
   // record-type id make the order a STRICT TOTAL order so an offset/cursor
   // resume cannot dup or skip at a tie. In LAYOUT mode every row shares the one
@@ -381,7 +380,7 @@ export const layoutAssignmentsHandler = async (
   const totalAssignments = assignments.length;
   const limit = input.limit ?? DEFAULT_LIMIT;
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // Resolve the resume offset (echoed cursor wins over explicit offset).
   // The fingerprint covers the narrowing arg `componentId` (the layout OR object
   // id) so a token minted for one target can't be replayed against another. In
   // layout mode `targetId === layoutId`, so this stays byte-identical.

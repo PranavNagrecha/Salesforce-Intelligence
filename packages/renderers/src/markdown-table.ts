@@ -139,7 +139,7 @@ export const escapeMarkdownHeading = (text: string): string =>
  * fence included (e.g. for a `**API Name:** ...` line, or a Flow detail
  * value). Collapses newlines to a single space first.
  *
- * CR-16d: an EARLIER version of this helper returned only the inner text and
+ * an EARLIER version of this helper returned only the inner text and
  * relied on callers to wrap it in a hardcoded single backtick, escaping an
  * embedded backtick with a backslash (`` \` ``). That does NOT work — per
  * CommonMark, backslash escapes are inert inside code spans (a code span

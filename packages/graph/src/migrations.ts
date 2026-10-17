@@ -10,7 +10,7 @@ import type { GraphError } from './store.js';
  * stored below this value gets the intervening migrations applied in order on
  * the next read-write open; a vault at this value is a no-op.
  *
- * v1 is the baseline — the v0.1 nodes/edges/facts schema (plus the CR-19
+ * v1 is the baseline — the original nodes/edges/facts schema (plus the
  * `schema_version` ledger itself), with no transform beyond stamping the
  * version on a previously-unversioned vault.
  */
@@ -73,7 +73,7 @@ const MIGRATIONS: readonly Migration[] = [
 
 /**
  * Read the integer schema version stored in the vault, or `0` when the
- * `schema_version` table is absent (a pre-versioning vault built before CR-19)
+ * `schema_version` table is absent (a pre-versioning vault)
  * or empty. Errors other than "table missing" surface as `schema-error`.
  *
  * @example
@@ -164,7 +164,7 @@ const stampVersion = async (
  *   1. `initSchema` creates the base tables (incl. `schema_version`)
  *      idempotently — a fresh vault gets the full schema, an existing one is
  *      untouched.
- *   2. Read the stored version (0 for a pre-CR-19 vault).
+ *   2. Read the stored version (0 for a legacy vault).
  *   3. Apply every migration whose `version` is greater than the stored
  *      version, in ascending order, inside one BEGIN/COMMIT. Any failure
  *      ROLLs BACK the whole batch and returns a typed `schema-error` — the

@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.find_dead_code` MCP tool.
  *
- * The v2.2 cross-cutting dead-code surface — composes v2.7's
+ * The cross-cutting dead-code surface — composes the call graph's
  * `method_reachability` verdict, entry-point taxonomy, zero-usage
  * classes, and unused CustomField (no incoming edges) into a single
  * cascade verdict per candidate. Answers "what code in this org has
@@ -28,7 +28,7 @@
  *     not, the candidate is downgraded to `uncertain` instead (see
  *     `ACTIVITY_POLYMORPHIC_DISCLOSURE`).
  *     For a Flow, ONLY when its status is `Obsolete` / `InvalidDraft`
- *     (R2-12): an Active / Draft / unknown-status Flow is NEVER
+ *     an Active / Draft / unknown-status Flow is NEVER
  *     definitely_dead — Flow edges are all OUTGOING (triggersOn /
  *     listensTo / callsApex / writesTo), so a live flow has ~0 incoming
  *     edges by nature and fires on its own trigger; flagging it dead
@@ -38,7 +38,7 @@
  *     split the field / what-if tools make.
  *   - `likely_dead`: a code component reached only by test classes
  *     (`isTest === true`) or via heuristic-only edges that may be
- *     stripped by dynamic SOQL / reflective access. The v2.7
+ *     stripped by dynamic SOQL / reflective access. The
  *     `method_reachability` `test-only-reachable` verdict cascades
  *     here. For an ApexClass this verdict also survives the same
  *     static-type-usage grep: a production type-name reference
@@ -51,7 +51,7 @@
  *     platform invokes these directly), an ASYNC-DISPATCH class of any
  *     kind, a class registered dynamically (framework subclass /
  *     `Callable`) — OR an Active / Draft / unknown-status Flow, which is
- *     its OWN entry point (R2-12). Surfaced for completeness in the
+ *     its OWN entry point. Surfaced for completeness in the
  *     result set when `includeUncertain: true`; suppressed by default,
  *     and the `suppressed` block says how many rows that removed.
  *
@@ -81,7 +81,7 @@
  * one or more ComponentTypes. Default is `['ApexClass', 'ApexTrigger',
  * 'Flow', 'CustomField']` — the four scope-relevant types.
  *
- * **Honesty axis (v2.7 inherited):** dynamic dispatch
+ * **Honesty axis (inherited):** dynamic dispatch
  * (`Type.forName(...)`), reflective invocation, framework wiring
  * (TriggerHandler / fflib base classes), managed-package callers, and
  * every registration that lives in DATA rather than metadata — a
@@ -94,10 +94,10 @@
  * surface as `definitely_dead` or `likely_dead`. The `boundaries` array
  * surfaces the verbatim disclosure.
  *
- * **Performance (v3.2):** the original implementation issued one
+ * **Performance:** the original implementation issued one
  * `listEdges` plus one `getNodeById` per incoming edge — an N+1
  * pattern that ran ~14000 SQL queries on the Acme fixture
- * (1539 candidates, ~12600 referrer-lookups). v3.2 collapses the
+ * (1539 candidates, ~12600 referrer-lookups). This collapses the
  * cascade into a single CTE that LEFT JOINs candidates to incoming
  * edges and referrers in one round-trip, pushing the entry-point
  * and `isTest` classification into SQL via DuckDB's
@@ -320,7 +320,7 @@ const findDeadCodeInputBaseSchema = z.object({
     .optional(),
   includeUncertain: z.boolean().optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
-  // CR-22: page cursor for walking the full candidate list when truncated.
+  // Page cursor for walking the full candidate list when truncated.
   offset: z.number().int().min(0).optional(),
   cursor: z.string().min(1).optional(),
 });
@@ -428,7 +428,7 @@ export interface FindDeadCodeOutput {
   /**
    * Page size applied to this response. Present ONLY on a PAGED response
    * (`truncated` or a resumed `offset > 0`); omitted on a whole-fits no-cursor
-   * call so that response stays byte-identical to the pre-CR-22 shape.
+   * call so that response stays byte-identical to the pre-paging shape.
    */
   readonly limit?: number;
   /** Zero-based offset of the first returned candidate. Present only when paged (see `limit`). */
@@ -436,9 +436,9 @@ export interface FindDeadCodeOutput {
   /** Offset to pass on the next call to fetch the following page. Present only when `truncated`. */
   readonly nextOffset?: number;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * Opaque continuation token, present ONLY when this page is truncated
    * (more candidates remain). Echo it back as `cursor` to resume. Absent on a
-   * complete page so an in-budget response is byte-identical to pre-CR-22.
+   * complete page so an in-budget response is byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
@@ -483,7 +483,7 @@ export interface FindDeadCodeOutput {
 /**
  * Caller families whose absence can FAKE a dead-code verdict: Apex entry
  * points are invoked from these surfaces, so incomplete coverage of any of
- * them must qualify the claim (P13-STAGED-absence-battery).
+ * them must qualify the claim.
  */
 const DEAD_CODE_REQUIRED_COVERAGE: readonly string[] = [
   'ApexClass',
@@ -594,7 +594,7 @@ interface DeadCodeRow {
    * is rolled back at runtime and does not keep the class alive.
    */
   readonly has_production_dispatch: boolean;
-  /** Flow only (R2-12): TRUE when the Flow's status is NOT Obsolete/InvalidDraft
+  /** Flow only: TRUE when the Flow's status is NOT Obsolete/InvalidDraft
    *  (active, Draft, or unknown/missing status — all treated as in-use). An
    *  active flow fires on its own trigger and has ~0 incoming edges by nature,
    *  so this guards against deleting live automation. FALSE for non-Flow. */
@@ -609,7 +609,7 @@ interface DeadCodeRow {
 }
 
 /**
- * Run the single CTE that drives the v3.2 dead-code scan. Returns
+ * Run the single CTE that drives the dead-code scan. Returns
  * one row per candidate in `types`, with the entry-point and
  * test-reach classifiers already aggregated SQL-side. Empty `types`
  * is handled at the caller boundary (`DEFAULT_TYPES` substitution),
@@ -850,7 +850,7 @@ ${NON_USAGE_EDGE_EXCLUSION_SQL}
 /**
  * Comparator: verdict rank ASC, componentType ASC, then componentId ASC.
  *
- * This is already a STRICT TOTAL order (CR-22): `componentId` is the node `id`
+ * This is already a STRICT TOTAL order: `componentId` is the node `id`
  * the dead-code CTE groups by (`GROUP BY c.id` — one row per distinct node id),
  * so every candidate has a unique componentId and the final key resolves all
  * ties uniquely. The earlier verdict / componentType keys only coarsen. No
@@ -1148,7 +1148,7 @@ export const findDeadCodeHandler = async (
     const hasNonTestReach = row.has_non_test_reach;
     const hasEntryPointReach = row.has_entry_point_reach;
     const hasProductionDispatch = row.has_production_dispatch;
-    // DuckDB returns COUNT as bigint; the v3.2 caller compares
+    // DuckDB returns COUNT as bigint; the caller compares
     // against zero and surfaces the value as a number in the
     // candidate payload, so the cast is safe (no overflow risk for
     // in-degree counts).
@@ -1157,7 +1157,7 @@ export const findDeadCodeHandler = async (
     let verdict: DeadCodeVerdict;
     let reasoning: string;
     if (row.is_active_entry_point) {
-      // R2-12: an active/Draft/unknown-status Flow is its OWN entry point — it
+      // An active/Draft/unknown-status Flow is its OWN entry point — it
       // fires on its own trigger/schedule and has ~0 incoming edges by nature.
       // Treat exactly like an own-entry-point Apex class: `uncertain`,
       // suppressed unless includeUncertain. NEVER definitely_dead/likely_dead.
@@ -1421,7 +1421,7 @@ export const findDeadCodeHandler = async (
         : '`includeUncertain` is false, but the scan classified no `uncertain` candidates, so nothing was withheld — `uncertain: 0` here is a CHECKED zero, not a hidden bucket.',
   };
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // Resolve the resume offset (echoed cursor wins over explicit offset).
   // The fingerprint covers every NARROWING arg — includeUncertain (it filters
   // which candidates are in the list, line below `verdict === 'uncertain'`), the
   // canonical objectId scope, and types — so a token minted for one narrowing
@@ -1459,7 +1459,7 @@ export const findDeadCodeHandler = async (
   const truncated = paged.hasMore;
   const emitCursor = paged.nextCursor !== null;
   // Paged when truncated OR resumed past 0; only then do we add paging fields,
-  // so a whole-fits no-cursor response stays byte-identical to pre-CR-22.
+  // so a whole-fits no-cursor response stays byte-identical to the pre-paging shape.
   const isPaged = truncated || offset > 0;
 
   const boundaries: string[] = [DEAD_CODE_DISCLOSURE];
@@ -1476,7 +1476,7 @@ export const findDeadCodeHandler = async (
       );
     }
   }
-  // R2-12: whenever Flow is in scope, disclose the status-gated Flow rule
+  // Whenever Flow is in scope, disclose the status-gated Flow rule
   // (active/Draft/unknown flows are never definitely_dead) and the unmodeled
   // subflow-invocation caveat — surfaced regardless of whether any flow landed
   // in the (suppressed) result set, so the honesty is never silently dropped.

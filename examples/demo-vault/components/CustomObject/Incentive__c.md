@@ -13,10 +13,12 @@ properties:
   enableHistory: false
   enableReports: false
   enableSearch: false
+  externalSharingModel: null
   label: Incentive
   nameFieldLabel: Incentive Name
   nameFieldType: Text
   pluralLabel: Incentives
+  recordPageOverrides: []
   sharingModel: Private
   visibility: Public
 sourcePath: source/main/default/objects/Incentive__c/Incentive__c.object-meta.xml
@@ -37,9 +39,11 @@ type: CustomObject
 | enableHistory | `false` |
 | enableReports | `false` |
 | enableSearch | `false` |
+| externalSharingModel | `null` |
 | nameFieldLabel | `Incentive Name` |
 | nameFieldType | `Text` |
 | pluralLabel | `Incentives` |
+| recordPageOverrides | `` |
 | sharingModel | `Private` |
 | visibility | `Public` |
 

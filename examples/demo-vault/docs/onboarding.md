@@ -1,4 +1,4 @@
-<!-- onboarding handbook · generated 2026-06-25T15:19:46.808Z · source ec3078be5664a9ac51be30123be8bbf4b2747acc85fbd99aa38f2c22e45e8824 -->
+<!-- onboarding handbook · generated 2026-10-17T16:10:41.658Z · source 937e69c4140fa1b350bf5c90b68d850e6b314bf005122976ccf07520ce92cb33 -->
 # Welcome to demo-org
 
 ## What This Org Does
@@ -6,19 +6,19 @@
 This is a structured tour of `demo-org` for a new admin.
 Total CustomObjects: 13  
 Total ApexClasses: 5  
-Total Flows: 2
+Total Flows: 3
 
 ## Main Data Model
 
 | Object | Inbound references |
 | --- | --- |
-| `CustomObject:Project__c` | 17 |
+| `CustomObject:Project__c` | 20 |
+| `CustomObject:Invoice__c` | 6 |
 | `CustomObject:Installation__c` | 5 |
-| `CustomObject:Invoice__c` | 5 |
 
 ## Common Workflows
 
-Automations extracted: 1 workflow rules, 2 flows, 1 apex triggers.
+Automations extracted: 1 workflow rules, 3 flows, 1 apex triggers.
 Active ratio: 1.00
 
 ## How Security Works
@@ -82,7 +82,7 @@ Key Contacts data depends on the Tooling API enrichment pass. Run `sfi refresh -
 
 ## Boundaries
 
-Generated from offline vault on 2026-06-25T15:19:46.650Z; missing real-time data, debug logs, runtime metrics.
+Generated from offline vault on 2026-10-17T16:10:41.527Z; missing real-time data, debug logs, runtime metrics.
 
 Section confidence is inherited from the source edges; spot-check heuristic entries before treating as authoritative.
 

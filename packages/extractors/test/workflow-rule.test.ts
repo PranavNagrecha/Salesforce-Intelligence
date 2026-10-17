@@ -55,7 +55,7 @@ describe('extractWorkflowRule', () => {
       };
       expect(result.value).toEqual(goldenPatched);
       // The Account fixture has 2 rules; sanity-check edge mix.
-      // v2.0a — also filter to `WorkflowRule` nodes because each
+      // also filter to `WorkflowRule` nodes because each
       // rule produces a sibling synthetic `ConditionalContext` node.
       expect(
         result.value.nodes.filter((n) => n.type === 'WorkflowRule'),
@@ -246,7 +246,7 @@ describe('extractWorkflowRule', () => {
       // Per WorkflowRule.md, a `<Workflow>` root with only orphan
       // `<alerts>` / `<fieldUpdates>` collections is a documented happy
       // path for objects whose action scaffolding outlives consuming rules.
-      // v2.9: <alerts> entries are now promoted to WorkflowAlert nodes even
+      // <alerts> entries are now promoted to WorkflowAlert nodes even
       // when the file has no <rules>, so a file with one <alerts> entry
       // produces one WorkflowAlert node + one parentOf edge.
       const xml = `<?xml version="1.0"?>
@@ -301,7 +301,7 @@ describe('extractWorkflowRule', () => {
     });
   });
 
-  describe('CR-05 — FieldUpdate field-level writesTo edge', () => {
+  describe('FieldUpdate field-level writesTo edge', () => {
     it('emits a field-level writesTo to the CustomField a FieldUpdate sets (KEEP references + ADD writesTo)', async () => {
       // A rule's <actions><name> names a field-update; the target field
       // lives in the sibling top-level <fieldUpdates> collection. The
@@ -773,7 +773,7 @@ describe('extractWorkflowRule', () => {
     });
   });
 
-  describe('v2.8 — OutboundMessage promotion', () => {
+  describe('OutboundMessage promotion', () => {
     it('promotes each <outboundMessages> child to an OutboundMessage node + parentOf edge', async () => {
       const xml = `<?xml version="1.0"?>
 <Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
@@ -880,7 +880,7 @@ describe('extractWorkflowRule', () => {
 
     it('emits an OutboundMessage even when the file has no <rules>', async () => {
       // A workflow file with only an `<outboundMessages>` collection is
-      // the v2.8 orphan-collection happy path — the extractor now
+      // the orphan-collection happy path — the extractor now
       // promotes the outbound message regardless of whether any rule
       // consumes it.
       const xml = `<?xml version="1.0"?>
@@ -968,7 +968,7 @@ describe('extractWorkflowRule', () => {
     });
   });
 
-  describe('v2.0a — ConditionalContext extraction', () => {
+  describe('ConditionalContext extraction', () => {
     it('emits a ConditionalContext + firesWhen edge for a criteria-based rule', async () => {
       const xml = `<?xml version="1.0"?>
 <Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
@@ -1230,7 +1230,7 @@ describe('extractWorkflowRule', () => {
     });
   });
 
-  describe('CR-CAP-11 — workflowTimeTriggers declarative shape', () => {
+  describe('workflowTimeTriggers declarative shape', () => {
     it('parses a per-rule <workflowTimeTriggers> into timeTriggerCount + timeTriggers[]', async () => {
       // The element nests INSIDE <rules> (per-rule), unlike the
       // top-level <fieldUpdates>/<alerts> collections. Child tag names
@@ -1363,7 +1363,7 @@ describe('extractWorkflowRule', () => {
     });
   });
 
-  describe('CR-CAP-11b — per-rule action-type counts (declared)', () => {
+  describe('per-rule action-type counts (declared)', () => {
     it('counts per-rule <actions> by <type> into fieldUpdateCount/outboundMessageCount/taskCreationCount', async () => {
       // The three counts come from the PER-RULE <actions> array by <type>,
       // NOT from the top-level <fieldUpdates>/<outboundMessages>/<tasks>
@@ -1480,7 +1480,7 @@ describe('extractWorkflowRule', () => {
     });
   });
 
-  describe('v2.9 — WorkflowAlert node promotion', () => {
+  describe('WorkflowAlert node promotion', () => {
     it('promotes each <alerts> child to a WorkflowAlert node with senderType, description, template, ccEmails', async () => {
       // Real-org shape: OA_Communication_Request__c has three email alerts
       // all using senderType CurrentUser. This test uses the same structure.
@@ -1551,8 +1551,8 @@ describe('extractWorkflowRule', () => {
       }
     });
 
-    it('W4.3 — emits a `references` edge from the WorkflowAlert node to the EmailTemplate its <template> names', async () => {
-      // Pre-W4.3 the alert node carried the template ONLY on
+    it('emits a `references` edge from the WorkflowAlert node to the EmailTemplate its <template> names', async () => {
+      // Previously the alert node carried the template ONLY on
       // `properties.template` (a string) and had a single `parentOf` edge — so
       // `get_edges` on the alert reached no EmailTemplate and "safe to delete
       // EmailTemplate X?" invented no WorkflowAlert dependent. This asserts the
@@ -1589,7 +1589,7 @@ describe('extractWorkflowRule', () => {
       }
     });
 
-    it('W4.3 — a template-less alert emits NO EmailTemplate edge (no phantom)', async () => {
+    it('a template-less alert emits NO EmailTemplate edge (no phantom)', async () => {
       const xml = `<?xml version="1.0"?>
 <Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
   <alerts>
@@ -1613,7 +1613,7 @@ describe('extractWorkflowRule', () => {
 
     it('WorkflowRule alert action references edge resolves to the promoted WorkflowAlert node id', async () => {
       // The Alert action variant already emits a `references` edge to
-      // `WorkflowAlert:{Object}.{name}`; v2.9 gives that target a real node.
+      // `WorkflowAlert:{Object}.{name}`; this gives that target a real node.
       // Verify co-existence: the references edge still emits (unchanged),
       // and the promoted node is present alongside it.
       const xml = `<?xml version="1.0"?>

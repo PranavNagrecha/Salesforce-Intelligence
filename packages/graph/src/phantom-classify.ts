@@ -130,7 +130,7 @@ export const classifyPhantom = (
   // unknown), which carry an honest remedy.
   const componentType = id.slice(0, id.indexOf(':'));
   const isSchemaId = componentType === 'CustomField' || componentType === 'CustomObject';
-  // P14-PHANTOM-edges: a standard object is ALWAYS PascalCase — a lowercase
+  // a standard object is ALWAYS PascalCase — a lowercase
   // no-`__` object part (`CustomField:app.Id`, `CustomField:acc.Status__c`)
   // is an un-type-resolved Apex local variable from the heuristic scanner,
   // not a standard field. Mislabeling it standard-field-phantom shipped a

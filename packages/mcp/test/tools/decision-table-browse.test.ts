@@ -1,10 +1,10 @@
 /// <reference types="vitest/globals" />
 
 /**
- * Tests for the `sfi.decision_table_browse` MCP tool (v3.2 R3e).
+ * Tests for the `sfi.decision_table_browse` MCP tool.
  *
  * Coverage:
- *   - happy path: parameter shape (CsvUpload variant) + Q179 row-data
+ *   - happy path: parameter shape (CsvUpload variant) + row-data
  *     refusal verbatim + rows: null + dataSourceType-specific hint.
  *   - SObject variant: row-store hint names the `sourceObject`.
  *   - Manual variant: row-store hint names the OmniStudio designer UI.
@@ -17,7 +17,7 @@
  *     node (cross-type confusion at the id boundary).
  *   - Native-vs-Vlocity disclosure surfaces verbatim on every response.
  *
- * Q179 honesty anchor (load-bearing): the row-data refusal MUST be the
+ * Honesty anchor (load-bearing): the row-data refusal MUST be the
  * first entry in `boundaries[]` and rows MUST be unconditionally null.
  */
 
@@ -281,7 +281,7 @@ afterAll(async () => {
 });
 
 describe('decisionTableBrowseHandler', () => {
-  it('returns parameter shape with Q179 row-data refusal verbatim for CsvUpload', async () => {
+  it('returns parameter shape with the row-data refusal verbatim for CsvUpload', async () => {
     const result = await decisionTableBrowseHandler(ctx, {
       decisionTableId: FPL_ID,
     });
@@ -302,10 +302,10 @@ describe('decisionTableBrowseHandler', () => {
     expect(data.outputParams).toEqual([
       { name: 'Result', type: 'Number' },
     ]);
-    // Q179 honesty anchor — rows MUST be null.
+    // Honesty anchor — rows MUST be null.
     expect(data.rows).toBeNull();
-    // Q179 boundary MUST be the first entry; this is the load-bearing
-    // contract a v3.2 release passes regardless of test-suite green.
+    // Boundary MUST be the first entry; this is the load-bearing
+    // contract a release passes regardless of test-suite green.
     expect(data.boundaries[0]).toBe(
       'DecisionTable rows live in CSV uploads or SObject records, ' +
         'not in the metadata XML. This tool cannot enumerate row content. ' +
@@ -327,7 +327,7 @@ describe('decisionTableBrowseHandler', () => {
     if (!result.ok) return;
     const data = result.value.data;
     expect(data.dataSourceType).toBe('SObject');
-    // Q179 anchor still first, then SObject hint naming Account.
+    // Anchor still first, then SObject hint naming Account.
     expect(data.boundaries[0]).toContain('This tool cannot enumerate row content');
     expect(data.boundaries[1]).toContain('dataSourceType is SObject');
     expect(data.boundaries[1]).toContain("'Account' SObject");
@@ -374,7 +374,7 @@ describe('decisionTableBrowseHandler', () => {
     expect(data.inputParams).toEqual([]);
     expect(data.outputParams).toEqual([]);
     expect(data.rows).toBeNull();
-    // Q179 still first; Native-vs-Vlocity third; read-failure last so
+    // Row-data refusal still first; Native-vs-Vlocity third; read-failure last so
     // callers see the partial-answer signal verbatim.
     expect(data.boundaries[0]).toContain('This tool cannot enumerate row content');
     const readFailureBoundary = data.boundaries[data.boundaries.length - 1];

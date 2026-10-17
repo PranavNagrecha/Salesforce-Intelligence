@@ -3,7 +3,7 @@
  *
  * Returns the in-memory `VaultManifest` snapshot the server loaded at
  * startup, wrapped in the standard `McpResponse` envelope. This is the
- * cheapest tool in the v0.1 surface — no graph or filesystem access at
+ * cheapest tool in the surface — no graph or filesystem access at
  * call time. Clients use it to display vault provenance (refresh time,
  * source org, per-type component counts) without re-reading
  * `meta/manifest.json` themselves.

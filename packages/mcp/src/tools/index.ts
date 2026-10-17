@@ -9,7 +9,7 @@
  *   - `advertisedTools` — filters V01_TOOLS by profile
  *   - `registerTools`   — wires MCP server handlers
  *
- * Split from the original monolithic index.ts (R7-F2) to kill the merge
+ * Split from the original monolithic index.ts to kill the merge
  * hotspot: roster PRs, dispatch PRs, and handler PRs no longer conflict.
  */
 
@@ -54,7 +54,7 @@ export {
 } from './tool-dispatch.js';
 
 // ── Re-exports: tool profile primitives ───────────────────────────────────────
-// P13-GW profile primitives live in tool-profile.ts (cycle-free for
+// profile primitives live in tool-profile.ts (cycle-free for
 // route-question's gateway envelopes); re-exported here as the public API.
 export {
   CORE_PROFILE_TOOLS,
@@ -80,7 +80,7 @@ export const advertisedTools = (
     : V01_TOOLS.filter((t) => !t.hidden);
 
 export const registerTools = (server: Server, ctx: Context): void => {
-  // P13-WATCH-epoch: the served context follows the vault's refresh epoch —
+  // The served context follows the vault's refresh epoch —
   // a refresh while this server is open swaps in a fresh graph connection on
   // the NEXT call (no restart). Held mutably here; tools never see the swap.
   let currentCtx = ctx;

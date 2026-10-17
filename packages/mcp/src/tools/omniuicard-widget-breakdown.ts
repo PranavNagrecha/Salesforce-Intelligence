@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.omniuicard_widget_breakdown` MCP tool.
  *
- * v3.2 R3 — the FlexCard / OmniUiCard widget-canvas breakdown surface.
+ * The FlexCard / OmniUiCard widget-canvas breakdown surface.
  * Given an OmniUiCard canonical id, returns:
  *
  *   - `metadata` — the card's identity (`omniUiCardType`, `authorName`,
@@ -9,12 +9,12 @@
  *   - `states[]` — each state's name + recursive widget tree (parsed
  *     from the source XML's `<propertySetConfig>` JSON blob).
  *   - `dataSource` — `dataSourceConfig.dataSource.type` +
- *     `contextVariables[]` from the node properties the v3.2 R2
+ *     `contextVariables[]` from the node properties the
  *     extractor stamped on (mirrors what the extractor parsed).
  *   - `dispatchedActions[]` — the `dispatchesOmniAction` edges the
  *     extractor emitted for Action widgets whose
  *     `stateAction.type` is `OmniScript` or `Integration Procedure`.
- *   - `boundaries[]` — verbatim disclosures the v3.2 honesty axis
+ *   - `boundaries[]` — verbatim disclosures the honesty axis
  *     mandates: the propertySetConfig-parsing caveat AND the
  *     Native-vs-Vlocity legacy boundary. Surfaced unconditionally on
  *     every response. When the widget-tree re-parse could not run, or
@@ -26,17 +26,17 @@
  * Why this tool re-reads XML (instead of pulling widget tree from
  * the node):
  *
- *   The v3.2 R2 OmniUiCard extractor (journal 0170) deliberately
+ *   The OmniUiCard extractor deliberately
  *   stores per-card *aggregates* on `Node.properties` (`stateCount`,
  *   `widgetCount`, `embeddedScriptCount`, `dataSourceType`,
  *   `dataSourceContextVariables`) but not the full widget tree. The
  *   propertySetConfig JSON for a real-org FlexCard runs into the
  *   tens-of-kilobytes range; stamping it onto every OmniUiCard node
  *   would inflate the graph DB without being load-bearing for the
- *   v3.2 edge / aggregate-count surface. The XML on disk is the
+ *   edge / aggregate-count surface. The XML on disk is the
  *   canonical source; this tool walks `node.sourcePath` and
  *   re-parses the propertySetConfig blob on demand. Per
- *   `OmniUiCard.md` §"Widget breakdown — what the v3.2 tool returns",
+ *   `OmniUiCard.md` §"Widget breakdown — what the tool returns",
  *   the widget tree the tool surfaces follows the JSON's declared
  *   order, not the visual designer's drag-drop order — the
  *   propertySetConfig-parsing disclosure surfaces verbatim on every
@@ -51,7 +51,6 @@
  *   parallel re-parsing in the tool would silently drift if the
  *   extractor's dedupe / sort discipline changed.
  *
- * @see PLAN-v3.2.md §4 (sfi.omniuicard_widget_breakdown).
  * @see docs/vendor/salesforce-metadata/OmniUiCard.md
  */
 
@@ -87,8 +86,8 @@ const OMNI_UI_CARD_PREFIX = 'OmniUiCard:';
 const ROOT_ELEMENT = 'OmniUiCard';
 
 /**
- * The widget-layer key v3.2 walks. FlexCards historically support multiple
- * visual layers; both this tool and the v3.2 R2 extractor walk `layer-0`
+ * The widget-layer key walks. FlexCards historically support multiple
+ * visual layers; both this tool and the extractor walk `layer-0`
  * only, so a state that hangs its widgets off any other layer is NOT WALKED
  * — and because the extractor shares the limitation, its `widgetCount`
  * aggregate agrees at zero and the cross-check below cannot catch it. That
@@ -97,7 +96,7 @@ const ROOT_ELEMENT = 'OmniUiCard';
 const WALKED_LAYER_KEY = 'layer-0';
 
 /**
- * The node property the v3.2 R2 extractor ALWAYS stamps (see
+ * The node property the extractor ALWAYS stamps (see
  * `packages/extractors/src/omni-ui-card.ts` — it is an unconditional literal
  * in the node's `properties` bag, written as `0` when the card genuinely has
  * no states). Its ABSENCE therefore means the vault was built by a refresh
@@ -118,7 +117,7 @@ const EXTRACTION_WARNINGS_PROPERTY = 'omniUiCardExtractionWarnings';
 
 /**
  * Verbatim disclosure for the propertySetConfig parsing axis. Per
- * `OmniUiCard.md` §"Widget breakdown — what the v3.2 tool returns",
+ * `OmniUiCard.md` §"Widget breakdown — what the tool returns",
  * surfaced ALWAYS on every response so consumers know widget order
  * follows the JSON's declared order, not the designer's drag-drop
  * sequence. The skill renders this verbatim.
@@ -150,8 +149,8 @@ export type OmniuicardWidgetBreakdownInput = z.infer<
 /**
  * One widget in the recursive widget tree. Block / Datatable Row /
  * Section containers carry nested `children`; leaf widgets carry an
- * empty `children` array. Field order matches PLAN-v3.2 §4
- * `OmniUiCardWidget` verbatim.
+ * empty `children` array. Field order matches the `OmniUiCardWidget`
+ * contract verbatim.
  */
 export interface OmniUiCardWidget {
   readonly name: string;
@@ -165,7 +164,7 @@ export interface OmniUiCardWidget {
  * One state in the FlexCard's `propertySetConfig.states[]`. The
  * `widgetCount` is the recursive count (container widgets contribute
  * their own count plus the counts of their children) — matches the
- * v3.2 R2 extractor's per-state aggregate semantics. `widgets[]` is
+ * extractor's per-state aggregate semantics. `widgets[]` is
  * the root of the recursive tree under
  * `components["layer-0"].children`.
  */
@@ -178,7 +177,7 @@ export interface OmniUiCardState {
 
 /**
  * One dispatched OmniScript / Integration Procedure call. Sourced
- * from the `dispatchesOmniAction` edges the v3.2 R2 extractor
+ * from the `dispatchesOmniAction` edges the extractor
  * emitted for Action widgets in `actionList[].stateAction`. The
  * `targetId` is the canonical id the extractor stamped on the edge;
  * the `targetRawName` is the verbatim string the source JSON
@@ -279,7 +278,7 @@ const walkWidgets = (rawChildren: unknown): OmniUiCardWidget[] => {
 };
 
 /**
- * Count widgets recursively to mirror the v3.2 R2 extractor's
+ * Count widgets recursively to mirror the extractor's
  * per-state `widgetCount` semantics: each widget counts as one, and
  * container widgets contribute their own count plus the counts of
  * their children. Used to populate `OmniUiCardState.widgetCount`.
@@ -319,7 +318,7 @@ const buildStates = (statesRaw: readonly unknown[]): BuiltStates => {
     if (typeof state !== 'object' || state === null) continue;
     const stateObj = state as Record<string, unknown>;
     const name = typeof stateObj['name'] === 'string' ? stateObj['name'] : '';
-    // The widget root is `components.layer-0.children`. v3.2 walks
+    // The widget root is `components.layer-0.children`. This walks
     // only `layer-0` — production cards in the recon use the
     // layer-0 root exclusively. A state that declares OTHER layers and
     // no `layer-0` is recorded so the caller can say so out loud.
@@ -346,7 +345,7 @@ const buildStates = (statesRaw: readonly unknown[]): BuiltStates => {
 
 /**
  * Read a string-array property from the OmniUiCard node, filtering
- * out non-string entries. The v3.2 R2 extractor stores
+ * out non-string entries. The extractor stores
  * `dataSourceContextVariables` as `readonly string[]` per the
  * extractor's parsing; this guard re-validates the runtime shape
  * because graph round-trips through canonical JSON do not enforce
@@ -506,8 +505,8 @@ const WIDGET_TREE_FAILURE_CLAUSE: Readonly<Record<WidgetTreeFailure, string>> = 
  * as a verified zero.
  *
  * fast-xml-parser's entity processor is configured the same way the
- * v3.2 R2 extractor configures it: the FlexCard propertySetConfig
- * blob is the most entity-heavy v3.2 metadata shape and needs the
+ * extractor configures it: the FlexCard propertySetConfig
+ * blob is the most entity-heavy metadata shape and needs the
  * raised 50000-expansion cap.
  */
 const buildStatesFromSourceXml = async (
@@ -528,7 +527,7 @@ const buildStatesFromSourceXml = async (
   if (XMLValidator.validate(xmlText) !== true) {
     return { kind: 'blind', cause: 'malformed-xml' };
   }
-  // Same parser configuration as the v3.2 R2 extractor — see
+  // Same parser configuration as the extractor — see
   // `extractors/src/omni-ui-card.ts` for the inline rationale on the
   // 50000-expansion cap.
   const parser = new XMLParser({
@@ -663,7 +662,7 @@ const widgetTreeDisclosures = (
  * The `sfi.omniuicard_widget_breakdown` MCP tool. Returns the
  * OmniUiCard's identity, parsed state list (with recursive widget
  * tree), declared data source, dispatched OmniScript / IP calls,
- * and the verbatim v3.2 boundary disclosures.
+ * and the verbatim boundary disclosures.
  *
  * Error cascade:
  *
@@ -737,7 +736,7 @@ export const omniuicardWidgetBreakdownHandler = async (
     }
   }
 
-  // Re-parse the source XML to surface the widget tree. The v3.2 R2
+  // Re-parse the source XML to surface the widget tree. The
   // extractor stores aggregates on the node but not the full tree;
   // the XML on disk is the canonical source. When that re-parse fails
   // the node's own aggregates are the cross-check that keeps the empty
@@ -772,7 +771,7 @@ export const omniuicardWidgetBreakdownHandler = async (
       },
       dispatchedActions: sortDispatchedActions(dispatchedActions),
       // Blind-spot / drift disclosures lead: they mute the answer above
-      // them. The two verbatim v3.2 contract disclosures follow and are
+      // them. The two verbatim contract disclosures follow and are
       // still surfaced unconditionally on every response.
       boundaries: [
         ...widgetTreeBoundaries,

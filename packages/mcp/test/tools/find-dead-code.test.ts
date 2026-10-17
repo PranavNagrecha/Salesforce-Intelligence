@@ -145,7 +145,7 @@ const seed: ExtractionResult = {
       apiName: 'AccountTrigger',
       properties: { isTest: false },
     }),
-    // Dead flow — no incoming references AND Obsolete status (R2-12: only
+    // Dead flow — no incoming references AND Obsolete status (only
     // Obsolete/InvalidDraft flows may fall through to definitely_dead).
     makeNode({
       id: 'Flow:UnusedFlow',
@@ -153,7 +153,7 @@ const seed: ExtractionResult = {
       apiName: 'UnusedFlow',
       properties: { status: 'Obsolete' },
     }),
-    // R2-12: an ACTIVE flow with ZERO incoming edges must NOT be definitely_dead
+    // An ACTIVE flow with ZERO incoming edges must NOT be definitely_dead
     // — Flow edges are all OUTGOING (triggersOn/listensTo/callsApex/writesTo),
     // so in-degree is ~0 by nature. An Active flow fires on its own trigger.
     makeNode({
@@ -162,7 +162,7 @@ const seed: ExtractionResult = {
       apiName: 'ActiveOrphanFlow',
       properties: { status: 'Active' },
     }),
-    // R2-12: a flow with NO status property at all → unknown → treated as
+    // A flow with NO status property at all → unknown → treated as
     // active (never confidently dead). The destructive false-positive guard.
     makeNode({
       id: 'Flow:StatuslessOrphanFlow',
@@ -414,7 +414,7 @@ describe('findDeadCodeHandler', () => {
     );
   });
 
-  it('discloses the POST-AST-FLIP CustomField truth: parsed Apex edges, residual blind spots named (P14-USAGE-dead-code-false-positive)', async () => {
+  it('discloses the POST-AST-FLIP CustomField truth: parsed Apex edges, residual blind spots named', async () => {
     // Stale__c is a CustomField with no inbound edges → flagged definitely_dead.
     // Pre-0.1.9 the disclosure claimed Apex/Flow/SOQL refs were "NOT modeled
     // as graph edges" — INVERTED once the parsed Apex pass became the default
@@ -542,7 +542,7 @@ describe('findDeadCodeHandler', () => {
     expect(flow?.verdict).toBe('definitely_dead');
   });
 
-  it('R2-12: an ACTIVE flow with 0 incoming edges is NOT definitely_dead (suppressed as uncertain)', async () => {
+  it('an ACTIVE flow with 0 incoming edges is NOT definitely_dead (suppressed as uncertain)', async () => {
     // Default (includeUncertain=false): an active orphan flow must be SUPPRESSED
     // from the result set entirely — never definitely_dead/likely_dead.
     const r = await findDeadCodeHandler(ctx, {});
@@ -554,7 +554,7 @@ describe('findDeadCodeHandler', () => {
     expect(flow).toBeUndefined();
   });
 
-  it('R2-12: an ACTIVE orphan flow surfaces as uncertain when includeUncertain', async () => {
+  it('an ACTIVE orphan flow surfaces as uncertain when includeUncertain', async () => {
     const r = await findDeadCodeHandler(ctx, { includeUncertain: true });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -564,7 +564,7 @@ describe('findDeadCodeHandler', () => {
     expect(flow?.verdict).toBe('uncertain');
   });
 
-  it('R2-12: a status-LESS orphan flow is treated as active, never definitely_dead', async () => {
+  it('a status-LESS orphan flow is treated as active, never definitely_dead', async () => {
     const r = await findDeadCodeHandler(ctx, { includeUncertain: true });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -724,7 +724,7 @@ describe('findDeadCodeHandler', () => {
   });
 
   it('reports incomingEdgeCount matching the non-parentOf in-degree', async () => {
-    // v3.2 result-parity sentinel: the SQL CTE aggregates the same
+    // Result-parity sentinel: the SQL CTE aggregates the same
     // counts the per-node `listEdges` walk used to compute. Verify
     // the known seed cases line up:
     //   - OrphanedHelper has zero non-parentOf incoming edges.
@@ -765,7 +765,7 @@ describe('findDeadCodeHandler', () => {
 
   it('treats sparse-graph orphan edges as non-test reach', async () => {
     // The original per-node walk falls through to `hasNonTestReach = true`
-    // when the referrer node is missing (sparse-graph case). The v3.2
+    // when the referrer node is missing (sparse-graph case). The
     // CTE preserves that semantics via `from_is_null OR NOT from_is_test`.
     // We seed a fresh store with an orphan edge pointing at a candidate
     // and assert the verdict cascades to `uncertain` (would be includeUncertain
@@ -846,7 +846,7 @@ describe('findDeadCodeInputSchema', () => {
     );
   });
 
-  it('accepts offset and cursor (CR-22)', () => {
+  it('accepts offset and cursor', () => {
     expect(
       findDeadCodeInputSchema.safeParse({ offset: 5, cursor: 'abc' }).success,
     ).toBe(true);
@@ -854,12 +854,12 @@ describe('findDeadCodeInputSchema', () => {
 });
 
 // =============================================================================
-// CR-22 B4 — output-axis cursor. A truncated page emits an opaque nextCursor
+// output-axis cursor. A truncated page emits an opaque nextCursor
 // that resumes with no gaps / no dupes; a whole-fits no-cursor call is
 // byte-identical (no limit/offset/nextCursor/pageInfo fields) while the
 // always-present `truncated` field stays.
 // =============================================================================
-describe('findDeadCodeHandler — output cursor (CR-22)', () => {
+describe('findDeadCodeHandler — output cursor', () => {
   it('whole-fits no-cursor call omits paging fields but keeps `truncated`', async () => {
     const r = await findDeadCodeHandler(ctx, { includeUncertain: true });
     expect(r.ok).toBe(true);
@@ -965,7 +965,7 @@ describe('findDeadCodeHandler — output cursor (CR-22)', () => {
   });
 });
 
-describe('findDeadCodeHandler — coverage caveat (P13-STAGED-absence-battery)', () => {
+describe('findDeadCodeHandler — coverage caveat', () => {
   // OmniStudio calls Apex and reads / writes fields, so its four families are
   // caller families too: an incomplete OmniStudio retrieve can fake death.
   const CALLER_FAMILIES = [
@@ -1872,7 +1872,7 @@ describe('findDeadCodeHandler — classApiName / apiName alias (guard)', () => {
 // per-node TS walk, so the IMPLEMENTATION stays split from the shared walker —
 // but the DEFINITION of "usage" must not. This is the test that stops the next
 // allow-list: `edgeTypes: ['callsApex']` survived two new edge types
-// (`dispatchesAsync` in v1.5, the Apex-scanner `references`) precisely because
+// (`dispatchesAsync`, the Apex-scanner `references`) precisely because
 // nothing tied it to a single source.
 // =============================================================================
 describe('find_dead_code — non-usage edge-type drift guard', () => {

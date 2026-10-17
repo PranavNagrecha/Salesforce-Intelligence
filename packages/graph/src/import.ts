@@ -430,7 +430,7 @@ export const canonicalizeApexCallEdgeTargets = (
 
 /**
  * Shared engine behind {@link canonicalizeFieldEdgeTargets} and
- * {@link canonicalizeObjectEdgeTargets} (R6-03 / R7-W3): remap a DANGLING edge
+ * {@link canonicalizeObjectEdgeTargets}: remap a DANGLING edge
  * target whose id starts with `idPrefix` onto the vaulted `nodeType` node that
  * matches case-insensitively. Apex and SOQL are case-insensitive languages, so
  * a scanner/AST edge minted from source-text casing (e.g.
@@ -763,7 +763,7 @@ export const canonicalizeFieldEdgeTargets = (
 };
 
 /**
- * R7-W3: remap `CustomObject:` edge targets to the canonical vaulted object
+ * remap `CustomObject:` edge targets to the canonical vaulted object
  * id when the producer used a different casing — mirrors R6-03's CustomField
  * fix for the object side of the same problem. `[select id from account]`
  * mints a heuristic `readsFrom` edge targeting `CustomObject:account`; the
@@ -827,7 +827,7 @@ export const canonicalizeResourceEdgeTargets = (
 };
 
 /**
- * CR-CAP-09: mint class-granular `@future` dispatch edges at graph-build time.
+ * mint class-granular `@future` dispatch edges at graph-build time.
  *
  * The Apex extractor detects `@future` only at CLASS granularity — the
  * annotation scanner (`collectMethodAnnotations`) cannot bind the annotation to
@@ -841,7 +841,7 @@ export const canonicalizeResourceEdgeTargets = (
  * that class — because `hasFutureMethod` cannot say WHICH method is `@future`.
  * That is honored honestly, not hidden: the minted edge is `confidence:
  * 'heuristic'` and carries `properties.granularity: 'class'`. Method-level
- * precision is gated on CR-CAP-06 (caller-method attribution). Reuses the
+ * precision is gated on caller-method attribution. Reuses the
  * existing `dispatchesAsync` EdgeType (whose contract already names `@future`
  * as a legitimate target) — no new EdgeType.
  *
@@ -950,7 +950,7 @@ export const importExtractionResults = async (
   // write via a Task receiver is visible from the Event representation too.
   // Runs after canonicalizeFieldEdgeTargets so remapped targets are considered.
   mintPolymorphicActivityFieldEdges(allNodes, allEdges);
-  // R7-W3: same remap for CustomObject targets (SOQL FROM, listensTo, trigger
+  // same remap for CustomObject targets (SOQL FROM, listensTo, trigger
   // `on Object`, etc.) onto the vaulted object id.
   canonicalizeObjectEdgeTargets(allNodes, allEdges);
   // C-2 (finding 25): same remap for CustomLabel ($Label.foo) and
@@ -963,7 +963,7 @@ export const importExtractionResults = async (
   // while the nodes are keyed by the versioned file stem — resolve each
   // dangling target onto the version that runs (see `./omni-resolve.ts`).
   canonicalizeOmniStudioEdgeTargets(allNodes, allEdges);
-  // CR-CAP-09: mint class-granular @future dispatchesAsync edges AFTER targets
+  // mint class-granular @future dispatchesAsync edges AFTER targets
   // are canonicalized so the future-set membership test sees real node ids.
   mintFutureDispatchEdges(allNodes, allEdges);
   // FLEXIPAGE-RELATEDLIST-ALIASES + formula `__r` traversals: resolve the

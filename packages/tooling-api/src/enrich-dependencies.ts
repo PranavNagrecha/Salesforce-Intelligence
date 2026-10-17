@@ -1,5 +1,5 @@
 /**
- * The v1.7 dependency enricher (R4).
+ * The dependency enricher.
  *
  * Given an opened `ToolingApiClient`, the in-memory vault Node set, and
  * the in-memory pre-existing Edge set, queries the Tooling API's
@@ -30,7 +30,7 @@
  * R3 result is a list of `NodeEnrichment` payloads the caller folds
  * into the persistence layer; this is the same pattern for edges.
  *
- * **Canonical-id correlation** — for the v1.7 R4 surface, the API
+ * **Canonical-id correlation** — for this surface, the API
  * row's `MetadataComponentType` + `MetadataComponentName` are joined
  * directly as `{Type}:{Name}` per the vendored doc's correlation
  * table. CustomField is the exception: the API row's
@@ -42,13 +42,13 @@
  * **What the enricher does NOT do** (deferred per
  * `MetadataComponentDependency.md`):
  *   - No managed-package dangling-id synthesis (`{Type}:{Name}@managed-package`).
- *     The doc describes this as a future enhancement; v1.7 skips rows
+ *     The doc describes this as a future enhancement; this skips rows
  *     whose target id doesn't resolve to a vault node and surfaces
  *     them in the per-row error list instead.
  *   - No multi-hop traversal — one API query per source node, that's it.
  *   - No batched WHERE-IN optimization. Per the vendored doc §"Batched-
- *     WHERE optimization (rejected for v1.7)", the per-source-component
- *     pattern is the v1.7 choice for error isolation.
+ *     WHERE optimization (rejected)", the per-source-component
+ *     pattern is the choice for error isolation.
  */
 
 import type {
@@ -192,7 +192,7 @@ const buildNodeIdSet = (nodes: readonly Node[]): ReadonlySet<ComponentId> => {
 
 /**
  * Correlate a Tooling API row's `MetadataComponentType` +
- * `MetadataComponentName` to a v1.7 canonical id. The canonical form
+ * `MetadataComponentName` to a canonical id. The canonical form
  * the enricher emits is `{Type}:{Name}` per the vendored doc's
  * §"Canonical-id correlation" table. The function returns `null` when
  * the type/name shape is not parseable (the doc treats this as a

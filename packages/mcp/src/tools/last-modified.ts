@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.last_modified` MCP tool.
  *
- * v1.7 R3's per-component freshness lookup — the sibling of v1.7 R2's
+ * The per-component freshness lookup — the sibling of the
  * `sfi.changed_since` range scan. Given a canonical `ComponentId`, the
  * tool reads the node's freshness fields (`lastModifiedDate`,
  * `lastModifiedBy`, `apiVersion`) and emits a structured envelope with
@@ -36,13 +36,13 @@
  * `disclosure` prose is DERIVED from `missingAxes`, so the sentence a
  * host reads aloud and the typed field cannot drift apart.
  *
- * Per PLAN-v1.7.md §4 condition (1), the disclosure is fixed-form —
+ * The disclosure is fixed-form —
  * callers are NOT to paraphrase or estimate dates from prior-art
  * training data.
  *
- * Backward-compat reads: the v1.0-v1.6 baseline writes the legacy
+ * Backward-compat reads: the baseline writes the legacy
  * top-level `lastModifiedDate: string | null` field on the node and the
- * legacy string-only `lastModifiedBy: string | null`. v1.7's enricher
+ * legacy string-only `lastModifiedBy: string | null`. The enricher
  * writes the new structured overlay under `properties.lastModifiedDate`
  * and `properties.lastModifiedBy: { id, name }`. The handler reads BOTH
  * sources — properties take precedence, with the legacy fields used
@@ -75,7 +75,7 @@ import {
 } from './freshness-fields.js';
 
 /**
- * Verbatim disclosure surfaced when neither the v1.7 enriched overlay
+ * Verbatim disclosure surfaced when neither the enriched overlay
  * nor the legacy top-level fields carry a freshness value. Kept as a
  * module-level constant so the `freshness-tracking` skill, the test
  * suite, and any future consumer all reference the SAME string.
@@ -206,7 +206,7 @@ export interface LastModifiedOutput {
 
 /**
  * The `sfi.last_modified` handler. Looks up the node, extracts the
- * freshness fields from either the v1.7 enricher overlay (preferred)
+ * freshness fields from either the enricher overlay (preferred)
  * or the legacy top-level fields (fallback), and emits a structured
  * envelope with the `enriched: boolean` honesty flag. See the module
  * JSDoc for the partial-data axis and the verbatim disclosure shape.

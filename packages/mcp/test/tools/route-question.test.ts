@@ -140,7 +140,7 @@ afterAll(async () => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
-describe('routeQuestionHandler — bare-component resolve fallback (P10-A5)', () => {
+describe('routeQuestionHandler — bare-component resolve fallback', () => {
   it('rescues a short phrase that names a real component to sfi.resolve on the vault plane', async () => {
     const r = await routeQuestionHandler(ctx, { question: 'payment object', logGap: false });
     expect(r.ok).toBe(true);
@@ -529,7 +529,7 @@ describe('routeQuestionHandler — enterprise routing evidence', () => {
   });
 });
 
-describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
+describe('core-profile gateway envelopes', () => {
   afterEach(() => {
     delete process.env['SFI_TOOL_PROFILE'];
   });
@@ -937,7 +937,7 @@ describe('core-profile gateway envelopes (P13-GW-router-envelope)', () => {
   });
 });
 
-describe('routeQuestionHandler — gap logging is privacy-first opt-in (CR-16b)', () => {
+describe('routeQuestionHandler — gap logging is privacy-first opt-in', () => {
   let gapDir: string;
   let gapLogPath: string;
   let priorEnv: string | undefined;

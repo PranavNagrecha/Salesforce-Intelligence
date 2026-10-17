@@ -1,5 +1,5 @@
 /**
- * Handlers for `sfi.baseline_acknowledge` and `sfi.baseline_status` (v4.0 R8).
+ * Handlers for `sfi.baseline_acknowledge` and `sfi.baseline_status`.
  */
 
 import type { McpError, McpResponse } from '@sf-intelligence/contracts';

@@ -472,7 +472,7 @@ describe('extractVisualforcePage', () => {
   });
 });
 
-describe('resource reference edges (P14-USAGE-label-static-graph)', () => {
+describe('resource reference edges', () => {
   it('emits HEURISTIC references edges for $Label / $Resource / $Setup tokens', async () => {
     const { dir, pagePath } = await writeTempVfPage(
       'ResourceUser',

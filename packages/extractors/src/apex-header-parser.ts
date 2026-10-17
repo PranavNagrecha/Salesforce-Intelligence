@@ -4,11 +4,11 @@ import { err, ok } from '@sf-intelligence/core';
 /**
  * Structured result of parsing the header of an Apex `.cls` source file.
  *
- * Captures only what `sf-intelligence` v0.1 needs for the ApexClass node:
+ * Captures only what `sf-intelligence` needs for the ApexClass node:
  * the access modifiers, sharing model, class name, superclass, implemented
  * interfaces, annotations, and whether the class is a test class.
  *
- * v1.5 extends the type with `methodAnnotations` (the set of annotation
+ * This extends the type with `methodAnnotations` (the set of annotation
  * names that appear on any method declaration in the source — used by
  * the apex-class extractor to drive the `hasFutureMethod` /
  * `hasInvocableMethod` / `hasAuraEnabledMethod` booleans and the
@@ -19,7 +19,7 @@ import { err, ok } from '@sf-intelligence/core';
  * The class-level `annotations` list still carries the raw `@...` source
  * lines (including arguments). `methodAnnotations` only captures the
  * bare annotation name — `'future'`, `'InvocableMethod'`, `'AuraEnabled'`
- * — without arguments, because the v1.5 producers only need to know
+ * — without arguments, because the producers only need to know
  * whether each annotation is present anywhere in the class.
  */
 export interface ApexHeader {
@@ -197,7 +197,7 @@ const readAnnotationNameAfterAt = (
 // argument is absent or the string is malformed. Case-insensitive on
 // the argument name to tolerate `urlMapping` vs `urlmapping` spellings.
 //
-// Used by the apex-class extractor (v1.5) to pull `urlMapping='/Foo'`
+// Used by the apex-class extractor to pull `urlMapping='/Foo'`
 // out of `@RestResource(urlMapping='/Foo')` for the synthetic-id
 // construction (`ExternalApi:rest/Foo`).
 const extractStringArg = (
@@ -275,7 +275,7 @@ const collectPreClassHeader = (
 
 // Scan the post-class-declaration token stream and collect the bare
 // names of all annotations that appear inside the class body. Used by
-// the v1.5 apex-class extension to set the per-class booleans
+// the apex-class extension to set the per-class booleans
 // `hasFutureMethod` / `hasInvocableMethod` / `hasAuraEnabledMethod`
 // without requiring the apex scanner to parse method declarations.
 //
@@ -283,7 +283,7 @@ const collectPreClassHeader = (
 // separated by whitespace (the tokenizer drops whitespace). Does NOT
 // distinguish annotations that decorate a method declaration from
 // annotations that decorate a class-level field or a top-level inner
-// class — that fidelity isn't needed for the v1.5 producers, which
+// class — that fidelity isn't needed for the producers, which
 // only ask "is `@future` present anywhere in this class body".
 const collectMethodAnnotations = (
   tokens: readonly Token[],
@@ -418,14 +418,14 @@ export const parseApexHeader = (
     bodyStart += 1;
   }
   // `bodyStart` now points at `{` (or `tokens.length` if the source
-  // lacks one — a malformed source the v0.3 scanner already rejects,
+  // lacks one — a malformed source the scanner already rejects,
   // but parseApexHeader is tolerant: missing body means zero method
   // annotations rather than a parse error).
   const methodAnnotations = collectMethodAnnotations(tokens, bodyStart + 1);
 
   // Find any class-level @RestResource(urlMapping='/X') annotation and
   // extract the urlMapping argument value for the synthetic-id
-  // construction (see ApexClass:exposes edge production in v1.5).
+  // construction (see ApexClass:exposes edge production).
   const restAnnotationLine = pre.annotations.find((line) =>
     /^@\s*RestResource\b/i.test(line),
   );

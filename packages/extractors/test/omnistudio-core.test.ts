@@ -19,6 +19,10 @@ const {
   elementRole,
   isRepeating,
   editBlockActionKind,
+  buildOmniProcessDoc,
+  buildSaveUrlPatternWrites,
+  isSaveUrlPatternFieldKey,
+  literalSaveObjectApiName,
 } = omnistudio;
 
 const psc = (o: unknown): string => JSON.stringify(o).replace(/&/g, '&amp;').replace(/"/g, '&quot;');
@@ -353,6 +357,33 @@ describe('taxonomy', () => {
     expect(elementRole('Text Block')).toBe('display');
     expect(elementRole('Some Future Action')).toBe('action');
     expect(elementRole('Some Future Input')).toBe('input');
+  });
+
+  it('saveURLPatterns: rejects dotted keys and merge-field save objects', () => {
+    expect(isSaveUrlPatternFieldKey('Demo_Field__c')).toBe(true);
+    expect(isSaveUrlPatternFieldKey('Demo_Obj__c.Demo_Field__c')).toBe(false);
+    expect(literalSaveObjectApiName('Demo_Obj__c')).toBe('Demo_Obj__c');
+    expect(literalSaveObjectApiName('%ContextId%')).toBeNull();
+    const full = buildOmniProcessDoc(
+      {
+        isActive: true,
+        isIntegrationProcedure: false,
+        propertySetConfig: {
+          saveObject: 'Demo_Obj__c',
+          saveURLPatterns: { Demo_Resume__c: '/x' },
+        },
+      },
+      false,
+      () => null,
+    );
+    const { edges, unresolvedSavePatterns } = buildSaveUrlPatternWrites(
+      'OmniScript:Demo_Test',
+      full,
+      'test',
+    );
+    expect(edges).toHaveLength(1);
+    expect(edges[0]!.toId).toBe('CustomField:Demo_Obj__c.Demo_Resume__c');
+    expect(unresolvedSavePatterns).toEqual([]);
   });
 
   it('detects repeating containers and edit-block actions', () => {

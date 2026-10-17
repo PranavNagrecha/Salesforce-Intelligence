@@ -161,7 +161,7 @@ const seed: ExtractionResult = {
         label: 'Old Field',
         type: 'Text',
         description: null,
-        // No sourceOfTruth / semanticCategory — pre-v2.9 vault.
+        // No sourceOfTruth / semanticCategory — legacy vault.
       },
     }),
     makeNode({ id: APEX_READER, type: 'ApexClass', apiName: 'AccountReader' }),
@@ -395,7 +395,7 @@ describe('fieldMeaningHandler', () => {
     expect(data.similarFields[0]?.fieldId).toBe(LEAD_INDUSTRY);
     expect(data.similarFields[0]?.parentObjectApiName).toBe('Lead');
     expect(data.similarFields[0]?.similarityScore).toBeGreaterThan(0);
-    // Boundaries include the v2.9-wide axes.
+    // Boundaries include the wide axes.
     expect(data.boundaries.some((b) => b.includes('org-specific'))).toBe(true);
     expect(data.boundaries.some((b) => b.includes('static analysis'))).toBe(
       true,
@@ -519,7 +519,7 @@ describe('fieldMeaningHandler', () => {
     ).toBe(true);
   });
 
-  it('surfaces classification-missing boundary on a pre-v2.9 field', async () => {
+  it('surfaces classification-missing boundary on a legacy field', async () => {
     const result = await fieldMeaningHandler(ctx, {
       fieldId: PRE_V29_FIELD,
     });

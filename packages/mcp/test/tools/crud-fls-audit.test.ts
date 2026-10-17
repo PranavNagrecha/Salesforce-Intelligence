@@ -171,7 +171,7 @@ describe('crudFlsAuditHandler', () => {
     expect(r.value.data.byRule['missing-fls-check']).toBe(1);
   });
 
-  it('surfaces the verbatim Q80 false-positive disclosure in boundaries', async () => {
+  it('surfaces the verbatim false-positive disclosure in boundaries', async () => {
     const r = await crudFlsAuditHandler(ctx, {});
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -207,7 +207,7 @@ describe('crudFlsAuditHandler', () => {
     expect(r.value.data.truncated).toBe(true);
   });
 
-  it('CR-22: in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
+  it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
     const r = await crudFlsAuditHandler(ctx, {});
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -396,7 +396,7 @@ describe('crudFlsAuditHandler — pagination + byte budget (B25)', () => {
     expect(d.nextOffset).toBe(d.classes.length);
   });
 
-  // CR-22: the byte-trimmed page carries an opaque continuation cursor and
+  // The byte-trimmed page carries an opaque continuation cursor and
   // walking it must cover every class exactly once with no gaps/dupes.
   it('emits a nextCursor on the truncated page and walks every class once via cursor', async () => {
     const seen = new Set<string>();
@@ -469,13 +469,13 @@ describe('crudFlsAuditHandler — pagination + byte budget (B25)', () => {
 });
 
 // =============================================================================
-// CR-22 B3 — the scan now WINDOWS past the per-type cap (was: drop the tail).
+// the scan now WINDOWS past the per-type cap (was: drop the tail).
 // crud_fls_audit already had the OUTPUT cursor (B1); B3 adds the SCAN axis so a
 // low cap no longer makes the verdict INCOMPLETE — it scans in smaller windows
 // and still reaches every unchecked-CRUD class, including ones in the SECOND
 // scanned type. `scanTruncated` fires only for a pathological residual cap.
 // =============================================================================
-describe('crudFlsAuditHandler — full multi-window scan (CR-22 B3)', () => {
+describe('crudFlsAuditHandler — full multi-window scan', () => {
   it('does NOT emit a Scan-capped boundary under the default cap (byte-identical happy path)', async () => {
     const r = await crudFlsAuditHandler(ctx, {});
     expect(r.ok).toBe(true);

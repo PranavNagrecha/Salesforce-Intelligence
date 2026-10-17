@@ -315,7 +315,7 @@ describe('downstreamEffectsHandler', () => {
     expect(r.value.data.disclosure).toMatch(/declarative-only/i);
   });
 
-  it('frames an EMPTY effects list as "no MODELED effects", never side-effect-free (P14-USAGE-downstream-effects-honesty)', async () => {
+  it('frames an EMPTY effects list as "no MODELED effects", never side-effect-free', async () => {
     const r = await downstreamEffectsHandler(ctx, { classApiName: 'ApexClass:C' });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -712,7 +712,7 @@ describe('downstreamEffectsInputSchema', () => {
 });
 
 // =============================================================================
-// P15-GRAPH-method-level-composites: optional `method` narrows the root's
+// optional `method` narrows the root's
 // direct callsApex edges — save vs deleteRecord paths surface different writes.
 // =============================================================================
 

@@ -1,5 +1,5 @@
 /**
- * Longitudinal snapshot tools: `sfi.trend` and `sfi.churn` (v4.0 R8).
+ * Longitudinal snapshot tools: `sfi.trend` and `sfi.churn`.
  */
 
 import type { McpError, McpResponse } from '@sf-intelligence/contracts';

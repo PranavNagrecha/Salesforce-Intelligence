@@ -499,7 +499,7 @@ describe('findHardcodedValuesAnywhereInputSchema', () => {
     ).toBe(false);
   });
 
-  it('accepts offset and cursor (CR-22)', () => {
+  it('accepts offset and cursor', () => {
     expect(
       findHardcodedValuesAnywhereInputSchema.safeParse({
         category: 'id',
@@ -511,12 +511,12 @@ describe('findHardcodedValuesAnywhereInputSchema', () => {
 });
 
 // =============================================================================
-// CR-22 B4 — output cursor + mandatory total-order tiebreak (category,
+// output cursor + mandatory total-order tiebreak (category,
 // matchedValue, contextSnippet). A whole-fits no-cursor call is byte-identical;
 // a truncated page resumes the full set with no gaps / dupes even across the
 // per-node-constant-location tie clusters (formula/VR/WF).
 // =============================================================================
-describe('findHardcodedValuesAnywhereHandler — output cursor (CR-22)', () => {
+describe('findHardcodedValuesAnywhereHandler — output cursor', () => {
   it('whole-fits no-cursor call omits all paging fields', async () => {
     const r = await findHardcodedValuesAnywhereHandler(ctx, {
       value: 'United States',
@@ -687,11 +687,11 @@ describe('findHardcodedValuesAnywhereHandler — $Permission.* guard searchabili
 });
 
 // =============================================================================
-// CR-07: Source-file email fallback
+// Source-file email fallback
 //
 // Root cause: the graph's `qualityIssues[]` for an ApexClass may be STALE —
 // the email was added to the source file after the last vault refresh, so the
-// graph node has no `hardcoded-email` entry. Without the CR-07 fix, calling
+// graph node has no `hardcoded-email` entry. Without the fix, calling
 // {category:'email'} misses those addresses entirely.
 //
 // Fix: when category==='email' or valueFilter contains '@', the handler also
@@ -728,7 +728,7 @@ const cr07Seed: ExtractionResult = {
   edges: [],
 };
 
-describe('findHardcodedValuesAnywhereHandler — CR-07 source-file email fallback', () => {
+describe('findHardcodedValuesAnywhereHandler — source-file email fallback', () => {
   let cr07Dir: string;
   let cr07Store: GraphStore;
   let cr07Ctx: Context;
@@ -770,8 +770,8 @@ describe('findHardcodedValuesAnywhereHandler — CR-07 source-file email fallbac
     rmSync(cr07Dir, { recursive: true, force: true });
   });
 
-  it('CR-07 fail-before: the seed graph has no hardcoded-email qualityIssue (confirms stale-graph scenario)', () => {
-    // Without the CR-07 source-file fallback, {category:'email'} would consult
+  it('fail-before: the seed graph has no hardcoded-email qualityIssue (confirms stale-graph scenario)', () => {
+    // Without the source-file fallback, {category:'email'} would consult
     // only graph qualityIssues and find zero email matches for this class.
     // This test confirms the seed is correctly configured (no graph email entry).
     const qualityIssues = cr07Seed.nodes[0]?.properties['qualityIssues'];
@@ -783,7 +783,7 @@ describe('findHardcodedValuesAnywhereHandler — CR-07 source-file email fallbac
     expect(hasEmailInGraph).toBe(false);
   });
 
-  it('CR-07 pass-after: {category:"email"} finds the email in a stale-graph class via source-file scan', async () => {
+  it('pass-after: {category:"email"} finds the email in a stale-graph class via source-file scan', async () => {
     const r = await findHardcodedValuesAnywhereHandler(cr07Ctx, {
       category: 'email',
     });
@@ -792,12 +792,12 @@ describe('findHardcodedValuesAnywhereHandler — CR-07 source-file email fallbac
     const found = r.value.data.matches.some(
       (m) => m.category === 'email' && m.matchedValue === CR07_EMAIL,
     );
-    // With the CR-07 fix, the email is surfaced even though the graph has no
+    // With the fix, the email is surfaced even though the graph has no
     // hardcoded-email qualityIssue (the source file is scanned directly).
     expect(found).toBe(true);
   });
 
-  it('CR-07: {value:"noreply@acmeco.example"} (an @-bearing value) also triggers source-file scan', async () => {
+  it('{value:"noreply@acmeco.example"} (an @-bearing value) also triggers source-file scan', async () => {
     const r = await findHardcodedValuesAnywhereHandler(cr07Ctx, {
       value: CR07_EMAIL,
     });
@@ -807,7 +807,7 @@ describe('findHardcodedValuesAnywhereHandler — CR-07 source-file email fallbac
     expect(found).toBe(true);
   });
 
-  it('CR-07: the source-scan hit carries componentId=ApexClass:NotificationService, source=apex, confidence=heuristic', async () => {
+  it('the source-scan hit carries componentId=ApexClass:NotificationService, source=apex, confidence=heuristic', async () => {
     const r = await findHardcodedValuesAnywhereHandler(cr07Ctx, {
       category: 'email',
     });
@@ -820,7 +820,7 @@ describe('findHardcodedValuesAnywhereHandler — CR-07 source-file email fallbac
     expect(hit?.confidence).toBe('heuristic');
   });
 
-  it('CR-07: source-scan disclosure appears in boundaries when category=email', async () => {
+  it('source-scan disclosure appears in boundaries when category=email', async () => {
     const r = await findHardcodedValuesAnywhereHandler(cr07Ctx, {
       category: 'email',
     });
@@ -831,7 +831,7 @@ describe('findHardcodedValuesAnywhereHandler — CR-07 source-file email fallbac
     expect(joined).toContain('source files were also scanned');
   });
 
-  it('CR-07: category=id does NOT trigger the source-file scan (no CR-07 disclosure)', async () => {
+  it('category=id does NOT trigger the source-file scan (no disclosure)', async () => {
     const r = await findHardcodedValuesAnywhereHandler(cr07Ctx, {
       category: 'id',
     });
@@ -914,17 +914,17 @@ describe('findHardcodedValuesAnywhereHandler — QUALITY-SCAN-SKIPS-TRIGGERS-AND
 });
 
 // =============================================================================
-// CR-07 HONESTY: the source-scan disclosure must report the scan's OUTCOME, not
+// HONESTY: the source-scan disclosure must report the scan's OUTCOME, not
 // the fact that it was ATTEMPTED.
 //
 // `ranApexSourceEmailScan` used to be set BEFORE the walk, so the affirmative
-// claim "Apex source files were also scanned directly (CR-07 fallback)" was
+// claim "Apex source files were also scanned directly (fallback)" was
 // emitted even when the walk found ZERO files — the normal state of a vault
 // whose `source/` tree was never retrieved (or is gitignored). The response was
 // then `matches: [], totalCount: 0` PLUS a disclosure vouching for coverage
 // that never happened: a false clean whose own honesty machinery endorses it.
 // =============================================================================
-describe('findHardcodedValuesAnywhereHandler — CR-07 source-corpus absence', () => {
+describe('findHardcodedValuesAnywhereHandler — source-corpus absence', () => {
   let absentDir: string;
   let absentStore: GraphStore;
   let absentCtx: Context;
@@ -994,7 +994,7 @@ describe('findHardcodedValuesAnywhereHandler — CR-07 source-corpus absence', (
 
   it('discloses the absence for an @-bearing `value` with zero matches too', async () => {
     // categoryFilter is undefined here and sorted.length === 0, so the old
-    // disclosure gate suppressed the CR-07 line entirely — a silent zero.
+    // disclosure gate suppressed the line entirely — a silent zero.
     const r = await findHardcodedValuesAnywhereHandler(absentCtx, {
       value: 'billing@acmeco.example',
     });
@@ -1005,7 +1005,7 @@ describe('findHardcodedValuesAnywhereHandler — CR-07 source-corpus absence', (
   });
 });
 
-describe('findHardcodedValuesAnywhereHandler — CR-07 partially-read source corpus', () => {
+describe('findHardcodedValuesAnywhereHandler — partially-read source corpus', () => {
   let partialDir: string;
   let partialStore: GraphStore;
   let partialCtx: Context;

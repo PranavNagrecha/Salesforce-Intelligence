@@ -1,13 +1,13 @@
 /**
  * Handler for the `sfi.field_360` MCP tool.
  *
- * The v3.0 headline synthesis tool — the "show me EVERYTHING about this
+ * The headline synthesis tool — the "show me EVERYTHING about this
  * field" surface. Composes every prior tier's reads of a single
  * CustomField into one structured response with per-section content
  * cuts (validates, formulas, writers, readers, ui, integrations,
- * automations, emails, dependencies, summary) plus the v3.0
+ * automations, emails, dependencies, summary) plus the
  * constitutional honesty axis (`dataNotAvailable[]` + `boundaries[]`
- * carry the verbatim Q165 disclosure naming the v1.x extraction gaps).
+ * carry the verbatim disclosure naming the v1.x extraction gaps).
  *
  * The tool is a pure composition: it makes no new graph queries beyond
  * `getNodeById` + `listEdges` over the target field's incoming edges.
@@ -15,11 +15,11 @@
  * `maxRowsPerSection` (default 50, hard cap 200). The optional
  * `includeSections` parameter narrows the response to a subset; the
  * `summary` and `boundaries` / `dataNotAvailable` honesty surfaces
- * are ALWAYS populated regardless of section filter, per the Q165
+ * are ALWAYS populated regardless of section filter
  * honesty anchor — synthesis-tier results without omission disclosure
  * are a contract violation.
  *
- * **Section composition table** (PLAN-v3.0 §4):
+ * **Section composition table**:
  *
  *   | Section       | Backing edge / source                                  | Confidence       |
  *   |---------------|--------------------------------------------------------|------------------|
@@ -30,7 +30,7 @@
  *   | readers       | incoming `readsFrom` from Apex/Flow/LWC/Aura/VF/SOQL — CODE reads only; a ConditionalContext `readsFrom` is NOT one (see `automations`) | mixed (heuristic)|
  *   | ui            | incoming `usedInLayout` + frontend `readsFrom` to UI + `references` from a UI placement surface (Layout, **FlexiPage** — the Lightning page, both its heuristic field sweep and its parsed related-list aliases — QuickAction, CustomTab) | declared/parsed/heuristic |
  *   | integrations  | incoming `references`/`exposes` from integration tier  | declared/heuristic |
- *   | automations   | incoming `firesWhen` ConditionalContext + v1.3 rule + ConditionalContext `readsFrom` (the fields a Flow/workflow/validation condition TESTS, source condition-extractor) | declared/parsed/heuristic |
+ *   | automations   | incoming `firesWhen` ConditionalContext + rule + ConditionalContext `readsFrom` (the fields a Flow/workflow/validation condition TESTS, source condition-extractor) | declared/parsed/heuristic |
  *   | emails        | incoming `references` from EmailTemplate with role=body-merge | parsed |
  *   | dependencies  | OUTGOING `references` for formula fields only          | parsed           |
  *   | listViews     | incoming `references` from ListView (referenceKind: fieldRef column / filterRef predicate / columnAndFilter) | heuristic |
@@ -42,9 +42,9 @@
  * sentence. A vault refreshed before this property existed still surfaces
  * the boolean with empty name arrays; `sfi refresh --no-pull` repopulates it.
  *
- * **Honesty axis** (the v3.0 constitutional rule per Q165):
+ * **Honesty axis** (the constitutional rule):
  *
- *   - `dataNotAvailable` is coverage-aware (CR-CAP-03). `list-view-filters`
+ *   - `dataNotAvailable` is coverage-aware. `list-view-filters`
  *     surfaces on EVERY response (filter-predicate evaluation is genuinely
  *     unmodeled). `reports` / `dashboards` surface ONLY when that family was
  *     NOT retrieved (coverage status !== 'complete') AND the field carries no
@@ -52,15 +52,15 @@
  *     not-used) or the field is folded-referenced, that data IS available and
  *     is omitted from `dataNotAvailable`. `FIELD_360_DATA_NOT_AVAILABLE` is the
  *     full not-retrieved baseline `['list-view-filters','reports','dashboards']`.
- *   - `boundaries[]` carries the verbatim Q165 disclosure naming the
+ *   - `boundaries[]` carries the verbatim disclosure naming the
  *     v1.x extraction footprint.
  *   - `confidence` reports `'mixed'` when sections span more than one
  *     edge-confidence level — the typical case for any real-org field.
  *
- * Per PLAN-v3.0 §10 sub-scope: v3.0 composes; it does NOT extract at
+ * This tool composes; it does NOT extract at
  * scale. The single non-composition addition (EmailTemplate body-merge)
- * is itself the closure of a v1.3 deferred item; every other section
- * reads what v0.1-v2.9 already extracted.
+ * is itself the closure of a deferred item; every other section
+ * reads what earlier tiers already extracted.
  */
 
 import type {
@@ -126,15 +126,15 @@ const CUSTOM_FIELD_PREFIX = 'CustomField:';
 /** Default per-section row cap when the caller omits `maxRowsPerSection`. */
 const DEFAULT_MAX_ROWS_PER_SECTION = 50;
 
-/** Hard cap on `maxRowsPerSection` — Q165 boundary protection. */
+/** Hard cap on `maxRowsPerSection` — boundary protection. */
 const HARD_CAP_MAX_ROWS_PER_SECTION = 200;
 
-/** Per-response byte budget for the designated section's page (CR-22). */
+/** Per-response byte budget for the designated section's page. */
 const FIELD_360_BYTE_BUDGET = 38_000;
 
 /**
- * The verbatim Q165 disclosure naming the v1.x extraction gap. Surfaces
- * in `boundaries[]` on every `field_360` response per PLAN-v3.0 §16.
+ * The verbatim disclosure naming the v1.x extraction gap. Surfaces
+ * in `boundaries[]` on every `field_360` response.
  * Kept as an exported module-level constant so the `field-forensics-
  * architect` skill, the test suite, and any future consumer reference
  * the SAME string.
@@ -152,7 +152,7 @@ export const FIELD_360_Q165_DISCLOSURE =
 
 /**
  * Verbatim phrase per category for `dataNotAvailable[]`. The order is
- * FIXED for test determinism (Q165 anchor).
+ * FIXED for test determinism.
  */
 export const FIELD_360_DATA_NOT_AVAILABLE: readonly string[] = [
   'list-view-filters',
@@ -192,7 +192,7 @@ type SectionName = (typeof SECTION_NAMES)[number];
 const GROUP_BY_VALUES = ['source', 'edge-type', 'confidence'] as const;
 
 /**
- * Zod schema for the `sfi.field_360` tool input. Per PLAN-v3.0 §4:
+ * Zod schema for the `sfi.field_360` tool input:
  *
  *   - `fieldId`: required, non-empty string. Canonical CustomField id;
  *     short forms (`Account.Industry__c`) are normalised by the
@@ -216,7 +216,7 @@ export const field360InputSchema = z
       .min(1)
       .max(HARD_CAP_MAX_ROWS_PER_SECTION)
       .optional(),
-    // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+    // Continuation cursor: an OPAQUE token echoed back from a prior
     // truncated page's `nextCursor`; carries the resume offset + which section
     // (validates | formulas | writers | …) it advances. Omit = today's behavior.
     cursor: z.string().min(1).optional(),
@@ -357,7 +357,7 @@ export interface Field360Output {
   readonly emails?: Field360Section;
   readonly dependencies?: Field360Section;
   /**
-   * CR-CAP-02 / CR-CAP-13: which list views show or filter this field. Each
+   * Which list views show or filter this field. Each
    * row's `ListView:Object.ViewName` → `CustomField` edge is a `references`
    * (confidence `heuristic`) emitted by the enterprise-metadata extractor's
    * regex capture; the row's `referenceKind` distinguishes the role —
@@ -382,18 +382,18 @@ export interface Field360Output {
   readonly confidence: 'declared' | 'parsed' | 'heuristic' | 'mixed';
   readonly groupBy: 'source' | 'edge-type' | 'confidence';
   /**
-   * P13-FACTS-consumers: the field's captured fill rate (a `data_snapshot`
+   * The field's captured fill rate (a `data_snapshot`
    * observation from `refresh --with-data-shape`), when one exists. Context
    * only — sampled, stamped, never a live read, never part of any verdict.
    */
   readonly dataShape?: FactsBlock;
-  /** P13-ANNOT-tools: curated annotations for this field (provenance `annotation`); absent when none. */
+  /** Curated annotations for this field (provenance `annotation`); absent when none. */
   readonly annotations?: AnnotationsBlock;
   /**
-   * CR-22 opaque continuation token, present ONLY when truncated (the designated
+   * Opaque continuation token, present ONLY when truncated (the designated
    * section overflowed its per-section page or the byte budget). Echo it back as
    * `cursor` to resume; absent on a whole-fits page so the response is
-   * byte-identical to pre-CR-22.
+   * byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata for the designated section; truncation only. */
@@ -431,7 +431,7 @@ export interface Field360Output {
 }
 
 /**
- * Normalize the input id. v3.0 accepts both the canonical
+ * Normalize the input id. This accepts both the canonical
  * `CustomField:Object.Field` form and the short `Object.Field` form;
  * the latter is promoted by adding the prefix. Anything else (a
  * non-CustomField canonical id, e.g., `ApexClass:X`) is rejected by
@@ -455,9 +455,9 @@ export const normalizeFieldId = (raw: string): ComponentId | null => {
 
 /**
  * Salesforce node types whose edges land in the `automations` section
- * per PLAN-v3.0 §4. Includes the v1.3 rule family + ConditionalContext
- * (v2.0a) + ApexTrigger (when an Apex if-clause references the field
- * via the v2.0a.1 extension).
+ * Includes the rule family + ConditionalContext
+ * + ApexTrigger (when an Apex if-clause references the field
+ * via the extension).
  */
 const AUTOMATION_NODE_TYPES: ReadonlySet<ComponentType> = new Set([
   'WorkflowRule',
@@ -600,9 +600,9 @@ const resolveEdgeSource = async (
 
 /**
  * Determine the field's `isFormula` posture from its properties. The
- * v0.1 custom-field extractor sets `properties.isFormula` (or
+ * custom-field extractor sets `properties.isFormula` (or
  * `properties.formula`) when the field's metadata declared a formula
- * body. v3.0's `dependencies` section is empty for non-formula fields.
+ * body. The `dependencies` section is empty for non-formula fields.
  */
 const detectIsFormula = (node: Node): boolean => {
   const p = node.properties;
@@ -655,7 +655,7 @@ const computeOverallConfidence = (
 };
 
 /**
- * Compute the `riskLevel` per PLAN-v3.0 §4.1. The classification is
+ * Compute the `riskLevel`. The classification is
  * conservative: `low` requires every axis below threshold AND no PII;
  * `high` fires on any of the named overloads.
  */
@@ -748,7 +748,7 @@ const computeRisk = (
 };
 
 /**
- * Determine whether the field is PII-classified. Runs the v2.0d
+ * Determine whether the field is PII-classified. Runs the
  * pii-detection recognizer LIVE (`detectPiiClassification`) — the same
  * recognizer `field_access_audit` and `pii_inventory` use — rather than
  * reading a `properties.piiClassification` value that NOTHING in the
@@ -794,7 +794,7 @@ const emptyBuckets = (): SectionBuckets => ({
 
 /**
  * Classify one incoming edge into the appropriate content section per
- * the PLAN-v3.0 §4 composition table.
+ * the section composition table above.
  *
  * UNCLASSIFIED-REFERRERS-READ-AS-ABSENCE: an edge that fits no branch used to
  * be dropped with no trace, which turned a referrer the tool could not
@@ -856,7 +856,7 @@ const classifyIncomingEdge = (
     return true;
   }
 
-  // `emails`: incoming references from EmailTemplate via v3.0 body-merge.
+  // `emails`: incoming references from EmailTemplate via body-merge.
   if (
     edge.edgeType === 'references' &&
     source.type === 'EmailTemplate' &&
@@ -942,7 +942,7 @@ const classifyIncomingEdge = (
     return true;
   }
 
-  // `listViews`: incoming references from a ListView (CR-CAP-02 / CR-CAP-13).
+  // `listViews`: incoming references from a ListView.
   // The edge is heuristic (regex capture by the enterprise-metadata extractor);
   // its `referenceKind` is `'fieldRef'` (column), `'filterRef'` (filter
   // predicate), or `'columnAndFilter'` (both). This branch is referenceKind-
@@ -994,7 +994,7 @@ const DEPENDENCY_TARGET_TYPE_BY_PREFIX: Readonly<Record<string, ComponentType>> 
 
 /**
  * The `sfi.field_360` handler. See module JSDoc for the composition
- * recipe and the Q165 honesty axis.
+ * recipe and the honesty axis.
  *
  * @example
  *   const r = await field360Handler(ctx, {
@@ -1304,7 +1304,7 @@ export const field360Handler = async (
   const conceptReasoning: ConceptReasoningEnvelope | null = reserved?.envelope ?? null;
   const conceptReservedBytes = reserved?.reservedBytes ?? 0;
 
-  // CR-22 nested-section cursor. Each section's FULL ordered rows are retained
+  // Nested-section cursor. Each section's FULL ordered rows are retained
   // here (sorted to a UNIQUE total order via compareRows) so a section can be
   // paged past `maxRowsPerSection` rather than discarding the tail. A whole-fits
   // call (no cursor, every INCLUDED section ≤ maxRows) emits exactly today's
@@ -1458,7 +1458,7 @@ export const field360Handler = async (
     Object.values(sectionsBuilt),
   );
 
-  // The boundaries[] array always carries the Q165 disclosure, plus
+  // The boundaries[] array always carries the disclosure, plus
   // per-category notes naming the unavailable surfaces verbatim.
   const boundaries: string[] = [
     FIELD_360_Q165_DISCLOSURE,
@@ -1510,7 +1510,7 @@ export const field360Handler = async (
       `${restated.suppressedConditionCount} ConditionalContext \`readsFrom\` row(s) were FOLDED into \`validates\`: each restates a validation rule already listed there (the rule's errorConditionFormula is tokenized into BOTH a direct \`references\` edge and a condition edge, so counting both would report one rule as two referrers). Both edges remain in the graph — query them with sfi.get_edges — and the folded rows still count toward the automation risk axis, so \`riskLevel\` is unaffected. Conditions are listed but NOT evaluated: sfi does not know whether any record satisfies them.`,
     );
   }
-  // CR-CAP-03: report / dashboard usage is folded onto the field as a node
+  // Report / dashboard usage is folded onto the field as a node
   // property by the reports pull (not an edge — the fold DROPS the report/
   // dashboard nodes), so it appears in no section above. The honest disclosure
   // is coverage-aware:
@@ -1708,12 +1708,12 @@ export const field360Handler = async (
         }
       : undefined;
 
-  // CR-CAP-03 / CR-CAP-13: `dataNotAvailable` is DYNAMIC. `list-view-filters`
+  // `dataNotAvailable` is DYNAMIC. `list-view-filters`
   // is always listed, but it now means ONLY the runtime filter-PREDICATE
   // EVALUATION gap (whether a given record passes the saved view's filter),
   // which is genuinely unmodeled. Filter-field IDENTITY (WHICH views filter on
   // this field) IS composed into the `listViews` section as `filterRef` /
-  // `columnAndFilter` edges (CR-CAP-13) — a different, available claim.
+  // `columnAndFilter` edges — a different, available claim.
   // `reports` / `dashboards` are listed ONLY when the family was NOT retrieved
   // (coverage status !== 'complete') AND the field carries no folded usage for
   // it — when reports were retrieved (confirmed not-used) OR the field is

@@ -11,7 +11,7 @@ import type { Context } from '../../src/server.js';
 import { orgCardHandler } from '../../src/tools/org-card.js';
 
 /**
- * P13-CARD-tool — `sfi.org_card` is a pure cache read of `meta/org-card.json`:
+ * `sfi.org_card` is a pure cache read of `meta/org-card.json`:
  * present → the parsed card verbatim; absent → honest `available: false` with
  * the refresh remedy (an old vault is not an error); corrupt → recoverable
  * internal error naming the regeneration step. It never recomputes the card.

@@ -261,7 +261,7 @@ const platformEventSeed: ExtractionResult = {
 };
 
 // =============================================================================
-// Suite 5 (R6-02): subflow broken callers. A subflow with NO outgoing edges
+// Suite 5: subflow broken callers. A subflow with NO outgoing edges
 // would read `safe` to deactivate — the false-"safe" the R6 audit flagged. With
 // incoming `references` (referenceKind: 'subflow') edges from parent flows, the
 // parents are BROKEN CALLERS on deactivation. An ACTIVE parent flips the verdict
@@ -903,7 +903,7 @@ describe('whatIfDeactivateFlowHandler', () => {
   });
 
   // ---------------------------------------------------------------------------
-  // R6-02: subflow broken callers (the incoming side).
+  // subflow broken callers (the incoming side).
   // ---------------------------------------------------------------------------
 
   it('flips a would-be-safe subflow to `blocking` when an ACTIVE parent calls it', async () => {
@@ -913,7 +913,7 @@ describe('whatIfDeactivateFlowHandler', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const data = result.value.data;
-    // The subflow has NO outgoing edges — pre-R6-02 this read `safe`.
+    // The subflow has NO outgoing edges — previously this read `safe`.
     expect(data.verdict).toBe('blocking');
     const brokenCallers = data.impacts.filter(
       (i) => i.category === 'broken-caller',

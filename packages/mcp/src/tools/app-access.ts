@@ -1,12 +1,12 @@
 /**
- * Handler for the `sfi.app_access` MCP tool (P11-UI-app-tool).
+ * Handler for the `sfi.app_access` MCP tool.
  *
  * "What is in this app, who can open it, and who defaults to it?" —
  * `CustomApplication` was extracted as a node but no tool was app-centric.
  * Given a CustomApplication this returns its navType + tabs (from the
  * `belongsToApp` edges, in document order) and the profiles / permission sets
  * that can OPEN it and that DEFAULT to it (from the `applicationVisibilities`
- * the profile/permset extractor now emits — P11-UI-app-tab-visibility-extract).
+ * the profile/permset extractor now emits).
  *
  * Input: a `componentId` (`CustomApplication:` / `Profile:` / `PermissionSet:`)
  * OR a natural app-name selector — `apiName` / `app` / `application` (bare app
@@ -67,7 +67,7 @@ export const appAccessInputSchema = z.object({
   nameContains: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
-  // CR-22 continuation cursor from a prior truncated page's nextCursor.
+  // Continuation cursor from a prior truncated page's nextCursor.
   cursor: z.string().min(1).optional(),
 });
 
@@ -125,9 +125,9 @@ export interface AppAccessOutput {
   readonly confidence: 'declared';
   readonly boundaryNote: string;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * Opaque continuation token, present ONLY when this page is truncated
    * (more granters remain). Echo it back as `cursor` to resume. Absent on a
-   * complete page so an in-budget response is byte-identical to pre-CR-22.
+   * complete page so an in-budget response is byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
@@ -142,7 +142,7 @@ export interface AppAccessOutput {
 }
 
 /**
- * INVERSE direction (P14-APP-default-reverse): given a Profile/PermissionSet
+ * INVERSE direction: given a Profile/PermissionSet
  * id, its own `applicationVisibilities` answer "which apps can this granter
  * open, and which is its default?" — a single node read, no roster scan.
  */
@@ -336,7 +336,7 @@ export const appAccessHandler = async (
   const componentIdInput = selector.value.componentId;
   const appliedScope = selector.value.appliedScope;
 
-  // INVERSE direction (P14-APP-default-reverse): a Profile/PermissionSet id
+  // INVERSE direction: a Profile/PermissionSet id
   // answers from the granter's OWN applicationVisibilities — one node read.
   if (componentIdInput.startsWith('Profile:') || componentIdInput.startsWith('PermissionSet:')) {
     return appAccessForGranter(ctx, componentIdInput as ComponentId);
@@ -386,7 +386,7 @@ export const appAccessHandler = async (
     })
     .map((e) => e.fromId);
 
-  // Who can open / defaults: CR-22 B3 full multi-window scan over Profiles +
+  // Who can open / defaults: full multi-window scan over Profiles +
   // PermissionSets so a grantor on node 501+ is reachable (the single capped
   // page used to drop the scan TAIL). The derived `canOpen` list is COMPLETE
   // and paged on the output axis below; the scan completes inside this call.
@@ -423,7 +423,7 @@ export const appAccessHandler = async (
       if (isDefault) defaultedBy.push(node.id);
     }
   }
-  // CR-22: total-order tiebreak. granterId is the node id (unique per node), but
+  // Total-order tiebreak. granterId is the node id (unique per node), but
   // a node could in theory list the app twice; granterType is the final
   // distinguishing key so the order is a strict total order (dup/skip-proof).
   canOpen.sort((a, b) => {
@@ -435,7 +435,7 @@ export const appAccessHandler = async (
   const total = canOpen.length;
   const limit = input.limit ?? DEFAULT_LIMIT;
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // Resolve the resume offset (echoed cursor wins over explicit offset).
   // The fingerprint covers the narrowing arg `componentId` (the app) so a token
   // minted for one app can't be replayed against another.
   const fingerprint = argsFingerprint({ componentId });
@@ -515,7 +515,7 @@ export const appAccessHandler = async (
 };
 
 /**
- * The inverse lookup (P14-APP-default-reverse): read the granter node's own
+ * The inverse lookup: read the granter node's own
  * `applicationVisibilities` and project `{openableApps, defaultApp}`. Honest
  * when the property is missing — via the SHARED case-1 builder (R6), so this
  * direction and the app direction above cannot word it differently.

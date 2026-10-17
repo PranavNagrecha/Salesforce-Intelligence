@@ -1,12 +1,12 @@
 ---
 generatedBy: sf-intelligence-vault-index
-totalComponents: 113
-typesIndexed: 19
+totalComponents: 141
+typesIndexed: 42
 ---
 
 # SfIntelligence vault
 
-This is the index for the Salesforce org's knowledge vault. 113 components across 19 types are indexed below.
+This is the index for the Salesforce org's knowledge vault. 141 components across 42 types are indexed below.
 
 ## ApexClass (5)
 
@@ -24,7 +24,27 @@ This is the index for the Salesforce org's knowledge vault. 113 components acros
 
 - [`ApprovalProcess:Project__c.Discount_Approval`](./ApprovalProcess/CustomObject/Project__c/Project__c.Discount_Approval.md) — Discount Approval
 
-## CustomField (63)
+## AuthProvider (1)
+
+- [`AuthProvider:Verdant_SSO_Provider`](./AuthProvider/Verdant_SSO_Provider.md) — Verdant Corporate SSO
+
+## Bot (1)
+
+- [`Bot:Verdant_Support_Agent`](./Bot/Verdant_Support_Agent.md) — Verdant Support Agent
+
+## BotVersion (1)
+
+- [`BotVersion:Verdant_Support_Agent.v1`](./BotVersion/Bot/Verdant_Support_Agent/Verdant_Support_Agent.v1.md) — Verdant_Support_Agent.v1
+
+## Certificate (1)
+
+- [`Certificate:Verdant_Community`](./Certificate/Verdant_Community.md) — Verdant Community
+
+## ConnectedApp (1)
+
+- [`ConnectedApp:Verdant_Marketing_Suite`](./ConnectedApp/Verdant_Marketing_Suite.md) — Verdant Marketing Suite
+
+## CustomField (64)
 
 - [`CustomField:Battery__c.Capacity_kWh__c`](./CustomField/CustomObject/Battery__c/Capacity_kWh__c.md) — Capacity (kWh)
 - [`CustomField:Battery__c.Manufacturer__c`](./CustomField/CustomObject/Battery__c/Manufacturer__c.md) — Manufacturer
@@ -69,6 +89,7 @@ This is the index for the Salesforce org's knowledge vault. 113 components acros
 - [`CustomField:Project__c.Status__c`](./CustomField/CustomObject/Project__c/Status__c.md) — Status
 - [`CustomField:Project__c.System_Size_kW__c`](./CustomField/CustomObject/Project__c/System_Size_kW__c.md) — System Size (kW)
 - [`CustomField:Project__c.Total_Invoiced__c`](./CustomField/CustomObject/Project__c/Total_Invoiced__c.md) — Total Invoiced
+- [`CustomField:Project__c.Utility_Provider__c`](./CustomField/CustomObject/Project__c/Utility_Provider__c.md) — Utility Provider
 - [`CustomField:SBQQ__ProductRule__c.SBQQ__ErrorMessage__c`](./CustomField/CustomObject/SBQQ__ProductRule__c/SBQQ__ErrorMessage__c.md) — Error Message
 - [`CustomField:SBQQ__ProductRule__c.SBQQ__Type__c`](./CustomField/CustomObject/SBQQ__ProductRule__c/SBQQ__Type__c.md) — Type
 - [`CustomField:Service_Visit__c.Installation__c`](./CustomField/CustomObject/Service_Visit__c/Installation__c.md) — Installation
@@ -106,10 +127,27 @@ This is the index for the Salesforce org's knowledge vault. 113 components acros
 - [`CustomObject:Solar_Panel__c`](./CustomObject/Solar_Panel__c.md) — Solar Panel
 - [`CustomObject:Warranty_Claim__c`](./CustomObject/Warranty_Claim__c.md) — Warranty Claim
 
-## Flow (2)
+## CustomSite (1)
+
+- [`CustomSite:VerdantPortal`](./CustomSite/VerdantPortal.md) — VerdantPortal
+
+## ExperienceBundle (1)
+
+- [`ExperienceBundle:VerdantPortal1`](./ExperienceBundle/VerdantPortal1.md) — Verdant Customer Portal
+
+## Flow (3)
 
 - [`Flow:Installation_On_Complete`](./Flow/Installation_On_Complete.md) — Installation On Complete
 - [`Flow:Project_On_Approve`](./Flow/Project_On_Approve.md) — Project On Approve
+- [`Flow:Project_Site_Survey`](./Flow/Project_Site_Survey.md) — Project Site Survey
+
+## GenAiPlannerBundle (1)
+
+- [`GenAiPlannerBundle:Verdant_Support_Agent_v1`](./GenAiPlannerBundle/Verdant_Support_Agent_v1.md) — Verdant Support Agent
+
+## GlobalValueSet (1)
+
+- [`GlobalValueSet:Solar_Equipment_Types`](./GlobalValueSet/Solar_Equipment_Types.md) — Solar Equipment Types
 
 ## Group (2)
 
@@ -121,6 +159,26 @@ This is the index for the Salesforce org's knowledge vault. 113 components acros
 - [`Layout:Installation__c.Installation Layout`](./Layout/CustomObject/Installation__c/Installation%20Layout.md) — Installation Layout
 - [`Layout:Project__c.Residential Layout`](./Layout/CustomObject/Project__c/Residential%20Layout.md) — Residential Layout
 
+## LightningComponentBundle (1)
+
+- [`LightningComponentBundle:projectSummaryCard`](./LightningComponentBundle/projectSummaryCard.md) — projectSummaryCard
+
+## MutingPermissionSet (1)
+
+- [`MutingPermissionSet:Sales_Muting`](./MutingPermissionSet/Sales_Muting.md) — Sales_Muting
+
+## NamedCredential (1)
+
+- [`NamedCredential:Verdant_Permitting_API`](./NamedCredential/Verdant_Permitting_API.md) — Verdant Permitting API
+
+## Network (1)
+
+- [`Network:VerdantPortal`](./Network/VerdantPortal.md) — VerdantPortal
+
+## NetworkAccess (1)
+
+- [`NetworkAccess:Office_VPN`](./NetworkAccess/Office_VPN.md) — Office_VPN
+
 ## OmniDataTransform (1)
 
 - [`OmniDataTransform:Quote_To_Project_Map_1`](./OmniDataTransform/Quote_To_Project_Map_1.md) — Maps an incoming solar quote payload onto Project__c fields for the Customer Intake provisioning flow.
@@ -129,14 +187,25 @@ This is the index for the Salesforce org's knowledge vault. 113 components acros
 
 - [`OmniIntegrationProcedure:Project_Provision_1`](./OmniIntegrationProcedure/Project_Provision_1.md) — Project Provision
 
-## OmniScript (1)
+## OmniScript (4)
 
 - [`OmniScript:Customer_Intake_English_1`](./OmniScript/Customer_Intake_English_1.md) — Customer Intake
+- [`OmniScript:Demo_SavePatterns_None_English_1`](./OmniScript/Demo_SavePatterns_None_English_1.md) — Demo Save Patterns None
+- [`OmniScript:Demo_SavePatterns_Resolved_English_1`](./OmniScript/Demo_SavePatterns_Resolved_English_1.md) — Demo Save Patterns Resolved
+- [`OmniScript:Demo_SavePatterns_Unresolved_English_1`](./OmniScript/Demo_SavePatterns_Unresolved_English_1.md) — Demo Save Patterns Unresolved
 
 ## PermissionSet (2)
 
 - [`PermissionSet:Finance_Team`](./PermissionSet/Finance_Team.md) — Finance Team
 - [`PermissionSet:Project_Manager`](./PermissionSet/Project_Manager.md) — Project Manager
+
+## PlatformEventChannel (1)
+
+- [`PlatformEventChannel:Verdant_Event_Channel__chn`](./PlatformEventChannel/Verdant_Event_Channel__chn.md) — Verdant Event Channel
+
+## PlatformEventChannelMember (1)
+
+- [`PlatformEventChannelMember:Verdant_Event_Member__chn`](./PlatformEventChannelMember/PlatformEventChannel/Verdant_Event_Channel__chn/Verdant_Event_Member__chn.md) — Verdant_Event_Member__chn
 
 ## Profile (3)
 
@@ -163,16 +232,44 @@ This is the index for the Salesforce org's knowledge vault. 113 components acros
 - [`Role:Sales_Rep`](./Role/Role/Sales_Manager/Sales_Rep.md) — Sales Rep
 - [`Role:Sales_VP`](./Role/Sales_VP.md) — Sales VP
 
+## SamlSsoConfig (1)
+
+- [`SamlSsoConfig:Verdant_Energy_SSO`](./SamlSsoConfig/Verdant_Energy_SSO.md) — https://verdantenergy.my.salesforce.com
+
 ## SharingRule (2)
 
 - [`SharingRule:Invoice__c.Share_Invoices_To_Finance`](./SharingRule/CustomObject/Invoice__c/Invoice__c.Share_Invoices_To_Finance.md) — Share Invoices To Finance
 - [`SharingRule:Project__c.Share_Projects_To_Ops`](./SharingRule/CustomObject/Project__c/Project__c.Share_Projects_To_Ops.md) — Share Projects To Ops
+
+## Skill (1)
+
+- [`Skill:Solar_Installation`](./Skill/Solar_Installation.md) — Solar Installation
+
+## StandardValueSet (1)
+
+- [`StandardValueSet:Status__c`](./StandardValueSet/Status__c.md) — Status__c
+
+## TimeSheetTemplate (1)
+
+- [`TimeSheetTemplate:Field_Crew_Weekly`](./TimeSheetTemplate/Field_Crew_Weekly.md) — Field Crew Weekly
+
+## TransactionSecurityPolicy (1)
+
+- [`TransactionSecurityPolicy:Block_Suspicious_Login`](./TransactionSecurityPolicy/Block_Suspicious_Login.md) — Block_Suspicious_Login
 
 ## ValidationRule (3)
 
 - [`ValidationRule:Payment__c.Amount_Positive`](./ValidationRule/CustomObject/Payment__c/Amount_Positive.md) — Amount_Positive
 - [`ValidationRule:Permit__c.Approved_Needs_Date`](./ValidationRule/CustomObject/Permit__c/Approved_Needs_Date.md) — Approved_Needs_Date
 - [`ValidationRule:Project__c.Complete_Requires_Permit`](./ValidationRule/CustomObject/Project__c/Complete_Requires_Permit.md) — Complete_Requires_Permit
+
+## WaveDashboard (1)
+
+- [`WaveDashboard:Ops_Overview`](./WaveDashboard/Ops_Overview.md) — Ops Overview
+
+## WaveXmd (1)
+
+- [`WaveXmd:Project_Pipeline`](./WaveXmd/Project_Pipeline.md) — Project_Pipeline
 
 ## WorkflowRule (1)
 

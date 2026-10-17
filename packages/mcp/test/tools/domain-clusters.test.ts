@@ -561,7 +561,7 @@ describe('domainClustersHandler — per-cluster member cap (oversize fix)', () =
       expect(big?.membersTruncated).toBe(true);
       expect(Buffer.byteLength(JSON.stringify(d), 'utf8')).toBeLessThanOrEqual(45_000);
 
-      // CR-22: the over-cap cluster is paged — a nextCursor lets the caller
+      // The over-cap cluster is paged — a nextCursor lets the caller
       // resume PAST member 40 (previously unreachable). Round-trip it.
       expect(d.nextCursor).toBeDefined();
       expect(d.designatedList).toBe(big?.id);

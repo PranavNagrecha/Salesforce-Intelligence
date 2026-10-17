@@ -71,7 +71,7 @@ afterAll(async () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-describe('scanAllNodesOfTypes (CR-22 B3)', () => {
+describe('scanAllNodesOfTypes', () => {
   afterEach(() => {
     delete process.env['SFI_NODE_SCAN_LIMIT'];
   });
@@ -117,7 +117,7 @@ describe('scanAllNodesOfTypes (CR-22 B3)', () => {
     expect(r.value.nodes.length).toBe(3);
   });
 
-  // CR-P3 (scan-cap off-by-one): a type with EXACTLY FULL_SCAN_MAX_NODES nodes
+  // Scan-cap off-by-one: a type with EXACTLY FULL_SCAN_MAX_NODES nodes
   // was fully scanned — nothing is behind it — so it must NOT report incomplete.
   it('FAIL-BEFORE/PASS-AFTER: a type with EXACTLY the full-scan cap is complete, not incomplete', async () => {
     process.env['SFI_NODE_SCAN_LIMIT'] = '2'; // windowSize = 2
@@ -210,7 +210,7 @@ describe('scanAllNodesOfTypes — parentId narrow', () => {
     expect(r.value.scanIncomplete).toBe(false);
   });
 
-  it('FAIL-BEFORE/PASS-AFTER: the CR-P3 cap probe is narrowed too — a foreign row must not fake incompleteness', async () => {
+  it('FAIL-BEFORE/PASS-AFTER: the cap probe is narrowed too — a foreign row must not fake incompleteness', async () => {
     // windowSize 1, maxNodes 2, and Alpha has EXACTLY 2 fields, so the walk
     // stops at the cap with the type's own rows exhausted. The bounded probe
     // reads offset 2: narrowed it sees nothing (complete); UNNARROWED it sees

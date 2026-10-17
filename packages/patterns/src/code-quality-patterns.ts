@@ -18,7 +18,7 @@
  * recognizer in sequence and returns a flat `QualityIssue[]` ordered
  * by source-position so the renderer-side output is deterministic.
  *
- * The recognizer family sits ABOVE the v0.3 `apex-scanner` in the
+ * The recognizer family sits ABOVE the `apex-scanner` in the
  * extraction stack: the scanner extracts structural edges (read/write
  * pairs, method-call sites), while this module observes anti-patterns
  * the scanner does not surface. The two are intentionally independent
@@ -50,7 +50,7 @@
  * - **Cross-method blindness.** A method that delegates the dangerous
  *   operation to a helper is analyzed in isolation; the helper's
  *   behavior is invisible.
- * - **Three orthogonal access planes (CR-04).** CRUD (object-level),
+ * - **Three orthogonal access planes.** CRUD (object-level),
  *   FLS (field-level), and record sharing are distinct; the
  *   `missing-crud-check` recognizer is about WRITE AUTHORIZATION only.
  *   A SOQL `WITH SECURITY_ENFORCED` / `WITH USER_MODE` clause enforces
@@ -65,7 +65,7 @@
  *   DELIBERATE opt-out (system mode) — NOT a `missing-crud-check` omission:
  *   it is reclassified as an `intentional-system-mode-dml` review finding
  *   (`info`), surfaced with the honest "switch to USER_MODE to enforce"
- *   remediation rather than a high-severity "add a Schema check" alarm (W7.3).
+ *   remediation rather than a high-severity "add a Schema check" alarm.
  *   Symmetrically, the `missing-fls-check` READ recognizer clears a query
  *   whose result is sanitized with a READ-path strip
  *   (`Security.stripInaccessible(AccessType.READABLE, <resultVar>)`) — the
@@ -95,8 +95,8 @@
  *
  * - `rule`: canonical pattern id (e.g., `'soql-in-loop'`,
  *   `'hardcoded-id'`). Stable across releases.
- * - `severity`: fixed per rule per the v2.1 catalog. Industry-
- *   consensus assignment; not overridable in v2.1.
+ * - `severity`: fixed per rule per the catalog. Industry-
+ *   consensus assignment; not overridable.
  * - `location`: a best-effort source pointer of the shape
  *   `'line {N}'` for raw-line matches, `'method:{name}:line{N}'`
  *   when a containing method is known, or `'class' / 'trigger'` for
@@ -379,7 +379,7 @@ const skipLoopHeader = (stripped: string, start: number): number => {
  * Tolerates whitespace; returns -1 if the next non-whitespace
  * character is something other than `{` (single-statement loops
  * without braces — those are governor-limit-relevant too, but
- * structurally harder to span, so v2.1 deliberately skips them).
+ * structurally harder to span, so it deliberately skips them).
  */
 const findBodyOpenBrace = (stripped: string, start: number): number => {
   for (let i = start; i < stripped.length; i += 1) {
@@ -776,7 +776,7 @@ const DML_DATABASE_CALL_PATTERN =
   /\bDatabase\.(insert|update|delete|upsert|merge)\s*\(\s*([A-Za-z_][A-Za-z_0-9]*)/g;
 
 // ---------------------------------------------------------------------------
-// CRUD vs FLS vs record-sharing are three orthogonal planes (CR-04). The
+// CRUD vs FLS vs record-sharing are three orthogonal planes. The
 // `missing-crud-check` recognizer is about WRITE AUTHORIZATION for a DML
 // statement, so its hint set recognizes ONLY constructs that gate a WRITE:
 //
@@ -923,7 +923,7 @@ const detectMissingCrudCheck = (
       if (seen.has(m.index)) continue;
       seen.add(m.index);
 
-      // --- User-mode DML gates (CR-04 #2), bound to the DML SITE ----------
+      // --- User-mode DML gates, bound to the DML SITE ----------
       if (isDatabaseCall) {
         // `Database.insert(x, AccessLevel.USER_MODE)` enforces CRUD/FLS for the
         // write. Scan THIS call's argument list (to the matching `)`) — not a
@@ -942,7 +942,7 @@ const detectMissingCrudCheck = (
             // developer who consciously chose SYSTEM_MODE has not "forgotten" a
             // CRUD check, and flagging it `high` produces a false alarm hosts
             // remediate by adding an isUpdateable() guard the SYSTEM_MODE write
-            // deliberately bypasses (W7.3). Reclassify it as an intentional
+            // deliberately bypasses. Reclassify it as an intentional
             // system-context bypass surfaced for REVIEW (`info`), with the honest
             // "switch to USER_MODE if the running user's CRUD/FLS should apply"
             // remediation. Bound to THIS call site (like USER_MODE) so an
@@ -972,7 +972,7 @@ const detectMissingCrudCheck = (
         if (/\bas\s+user\b/.test(m[3] ?? '')) continue;
       }
 
-      // --- Object-level / field-FLS write-CRUD hints (CR-04 #1) -----------
+      // --- Object-level / field-FLS write-CRUD hints -----------
       // Scope the hint scan to the innermost block enclosing the DML plus its
       // controlling `if (...)` clause — a check in method A no longer clears a
       // DML in method B. Then strengthen by matching the hinted sObject to the
@@ -1067,7 +1067,7 @@ const detectMissingCrudCheck = (
 // Detect SOQL queries WITHOUT a `WITH SECURITY_ENFORCED` / `USER_MODE`
 // clause. The naive heuristic flags every inline `[SELECT ... FROM ...]`
 // that doesn't carry the FLS clause; the caller's skill is responsible
-// for surfacing the Q80 disclosure (custom helpers are invisible).
+// for surfacing the disclosure (custom helpers are invisible).
 //
 // A query is NOT an unenforced read, however, when its result is sanitized
 // with a READ-path field-FLS strip
@@ -1197,7 +1197,7 @@ const findVarAssignment = (
   offset: number,
 ): string | null => {
   // Match `[Type] varName = ...;` — Type optional, type names are
-  // identifier-shaped. Skip generic-parameter shapes for v2.1
+  // identifier-shaped. Skip generic-parameter shapes
   // simplicity; if a variable is assigned via `Map<X,Y> v = ...`
   // the regex still matches because the modifier prefix is loose.
   // `\b` before the name: searching `e` must not match `name = ...`.

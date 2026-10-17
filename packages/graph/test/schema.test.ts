@@ -49,7 +49,7 @@ describe('initSchema', () => {
       "SELECT table_name FROM duckdb_tables() WHERE schema_name = 'main' ORDER BY table_name",
     );
     const names = tables.map((row) => row['table_name']);
-    // CR-19 appended the schema_version ledger to the base schema.
+    // The schema_version ledger is appended to the base schema.
     expect(names).toEqual(['edges', 'facts', 'nodes', 'schema_version']);
   });
 

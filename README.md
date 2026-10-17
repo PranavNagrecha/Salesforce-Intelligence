@@ -258,6 +258,7 @@ Moving from an earlier release: **[docs/guides/upgrading.md](./docs/guides/upgra
 | Cursor | `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` | `mcpServers` |
 | Codex | `~/.codex/config.toml` | `[mcp_servers.*]` (TOML) |
 | VS Code + GitHub Copilot | `.vscode/mcp.json` | **`servers`** |
+| Cline (VS Code extension) | `cline_mcp_settings.json` (via Cline → MCP Servers → Configure) | `mcpServers` |
 
 **Claude Code** — from your Salesforce DX repo, add it project-scoped (writes a
 `.mcp.json` at the repo root that your team can commit):
@@ -307,6 +308,11 @@ here parses fine and registers nothing:
 
 **Codex** — `codex mcp add sf-intelligence -- npx -y sf-intelligence mcp --vault /abs/path/to/org-kb`,
 or the TOML equivalent in `~/.codex/config.toml`.
+
+**Cline** (VS Code extension) — open Cline → MCP Servers → Configure MCP
+Servers, which opens its `cline_mcp_settings.json`; paste the Claude Desktop
+block above (same `mcpServers` key, absolute `--vault` path). Cline reloads the
+file on save.
 
 Restart the client. The `sfi.*` tools are now available — ask "what can you
 do?" for the live tool map.
@@ -360,9 +366,9 @@ Claude Code from the folder that holds `org-kb`. If answers come back empty,
 ask "is the server set up?" and it will say where it looked.
 
 The plugin ships the skills and the slash commands. It does not ship the agent
-files under `.claude/agents/`; two of those are maintainer tools, and the two
-that `/sfi-field-audit` spawns are available from a clone of this repo, not
-from the plugin.
+files under `.claude/agents/`: `/sfi-field-audit` works without them and runs
+the audit inline; copying the two `salesforce-field-*.md` files from a clone of
+this repo into your project's `.claude/agents/` enables its parallel path.
 
 ## First run
 

@@ -322,7 +322,7 @@ const verdictSpreadSeed: ExtractionResult = {
 };
 
 // =============================================================================
-// Suite 4 (R1 — UNRESOLVED EDGE TARGETS): the v0.3 apex-scanner emits heuristic
+// Suite 4 (R1 — UNRESOLVED EDGE TARGETS): the apex-scanner emits heuristic
 // `writesTo` edges to `CustomField:<localVar>.<Field>` when it cannot resolve
 // the receiver's object. Those ids are NOT nodes in this vault, so the importer
 // stamps `targetMissing: true` on the edge. The WRITE is real and declared by
@@ -800,7 +800,7 @@ describe('whatIfDisableTriggerInputSchema', () => {
 // `toNode === null` guard whose only justification was a comment claiming
 // parity with unnamed peer tools ("matches the tolerance every other
 // composition tool uses"). `writesTo` is the ONLY edge category that yields
-// `blocking`, and the v0.3 apex-scanner emits heuristic `writesTo` edges to
+// `blocking`, and the apex-scanner emits heuristic `writesTo` edges to
 // `CustomField:<localVar>.<Field>` whenever it cannot resolve the receiver's
 // object — real declared writes with an unnameable target. Every one of them
 // was deleted from the answer with no counter anywhere in the response, so a

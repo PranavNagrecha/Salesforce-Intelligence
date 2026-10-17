@@ -1,6 +1,6 @@
 /**
  * `sfi annotate` — the human side of the annotations overlay
- * (P13-ANNOT-tools): state curated meaning, confirm AI proposals, list the
+ * state curated meaning, confirm AI proposals, list the
  * overlay, and find orphans (annotations whose component vanished).
  *
  *   sfi annotate <componentId> --key owner --value "RevOps"     # human set (confirmed)

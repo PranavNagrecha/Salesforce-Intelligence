@@ -10,7 +10,7 @@ import type { ExecCommand } from '@sf-intelligence/tooling-api';
 import { runStaleSweep, type StalenessSnapshot } from '../src/commands/stale-sweep.js';
 
 /**
- * P13-WATCH-sweep — mocked-tick tests: the SourceMember fast-path, the
+ * Mocked-tick tests: the SourceMember fast-path, the
  * per-type fallback over the WIDENED roster (PermissionSet drift — the
  * permission-drift hole — proven at unit level), honest erroredTypes for
  * unqueryable types, and the clean-sweep negative control. Every tick
@@ -20,7 +20,7 @@ import { runStaleSweep, type StalenessSnapshot } from '../src/commands/stale-swe
 let cwd: string;
 
 beforeEach(() => {
-  // CR-09 follow-up: the module-level live-query budget + result cache
+  // The module-level live-query budget + result cache
   // (live-session.ts) is process-global. checkVaultStaleness now routes its 15
   // per-type reads through that budget, so without a reset the budget/cache would
   // LEAK across these cases — a later test would hit the previous test's cached

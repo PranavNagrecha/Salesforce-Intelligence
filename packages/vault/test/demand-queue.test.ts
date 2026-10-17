@@ -13,7 +13,7 @@ import {
 } from '../src/demand-queue.js';
 
 /**
- * P13-STAGED-demand-queue — fold semantics of the append-only event log:
+ * fold semantics of the append-only event log:
  * dedup (N hits → one entry), drain outcomes, re-queue on a post-drain hit,
  * corrupt-line tolerance, and the drain-id selection rule.
  */

@@ -1,7 +1,7 @@
 /**
  * @sf-intelligence/graph
  *
- * The graph layer for `org-kb/`. v0.1 ships the DuckDB schema, the open/close
+ * The graph layer for `org-kb/`. This ships the DuckDB schema, the open/close
  * lifecycle, and migration plumbing; Phase D's remaining graph-* tasks add
  * the import pipeline that ingests the Markdown corpus into nodes/edges and
  * the query API consumed by the MCP tools. This barrel is the single public

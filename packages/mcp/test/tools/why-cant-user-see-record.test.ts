@@ -115,7 +115,7 @@ const owdControlledByCampaignSeed: ExtractionResult = {
       apiName: 'CampaignMember',
       properties: { sharingModel: 'ControlledByCampaign' },
     }),
-    // CR-03: a profile with object Read so the precondition passes and the OWD
+    // A profile with object Read so the precondition passes and the OWD
     // stage is reached — this test asserts the OWD's restricted CLASSIFICATION.
     makeNode({ id: CBC_READER_PROFILE, type: 'Profile', apiName: 'CbcReader' }),
   ],
@@ -219,9 +219,9 @@ const ownerSharingRuleSeed: ExtractionResult = {
 };
 
 // =============================================================================
-// Seed 3b (CR-CAP-12): OWD-Private object with an owner rule shared with an
+// Seed 3b: OWD-Private object with an owner rule shared with an
 // ENCLOSING public group. The user is a literal member ONLY of a NESTED group
-// (`Group:Enclosing_PG --hasMember--> Group:Nested_PG`). Before CR-CAP-12 the
+// (`Group:Enclosing_PG --hasMember--> Group:Nested_PG`). Previously the
 // literal membership set held only `Group:Nested_PG`, so the rule granting
 // `Group:Enclosing_PG` did NOT match (restricted). After: the upward hasMember
 // walk folds `Group:Enclosing_PG` into membership → visible.
@@ -335,7 +335,7 @@ const criteriaSharingRuleSeed: ExtractionResult = {
 };
 
 // =============================================================================
-// Seed 4b (CR-CAP-16): OWD-Private object with a GUEST sharing rule. The
+// Seed 4b: OWD-Private object with a GUEST sharing rule. The
 // TerritoryAndGuestRules stage must report `unknown` per rule with the rule id /
 // site / predicate in the reason, and the aggregate stays `unknown`.
 // =============================================================================
@@ -385,7 +385,7 @@ const guestSharingRuleSeed: ExtractionResult = {
 };
 
 // =============================================================================
-// Seed 4c (CR-CAP-16): OWD-Private object with NO guest/territory rules. The
+// Seed 4c: OWD-Private object with NO guest/territory rules. The
 // TerritoryAndGuestRules stage must preserve the absence disclosure as
 // `unknown`, never `restricted`.
 // =============================================================================
@@ -456,7 +456,7 @@ const roleHierarchySeed: ExtractionResult = {
 };
 
 // =============================================================================
-// Seed 6b (CR-CAP-05): owner-based SharingRule whose RECEIVER (sharedTo) target
+// Seed 6b: owner-based SharingRule whose RECEIVER (sharedTo) target
 // is a role marked `roleAndSubordinates` (inheritance: 'subordinates'). The
 // rule must reach the named role AND every role below it in the hierarchy.
 //
@@ -531,7 +531,7 @@ const ownerSubordinateRuleSeed: ExtractionResult = {
 };
 
 // =============================================================================
-// Seed 6c (CR-CAP-05): a PLAIN-role owner rule (NO inheritance marker) whose
+// Seed 6c: a PLAIN-role owner rule (NO inheritance marker) whose
 // sharedTo target is Sales_VP. A plain `role` rule reaches ONLY the named role;
 // a subordinate (Sales_Rep) must NOT match it. Guards the false-grant class.
 // Reuses the Sales_* roles seeded in `ownerSubordinateRuleSeed`.
@@ -577,7 +577,7 @@ const ownerPlainRoleRuleSeed: ExtractionResult = {
 };
 
 // =============================================================================
-// Seed 6d (CR-CAP-05): an Edit-level owner rule whose sharedTo target is
+// Seed 6d: an Edit-level owner rule whose sharedTo target is
 // roleAndSubordinates -> Sales_VP. Proves the subordinate match still composes
 // with the access-level gate: a subordinate (Sales_Rep) gets `visible` for read
 // but `restricted` for edit (Read rule grants Read, not edit). Distinct object
@@ -623,7 +623,7 @@ const ownerSubordinateReadRuleForLevelSeed: ExtractionResult = {
 };
 
 // =============================================================================
-// Seed 6e (CR-CAP-05 honesty): an owner rule whose sharedTo target is
+// Seed 6e (honesty): an owner rule whose sharedTo target is
 // roleAndSubordinates -> Cap_VP (a role that IS retrieved). But an INTERMEDIATE
 // role on the user's ancestor chain (Cap_Mid_Missing) was NOT retrieved, so the
 // upward walk from Cap_Rep_Trunc truncates at the missing node and never reaches
@@ -708,7 +708,7 @@ const restrictionRuleSeed: ExtractionResult = {
       type: 'PermissionSetGroup',
       apiName: 'Ops_Group',
     }),
-    // CR-03: a permission set with object Read on RestrictionObj so the
+    // A permission set with object Read on RestrictionObj so the
     // object-Read precondition passes and the cascade reaches the RestrictionRule
     // / PermissionSetGroup stages (which the boundary tests assert).
     makeNode({ id: RESTRICTION_PS, type: 'PermissionSet', apiName: 'Some_PS' }),
@@ -760,12 +760,12 @@ const hardDenyRestrictionSeed: ExtractionResult = {
 };
 
 // =============================================================================
-// Seed (R7-W4 — PermissionSetGroup MUTING). A Public-Read object where a PSG's
+// Seed (PermissionSetGroup MUTING). A Public-Read object where a PSG's
 // two members BOTH grant object Read, but the group's muting permission set
 // DENIES object Read. Muting is group-scoped, so:
 //   - a user assigned ONLY the muting group has NO net object Read → the
 //     object-CRUD precondition FAILS (verdict `restricted`, `mutedBy` names the
-//     muting set) even though the OWD is Public Read — the pre-R7-W4 overstatement.
+//     muting set) even though the OWD is Public Read — the earlier overstatement.
 //   - a SECOND group with no muting keeps its member's Read (survives).
 //   - a profile granting Read OUTSIDE any group is never muted (survives).
 // Plus a create object where the group mutes object Create, and a legacy muting
@@ -790,7 +790,7 @@ const mutingSeed: ExtractionResult = {
     // Group members: BOTH grant object Read on MuteObj.
     makeNode({ id: 'PermissionSet:MuteM1', type: 'PermissionSet', apiName: 'MuteM1' }),
     makeNode({ id: 'PermissionSet:MuteM2', type: 'PermissionSet', apiName: 'MuteM2' }),
-    // Muting set — R6-06 muted-perm node properties: denies object Read on MuteObj.
+    // Muting set — muted-perm node properties: denies object Read on MuteObj.
     makeNode({
       id: MUTE_READ_SET,
       type: 'MutingPermissionSet',
@@ -861,7 +861,7 @@ const mutingSeed: ExtractionResult = {
       apiName: 'MuteCreateG',
       properties: { permissionSets: ['MuteCM1'], mutingPermissionSets: ['MuteCreate'] },
     }),
-    // Legacy muting node (vault refreshed before R6-06): NO muted-perm props, so
+    // Legacy muting node (vault refreshed before muting support): NO muted-perm props, so
     // it CANNOT be subtracted — access may be overstated (disclosed).
     makeNode({ id: LEGACY_MUTE_OBJ, apiName: 'LegacyMuteObj', properties: { sharingModel: 'Read' } }),
     makeNode({ id: 'PermissionSet:LegacyM1', type: 'PermissionSet', apiName: 'LegacyM1' }),
@@ -893,7 +893,7 @@ const mutingSeed: ExtractionResult = {
 };
 
 /**
- * `Profile:Standard User` — the zero-permission profile the CR-03 precondition
+ * `Profile:Standard User` — the zero-permission profile the precondition
  * tests query. It is SEEDED (with no grant edges at all) so those tests pin what
  * they mean to pin: a profile that IS in the vault and genuinely grants nothing,
  * which is a MEASURED deny. An ABSENT profile is a different answer (`unknown`
@@ -994,7 +994,7 @@ const godModeSeed: ExtractionResult = {
       properties: { userPermissions: ['ManageUsers', 'ViewAllData'] },
     }),
     // A non-god-mode profile on the same object, to exercise the restricted path.
-    // CR-03: it holds plain object Read so the object-Read precondition passes
+    // It holds plain object Read so the object-Read precondition passes
     // and the cascade reaches the SystemPermission stage (which then reports
     // `restricted` — no View/Modify All Data).
     makeNode({
@@ -1003,7 +1003,7 @@ const godModeSeed: ExtractionResult = {
       apiName: 'Mortal',
       properties: { userPermissions: ['ManageUsers'] },
     }),
-    // CR-03: a profile with ZERO object access on this object — used to exercise
+    // A profile with ZERO object access on this object — used to exercise
     // the object-Read precondition hard-deny (bug 21).
     makeNode({
       id: 'Profile:NoAccess',
@@ -1181,7 +1181,7 @@ const createNoRtObjSeed: ExtractionResult = {
 };
 
 // =============================================================================
-// CR-03 (two-plane access model) seeds.
+// Two-plane access model seeds.
 //
 // The OWD-public objects above (READ_OBJ, RWT_OBJ) carry NO grantedBy edges, so
 // a `Profile:Standard User` queried against them has ZERO object Read — under
@@ -1302,7 +1302,7 @@ const controlledByParentSeed: ExtractionResult = {
 };
 
 // =============================================================================
-// CR-RV6 fixtures — operation-aware object-CRUD precondition.
+// fixtures — operation-aware object-CRUD precondition.
 // The old precondition only ever checked object READ regardless of accessLevel,
 // so the FIRST cascade step (OWD) could win for an operation the user lacks the
 // CRUD for: a Read-only user on a ReadWriteTransfer OWD object was told they
@@ -1311,7 +1311,7 @@ const controlledByParentSeed: ExtractionResult = {
 // Delete together (e.g. EDITOR_PROFILE), which masked the bug.
 // =============================================================================
 
-// CR-RV6 #1 — READ-ONLY profile (allowRead:true, allowEdit/allowDelete:false,
+// READ-ONLY profile (allowRead:true, allowEdit/allowDelete:false,
 // no view/modify-all) on a PUBLIC Read/Write/Transfer OWD object. OWD
 // ReadWriteTransfer (rank 2) grants edit org-wide, so the FALSE-PERMISSIVE bug
 // made accessLevel:'edit' say "visible" even though the user holds only Read.
@@ -1345,7 +1345,7 @@ const rv6ReadOnlyOnRwtSeed: ExtractionResult = {
   ],
 };
 
-// CR-RV6 #2 — FullAccess OWD object (none existed in the suite before) + a
+// FullAccess OWD object (none existed in the suite before) + a
 // profile with Read+Edit but NOT Delete. OWD FullAccess (rank 3) grants delete
 // org-wide, so the bug made accessLevel:'delete' say "visible" despite no
 // object Delete CRUD. accessLevel:'edit' on the SAME object must stay visible
@@ -1383,7 +1383,7 @@ const rv6FullAccessEditNoDeleteSeed: ExtractionResult = {
   ],
 };
 
-// CR-RV6 #3 — grant-edge Modify-All variant: a PRIVATE object + a profile with
+// Grant-edge Modify-All variant: a PRIVATE object + a profile with
 // NO plain CRUD bits but modifyAllRecords:true (object "Modify All"). The new
 // write predicate's modifyAllRecords branch must satisfy the edit/delete
 // precondition even with allowRead/allowEdit/allowDelete all false, mirroring
@@ -1475,7 +1475,7 @@ afterAll(async () => {
 
 describe('whyCantUserSeeRecordHandler', () => {
   it('Public-Read OWD does NOT grant visibility without object Read CRUD (object Read is a precondition)', async () => {
-    // CR-03 (corrected H1): a Public-Read OWD alone does NOT make a record
+    // A Public-Read OWD alone does NOT make a record
     // visible. `Profile:Standard User` IS seeded (zeroGrantProfileSeed) and
     // holds zero object permission on READ_OBJ, so the deny is MEASURED — the
     // object-Read PRECONDITION (plane A) is
@@ -1499,7 +1499,7 @@ describe('whyCantUserSeeRecordHandler', () => {
   });
 
   it('Public-Read OWD grants visibility when the user HAS object Read CRUD', async () => {
-    // CR-03 PASS-AFTER: with the object-Read precondition satisfied (a seeded
+    // PASS-AFTER: with the object-Read precondition satisfied (a seeded
     // profile holding object Read), the public OWD legitimately makes the record
     // visible via the OWD step.
     const result = await whyCantUserSeeRecordHandler(ctx, {
@@ -1516,7 +1516,7 @@ describe('whyCantUserSeeRecordHandler', () => {
   });
 
   it('classifies OWD ReadWriteTransfer as visible (Public Read/Write/Transfer) when object Read is present', async () => {
-    // CR-03: ReadWriteTransfer (the Lead/Case OWD) is a PUBLIC read-or-better
+    // ReadWriteTransfer (the Lead/Case OWD) is a PUBLIC read-or-better
     // setting — it must read as visible, NOT 'unrecognised OWD value'. The user
     // here HAS object Read CRUD (precondition satisfied), so the public OWD
     // grants record visibility.
@@ -1533,7 +1533,7 @@ describe('whyCantUserSeeRecordHandler', () => {
   });
 
   it('classifies OWD ControlledByCampaign as restricted at the OWD stage', async () => {
-    // CR-03: the supplied profile HAS object Read (precondition met), so the OWD
+    // The supplied profile HAS object Read (precondition met), so the OWD
     // stage is reached and its CLASSIFICATION is what is tested.
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: CBC_OBJ,
@@ -1595,7 +1595,7 @@ describe('whyCantUserSeeRecordHandler', () => {
   });
 
   it('object-Read precondition hard-deny: a supplied profile with no object grant and no god-mode is restricted, not unknown (bug 21)', async () => {
-    // CR-03: Profile:NoAccess has no grantedBy edge on the Private GodModeObj and
+    // Profile:NoAccess has no grantedBy edge on the Private GodModeObj and
     // no View/Modify-All Data. Object Read is a hard PRECONDITION for record
     // access, so the unknown record-level sharing tail (territory / manual /
     // sets / teams) cannot grant it — the answer is a definitive `restricted`,
@@ -1683,7 +1683,7 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(ownerSteps[0]?.reason).toContain(SALES_GROUP);
   });
 
-  it('CR-CAP-12: a rule granting an ENCLOSING group reaches a user in a NESTED member group', async () => {
+  it('a rule granting an ENCLOSING group reaches a user in a NESTED member group', async () => {
     // The user is a literal member ONLY of Group:Nested_PG. The owner rule
     // grants Group:Enclosing_PG, which CONTAINS Nested_PG via hasMember. The
     // literal membership set would miss the grant (restricted); the upward
@@ -1702,9 +1702,9 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(ownerSteps[0]?.reason).toContain(ENCLOSING_PG);
   });
 
-  // --- CR-CAP-05: owner sharing rule "Roles and Subordinates" subtree match ---
+  // --- owner sharing rule "Roles and Subordinates" subtree match ---
 
-  it('CR-CAP-05 (1): a SUBORDINATE role is GRANTED by a roleAndSubordinates owner rule', async () => {
+  it('a SUBORDINATE role is GRANTED by a roleAndSubordinates owner rule', async () => {
     // The core regression. Cap_Rep is two rungs below the rule's sharedTo
     // target Cap_VP. Before the fix the OwnerSharingRule step matched by EXACT
     // role membership, so Cap_Rep (not equal Cap_VP) was wrongly `restricted`
@@ -1725,7 +1725,7 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(verdict).toBe('visible');
   });
 
-  it('CR-CAP-05 (2): the NAMED role itself is still granted by a roleAndSubordinates rule', async () => {
+  it('the NAMED role itself is still granted by a roleAndSubordinates rule', async () => {
     // Base case — covered by membership.has(target). Passes before AND after.
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: SUB_OBJ,
@@ -1741,7 +1741,7 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(result.value.data.verdict).toBe('visible');
   });
 
-  it('CR-CAP-05 (3): a PLAIN role owner rule stays EXACT — a subordinate is NOT granted', async () => {
+  it('a PLAIN role owner rule stays EXACT — a subordinate is NOT granted', async () => {
     // False-grant guard. PlainRule targets Cap_VP with NO inheritance marker,
     // so a subordinate (Cap_Rep) must NOT leak into the match. restricted
     // before AND after.
@@ -1758,7 +1758,7 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(ownerSteps[0]?.verdict).toBe('restricted');
   });
 
-  it('CR-CAP-05 (4): a role OUTSIDE the subtree is still DENIED', async () => {
+  it('a role OUTSIDE the subtree is still DENIED', async () => {
     // Cap_Service_Agent is not Cap_VP and not a subordinate of it.
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: SUB_OBJ,
@@ -1773,7 +1773,7 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(verdict).not.toBe('visible');
   });
 
-  it('CR-CAP-05 (5): an INCOMPLETE role tree downgrades the non-match to UNKNOWN, not restricted', async () => {
+  it('an INCOMPLETE role tree downgrades the non-match to UNKNOWN, not restricted', async () => {
     // Honesty obligation. The rule targets subordinates of Cap_VP, and the user
     // Cap_Rep_Trunc really IS a subordinate — but the intermediate role
     // Cap_Mid_Missing was not retrieved, so the upward walk truncates before
@@ -1798,7 +1798,7 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(verdict).not.toBe('restricted');
   });
 
-  it('CR-CAP-05 (6): the subordinate match composes with the access-level gate', async () => {
+  it('the subordinate match composes with the access-level gate', async () => {
     // A Read rule reaches the subordinate Cap_Rep, so `read` is visible but
     // `edit` is restricted with the "grants only Read" reason — the inheritance
     // change did not bypass ruleAccessSatisfiesLevel.
@@ -1880,7 +1880,7 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(accountTeams?.verdict).toBe('unknown');
   });
 
-  it('CR-CAP-16: a GUEST sharing rule surfaces an unknown TerritoryAndGuestRules step with rule id / site / predicate', async () => {
+  it('a GUEST sharing rule surfaces an unknown TerritoryAndGuestRules step with rule id / site / predicate', async () => {
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: GUEST_OBJ,
       userContext: { groupIds: ['Group:Customer_Site'] },
@@ -1899,7 +1899,7 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(verdict).toBe('unknown');
   });
 
-  it('CR-CAP-16: an object with NO guest/territory rules preserves the absence disclosure as unknown, not restricted', async () => {
+  it('an object with NO guest/territory rules preserves the absence disclosure as unknown, not restricted', async () => {
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: NO_GUEST_OBJ,
       userContext: { roleId: SALES_REP_ROLE },
@@ -1937,7 +1937,7 @@ describe('whyCantUserSeeRecordHandler', () => {
     // silent accept that hid typos behind a real-looking cascade. The
     // handler now returns the canonical `component-not-found` error
     // envelope (matches `get-component`, `explain-apex-method`, and
-    // the rest of the v0.1+ tools).
+    // the rest of the tools).
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: 'CustomObject:DoesNotExist',
       userContext: { profileId: ADMIN_PROFILE },
@@ -1965,10 +1965,10 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(roleStep?.reason).toContain('2 level');
   });
 
-  // --- CR-03: two-plane access model (object-Read precondition + sharing) ---
+  // --- two-plane access model (object-Read precondition + sharing) ---
 
   it('Public Read/Write/Transfer OWD does NOT grant visibility without object Read (precondition)', async () => {
-    // CR-03 (H1): the same precondition gate applies to every public OWD, not
+    // The same precondition gate applies to every public OWD, not
     // just Public-Read. A zero-permission user on a ReadWriteTransfer object is
     // `restricted`, not `visible`.
     const result = await whyCantUserSeeRecordHandler(ctx, {
@@ -1984,7 +1984,7 @@ describe('whyCantUserSeeRecordHandler', () => {
   });
 
   it('H2: object Edit/Delete on a PRIVATE object is NOT a record-visibility grant', async () => {
-    // CR-03 (H2): plain object Edit/Delete satisfies the object precondition
+    // Plain object Edit/Delete satisfies the object precondition
     // (Edit/Delete imply Read) but on a Private object with no record-sharing
     // grant it must NEVER read as `visible`. The honest answer is `unknown` —
     // unmodeled manual sharing / teams / sets could still grant it (the
@@ -2009,7 +2009,7 @@ describe('whyCantUserSeeRecordHandler', () => {
   });
 
   it('object View All records (viewAllRecords) on a Private object grants read (all-records bypass)', async () => {
-    // CR-03: object "View All" records IS a record-sharing bypass scoped to all
+    // Object "View All" records IS a record-sharing bypass scoped to all
     // records — visible even on a Private OWD.
     const r = await whyCantUserSeeRecordHandler(ctx, {
       componentId: PRIV_VIEWALL_OBJ,
@@ -2037,7 +2037,7 @@ describe('whyCantUserSeeRecordHandler', () => {
   });
 
   it('ControlledByParent with object Read but no modeled sharing is honest unknown, not restricted', async () => {
-    // CR-03 (honesty): record access on a detail object derives from the MASTER
+    // Honesty: record access on a detail object derives from the MASTER
     // object's sharing, which v1.x cannot walk. With the object-Read precondition
     // satisfied but no modeled bypass/grant, the answer must be `unknown` — never
     // a flat `restricted` that would tell an admin the user definitely cannot see
@@ -2053,10 +2053,10 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(owd?.verdict).toBe('restricted'); // ControlledByParent groups as restricted at OWD
   });
 
-  // --- accessLevel: read vs edit vs delete (P11-ACCESS-edit-verdict) ---
+  // --- accessLevel: read vs edit vs delete ---
 
   it('a Read OWD is visible for read but NOT for edit (read-only is not edit-capable)', async () => {
-    // CR-03: the supplied profile HAS object Read/Edit CRUD (precondition met),
+    // The supplied profile HAS object Read/Edit CRUD (precondition met),
     // so the OWD read/edit ladder is what is tested. A Read OWD makes the record
     // read-visible but the OWD does not grant edit org-wide; with only plain
     // object CRUD (no record-sharing bypass / grant) edit is NOT visible.
@@ -2079,7 +2079,7 @@ describe('whyCantUserSeeRecordHandler', () => {
   });
 
   it('a ReadWrite (ReadWriteTransfer) OWD is visible for edit but NOT for delete', async () => {
-    // CR-03: the supplied profile HAS object Read/Edit/Delete CRUD (precondition
+    // The supplied profile HAS object Read/Edit/Delete CRUD (precondition
     // met), so the OWD edit/delete ladder is what is tested. A ReadWrite OWD
     // makes edit visible but delete needs FullAccess org-wide; with only plain
     // object CRUD (no record-sharing bypass) delete is NOT visible.
@@ -2103,7 +2103,7 @@ describe('whyCantUserSeeRecordHandler', () => {
   });
 
   it('ViewAllData grants read god-mode but NOT edit; ModifyAllData grants edit AND delete', async () => {
-    // ViewAllData is read-only. CR-RV6: GOD_PROFILE holds ViewAllData but NO
+    // ViewAllData is read-only. GOD_PROFILE holds ViewAllData but NO
     // object Edit CRUD on GODMODE_OBJ, so for accessLevel:'edit' the now
     // operation-aware precondition (systemPermsForLevel('edit') = ModifyAllData
     // only) hard-stops at the precondition with `restricted` BEFORE the cascade
@@ -2153,7 +2153,7 @@ describe('whyCantUserSeeRecordHandler', () => {
     }
   });
 
-  // === accessLevel: 'create' (P11-ACCESS-create-verdict) ====================
+  // === accessLevel: 'create' ====================
 
   it('create is visible with allowCreate AND a visible record type', async () => {
     const r = await whyCantUserSeeRecordHandler(ctx, {
@@ -2254,13 +2254,13 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(sys?.verdict).toBe('visible');
   });
 
-  // === CR-RV6: operation-aware object-CRUD precondition ======================
+  // === operation-aware object-CRUD precondition ======================
   // The headline false-permissive class. Pre-fix the precondition only checked
   // object READ regardless of accessLevel, so the OWD step (which visibles edit
   // on a ReadWriteTransfer OWD and delete on a FullAccess OWD) won for an
   // operation the user lacked the CRUD for.
 
-  it('CR-RV6: read-only profile on a ReadWriteTransfer OWD object is NOT visible for edit (false-permissive guard)', async () => {
+  it('read-only profile on a ReadWriteTransfer OWD object is NOT visible for edit (false-permissive guard)', async () => {
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: RV6_RWT_OBJ,
       accessLevel: 'edit',
@@ -2278,7 +2278,7 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(reasons).not.toMatch(/no object Read permission/i);
   });
 
-  it('CR-RV6: that SAME read-only profile is STILL visible for read (no over-demotion regression)', async () => {
+  it('that SAME read-only profile is STILL visible for read (no over-demotion regression)', async () => {
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: RV6_RWT_OBJ,
       accessLevel: 'read',
@@ -2291,7 +2291,7 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(result.value.data.verdict).toBe('visible');
   });
 
-  it('CR-RV6: Edit-but-not-Delete profile on a FullAccess OWD object is NOT visible for delete (false-permissive guard)', async () => {
+  it('Edit-but-not-Delete profile on a FullAccess OWD object is NOT visible for delete (false-permissive guard)', async () => {
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: RV6_FULLACCESS_OBJ,
       accessLevel: 'delete',
@@ -2307,7 +2307,7 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(reasons).not.toMatch(/no object Read permission/i);
   });
 
-  it('CR-RV6: that SAME Edit-but-not-Delete profile IS visible for edit on the FullAccess object (demotion is delete-specific)', async () => {
+  it('that SAME Edit-but-not-Delete profile IS visible for edit on the FullAccess object (demotion is delete-specific)', async () => {
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: RV6_FULLACCESS_OBJ,
       accessLevel: 'edit',
@@ -2319,7 +2319,7 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(result.value.data.verdict).toBe('visible');
   });
 
-  it('CR-RV6: true-positive preserved — Edit+Read profile on ReadWriteTransfer is visible for edit (regression guard for EDITOR_PROFILE)', async () => {
+  it('true-positive preserved — Edit+Read profile on ReadWriteTransfer is visible for edit (regression guard for EDITOR_PROFILE)', async () => {
     const result = await whyCantUserSeeRecordHandler(ctx, {
       componentId: PUB_RWT_OBJ,
       accessLevel: 'edit',
@@ -2332,7 +2332,7 @@ describe('whyCantUserSeeRecordHandler', () => {
     expect(result.value.data.verdict).toBe('visible');
   });
 
-  it('CR-RV6: object Modify-All grant-edge satisfies the edit AND delete precondition with no plain CRUD bits', async () => {
+  it('object Modify-All grant-edge satisfies the edit AND delete precondition with no plain CRUD bits', async () => {
     for (const lvl of ['edit', 'delete'] as const) {
       const result = await whyCantUserSeeRecordHandler(ctx, {
         componentId: RV6_MAREC_OBJ,
@@ -2349,7 +2349,7 @@ describe('whyCantUserSeeRecordHandler', () => {
     }
   });
 
-  it('CR-RV6: role/group-only context on a PRIVATE object stays unknown for edit (operation-aware precondition must NOT hard-deny)', async () => {
+  it('role/group-only context on a PRIVATE object stays unknown for edit (operation-aware precondition must NOT hard-deny)', async () => {
     // The load-bearing honesty guard: with NO profileId / permissionSetIds object
     // perms are UNDECIDABLE, so the operation-aware precondition is SKIPPED
     // (profileOrPermSetSupplied is false) — it must NOT hard-deny. On a Private
@@ -2447,7 +2447,7 @@ describe('whyCantUserSeeRecordInputSchema', () => {
 
 describe('whyCantUserSeeRecordHandler — restriction rules and PSG boundaries', () => {
   it('surfaces RestrictionRule stage as unknown when rules exist on the object', async () => {
-    // CR-03: the supplied permission set has object Read on RestrictionObj, so
+    // The supplied permission set has object Read on RestrictionObj, so
     // the object-Read precondition passes and the cascade reaches the
     // RestrictionRule stage. With object Read present, a Private OWD, and no
     // modeled bypass / sharing grant, the honest aggregate is `unknown` —
@@ -2466,7 +2466,7 @@ describe('whyCantUserSeeRecordHandler — restriction rules and PSG boundaries',
   });
 
   it('reports PermissionSetGroup as NOT EVALUATED when groups exist but none are assigned', async () => {
-    // CR-CAP-04: PSG membership IS modeled, so the old always-`unknown` stub is
+    // PSG membership IS modeled, so the old always-`unknown` stub is
     // gone. But when the caller supplies no group, nothing about the groups that
     // DO exist was examined — and `restricted` claims they were examined and
     // grant nothing. An unknown must not wear a denial word: this stage now
@@ -2654,12 +2654,12 @@ describe('whyCantUserSeeRecordHandler: userContext apiName coercion', () => {
   });
 
   // ===========================================================================
-  // R7-W4 — PermissionSetGroup MUTING subtracts from the object-CRUD precondition.
+  // PermissionSetGroup MUTING subtracts from the object-CRUD precondition.
   // ===========================================================================
-  describe('R7-W4 group-scoped muting of the object-CRUD precondition', () => {
+  describe('group-scoped muting of the object-CRUD precondition', () => {
     it('mutes object Read within the group → precondition FAILS, verdict restricted, mutedBy names the set', async () => {
       // Both group members grant object Read on a Public-Read object, but the
-      // group's muting set denies object Read. Pre-R7-W4 the object-Read
+      // group's muting set denies object Read. Previously the object-Read
       // precondition passed (member grant counted) and the Public-Read OWD made
       // this `visible` — the OVERSTATEMENT. Now muting removes the members' Read
       // net, so the precondition fails and the honest answer is `restricted`.
@@ -2730,7 +2730,7 @@ describe('whyCantUserSeeRecordHandler: userContext apiName coercion', () => {
     });
 
     it('a legacy muting node (no muted-perm data) CANNOT be subtracted → access preserved but disclosed as overstated', async () => {
-      // The muting node predates the R6-06 extractor (no muted* properties), so
+      // The muting node predates the extractor (no muted* properties), so
       // its Read mute cannot be applied. Honesty: do NOT drop the grant (would be
       // a false deny) — keep it visible but DISCLOSE the possible overstatement.
       const r = await whyCantUserSeeRecordHandler(ctx, {

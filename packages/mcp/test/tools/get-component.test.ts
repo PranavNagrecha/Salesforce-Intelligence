@@ -74,7 +74,7 @@ const VALIDATION_RULE_PROPERTIES = {
 };
 
 /**
- * R6-31 fixture: mirrors the real-world shape that broke `maxBodyBytes: 0`
+ * Fixture: mirrors the real-world shape that broke `maxBodyBytes: 0`
  * — a Profile whose graph node carries thousands of `fieldPermissions`/
  * `objectPermissions` entries alongside a few small scalar fields. The
  * frontmatter written to disk for this node (below) is ALSO oversized on
@@ -180,7 +180,7 @@ const seed: ExtractionResult = {
       parentId: 'CustomObject:TestObj__c',
       sourcePath: 'objects/TestObj__c/fields/Start_Time__c.field-meta.xml',
     }),
-    // R6-31 fixture: huge node used by the metadata-probe regression tests.
+    // Fixture: huge node used by the metadata-probe regression tests.
     makeNode({
       id: 'Profile:HugeProfile',
       type: 'Profile',
@@ -378,7 +378,7 @@ beforeAll(async () => {
     ].join('\n'),
   );
 
-  // R6-31 fixture: a HUGE node whose on-disk frontmatter is ALSO oversized
+  // Fixture: a HUGE node whose on-disk frontmatter is ALSO oversized
   // (standing in for a real Profile's rendered permissions block — see the
   // real-vault numbers in the handoff). Node index 9 in the seed. Before the
   // fix, `getComponentHandler(ctx, { id, maxBodyBytes: 0 })` on a node like
@@ -432,7 +432,7 @@ describe('getComponentHandler', () => {
     expect('annotations' in result.value.data).toBe(false);
   });
 
-  it('embeds the curated annotations block with provenance `annotation` when the subject has one (P13-ANNOT-tools)', async () => {
+  it('embeds the curated annotations block with provenance `annotation` when the subject has one', async () => {
     const { appendAnnotationEvent } = await import('@sf-intelligence/vault');
     await appendAnnotationEvent(ctx.vaultRoot, {
       componentId: 'CustomObject:Account',
@@ -519,7 +519,7 @@ describe('getComponentHandler', () => {
     rmSync(localDir, { recursive: true, force: true });
   });
 
-  it('queues an AUTOMATION-CRITICAL phantom hit in meta/demand-queue.jsonl — and only that class (P13-STAGED-demand-queue)', async () => {
+  it('queues an AUTOMATION-CRITICAL phantom hit in meta/demand-queue.jsonl — and only that class', async () => {
     const localDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-getcomp-queue-'));
     const opened = await openGraph(join(localDir, 'phantom.db'));
     expect(opened.ok).toBe(true);
@@ -973,7 +973,7 @@ describe('getComponentHandler', () => {
     );
   });
 
-  it('propagates a failed outgoing-edge query as `internal` instead of silently emptying referenceIds (R1-539)', async () => {
+  it('propagates a failed outgoing-edge query as `internal` instead of silently emptying referenceIds', async () => {
     // `listEdges(ctx.graph, node.id, { direction: 'out' })` on the normal
     // (non-metadata-probe) path used `.ok ? ... : []` — a genuine graph query
     // failure (DB gone away, corrupted index, etc.) reads identically to "this
@@ -1007,7 +1007,7 @@ describe('getComponentHandler', () => {
     expect(result.error.message).toContain('listEdges');
   });
 
-  describe('R6-31: metadata-probe mode (maxBodyBytes 0 / small)', () => {
+  describe('metadata-probe mode (maxBodyBytes 0 / small)', () => {
     it('maxBodyBytes: 0 on a huge node returns ok with a bounded metadata envelope (was oversize before the fix)', async () => {
       const result = await getComponentHandler(ctx, {
         id: 'Profile:HugeProfile',

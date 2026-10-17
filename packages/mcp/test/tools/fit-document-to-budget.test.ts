@@ -165,7 +165,7 @@ describe('fitDocumentToBudget', () => {
 
   it('BUDGET-ALIGNMENT: an admin_handbook-sized doc (832 ids, ~2KB body, ~37KB) passes byte-identical at the real budget', () => {
     // 832 componentIds = ~34 KB provenance, ~2 KB readable body — the exact
-    // shape the CR-08 regression over-truncated. With the corrected budget
+    // shape the regression over-truncated. With the corrected budget
     // (cap - measured envelope overhead ~= 38_976) the full envelope is under
     // the global cap, so the doc must pass UNCHANGED (no truncation, no note).
     const doc = makeBloatedIdsDoc(832);
@@ -261,7 +261,7 @@ describe('fitDocumentToBudget', () => {
 // =============================================================================
 // RV4: the claimed H7 re-opening at a tiny SFI_MAX_RESPONSE_BYTES does NOT
 // exist. These guards verify the REAL safety property through the full
-// fit→jsonResult path (the plan-check's requiredChange), and pin the CR-08 /
+// fit→jsonResult path (the plan-check's requiredChange), and pin the
 // 40 KB-default budget. They do NOT assert any 1536-byte body ceiling — a
 // realistic data-dictionary collapses to ~1670 B, OVER slimDataStrings' 1536
 // threshold, so that "always under 1536" invariant from the original diagnosis
@@ -307,11 +307,11 @@ describe('RV4 — tiny SFI_MAX_RESPONSE_BYTES never silently chops the doc foote
     }
   });
 
-  it('CR-08 / 40KB DEFAULT: generatedDocByteBudget() === 38976 with SFI_MAX_RESPONSE_BYTES unset', () => {
+  it('40KB DEFAULT: generatedDocByteBudget() === 38976 with SFI_MAX_RESPONSE_BYTES unset', () => {
     delete process.env['SFI_MAX_RESPONSE_BYTES'];
     // 40_000 default minus the 1_024 envelope reserve, well above the 2_000
     // floor — proving the floor value is irrelevant on the default path and no
-    // floor change can perturb the CR-08-tuned budget.
+    // floor change can perturb the tuned budget.
     expect(generatedDocByteBudget()).toBe(38_976);
   });
 });

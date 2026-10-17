@@ -216,7 +216,7 @@ describe('extractOmniUiCard', () => {
       }
     });
 
-    // --- DataRaptor dispatch edges (the v3.3 consistency fix) -------------
+    // --- DataRaptor dispatch edges (the consistency fix) -------------
     // A FlexCard depends on a DataRaptor in two real ways, both of which
     // the OmniScript / Integration Procedure extractors already model as
     // `dispatchesOmniAction` -> `OmniDataTransform:{bundle}`:

@@ -106,8 +106,8 @@ const validateRoot = (
  *
  * Returns one `Node` of type `'CspTrustedSite'` and zero edges. CSP
  * Trusted Sites govern inbound browser fetches and have no inter-
- * component references. v1.5 does NOT correlate LWC `fetch()` calls
- * to specific CSP entries (a runtime browser concern; the v1.4 LWC
+ * component references. This does NOT correlate LWC `fetch()` calls
+ * to specific CSP entries (a runtime browser concern; the LWC
  * scanner does not detect URL strings in JS source — see
  * `CspTrustedSite.md` for the deferral rationale).
  *

@@ -71,7 +71,7 @@ import { V01_TOOLS } from '../src/tools/index.js';
 const MCP_SRC_DIR = join(dirname(fileURLToPath(import.meta.url)), '..', 'src');
 const TOOLS_DIR = join(MCP_SRC_DIR, 'tools');
 const PACKAGES_DIR = join(MCP_SRC_DIR, '..', '..');
-// R7-F2: handler imports and dispatchTool switch moved to tool-dispatch.ts.
+// Handler imports and dispatchTool switch moved to tool-dispatch.ts.
 // INDEX_PATH here means "the dispatch file" — point at tool-dispatch.ts.
 const INDEX_PATH = join(TOOLS_DIR, 'tool-dispatch.ts');
 

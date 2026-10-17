@@ -41,72 +41,65 @@ export type Result<T, E> =
 /**
  * The set of Salesforce metadata component types `sf-intelligence` knows about.
  *
- * The validation slice exercises only `CustomObject` and `CustomField`. v0.2
- * and v0.3 did not extend this union — only edge types. v1.1 added the
- * sharing & visibility tier (`Group`, `Queue`, `Role`, `SharingRule`). v1.2
- * added the record-types + UI-surfaces tier (`RecordType`, `BusinessProcess`,
- * `CustomTab`, `CustomApplication`, `QuickAction`, `PathAssistant`,
- * `GlobalValueSet`, `CustomLabel`, `StaticResource`). v1.3 added the
- * legacy-automation + communications tier (`WorkflowRule`, `ApprovalProcess`,
- * `AssignmentRule`, `AutoResponseRule`, `EscalationRule`, `DuplicateRule`,
- * `MatchingRule`, `EmailTemplate`, `Letterhead`). v1.4 adds the developer
- * frontend + test mapping tier (`LightningComponentBundle`,
- * `AuraDefinitionBundle`, `VisualforcePage`, `VisualforceComponent`); the
- * extractors land across v1.4 R2-R4 and `sfi.find_apex_usages` is broadened
- * to `sfi.find_code_usages` (alias preserved) in v1.4 R5. v1.5 adds the
- * integration topology + event/async/API surface tier (`AuthProvider`,
- * `RemoteSiteSetting`, `CspTrustedSite`, `ExternalDataSource`,
- * `ExternalService`, `NetworkAccess`) — the six metadata families that
- * answer the architect's "draw me our integration map" question.
- * `ExternalDataSource` carries a single `references` edge to its declared
- * `AuthProvider`; `ExternalService` carries a single `references` to its
- * declared `NamedCredential`; the other four produce zero edges of their
- * own. v1.5 also unlocks the reserved `listensTo` edge (Platform Event
- * subscribers; emitted by the existing apex-trigger / apex-class / flow
- * extractors against `__e`-suffixed CustomObject targets) and adds two
- * new EdgeTypes (`exposes`, `dispatchesAsync`) — see the `EdgeType` union
- * below. v1.6 adds the business-user record-value tier
- * (`CustomMetadataRecord`, `CustomSettingRecord`) — record (row)
- * instances of `__mdt` Custom Metadata Types and Custom Setting types,
- * attached to their parent type via the existing `parentOf` edge
- * (mirroring the v1.0 CustomField → CustomObject pattern; no new
- * EdgeType). Until those workers ship, the new members are valid targets
- * for ad-hoc graph nodes but produce no extractor output. v2.0a adds the
- * conditional-context tier: a single synthetic `ConditionalContext`
- * ComponentType that represents one extracted firing condition (criteria
- * block, formula expression, Flow decision, or Flow record-trigger
- * filter). Synthetic ids follow the pattern
- * `ConditionalContext:{ParentFirerId}.condition-{index}` (mirroring v1.5's
- * `ExternalApi:{kind}/{path}` convention); the new type pairs with the
- * v2.0a `firesWhen` EdgeType. See
- * `docs/vendor/salesforce-metadata/ConditionalContextSemantics.md` for
- * the full per-firer extraction rules and the deferred-extraction
- * boundary (Apex if-guards, per-step approval criteria, Process Builder,
- * UI conditional-rendering directives, time-based firing). v3.2 adds
- * the OmniStudio / Salesforce Industries declarative-process tier:
- * `OmniScript` (the user-facing no-code form flow,
- * `.os-meta.xml`), `OmniIntegrationProcedure` (the server-side
- * action-chain orchestrator, `.oip-meta.xml`), `OmniDataTransform`
- * (the DataRaptor mapping primitive, `.rpt-meta.xml`), `OmniUiCard`
- * (the FlexCard widget-canvas primitive, `.ouc-meta.xml`), and
- * `DecisionTable` (the declarative rule-table primitive,
- * `.decisionTable-meta.xml`). The recon (journal 0157) found
- * Globex's sandbox silently skipped 1,474 OmniStudio files
- * while reporting `kind: "fresh"`; v3.2 closes that extraction gap.
- * The v3.1 roadmap-closure framing was conditional on the buyer-
- * interview cohort; v3.2 corrects it to acknowledge the OmniStudio
- * extraction tier was missing from the cohort's question shapes.
- * The four v3.1 out-of-roadmap zones (live-state, record-level,
- * write-side, cross-org-deep-diff) remain intact. v3.2 ships the
- * 5 ComponentTypes plus one new EdgeType (`dispatchesOmniAction`)
- * for the intra-OmniStudio call chain; the Apex-to-OmniProcess
- * coupling edge (`implementsOmniInterface`) is a v3.3 follow-up,
- * NOT in v3.2. Recognizes Industries Native XML shapes only;
- * Vlocity-Legacy managed-package components (namespace
- * `vlocity_cmt__`) are NOT extracted by v3.2. See per-type docs
- * in `docs/vendor/salesforce-metadata/OmniScript.md`,
- * `.../OmniIntegrationProcedure.md`, `.../OmniDataTransform.md`,
- * `.../OmniUiCard.md`, `.../DecisionTable.md`.
+ * The validation slice exercises only `CustomObject` and `CustomField`. The
+ * other members arrive in tiers:
+ *
+ * - Sharing & visibility: `Group`, `Queue`, `Role`, `SharingRule`.
+ * - Record types + UI surfaces: `RecordType`, `BusinessProcess`, `CustomTab`,
+ *   `CustomApplication`, `QuickAction`, `PathAssistant`, `GlobalValueSet`,
+ *   `CustomLabel`, `StaticResource`.
+ * - Legacy automation + communications: `WorkflowRule`, `ApprovalProcess`,
+ *   `AssignmentRule`, `AutoResponseRule`, `EscalationRule`, `DuplicateRule`,
+ *   `MatchingRule`, `EmailTemplate`, `Letterhead`.
+ * - Developer frontend + test mapping: `LightningComponentBundle`,
+ *   `AuraDefinitionBundle`, `VisualforcePage`, `VisualforceComponent`;
+ *   `sfi.find_apex_usages` was broadened to `sfi.find_code_usages` (alias
+ *   preserved) alongside them.
+ * - Integration topology + event/async/API surface: `AuthProvider`,
+ *   `RemoteSiteSetting`, `CspTrustedSite`, `ExternalDataSource`,
+ *   `ExternalService`, `NetworkAccess` — the six metadata families that
+ *   answer the architect's "draw me our integration map" question.
+ *   `ExternalDataSource` carries a single `references` edge to its declared
+ *   `AuthProvider`; `ExternalService` carries a single `references` to its
+ *   declared `NamedCredential`; the other four produce zero edges of their
+ *   own. This tier also unlocks the reserved `listensTo` edge (Platform Event
+ *   subscribers; emitted by the existing apex-trigger / apex-class / flow
+ *   extractors against `__e`-suffixed CustomObject targets) and adds two
+ *   EdgeTypes (`exposes`, `dispatchesAsync`) — see the `EdgeType` union
+ *   below.
+ * - Business-user record values: `CustomMetadataRecord`,
+ *   `CustomSettingRecord` — record (row) instances of `__mdt` Custom Metadata
+ *   Types and Custom Setting types, attached to their parent type via the
+ *   existing `parentOf` edge (mirroring the CustomField → CustomObject
+ *   pattern; no new EdgeType).
+ * - Conditional context: a single synthetic `ConditionalContext`
+ *   ComponentType that represents one extracted firing condition (criteria
+ *   block, formula expression, Flow decision, or Flow record-trigger
+ *   filter). Synthetic ids follow the pattern
+ *   `ConditionalContext:{ParentFirerId}.condition-{index}` (mirroring the
+ *   `ExternalApi:{kind}/{path}` convention); the type pairs with the
+ *   `firesWhen` EdgeType. See
+ *   `docs/vendor/salesforce-metadata/ConditionalContextSemantics.md` for
+ *   the full per-firer extraction rules and the deferred-extraction
+ *   boundary (Apex if-guards, per-step approval criteria, Process Builder,
+ *   UI conditional-rendering directives, time-based firing).
+ * - OmniStudio / Salesforce Industries declarative process: `OmniScript`
+ *   (the user-facing no-code form flow, `.os-meta.xml`),
+ *   `OmniIntegrationProcedure` (the server-side action-chain orchestrator,
+ *   `.oip-meta.xml`), `OmniDataTransform` (the DataRaptor mapping
+ *   primitive, `.rpt-meta.xml`), `OmniUiCard` (the FlexCard widget-canvas
+ *   primitive, `.ouc-meta.xml`), and `DecisionTable` (the declarative
+ *   rule-table primitive, `.decisionTable-meta.xml`). Before this tier a
+ *   real sandbox silently skipped 1,474 OmniStudio files while reporting
+ *   `kind: "fresh"`. The tier ships the 5 ComponentTypes plus one EdgeType
+ *   (`dispatchesOmniAction`) for the intra-OmniStudio call chain; the
+ *   Apex-to-OmniProcess coupling edge (`implementsOmniInterface`) is a
+ *   follow-up. Recognizes Industries Native XML shapes only; Vlocity-Legacy
+ *   managed-package components (namespace `vlocity_cmt__`) are NOT
+ *   extracted. See per-type docs in
+ *   `docs/vendor/salesforce-metadata/OmniScript.md`,
+ *   `.../OmniIntegrationProcedure.md`, `.../OmniDataTransform.md`,
+ *   `.../OmniUiCard.md`, `.../DecisionTable.md`.
  */
 export type ComponentType =
   | 'CustomObject'
@@ -121,12 +114,12 @@ export type ComponentType =
   | 'PermissionSetAssignment'
   | 'NamedCredential'
   | 'ConnectedApp'
-  // v1.1 — sharing & visibility tier.
+  // sharing & visibility tier.
   | 'Group'
   | 'Queue'
   | 'Role'
   | 'SharingRule'
-  // v1.2 — record types + UI surfaces tier.
+  // record types + UI surfaces tier.
   | 'RecordType' //          per-object; governs which layout / picklist / process variant a user sees.
   | 'BusinessProcess' //     stage-gating variant referenced by a RecordType (Lead/Opportunity/Case).
   | 'CustomTab' //           a tab entry in the app navigator.
@@ -136,7 +129,7 @@ export type ComponentType =
   | 'GlobalValueSet' //      org-wide picklist values reused across fields.
   | 'CustomLabel' //         translation / string resource.
   | 'StaticResource' //      image / zip / js asset referenced from VF or LWC.
-  // v1.3 — legacy automation + communications tier.
+  // legacy automation + communications tier.
   | 'WorkflowRule' //        per-object rule with field-update / email-alert / task / outbound-message actions.
   | 'ApprovalProcess' //     multi-step approval routing tied to a SObject (Lead/Opportunity/Case/Account).
   | 'AssignmentRule' //      Lead / Case routing rule with criteria → assigned User or Queue.
@@ -146,12 +139,12 @@ export type ComponentType =
   | 'MatchingRule' //        per-object fuzzy-match definition consumed by DuplicateRule.
   | 'EmailTemplate' //       org-wide or folder-scoped email body (text / html / custom / visualforce).
   | 'Letterhead' //          HTML letterhead styling reused by custom-html email templates.
-  // v1.4 — developer frontend + test mapping tier.
+  // developer frontend + test mapping tier.
   | 'LightningComponentBundle' // LWC bundle (`.js` + `.html` + `.js-meta.xml`); modern Lightning UI surface.
   | 'AuraDefinitionBundle' //    Aura bundle (`.cmp`/`.app`/`.evt` + `.js` controller/helper + `*-meta.xml`); legacy Lightning UI surface.
   | 'VisualforcePage' //         `.page` file with companion `.page-meta.xml`; pre-Lightning UI surface.
   | 'VisualforceComponent' //    `.component` file with companion `.component-meta.xml`; reusable VF building block.
-  // v1.5 — integration topology + event/async/API surface tier.
+  // integration topology + event/async/API surface tier.
   | 'AuthProvider' //            SSO / OAuth provider registration (`.authprovider-meta.xml`); the directly-named target of `ExternalDataSource.authProvider` and (in many orgs) `NamedCredential.authProvider`.
   | 'SamlSsoConfig' //           SAML SSO setting (`.samlssoconfig-meta.xml`); its `identityMapping` (Username | FederationId | UserId) is the authoritative source of which User field the IdP asserts as the login subject — the value-change tier gates the FederationIdentifier verdict on it.
   | 'RemoteSiteSetting' //       Single allowed outbound URL (`.remoteSite-meta.xml`); the pre-Named-Credential mechanism for outbound HTTP callouts.
@@ -159,34 +152,34 @@ export type ComponentType =
   | 'ExternalDataSource' //      Salesforce-Connect (OData / cross-org) data-source binding (`.dataSource-meta.xml`); carries a `references` edge to its declared `AuthProvider` when set.
   | 'ExternalService' //         `ExternalServiceRegistration` — invoke-an-OpenAPI-endpoint binding (`.externalServiceRegistration-meta.xml`); carries a `references` edge to its declared `NamedCredential` when set.
   | 'NetworkAccess' //           IP-range trust-list entry (`.networkAccess-meta.xml`). NOT the Experience Cloud community: that `Network` / `CustomSite` / `ExperienceBundle` family is now modeled as its own tier (R6-17, below). This type is the unrelated "Trusted IP Ranges" list — the two only share the XML-namespace `Network` prefix.
-  // v1.6 — business-user record-value tier.
-  // CR-CAP-15 — declarative custom-permission definition tier. A
+  // business-user record-value tier.
+  // declarative custom-permission definition tier. A
   // CustomPermission is a named permission flag (`.customPermission-meta.xml`)
   // that Apex / Flow / validation rules gate on, and that PermissionSets /
   // Profiles grant via their `<customPermissions>` block (the grant side is
-  // CR-CAP-10's `grantedBy` edge; no new EdgeType). Id format is flat
+  // The `grantedBy` edge; no new EdgeType). Id format is flat
   // `CustomPermission:{DeveloperName}` (no parent scope — mirroring
   // RemoteSiteSetting / AuthProvider / CustomLabel) so a bare `<name>` grant
-  // resolves to exactly this id. v0.1 extracts the definition node only; the
+  // resolves to exactly this id. This extracts the definition node only; the
   // optional `<requiredPermission>` CustomPermission-implies-CustomPermission
   // dependency edges and the `<connectedApp>` reference are deferred.
-  | 'CustomPermission' //        A declarative permission flag (`.customPermission-meta.xml`) checked by Apex/Flow/validation rules and granted by PermissionSet/Profile `<customPermissions>`. Id `CustomPermission:{DeveloperName}`. Carries `label`/`description`; the grant edge (`grantedBy`) is CR-CAP-10.
-  | 'CustomMetadataRecord' //    A single record (row) of a `__mdt` Custom Metadata Type; holds runtime-readable configured values. Attached to its `CustomObject:{TypeApiName}` parent via the existing `parentOf` edge (mirroring v1.0's CustomField → CustomObject pattern; no new EdgeType).
+  | 'CustomPermission' //        A declarative permission flag (`.customPermission-meta.xml`) checked by Apex/Flow/validation rules and granted by PermissionSet/Profile `<customPermissions>`. Id `CustomPermission:{DeveloperName}`. Carries `label`/`description`; the grant edge (`grantedBy`) is its own tier.
+  | 'CustomMetadataRecord' //    A single record (row) of a `__mdt` Custom Metadata Type; holds runtime-readable configured values. Attached to its `CustomObject:{TypeApiName}` parent via the existing `parentOf` edge (mirroring the CustomField → CustomObject pattern; no new EdgeType).
   | 'CustomSettingRecord' //     A single record of a List or Hierarchy Custom Setting; extracted ONLY when present in the DX source tree (rare — records typically live as data, requiring `sf data query`). Attached to its `CustomObject:{TypeApiName}` parent via the existing `parentOf` edge.
-  // v2.0a — conditional-context tier (the master primitive for "when does this fire?").
-  | 'ConditionalContext' //     Synthetic component representing one extracted firing condition belonging to a declarative firer (WorkflowRule, ValidationRule, ApprovalProcess, AutoResponseRule, AssignmentRule, EscalationRule, Flow). Id format `ConditionalContext:{ParentFirerId}.condition-{index}` mirrors v1.5's `ExternalApi:{kind}/{path}` synthetic-id convention. Properties carry `kind` (criteria | formula | flow-decision | flow-recordtrigger), `expression` (raw string), `fieldRefs` (CustomField ids referenced), and a `synthesized` flag (for nested-guard conjunctions; reserved for the deferred v2.0a.1 apex-scanner extension). Pairs with the v2.0a `firesWhen` EdgeType. See `docs/vendor/salesforce-metadata/ConditionalContextSemantics.md`.
-  // v2.8 — async + integration deep tier. OutboundMessage action targets
-  // promoted from the dangling-by-design v1.3 references into a real
+  // conditional-context tier (the master primitive for "when does this fire?").
+  | 'ConditionalContext' //     Synthetic component representing one extracted firing condition belonging to a declarative firer (WorkflowRule, ValidationRule, ApprovalProcess, AutoResponseRule, AssignmentRule, EscalationRule, Flow). Id format `ConditionalContext:{ParentFirerId}.condition-{index}` mirrors the `ExternalApi:{kind}/{path}` synthetic-id convention. Properties carry `kind` (criteria | formula | flow-decision | flow-recordtrigger), `expression` (raw string), `fieldRefs` (CustomField ids referenced), and a `synthesized` flag (for nested-guard conjunctions; reserved for the deferred apex-scanner extension). Pairs with the `firesWhen` EdgeType. See `docs/vendor/salesforce-metadata/ConditionalContextSemantics.md`.
+  // async + integration deep tier. OutboundMessage action targets
+  // promoted from the dangling-by-design references into a real
   // ComponentType so the `sfi.outbound_message_catalog` and
   // `sfi.endpoint_catalog` tools can enumerate them. Id format
   // `OutboundMessage:{ObjectApiName}.{Name}` mirrors the
   // `WorkflowFieldUpdate:` scoping convention; the parent edge is the
   // existing `parentOf` from `CustomObject:{ObjectApiName}` (mirroring
-  // the v1.0 CustomField → CustomObject pattern; no new EdgeType).
-  | 'OutboundMessage' //       SOAP-based outbound message embedded inside `*.workflow-meta.xml`'s `<outboundMessages>` collection. Carries `name`, `endpointUrl`, `includeSessionId`, `useDeadLetterQueue`, `integrationUser`, and `fields` (string array) properties. The endpoint URL is captured verbatim — v2.8 does NOT probe the URL, does NOT validate the destination exists, and does NOT confirm the message is actually invoked at runtime (the v2.8 honesty axis surfaced verbatim by `sfi.outbound_message_catalog`'s disclosure field). Triggered by `<outboundMessages>` child elements inside `*.workflow-meta.xml`. Pre-v2.8 these references dangled by design (per `WorkflowRule.md` § "outboundMessages"); v2.8 promotes them to real nodes so the integration catalog can list outbound destinations alongside RemoteSiteSetting and NamedCredential. See `docs/vendor/salesforce-metadata/AsyncTopologySemantics.md`.
-  // v2.9 — WorkflowAlert promotion. Each `<alerts>` entry in a
+  // the CustomField → CustomObject pattern; no new EdgeType).
+  | 'OutboundMessage' //       SOAP-based outbound message embedded inside `*.workflow-meta.xml`'s `<outboundMessages>` collection. Carries `name`, `endpointUrl`, `includeSessionId`, `useDeadLetterQueue`, `integrationUser`, and `fields` (string array) properties. The endpoint URL is captured verbatim — this does NOT probe the URL, does NOT validate the destination exists, and does NOT confirm the message is actually invoked at runtime (the honesty axis surfaced verbatim by `sfi.outbound_message_catalog`'s disclosure field). Triggered by `<outboundMessages>` child elements inside `*.workflow-meta.xml`. Previously these references dangled by design (per `WorkflowRule.md` § "outboundMessages"); this promotes them to real nodes so the integration catalog can list outbound destinations alongside RemoteSiteSetting and NamedCredential. See `docs/vendor/salesforce-metadata/AsyncTopologySemantics.md`.
+  // WorkflowAlert promotion. Each `<alerts>` entry in a
   // `*.workflow-meta.xml` file is promoted from a dangling-by-design
-  // `references` target (pre-v2.9 only the name→template lookup was
+  // `references` target (previously only the name→template lookup was
   // captured) to a real ComponentType node so alert-level properties
   // (`senderType`, `description`, `template`, `ccEmails`) are queryable.
   // Id format `WorkflowAlert:{ObjectApiName}.{fullName}` mirrors the
@@ -194,24 +187,24 @@ export type ComponentType =
   // Parent edge is the existing `parentOf` from
   // `CustomObject:{ObjectApiName}`. The `WorkflowRule→WorkflowAlert`
   // `references` edge already existed (via the Alert action variant);
-  // v2.9 gives that edge a real node target instead of a phantom stub.
+  // This gives that edge a real node target instead of a phantom stub.
   | 'WorkflowAlert' //        Email alert embedded inside `*.workflow-meta.xml`'s `<alerts>` collection. Carries `name` (fullName), `description`, `senderType` (CurrentUser | OrgWideEmailAddress | DefaultWorkflowUser), `template` (EmailTemplate path), and `ccEmails` (string array). Id `WorkflowAlert:{ObjectApiName}.{fullName}`. Parented by `CustomObject:{ObjectApiName}` via `parentOf`. Referenced by `WorkflowRule` via the existing Alert-variant `references` edge, which now resolves to a real node rather than a phantom stub.
-  // v2.6a — CPQ specialist tier. Five typed CPQ ComponentTypes
+  // CPQ specialist tier. Five typed CPQ ComponentTypes
   // recognized HEURISTICALLY from underlying CustomMetadataRecord /
   // CustomSettingRecord nodes when their apiName carries the `SBQQ__`
-  // managed-package namespace prefix. The v2.6a specialization layer
-  // sits on top of v1.6's record extractors — the original
+  // managed-package namespace prefix. The specialization layer
+  // sits on top of the record extractors — the original
   // `CustomMetadataRecord` / `CustomSettingRecord` nodes are NOT
   // re-extracted; a sibling node is emitted per recognized record so
-  // the existing v1.6 lookup surfaces (`sfi.lookup_record`,
+  // the existing lookup surfaces (`sfi.lookup_record`,
   // `sfi.explain_field`) continue to work uninterrupted. Confidence is
-  // `heuristic` per the v2.1 recognizer convention — the SBQQ prefix
+  // `heuristic` per the recognizer convention — the SBQQ prefix
   // is the recognition signal, not a declared Salesforce metadata
   // marker. CPQ is a managed package; the namespace is its
   // structural fingerprint. Each CPQ ComponentType is parented by the
   // SBQQ__ CustomObject type definition via the existing `parentOf`
   // edge (no new EdgeType). Synthetic id format
-  // `{CpqType}:{TypeApiName}.{RecordName}` mirrors v1.6's
+  // `{CpqType}:{TypeApiName}.{RecordName}` mirrors the
   // CustomMetadataRecord scoping convention. See
   // `docs/vendor/salesforce-metadata/CpqSemantics.md`.
   | 'CpqProductRule' //        A CPQ Product Rule record — `SBQQ__ProductRule__c` namespace prefix on a CustomMetadataRecord or CustomSettingRecord. Product rules either validate (block) or filter (show / hide options) based on conditions. The sibling node carries the recognized record's `conditionsMet`, `evaluationOrder`, and `active` properties when present plus the raw `values[]` mirror so downstream tools can reconstruct the original record without a second graph hop. Heuristic confidence — the SBQQ__ prefix is the recognition signal.
@@ -219,25 +212,25 @@ export type ComponentType =
   | 'CpqQuoteTemplate' //      A CPQ Quote Template record — `SBQQ__QuoteTemplate__c` namespace prefix. Quote templates declare the rendered output structure (sections, field mappings, page break behavior) for generated quote PDFs. Carry `templateContentReference` (the `SBQQ__Template__c` reference), `sectionCount`, `active`, and the raw values mirror. Heuristic confidence.
   | 'CpqLookupQuery' //        A CPQ Lookup Query record — `SBQQ__LookupQuery__c` namespace prefix. Lookup queries express a single condition evaluated against a Price Rule's lookup data source; carry `matchType`, `field`, and `value` when present plus the values mirror. Heuristic confidence.
   | 'CpqConfigurationAttribute' //  A CPQ Configuration Attribute record — `SBQQ__ConfigurationAttribute__c` namespace prefix. Configuration attributes are question-and-answer style prompts attached to a bundle that capture a sales-rep value used in subsequent Price / Product Rules. Carry `targetField`, `position`, `applyImmediatelyContext`, `displayOrder`, and `required` when present. Heuristic confidence.
-  // v3.2 — OmniStudio / Salesforce Industries declarative-process tier.
+  // OmniStudio / Salesforce Industries declarative-process tier.
   // Five ComponentTypes closing the extraction gap the recon (journal 0157)
   // surfaced in Globex: 1,474 silently-skipped Industries metadata
   // files; 22,087 OmniProcess SObject records with zero graph footprint
-  // before v3.2. Recognized via Industries Native XML shapes (no managed-
+  // until this tier landed. Recognized via Industries Native XML shapes (no managed-
   // package namespace prefix; standard `*-meta.xml` extensions in the
   // dedicated source-tree subdirectories `omniScripts/`,
   // `omniIntegrationProcedures/`, `omniDataTransforms/`, `omniUiCard/`,
   // `decisionTables/`). Vlocity-Legacy managed-package components
-  // (namespace `vlocity_cmt__`) are NOT extracted by v3.2 — mid-migration
-  // orgs may show partial coverage. The Q180 honesty anchor (skill's
+  // (namespace `vlocity_cmt__`) are NOT extracted — mid-migration
+  // orgs may show partial coverage. The honesty anchor (skill's
   // `salesforce-industries-routing`) surfaces the Native-vs-Vlocity
   // boundary verbatim. See per-type vendored docs.
   | 'OmniScript' //                The user-facing no-code form flow. XML root `<OmniScript>`; file extension `.os-meta.xml`. Carries `<omniProcessElements>` children (steps, text blocks, inputs, action calls, navigate actions, Integration Procedure Actions, DataRaptor Extract Actions, Custom Lightning Web Components). Top-level `<omniProcessType>` is `OmniScript`. Each child carries `name`, `type`, `level`, `sequenceNumber`, `isActive`, and a `propertySetConfig` JSON blob (HTML-entity-escaped in the source XML). Properties surface `omniProcessType`, `omniProcessKey`, `versionNumber`, `language`, `subType`, `type` (the user-facing type discriminant, e.g., `AcmeEnrollment`), `uniqueName`, `isActive`, `isWebCompEnabled`, `isOmniScriptEmbeddable`, `elementCount`. Emits `dispatchesOmniAction` edges for each Integration Procedure Action / DataRaptor Action / navigate-to-OmniScript child. See `docs/vendor/salesforce-metadata/OmniScript.md`.
   | 'OmniIntegrationProcedure' //  The server-side action-chain orchestrator. XML root `<OmniIntegrationProcedure>`; file extension `.oip-meta.xml`. Same `<omniProcessElements>` shape as OmniScript, but action child `type` values include `Rest Action`, `DataRaptor Extract Action`, `DataRaptor Transform Action`, `Response Action`, `Remote Action`, and nested `Integration Procedure Action`. Top-level `<omniProcessType>` is `Integration Procedure`. Properties: same as OmniScript plus `restEndpointCount` (count of Rest Action children with non-empty `restPath`), `dataRaptorCount`, `chainedIpCount`. Emits `dispatchesOmniAction` edges for each DataRaptor Extract/Transform action's `bundle` field, each Remote Action's `remoteClass.remoteMethod`, and each nested IP Action's `integrationProcedureKey`. See `docs/vendor/salesforce-metadata/OmniIntegrationProcedure.md`.
-  | 'OmniDataTransform' //         The DataRaptor mapping primitive. XML root `<OmniDataTransform>`; file extension `.rpt-meta.xml`. Carries one-to-many `<omniDataTransformItem>` rows mapping `inputFieldName` → `outputFieldName`. Properties: `inputType` (typically `JSON` or `SObject`), `interfaceClass` (Extract / Load / Transform classification key), `transformItemCount`, `active`, `assignmentRulesUsed`, `nullInputsIncludedInOutput`, `description`. The optional `<expectedInputJson>` / `<expectedOutputJson>` elements carry sample payloads useful for downstream documentation; v3.2 surfaces them verbatim. Does NOT emit `dispatchesOmniAction` edges (DataRaptors are leaf-of-the-chain). See `docs/vendor/salesforce-metadata/OmniDataTransform.md`.
+  | 'OmniDataTransform' //         The DataRaptor mapping primitive. XML root `<OmniDataTransform>`; file extension `.rpt-meta.xml`. Carries one-to-many `<omniDataTransformItem>` rows mapping `inputFieldName` → `outputFieldName`. Properties: `inputType` (typically `JSON` or `SObject`), `interfaceClass` (Extract / Load / Transform classification key), `transformItemCount`, `active`, `assignmentRulesUsed`, `nullInputsIncludedInOutput`, `description`. The optional `<expectedInputJson>` / `<expectedOutputJson>` elements carry sample payloads useful for downstream documentation; this surfaces them verbatim. Does NOT emit `dispatchesOmniAction` edges (DataRaptors are leaf-of-the-chain). See `docs/vendor/salesforce-metadata/OmniDataTransform.md`.
   | 'OmniUiCard' //                The FlexCard widget-canvas primitive. XML root `<OmniUiCard>`; file extension `.ouc-meta.xml`. Top-level XML elements are sparse (authorName, name, versionNumber, isActive, omniUiCardType); the bulk of the structural content lives inside a single `<propertySetConfig>` JSON blob (HTML-entity-escaped) containing a `states[]` array. Each state carries a `components` widget tree (Text, Block, Action, Datatable, Datatable Row, OmniScript embed, IP embed). The `<dataSourceConfig>` JSON declares the data source (`type`, `value`, `contextVariables`). Properties: `omniUiCardType` (`Parent` | `Child`), `authorName`, `versionNumber`, `isActive`, `isManagedUsingStdDesigner`, `stateCount`, `widgetCount`, `embeddedScriptCount`. Emits `dispatchesOmniAction` edges for each Action widget whose `actionList[].stateAction.type` is `OmniScript` or `Integration Procedure` (the target identity comes from `omniType.Name`). See `docs/vendor/salesforce-metadata/OmniUiCard.md`.
-  | 'DecisionTable' //            The declarative rule-table primitive. XML root `<DecisionTable>`; file extension `.decisionTable-meta.xml`. Carries one-to-many `<decisionTableParameters>` rows tagged `usage: INPUT` or `usage: OUTPUT`. Properties: `setupName`, `dataSourceType` (`CsvUpload` | `SObject` | `Manual`), `sourceObject` (for `SObject` dataSourceType), `executionType` (`HBASE` | `OnPrem`), `usageType` (`Bre` for Business Rules Engine), `status` (`Draft` | `Active` | `Archived`), `type` (volume tier: `LowVolume` | `MediumVolume` | `HighVolume`), `conditionType` (`All` | `Any`), `conditionCriteria` (e.g., `1 AND 2 AND 3`), `doesConsiderNullValue`, `filterResultBy`, `inputParamCount`, `outputParamCount`. Row-level lookup data lives in CSV uploads or SObject records — NOT in the metadata XML. v3.2's extractor surfaces parameter shape only; row enumeration is the Q179 honesty anchor (out of scope per v3.1's record-level zone). Does NOT emit `dispatchesOmniAction` edges. See `docs/vendor/salesforce-metadata/DecisionTable.md`.
-  // v4.0 — enterprise safety coverage tier.
+  | 'DecisionTable' //            The declarative rule-table primitive. XML root `<DecisionTable>`; file extension `.decisionTable-meta.xml`. Carries one-to-many `<decisionTableParameters>` rows tagged `usage: INPUT` or `usage: OUTPUT`. Properties: `setupName`, `dataSourceType` (`CsvUpload` | `SObject` | `Manual`), `sourceObject` (for `SObject` dataSourceType), `executionType` (`HBASE` | `OnPrem`), `usageType` (`Bre` for Business Rules Engine), `status` (`Draft` | `Active` | `Archived`), `type` (volume tier: `LowVolume` | `MediumVolume` | `HighVolume`), `conditionType` (`All` | `Any`), `conditionCriteria` (e.g., `1 AND 2 AND 3`), `doesConsiderNullValue`, `filterResultBy`, `inputParamCount`, `outputParamCount`. Row-level lookup data lives in CSV uploads or SObject records — NOT in the metadata XML. The extractor surfaces parameter shape only; row enumeration is the honesty anchor (out of scope per the record-level zone). Does NOT emit `dispatchesOmniAction` edges. See `docs/vendor/salesforce-metadata/DecisionTable.md`.
+  // enterprise safety coverage tier.
   | 'Report'
   | 'Dashboard'
   | 'ListView'
@@ -258,7 +251,7 @@ export type ComponentType =
   | 'FieldSet' //       A field set (`.fieldSet-meta.xml`) — an ordered field group consumed by LWC/VF/managed packages. `<displayedFields>`/`<availableFields>` field API names each emit a `usedInLayout` edge.
   | 'Index' //          A custom index (`.index-meta.xml`). Indexed `<fields><name>` emit `references` edges (removing an indexed field breaks the index).
   | 'InstalledPackage' // A managed/unlocked package installed in the org (`.installedPackage-meta.xml`). The fullName is the namespace prefix; `properties.versionNumber` is the installed version. Answers "what packages are installed?".
-  // CR-CAP-18 — platform-event publish/stream-routing topology. A
+  // platform-event publish/stream-routing topology. A
   // PlatformEventChannel is the publish/stream container; a
   // PlatformEventChannelMember binds ONE entity onto that channel with an
   // optional declared per-member filter. This is the PUBLISH side (channel
@@ -314,7 +307,7 @@ export type ComponentType =
   // `standardValueSets/` folder — mirrors GlobalValueSet's shape but for
   // STANDARD, not custom, fields). Id `StandardValueSet:{Name}` (the file's own
   // API name, e.g. `StandardValueSet:LeadSource`) — flat, no parent scope,
-  // mirroring GlobalValueSet/CustomLabel. EDGE-LESS: v0.1 extracts the node
+  // mirroring GlobalValueSet/CustomLabel. EDGE-LESS: this extracts the node
   // only (value apiName + active flag per entry, mirrored as a `values[]`
   // array plus `valueCount`); no `usesValueSet`-style edge from the standard
   // CustomField to its StandardValueSet is emitted (unlike GlobalValueSet's
@@ -340,7 +333,7 @@ export type ComponentType =
   // the version distinction Salesforce assigns it). Its `<milestones>` blocks
   // repeat per milestone; the `<milestoneName>` child of each is promoted to
   // a `references` edge to `MilestoneType:{Name}` (`referenceKind:
-  // 'entitlementMilestone'`). R7-C7 additionally captures each block's OWN
+  // 'entitlementMilestone'`). This additionally captures each block's OWN
   // `minutesToComplete` / `useCriteriaStartTime` via a block-scoped parser
   // (`properties.milestones`) — R6-18 deliberately did NOT ship this: the
   // generic extractor's flat `extraProperties` reads only the FIRST
@@ -352,7 +345,7 @@ export type ComponentType =
   // object, whether the process is active, AND each milestone's target
   // minutes — but NEVER whether a specific case is currently on-track or
   // breached (that is live, per-record timer data — still unmodeled).
-  | 'EntitlementProcess' //        SLA/entitlement process definition (`entitlementProcesses/{fullName}.entitlementProcess-meta.xml`). Carries `SObjectType`, `active`, `businessHours`, `versionNumber`, `versionMaster`, `isVersionDefault`, `versionNotes`, `entryStartDateField`, `description`, `label` (top-level `<name>`, distinct from the file's own `fullName`/apiName), `milestoneName` (the deduplicated, sorted array of referenced milestone names, mirroring the emitted edges), and `milestones` (R7-C7: `{ milestoneName, minutesToComplete, useCriteriaStartTime }[]`, one entry per `<milestones>` block, each read scoped to its OWN block — correct per-milestone attribution, not a first-occurrence guess). Id `EntitlementProcess:{fullName}` — flat, no parent scope (multiple versions of the same process are multiple files/nodes; NOT merged). Emits one `references` edge per distinct `<milestoneName>` to `MilestoneType:{Name}` (`declared` confidence). `timeTriggers`, `exitCriteriaFilterItems`, and live on-track/breached status are NOT modeled.
+  | 'EntitlementProcess' //        SLA/entitlement process definition (`entitlementProcesses/{fullName}.entitlementProcess-meta.xml`). Carries `SObjectType`, `active`, `businessHours`, `versionNumber`, `versionMaster`, `isVersionDefault`, `versionNotes`, `entryStartDateField`, `description`, `label` (top-level `<name>`, distinct from the file's own `fullName`/apiName), `milestoneName` (the deduplicated, sorted array of referenced milestone names, mirroring the emitted edges), and `milestones` (`{ milestoneName, minutesToComplete, useCriteriaStartTime }[]`, one entry per `<milestones>` block, each read scoped to its OWN block — correct per-milestone attribution, not a first-occurrence guess). Id `EntitlementProcess:{fullName}` — flat, no parent scope (multiple versions of the same process are multiple files/nodes; NOT merged). Emits one `references` edge per distinct `<milestoneName>` to `MilestoneType:{Name}` (`declared` confidence). `timeTriggers`, `exitCriteriaFilterItems`, and live on-track/breached status are NOT modeled.
   // `MilestoneType` (`milestoneTypes/`, `.milestoneType-meta.xml` — folder/
   // suffix confirmed via the same real retrieve) is the org-wide milestone
   // DEFINITION an `EntitlementProcess` references by name. Real org files
@@ -417,7 +410,7 @@ export type ComponentType =
   // CustomPermission / PlatformEventChannel); every edge is `declared` (an
   // explicit metadata pointer, not a heuristic). Legacy Einstein `Bot` /
   // `BotVersion` were deferred from the original R6-13 slice and landed as
-  // R7-C7 (see below); `sfi.ai_exposure_report` composes both tiers.
+  // (see below); `sfi.ai_exposure_report` composes both tiers.
   // Composed by `sfi.ai_exposure_report`. See `gen-ai.ts` / `bot.ts`.
   | 'GenAiFunction' //             One Agentforce action (`.genAiFunction-meta.xml`, `genAiFunctions/`). Carries `masterLabel` (label), `description`, `invocationTarget` + `invocationTargetType` (`apex` | `flow` | `api` | `externalService`). Id `GenAiFunction:{Name}`. Emits a declared `references` edge to `ApexClass:{invocationTarget}` (`apex`) or `Flow:{invocationTarget}` (`flow`); other invocation types are properties-only (no phantom edge).
   | 'GenAiPlugin' //               One Agentforce topic — a category of actions (`.genAiPlugin-meta.xml`, `genAiPlugins/`). Carries `masterLabel` (label), `description`, `pluginType` (`Topic` | `APICustomTopic`), `scope`, `language`, and `functionNames`. Id `GenAiPlugin:{Name}`. Emits one declared `references` edge per member `<genAiFunctions><functionName>` to `GenAiFunction:{name}` (referenceKind `genAiPluginFunction`).
@@ -433,7 +426,7 @@ export type ComponentType =
   | 'Network' //                   The Experience Cloud / community DEFINITION and the family anchor (`.network-meta.xml`, `networks/` folder). Carries the security posture: `status` (`Live`/`UnderConstruction`/…), `selfRegistration` (CRITICAL — `true` lets unauthenticated visitors create a login), `selfRegProfile` (the Profile a self-registered visitor is CREATED AS — `null` when the element is absent, which with `selfRegistration: true` means the site registers through a custom Apex handler and is NEVER collapsed into "no self-registration"), and the guest-access switches present in the XML (`enableGuestFileAccess`, `enableGuestChatter`, `enableGuestMemberVisibility`, `allowInternalUserLogin` — each tri-state, an absent switch is `null`, never fabricated `false`), plus `urlPathPrefix` and member profile/perm-set counts. Id `Network:{Name}`. Emits DECLARED `references` edges to its `CustomSite` (`<site>`), `ExperienceBundle` (`<picassoSite>`), each `<networkMemberGroups>` member `Profile`/`PermissionSet`, and `<selfRegProfile>` → `Profile:{name}` (`via: 'selfRegProfile'`; folded onto the member edge as `alsoSelfRegProfile: true` when the same Profile is already a declared member, because the edges primary key would collide); all dangle-by-design when the target was not retrieved. No new EdgeType.
   | 'CustomSite' //                The site container fronting a Force.com site or an Experience Cloud community (`.site-meta.xml`, `sites/` folder). Carries `active`, `siteType` (`ChatterNetwork` = Experience Cloud), `masterLabel`, `urlPathPrefix`, `guestRecordDefaultOwner`. Id `CustomSite:{Name}`. Emits ONE HEURISTIC `references` edge to the site's auto-provisioned guest-user profile `Profile:{Site Label} Profile` — a NAMING CONVENTION (the XML carries no `<guestProfile>` element; verified against a real production org where each Site owns exactly one `UserType='Guest'` profile named `"{label} Profile"`), so the edge carries `confidence: 'heuristic'`. No new EdgeType.
   | 'ExperienceBundle' //         The Builder page tree's TOP-LEVEL meta only (`experiences/{Name}.site-meta.xml`, root `<ExperienceBundle>` — shares the `.site-meta.xml` suffix with CustomSite but a different directory + root). Carries `bundleLabel`, `type`, `urlPathPrefix`, and a best-effort `pageCount` (a count of `views/*.json`, no content parsed). The full JSON page tree (pages/components/audience rules — hundreds of files) is DELIBERATELY out of scope (`pageContentModeled: false`); this models the community's existence + size, not its pages. Id `ExperienceBundle:{Name}`. Node-only; the `Network` → `ExperienceBundle` wiring edge is emitted by the Network extractor.
-  // R7-C7 — Agentforce / Service Cloud extraction leftovers R6-13 and R6-18
+  // Agentforce / Service Cloud extraction leftovers that two earlier slices
   // deferred. Three families, verified against REAL scoped retrieves
   // (`sf project retrieve start --metadata Bot --metadata PresenceUserConfig
   // --metadata EntitlementProcess`) from two live orgs (a production-scale
@@ -516,7 +509,7 @@ export type ComponentType =
   // precedent as ExperienceBundle's page tree. WaveXmd field customizations
   // emit `references` → `CustomField:{Object}.{Field}` so safe_to_delete_field
   // / unused_fields_deep see CRMA consumption. Data Cloud (DataStream /
-  // CalculatedInsight) is deferred to v1.1 ([ORG]-gated).
+  // CalculatedInsight) is deferred ([ORG]-gated).
   | 'WaveDashboard' //             A CRM Analytics dashboard (`wave/{Name}.wdash-meta.xml`, root `<WaveDashboard>`, MetadataWithContent, API v37.0+). Carries `application`, `masterLabel` (also `label`), `description`, `templateAssetSourceName`, `dateVersion` — each null when absent. `contentModeled: false` (the companion `.wdash` JSON blob is not parsed). Id `WaveDashboard:{Name}` — flat, no parent scope, zero edges.
   | 'WaveDataflow' //              A CRM Analytics dataflow/recipe definition (`wave/{Name}.wdf-meta.xml`, root `<WaveDataflow>`, MetadataWithContent, API v37.0+). Carries `application`, `masterLabel`, `description`, `dataflowType` (`User` | `Prepared`). `contentModeled: false` (the companion `.wdf` JSON blob is not parsed). Id `WaveDataflow:{Name}` — flat, no parent scope, zero edges.
   | 'WaveXmd' //                   Extended metadata for a CRM Analytics dataset (`wave/{Name}.xmd-meta.xml`, root `<WaveXmd>`, plain Metadata, API v39.0+). Carries `application`, `dataset` (also used as `label` when present), `datasetConnector`, `datasetFullyQualifiedName`, `origin`, `xmdType` (`<type>`), `waveVisualization`, plus `dimensionCount`/`measureCount`/`dateCount`. Dimension/measure customizations whose `<origin>` or `<field>` is Object.Field-shaped each emit a DECLARED `references` edge to `CustomField:{Object}.{Field}` (`referenceKind: 'waveXmdFieldCustomization'`), mirrored onto `properties.referencedFields` (sorted; omitted when empty). Id `WaveXmd:{Name}` — flat, no parent scope.
@@ -612,7 +605,7 @@ export type ConfidenceLevel = 'declared' | 'parsed' | 'heuristic';
 // ============================================================================
 
 /**
- * Where a tool's answer came from. v4.0 keeps the MCP envelope stable and lets
+ * Where a tool's answer came from. This keeps the MCP envelope stable and lets
  * higher-level tools expose this inside their tool-specific `data` payload.
  */
 export type Provenance = 'offline_snapshot' | 'live_org' | 'hybrid';
@@ -733,51 +726,46 @@ export interface Node {
 /**
  * The set of edge types in the org knowledge graph.
  *
- * v1.0 shipped the 9 original edges. v1.1 added the sharing & visibility
- * pair (`inheritsFrom`, `sharedWith`). v1.2 added the record-types + UI-
- * surfaces pair (`belongsToApp`, `usesValueSet`). v1.3 added the legacy-
- * automation + communications singleton (`sendsEmail`). v1.4 adds the
+ * The 9 original edges are followed by the tier pairs and singletons below:
+ * the sharing & visibility pair (`inheritsFrom`, `sharedWith`), the
+ * record-types + UI-surfaces pair (`belongsToApp`, `usesValueSet`), the
+ * legacy-automation + communications singleton (`sendsEmail`), and the
  * developer test-mapping singleton (`coversTest`) — a directed edge from
  * a test class to a non-test class it covers, DECLARED IN THE CONTRACT
  * ONLY: nothing in this product produces it (see the member comment on
  * `coversTest` below for why it is not recoverable from metadata, and
  * what a consumer must disclose instead). The LWC/Aura/VF frontend
  * extractors deliberately reuse the existing `readsFrom`, `writesTo`,
- * `callsApex`, and `references` edges rather than fragmenting per tier;
- * see PLAN-v1.4.md §3 for the rationale. v1.5 adds the integration
- * topology + event/async/API surface pair (`exposes`, `dispatchesAsync`)
- * and unlocks the production of the reserved-since-v1.0 `listensTo`
+ * `callsApex`, and `references` edges rather than fragmenting per tier.
+ * The integration topology + event/async/API surface pair (`exposes`,
+ * `dispatchesAsync`) unlocks the production of the reserved `listensTo`
  * edge: `exposes` lands from an `ApexClass` to a synthetic
  * `ExternalApi:{kind}/{path}` target (the `kind` enum is `rest` /
- * `aura` / `invocable`; the synthetic prefix mirrors v1.1's
+ * `aura` / `invocable`; the synthetic prefix mirrors the
  * `Group:role/...` pattern and is deliberately NOT a `ComponentType`),
  * `dispatchesAsync` lands from a caller `ApexClass` to a job `ApexClass`
  * (Queueable / Schedulable / Batchable / `@future`), and `listensTo`
  * lands from any Platform Event subscriber (ApexTrigger, ApexClass
  * implementing `Triggerable<{EventName}__e>`, or platform-event-start
  * Flow) into the existing `__e`-suffixed `CustomObject` target node.
- * See PLAN-v1.5.md §3 for the synthetic-id design and the confidence
- * matrix. v1.7 adds the live-API enrichment singleton
- * (`dependsOnFromApi`) — the first edge family in the union whose
- * sole producer is an opt-in Tooling API enrichment pass rather than
- * an offline DX-source extractor. It sits alongside the DX-source
- * edges (the other 17) at `declared` confidence because the
- * `MetadataComponentDependency` endpoint IS the declaration. See
- * PLAN-v1.7.md §3 for the enrichment vs. extraction split and the
- * `properties.confirmedByApi` overlay on pre-existing `references`
- * edges. v2.0a adds the conditional-context tier singleton
- * (`firesWhen`) — a directed edge from a firer (WorkflowRule,
+ * The live-API enrichment singleton (`dependsOnFromApi`) is the first
+ * edge family in the union whose sole producer is an opt-in Tooling API
+ * enrichment pass rather than an offline DX-source extractor. It sits
+ * alongside the DX-source edges (the other 17) at `declared` confidence
+ * because the `MetadataComponentDependency` endpoint IS the declaration;
+ * the same pass stamps a `properties.confirmedByApi` overlay on
+ * pre-existing `references` edges. The conditional-context tier singleton
+ * (`firesWhen`) is a directed edge from a firer (WorkflowRule,
  * ValidationRule, ApprovalProcess, AutoResponseRule, AssignmentRule,
- * EscalationRule, Flow; later v2.0a.1 will extend to ApexClass /
- * ApexTrigger via the if-guard scanner) to the synthetic
- * `ConditionalContext:` target carrying the parsed condition surface.
- * v2.0a's seven extractor extensions emit `firesWhen` at `declared`
- * confidence (XML-extracted) or `parsed` confidence (formula-based,
- * resolved via the v0.2 formula tokenizer); the deferred Apex side
- * lands at `heuristic`. See PLAN-v2.0.md §3 v2.0a and
+ * EscalationRule, Flow; ApexClass / ApexTrigger via the if-guard scanner
+ * is deferred) to the synthetic `ConditionalContext:` target carrying the
+ * parsed condition surface. The seven extractor extensions emit
+ * `firesWhen` at `declared` confidence (XML-extracted) or `parsed`
+ * confidence (formula-based, resolved via the formula tokenizer); the
+ * deferred Apex side lands at `heuristic`. See
  * `docs/vendor/salesforce-metadata/ConditionalContextSemantics.md`.
- * v3.2 adds the OmniStudio declarative-process tier singleton
- * (`dispatchesOmniAction`) — a directed edge from any v3.2-tier
+ * The OmniStudio declarative-process tier singleton
+ * (`dispatchesOmniAction`) is a directed edge from any OmniStudio-tier
  * caller (OmniScript, OmniIntegrationProcedure, OmniUiCard) to the
  * OmniIntegrationProcedure / OmniDataTransform / sibling OmniScript
  * it invokes via an action child. Confidence is `declared` when the
@@ -802,11 +790,11 @@ export type EdgeType =
   | 'usedInLayout' //      Field is placed on a Layout
   | 'grantedBy' //         PermissionSet or Profile grants access to a component
   | 'callsApex' //         Flow calls an Apex action
-  | 'listensTo' //         generic event listener; v1.5 production unlock — emitted by apex-trigger / apex-class (`implements Triggerable<{Event}__e>`) / flow (`<triggerType>PlatformEvent</triggerType>`) extractors against `__e`-suffixed CustomObject targets (Platform Event subscribers).
-  // v1.1 — sharing & visibility tier.
+  | 'listensTo' //         generic event listener; emitted by apex-trigger / apex-class (`implements Triggerable<{Event}__e>`) / flow (`<triggerType>PlatformEvent</triggerType>`) extractors against `__e`-suffixed CustomObject targets (Platform Event subscribers).
+  // sharing & visibility tier.
   | 'inheritsFrom' //      Role -> parent Role (hierarchy)
   | 'sharedWith' //        SharingRule or Queue -> access target
-  // CR-CAP-12 — Group membership topology. Group -> a member it contains, one
+  // Group membership topology. Group -> a member it contains, one
   // edge per `<related>` row in the `*.group-meta.xml`. The member target uses
   // the SAME variant-prefix logic the sharing-rules `sharedWith` table uses:
   // a `User` row → a dangling `User:{ref}` id (no User ComponentType, so the
@@ -821,21 +809,21 @@ export type EdgeType =
   // kept `Group` node `properties.memberCount` is additive, not replaced. See
   // `docs/vendor/salesforce-metadata/Group.md`.
   | 'hasMember'
-  // v1.2 — record types + UI surfaces tier.
+  // record types + UI surfaces tier.
   | 'belongsToApp' //      CustomTab -> CustomApplication (declared, tab/app membership)
   | 'usesValueSet' //      CustomField -> GlobalValueSet (declared, value-set reference)
-  // v1.3 — legacy automation + communications tier.
+  // legacy automation + communications tier.
   | 'sendsEmail' //        WorkflowRule / ApprovalProcess / AutoResponseRule / AssignmentRule / EscalationRule -> EmailTemplate (declared, alert / notification template reference)
-  // v1.4 — developer frontend + test mapping tier.
+  // developer frontend + test mapping tier.
   | 'coversTest' //        ApexClass (@isTest) -> ApexClass (covered). DECLARED BUT NEVER PRODUCED: no extractor, graph-build mint, or enricher in this product emits this edge, so no vault has ever contained one and every walk of it returns empty on a real org while synthetic-fixture tests pass. It is NOT recoverable from metadata: Salesforce does not declare test-to-class coverage anywhere in the source format (coverage is a RUNTIME artifact of a test run, readable only from the Tooling API's ApexCodeCoverage). `@TestVisible` marks a member on the TARGET class and names no test; `@TestSetup` marks a method inside the test class and names no target; the one statically-knowable signal — "an @isTest class calls this class" — is ALREADY modeled as `callsApex` plus `properties.isTest`, so minting `coversTest` from it would double-report one referrer. The type is KEPT so tools and vaults referencing the name do not silently break, but every consumer that walks it MUST report an empty result as "test-coverage mapping UNAVAILABLE", never as "no tests cover this".
-  // v1.5 — integration topology + event/async/API surface tier.
-  | 'exposes' //           ApexClass with @RestResource / @AuraEnabled / @InvocableMethod -> synthetic `ExternalApi:{kind}/{path}` target (declared; the annotation IS the declaration, the synthetic id is a graph-store convention not a ComponentType — see PLAN-v1.5.md §3).
-  | 'dispatchesAsync' //   ApexClass (caller) -> ApexClass (Queueable / Schedulable / Batchable / @future job); declared when the dispatch shape names the target class in-line (`System.enqueueJob(new MyQueueable())`), heuristic when it passes a constructed local variable the scanner can still resolve. The @future variant is minted at GRAPH-BUILD time (CR-CAP-09, `mintFutureDispatchEdges`) by joining a `callsApex` edge to a target class with `hasFutureMethod === true`; it is `heuristic` and CLASS-GRANULAR (`properties.dispatchMechanism: 'future'`, `granularity: 'class'`) — it fires when the target class has SOME @future method, not necessarily the invoked one (method-level precision gated on CR-CAP-06). Does NOT replace `callsApex` — a caller emits both edges in parallel.
-  // v1.7 — Tooling API freshness + dependency tier.
-  | 'dependsOnFromApi' //  Sourced from Tooling API's MetadataComponentDependency endpoint; declared confidence. Direction is `{Source} -> {Target}` per the API's response (typically ApexClass -> CustomField, Flow -> ApexClass, Layout -> CustomField). Emitted ONLY by the opt-in `tooling-api-dependency` enricher behind `sfi refresh --with-tooling-api`; absent from offline-only vaults by design. Does NOT replace `references` — when the API confirms a pre-existing extracted edge, the enricher adds `properties.confirmedByApi: true` to that edge instead of duplicating it. See PLAN-v1.7.md §3.
-  // v2.0a — conditional-context tier (the master primitive for "when does this fire?").
-  | 'firesWhen' //         Firer -> `ConditionalContext:{ParentFirerId}.condition-{index}`. Emitted by the seven v2.0a-extended declarative extractors (workflow-rule, validation-rule, approval-process, auto-response-rule, assignment-rule, escalation-rule, flow); the v2.0a.1 follow-up extends to ApexClass / ApexTrigger via the heuristic if-guard scanner. Confidence: `declared` for XML criteria items, `parsed` for formula expressions resolved via the v0.2 formula tokenizer, `heuristic` for the deferred Apex side. The synthetic-id pattern preserves the parent firer's full canonical id (including any `__c`/`__mdt` suffix) so consumers can resolve the parent without an extra graph query. See `docs/vendor/salesforce-metadata/ConditionalContextSemantics.md`.
-  // v3.3 — schema relationship tier. CustomField (Lookup / Master-Detail) ->
+  // integration topology + event/async/API surface tier.
+  | 'exposes' //           ApexClass with @RestResource / @AuraEnabled / @InvocableMethod -> synthetic `ExternalApi:{kind}/{path}` target (declared; the annotation IS the declaration, the synthetic id is a graph-store convention not a ComponentType).
+  | 'dispatchesAsync' //   ApexClass (caller) -> ApexClass (Queueable / Schedulable / Batchable / @future job); declared when the dispatch shape names the target class in-line (`System.enqueueJob(new MyQueueable())`), heuristic when it passes a constructed local variable the scanner can still resolve. The @future variant is minted at GRAPH-BUILD time (`mintFutureDispatchEdges`) by joining a `callsApex` edge to a target class with `hasFutureMethod === true`; it is `heuristic` and CLASS-GRANULAR (`properties.dispatchMechanism: 'future'`, `granularity: 'class'`) — it fires when the target class has SOME @future method, not necessarily the invoked one (method-level precision gated). Does NOT replace `callsApex` — a caller emits both edges in parallel.
+  // Tooling API freshness + dependency tier.
+  | 'dependsOnFromApi' //  Sourced from Tooling API's MetadataComponentDependency endpoint; declared confidence. Direction is `{Source} -> {Target}` per the API's response (typically ApexClass -> CustomField, Flow -> ApexClass, Layout -> CustomField). Emitted ONLY by the opt-in `tooling-api-dependency` enricher behind `sfi refresh --with-tooling-api`; absent from offline-only vaults by design. Does NOT replace `references` — when the API confirms a pre-existing extracted edge, the enricher adds `properties.confirmedByApi: true` to that edge instead of duplicating it.
+  // conditional-context tier (the master primitive for "when does this fire?").
+  | 'firesWhen' //         Firer -> `ConditionalContext:{ParentFirerId}.condition-{index}`. Emitted by the seven extended declarative extractors (workflow-rule, validation-rule, approval-process, auto-response-rule, assignment-rule, escalation-rule, flow); the follow-up extends to ApexClass / ApexTrigger via the heuristic if-guard scanner. Confidence: `declared` for XML criteria items, `parsed` for formula expressions resolved via the formula tokenizer, `heuristic` for the deferred Apex side. The synthetic-id pattern preserves the parent firer's full canonical id (including any `__c`/`__mdt` suffix) so consumers can resolve the parent without an extra graph query. See `docs/vendor/salesforce-metadata/ConditionalContextSemantics.md`.
+  // schema relationship tier. CustomField (Lookup / Master-Detail) ->
   // the CustomObject its `referenceTo` names. Promotes the relationship from a
   // field PROPERTY to a first-class, traversable edge so dependency walks see
   // the data model — e.g. get_impact on an object lists the inbound lookups
@@ -843,7 +831,7 @@ export type EdgeType =
   // a polymorphic lookup emits one edge per target. The target may be a standard
   // / managed object not in the vault (dangling, classified by the phantom taxonomy).
   | 'lookupTo'
-  // v3.4 — UI-visibility tier. ListView -> Group / Role / synthetic Group
+  // UI-visibility tier. ListView -> Group / Role / synthetic Group
   // (AllInternalUsers etc.). A saved list view's `<sharedTo>` visibility scope:
   // which groups / roles the list view is shared with in the list-view picker.
   // DISTINCT from `sharedWith` (record-level access) — `visibleTo` grants
@@ -852,14 +840,14 @@ export type EdgeType =
   // confidence; `properties.sharedToType` is the source variant element and
   // `properties.inheritance` carries role-hierarchy inheritance when present.
   | 'visibleTo'
-  // v3.2 — OmniStudio declarative-process tier edge (intra-OmniStudio call chain only).
-  | 'dispatchesOmniAction' //  {Caller} -> {OmniIntegrationProcedure | OmniDataTransform | OmniScript | OmniUiCard}. Caller can be `OmniScript` (Integration Procedure Action, DataRaptor Extract / Transform Action, navigate-to-OmniScript step), `OmniIntegrationProcedure` (Remote Action calling nested IP, DataRaptor Extract / Transform Action, chained IP Action), or `OmniUiCard` (Action widget whose `actionList[].stateAction.type` is `OmniScript` or `Integration Procedure`). Confidence: `declared` when the target name is in a top-level XML element (e.g., the `<bundle>` element of a DataRaptor Extract Action child), `parsed` when the target name is inside the `propertySetConfig` JSON blob (e.g., `integrationProcedureKey`, `actionList[].stateAction.omniType.Name`). Dangling references (target name present but no matching component in the vault) are emitted with `properties.targetMissing: true` so impact-analysis tools can surface them. Also `ApexClass` / `ApexTrigger`: Apex that runs an IP or DataRaptor by a literal key through `<ns>.IntegrationProcedureService` / `<ns>.DRGlobal` (`properties.via: 'apex'`, heuristic, apex-scanner). The reserved `implementsOmniInterface` edge stays unused — `implements omnistudio.VlocityOpenInterface` classes are reached FROM OmniStudio through `callsApex`. See PLAN-v3.2.md §4 and the per-type vendored docs.
+  // OmniStudio declarative-process tier edge (intra-OmniStudio call chain only).
+  | 'dispatchesOmniAction' //  {Caller} -> {OmniIntegrationProcedure | OmniDataTransform | OmniScript | OmniUiCard}. Caller can be `OmniScript` (Integration Procedure Action, DataRaptor Extract / Transform Action, navigate-to-OmniScript step), `OmniIntegrationProcedure` (Remote Action calling nested IP, DataRaptor Extract / Transform Action, chained IP Action), or `OmniUiCard` (Action widget whose `actionList[].stateAction.type` is `OmniScript` or `Integration Procedure`). Confidence: `declared` when the target name is in a top-level XML element (e.g., the `<bundle>` element of a DataRaptor Extract Action child), `parsed` when the target name is inside the `propertySetConfig` JSON blob (e.g., `integrationProcedureKey`, `actionList[].stateAction.omniType.Name`). Dangling references (target name present but no matching component in the vault) are emitted with `properties.targetMissing: true` so impact-analysis tools can surface them. Also `ApexClass` / `ApexTrigger`: Apex that runs an IP or DataRaptor by a literal key through `<ns>.IntegrationProcedureService` / `<ns>.DRGlobal` (`properties.via: 'apex'`, heuristic, apex-scanner). The reserved `implementsOmniInterface` edge stays unused — `implements omnistudio.VlocityOpenInterface` classes are reached FROM OmniStudio through `callsApex`. See the per-type vendored docs.
 
 /**
  * Every {@link EdgeType} as a runtime tuple — the single source the Zod input
  * enums and advertised JSON Schemas consume, so they can no longer drift from
- * the type. They previously re-listed the members by hand: v3.2 added
- * `dispatchesOmniAction` to the union but it was missed in `get_edges` /
+ * the type. They previously re-listed the members by hand: `dispatchesOmniAction`
+ * was added to the union but it was missed in `get_edges` /
  * `get_impact`, which then rejected an org's dominant OmniStudio edge while the
  * graph happily returned it. `satisfies` rejects an INVALID member; the
  * completeness guard below rejects a MISSING one — so an under-listing is now a
@@ -912,7 +900,7 @@ const edgeTypesComplete: EdgeTypesComplete = true;
  * one gets an empty result on EVERY real org while its synthetic-fixture tests
  * pass.
  *
- * `coversTest` is the whole list, and it has been since v1.4 declared it. Its
+ * `coversTest` is the whole list, and has been since it was declared. Its
  * own union comment claims it is "declared via @TestVisible/@TestSetup,
  * heuristic from callsApex inference" — no such producer was ever written. It
  * is a genuine gap rather than dead weight, because it is NOT recoverable from
@@ -1062,7 +1050,7 @@ export interface VaultManifest {
   readonly edges: Readonly<Partial<Record<EdgeType, number>>>;
   /** sha256 of the canonicalized DX source tree. Used to detect staleness. */
   readonly sourceTreeHash: string;
-  /** Optional v4.0 self-assessment of retrieve / extraction coverage. */
+  /** Optional self-assessment of retrieve / extraction coverage. */
   readonly coverage?: readonly CoverageEntry[];
   /** ISO 8601 timestamp when `coverage` was computed. */
   readonly coverageComputedAt?: string;
@@ -1161,7 +1149,7 @@ export interface CoverageEntry {
  * A single observation from a pattern recognizer. Pattern recognizers do
  * not assert; they observe and report confidence.
  *
- * For naming conventions in v0.1: an observation might be "94% of custom
+ * For naming conventions: an observation might be "94% of custom
  * fields on standard objects use the `__c` suffix" (which is required
  * universally and would be 100%) or "78% of custom fields on Account use
  * the prefix `Acc_`" (which is a discovered convention).
@@ -1325,11 +1313,11 @@ export interface McpError {
 }
 
 // ============================================================================
-// Continuation-cursor pagination (CR-22)
+// Continuation-cursor pagination
 // ============================================================================
 
 /**
- * Decoded shape of a CR-22 continuation cursor. The cursor is an OPAQUE,
+ * Decoded shape of a continuation cursor. The cursor is an OPAQUE,
  * versioned, per-handler token: a caller receives `PageInfo.nextCursor` (a
  * base64url string), treats it as a black box, and echoes it back on the next
  * call. This is the post-decode struct the handler reasons over — never
@@ -1615,7 +1603,7 @@ export interface RuleJoin {
    */
   readonly excludeSelf: boolean;
   /**
-   * P1-A REASONING-COUPLED-FIELD-WRITE-DEAD-PLANE — active-firer liveness gate.
+   * REASONING-COUPLED-FIELD-WRITE-DEAD-PLANE — active-firer liveness gate.
    * When true, a coupling is NOT emitted when its FIRER F is PROVABLY INACTIVE
    * under the shared SOE `isActiveSoeFirer` predicate (a Draft/Obsolete Flow, an
    * inactive ValidationRule/WorkflowRule/ApprovalProcess/Assignment/AutoResponse/
@@ -1627,7 +1615,7 @@ export interface RuleJoin {
    */
   readonly excludeInactiveFirer?: boolean;
   /**
-   * P1-A REASONING-COUPLED-FIELD-WRITE-DEAD-PLANE — test-writer plane gate.
+   * REASONING-COUPLED-FIELD-WRITE-DEAD-PLANE — test-writer plane gate.
    * When true, a writer W whose node is a TEST class (`isTest === true`, the
    * unconditionally-present ApexClass boolean) is EXCLUDED from the coupling: a
    * test-only Apex writer runs only while a test executes and never establishes a
@@ -2358,7 +2346,7 @@ export interface RuleSetDifference {
  *   - `property` (REASONING-ASYNC-TEST-CALLER-BLEED, the default): a witness is an
  *     edge whose role-endpoint node's `properties[witnessProperty] === true`
  *     (e.g. `isTest` on the DISPATCHER `from` side of a `dispatchesAsync` edge).
- *   - `inactive-firer` (P1-B REASONING-STATUS-CODE-CITES-INACTIVE-AUTOMATION): a
+ *   - `inactive-firer` (REASONING-STATUS-CODE-CITES-INACTIVE-AUTOMATION): a
  *     witness is an edge whose role-endpoint node is PROVABLY INACTIVE under the
  *     shared SOE `isActiveSoeFirer` predicate (the FIRER `from` side of a
  *     `triggersOn` edge — a Draft/Obsolete Flow, an Inactive ApexTrigger).
@@ -2401,7 +2389,7 @@ export interface RuleWitnessPartition {
    *   - `property` (the DEFAULT — absent ⇒ this; the async test-caller guard):
    *     a witness is an edge whose role-endpoint node has
    *     `properties[witnessProperty] === true` (e.g. `isTest`).
-   *   - `inactive-firer` (P1-B REASONING-STATUS-CODE-CITES-INACTIVE-AUTOMATION):
+   *   - `inactive-firer` (REASONING-STATUS-CODE-CITES-INACTIVE-AUTOMATION):
    *     a witness is an edge whose role-endpoint node is PROVABLY INACTIVE under
    *     the shared SOE `isActiveSoeFirer` predicate — a Draft/Obsolete Flow, an
    *     Inactive ApexTrigger, or an inactive rule. A status-less / always-live

@@ -1,8 +1,8 @@
 /**
  * `sfi serve --http` — read-only HTTP serving of the MCP server
- * (P13-REMOTE-http). Same tool surface as stdio, plus the remote security
+ * Same tool surface as stdio, plus the remote security
  * posture: bearer token (constant-time compare), optional `--tokens-file`
- * identity map (R8-PERCALLER-TOKENS), loopback bind by default
+ * identity map, loopback bind by default
  * (a non-loopback host warns AND requires a token), and the live plane
  * HARD-DISABLED over HTTP regardless of the host's consent state.
  */

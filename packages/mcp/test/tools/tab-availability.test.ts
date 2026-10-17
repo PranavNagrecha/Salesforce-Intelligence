@@ -305,7 +305,7 @@ describe('tabAvailabilityHandler — object scope (guard)', () => {
   });
 });
 
-describe('tabAvailabilityHandler — CR-22 continuation cursor', () => {
+describe('tabAvailabilityHandler — continuation cursor', () => {
   it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
     const r = await tabAvailabilityHandler(ctx, { componentId: 'Profile:Admin' });
     expect(r.ok).toBe(true); if (!r.ok) return;

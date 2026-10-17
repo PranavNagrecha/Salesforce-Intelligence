@@ -62,9 +62,15 @@ type: OmniIntegrationProcedure
 
 ## Incident edges
 
+### dispatchesOmniAction (incoming, 1)
+
+| Source | Confidence | Producer |
+| --- | --- | --- |
+| `OmniScript:Customer_Intake_English_1` | parsed | omniscript-extractor |
+
 ### dispatchesOmniAction (outgoing, 2)
 
 | Target | Confidence | Producer |
 | --- | --- | --- |
-| `OmniDataTransform:Quote_To_Project_Map` | parsed | omni-integration-procedure |
+| `OmniDataTransform:Quote_To_Project_Map_1` | parsed | omni-integration-procedure |
 | `OmniIntegrationProcedure:Permit_Submit` | parsed | omni-integration-procedure |

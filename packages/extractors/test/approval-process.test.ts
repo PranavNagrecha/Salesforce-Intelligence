@@ -38,7 +38,7 @@ const writeTempApprovalXml = async (
 };
 
 /**
- * CR-CAP-07 — write BOTH an `approvalProcesses/{stem}.approvalProcess-meta.xml`
+ * write BOTH an `approvalProcesses/{stem}.approvalProcess-meta.xml`
  * AND a sibling `workflows/{objectApiName}.workflow-meta.xml` under ONE temp
  * root so the extractor's derived sibling path
  * (`dirname(dirname(approvalPath))/workflows/{Object}.workflow-meta.xml`)
@@ -85,7 +85,7 @@ describe('extractApprovalProcess', () => {
         nodes: golden.nodes.map((n) => ({ ...n, sourcePath: fixtureAbsPath })),
       };
       expect(result.value).toEqual(goldenPatched);
-      // v2.0a — Credit_Review has a multi-criteria top-level
+      // Credit_Review has a multi-criteria top-level
       // `<entryCriteria>`, so the result includes 1 ApprovalProcess
       // node + 1 synthetic ConditionalContext node.
       expect(
@@ -327,7 +327,7 @@ describe('extractApprovalProcess', () => {
     });
   });
 
-  describe('v2.0a — ConditionalContext extraction', () => {
+  describe('ConditionalContext extraction', () => {
     it('emits a criteria-kind ConditionalContext for a multi-item <entryCriteria>', async () => {
       const xml = `<?xml version="1.0"?>
 <ApprovalProcess xmlns="http://soap.sforce.com/2006/04/metadata">
@@ -478,7 +478,7 @@ describe('extractApprovalProcess', () => {
     }
   });
 
-  describe('CR-CAP-07 — FieldUpdate writesTo via sibling workflow', () => {
+  describe('FieldUpdate writesTo via sibling workflow', () => {
     const APPROVAL_WITH_FIELD_UPDATE = `<?xml version="1.0"?>
 <ApprovalProcess xmlns="http://soap.sforce.com/2006/04/metadata">
   <label>Credit Review</label>
@@ -632,7 +632,7 @@ describe('extractApprovalProcess', () => {
     });
   });
 
-  describe('W4.3 — Alert hook EmailTemplate references via sibling workflow', () => {
+  describe('Alert hook EmailTemplate references via sibling workflow', () => {
     const APPROVAL_WITH_ALERT = `<?xml version="1.0"?>
 <ApprovalProcess xmlns="http://soap.sforce.com/2006/04/metadata">
   <label>Widget Approval</label>
@@ -654,7 +654,7 @@ describe('extractApprovalProcess', () => {
 </Workflow>`;
 
     it('emits a DIRECT `references` edge to the EmailTemplate the Alert hook sends AND keeps the WorkflowAlert reference (KEEP+ADD)', async () => {
-      // Pre-W4.3 an Alert hook emitted ONLY the `references` to the
+      // Previously an Alert hook emitted ONLY the `references` to the
       // WorkflowAlert scaffolding node; the EmailTemplate the alert sends was
       // 2 hops away, so "safe to delete EmailTemplate X?" (a 1-hop referrer
       // check) missed this ApprovalProcess dependent. This asserts the new

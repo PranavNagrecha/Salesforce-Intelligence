@@ -10,7 +10,7 @@
  * built yet, it returns `plane: 'unknown'` / a `gap` and points at
  * `sfi.resolve` / `sfi.capabilities` instead of pretending. The gap is appended
  * to the local backlog only when the `route_question` caller explicitly opts in
- * with `logGap: true` (privacy-first, off by default — CR-16).
+ * with `logGap: true` (privacy-first, off by default).
  *
  * Coverage goal: the org has ~120 read-only tools spanning schema, automation,
  * order-of-execution, code quality, security/sharing, PII, integration,
@@ -239,8 +239,7 @@ export const routeForSelectedIntent = (
 
 // Normalize smart/curly apostrophes (’ ‘ ʼ) to ASCII ' so patterns like
 // `can'?t` match "can’t" — IDEs, docs, and copy-paste routinely produce the
-// curly form, which silently broke why-cant-see routing (P12-UX-capabilities-
-// router-contract).
+// curly form, which silently broke why-cant-see routing.
 const normalize = (q: string): string =>
   q.trim().toLowerCase().replace(/[‘’ʼ]/g, "'").replace(/\s+/g, ' ');
 
@@ -353,7 +352,7 @@ const deriveKnowledgeTopic = (q: string): string | undefined => {
 
 /**
  * Derive a `list_components` `type` filter from a schema enumeration question, so
- * the router can hand `sfi.list_components` the `type` it REQUIRES (the v0.1
+ * the router can hand `sfi.list_components` the `type` it REQUIRES (the
  * contract errors `type is required` when omitted) instead of the caller hitting
  * a missing-param error on a discovery ask (e.g. "duplicate rules on Lead" →
  * `DuplicateRule`). Conservative: returns a type only when the question clearly
@@ -426,7 +425,7 @@ const FIELD_PARENT_OBJECTS = [
  * When a question enumerates fields ON a named object ("what fields does Account
  * have", "standard fields on Lead"), return `list_components` parentId so the
  * router can suggest `{ type: 'CustomField', parentId }` instead of an org-wide
- * CustomField list (which errors without a parent in v0.1).
+ * CustomField list (which errors without a parent).
  */
 const deriveFieldListParent = (q: string): string | undefined => {
   if (!/\bfields?\b/.test(q)) return undefined;
@@ -843,7 +842,7 @@ const routeText = (question: string): string => {
  */
 const RULES: readonly Rule[] = [
   // === ARCHITECT GREENFIELD STRATEGY (knowledge plane, checked FIRST) ========
-  // P12-ROUTER-architect-synthesis: prescriptive "what X strategy/model should I
+  // prescriptive "what X strategy/model should I
   // design/establish for a NEW/greenfield org" questions are best-practice
   // guidance, not org lookups — but late-rule guidance (topic-specific) missed
   // them, so 7 went `unrouted` and 2 were stolen by descriptive org intents
@@ -2111,9 +2110,9 @@ const RULES: readonly Rule[] = [
     patterns: [
       // CMDT / Custom Setting records are VAULT data (sfi.lookup_record), not
       // live rows — carve them out so "show the values in the X__mdt records"
-      // never burns live consent (P14-ROUTER-cmdt-record-values). No leading
+      // never burns live consent. No leading
       // \b before __mdt: suffixed api names have no boundary at underscores.
-      // R7-W6: a record ACCESS/SHARING ask ("show me the sharing rows on
+      // A record ACCESS/SHARING ask ("show me the sharing rows on
       // record X", "who is this record shared with") is live-record-access /
       // live-record-shares (below), not a generic sample-rows dump — carved
       // out the same way so the bare "rows"/record-id patterns here don't
@@ -2124,7 +2123,7 @@ const RULES: readonly Rule[] = [
       /\b\d+\s+(sample|example)\s+\w+\b/,
       // Router-v2 P4: a literal Salesforce record ID (15/18 chars, leading 0 +
       // keyprefix — "did lead 00Q5x000004abcd convert?") is a live row lookup;
-      // the vault never holds record data. R7-W6: excludes the same
+      // the vault never holds record data. Excludes the same
       // access/sharing vocabulary so "show the sharing rows on record
       // 001XX0000123ABC" is not stolen from live-record-shares.
       /^(?!.*\b(?:shared?\s+with|sharing\s+rows?|share\s+rows?|effective\s+access|record[-\s]level\s+access)\b).*\b0[0-9a-z]{2}[0-9a-z]{12}(?:[0-9a-z]{3})?\b/,
@@ -2342,7 +2341,7 @@ const RULES: readonly Rule[] = [
       // A TEMPORAL qualifier cues live data regardless of the noun — "how
       // many open applications do we have right now" was unrouted because
       // the noun list above can never name every object (the last Phase-14
-      // gallery miss; P14-ROUTER-live-count-temporal). Metadata nouns still
+      // gallery miss). Metadata nouns still
       // win: the metadata-count rule sits earlier. fired/ran/logged forms
       // are excluded so automation/login activity asks don't collapse into
       // a bare record count.
@@ -2377,7 +2376,7 @@ const RULES: readonly Rule[] = [
     needsResolve: false,
     reason: 'Recently created or modified records are live-only runtime state.',
     patterns: [
-      // R7-W6: excludes Setup-CONFIG vocabulary (field-level security / sharing
+      // Excludes Setup-CONFIG vocabulary (field-level security / sharing
       // settings / OWD / session settings / password policy / MFA / profile /
       // permission set / setup audit trail) — "who modified the field-level
       // security … most recently" is a SetupAuditTrail ask (live-setup-audit-
@@ -2612,14 +2611,14 @@ const RULES: readonly Rule[] = [
       // Bounded gap: an unbounded `.*` here matched ACROSS clauses of a long
       // compound question ("…application templates … named credentials USED
       // by…") and dragged a vault security ask onto this live-required email
-      // tool (P14-ROUTER-community-security-compound). Real asks keep the
+      // tool. Real asks keep the
       // verb near the noun ("which templates are unused").
       /\btemplates?\b[^.?!]{0,40}\b(used|unused|migrate|move|legacy)\b/,
     ],
   },
 
   // === Security / access / sharing / PII / compliance (vault) ===============
-  // P12-ROUTER-new-tool-intents: the P11 access/UI tools shipped without router
+  // The access/UI tools shipped without router
   // entries, so their questions went `unrouted` or were stolen by broader
   // intents (field-access / trigger-order / list-views / schema). Placed FIRST
   // in this cluster so a tool-specific question wins; each is anchored to its
@@ -2698,15 +2697,14 @@ const RULES: readonly Rule[] = [
       // "application" used ATTRIBUTIVELY ("application templates/records/
       // object/history") names a business OBJECT, not a Salesforce app — a
       // long community-security question was stolen onto this intent through
-      // the bare \bapp prefix + unbounded gaps (P14-ROUTER-community-
-      // security-compound). Gaps bounded to one clause; attributive uses
+      // the bare \bapp prefix + unbounded gaps. Gaps bounded to one clause; attributive uses
       // excluded.
       /\bwhich\s+(profiles?|users?|permission\s+sets?)\b[^.?!]{0,40}\b(open|default|access)\b[^.?!]{0,30}\bapp(lication)?s?\b(?!\s+(templates?|records?|objects?|history|data|fields?))/,
       /\b(tabs?\s+(in|of|for))\b.*\bapp/,
       /\bwhat\s+apps?\b.*\b(can|does)\b.*\b(profile|user|permission\s+set)\b.*\b(open|access|use)\b/,
       // "what apps are visible to the Marketing profile" — the INVERSE
       // direction app_access answers from the granter's own
-      // applicationVisibilities (P14-APP-default-reverse; a top
+      // applicationVisibilities (a top
       // baseline-300 unrouted cluster).
       /\bwhat\s+apps?\b.*\b(visible|available)\b.*\b(profiles?|permission\s+sets?|users?)\b/,
       /\b(default)\s+app\b.*\b(profiles?|permission\s+sets?)\b/,
@@ -2832,7 +2830,7 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
-    // R7-W6: a user's ACTUAL/EFFECTIVE access to ONE record, right now, from
+    // A user's ACTUAL/EFFECTIVE access to ONE record, right now, from
     // the live sharing calculation (UserRecordAccess) — the runtime resolver
     // for why_cant_user_see_record's `unknown` verdict. Sits BEFORE
     // effective-permissions, which used to first-match "effective access" —
@@ -2863,7 +2861,7 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
-    // R7-W6: the explicit sharing ROWS on ONE record ({Object}Share: Owner /
+    // The explicit sharing ROWS on ONE record ({Object}Share: Owner /
     // Manual / Rule / Team / Apex) — the complement to live-record-access
     // (a user's flags) enumerating WHO/WHY. Sits BEFORE sharing-model, whose
     // bare "how is X shared" pattern would otherwise swallow "how is this
@@ -2940,7 +2938,7 @@ const RULES: readonly Rule[] = [
       /\beffective\s+(permissions?|access)\b/,
       /\b(combined|union|total|net)\b.*\b(permissions?|access)\b.*\b(profile|permission\s+set|user)\b/,
       // "what permissions does the Sales User profile have" — a top
-      // baseline-300 unrouted cluster (P14-ROUTER-goldset-expand).
+      // baseline-300 unrouted cluster.
       /\bwhat\s+permissions?\s+(does|do)\b.*\b(profiles?|permission\s+sets?|users?)\b/,
       // NOTE (ENGINE-ARC §4): the "permission sets assigned to a user"
       // phrasings moved to the user-permset-holdings arm ABOVE — a user's
@@ -3012,8 +3010,7 @@ const RULES: readonly Rule[] = [
       /\b(object\s+(access|permission|crud)|crud\s+(matrix|audit))\b/,
       /\bwho\s+can\s+(create|read|edit|delete)\b.*\brecords?\s+(of|in|for)\b/,
       // SINGLE-verb create/delete asks are object-level too — "who can create
-      // an Account record?" was unrouted (gallery miss, P14-ROUTER-object-
-      // create-access). Past tense ("who deleted …") has a word boundary
+      // an Account record?" was unrouted (gallery miss). Past tense ("who deleted …") has a word boundary
       // mismatch so audit-trail phrasings stay untouched; edit/read/view
       // single-verb RECORD asks keep who-can-access-object (later rule, but
       // these patterns require create|insert|delete so they never fire there).
@@ -3070,7 +3067,7 @@ const RULES: readonly Rule[] = [
     // REVERSE of why-cant-see (single user, forward): WHO (profiles/permsets/
     // roles/groups) can see/edit an object's RECORDS. Anchored to "records" so it
     // wins over field-access (fields, no "records") but never steals a field
-    // question (P12-ROUTER-disambiguation: forward vs reverse).
+    // question (forward vs reverse).
     intent: 'who-can-access-object',
     plane: 'vault',
     tools: ['sfi.resolve', 'sfi.who_can_access_object', 'sfi.interpret'],
@@ -3101,7 +3098,7 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
-    // R6-17: unauthenticated GUEST-user exposure across Experience Cloud / Site
+    // Unauthenticated GUEST-user exposure across Experience Cloud / Site
     // communities. Anchored on the guest/community/unauthenticated vocabulary so
     // it does not steal a generic object-access ("who can access") question,
     // which who_can_access_object owns.
@@ -3155,7 +3152,7 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
-    // P12-ROUTER-layout-assignments: the REVERSE of layout-access. "What is this
+    // The REVERSE of layout-access. "What is this
     // layout assigned to" / "which profiles use the Account Layout" start FROM a
     // page Layout and ask which (Profile × RecordType) assignments target it —
     // the `sfi.layout_assignments` tool, not the forward `layout_for_user`. Must
@@ -3606,7 +3603,7 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
-    // EARLY PRECISION RULE (P14-ROUTER-safe-delete-misroute): a long
+    // EARLY PRECISION RULE: a long
     // compound delete-verdict question enumerates nouns ("every layout,
     // validation rule, flow, formula field, and permission set…") and the
     // first broad noun rule in array order was winning — unassigned-permsets,
@@ -3645,7 +3642,7 @@ const RULES: readonly Rule[] = [
       // Clause-bounded: an unbounded gap matched "…is UNUSED legacy text …
       // every … PERMISSION SET that still references…" across two sentences
       // and stole a safe-to-delete-field question onto this cleanup intent
-      // (P14-ROUTER-safe-delete-misroute; same overreach class as the
+      // (same overreach class as the
       // community-security compound fix).
       // Negative lookahead `(?!\s+groups?)` excludes "permission set GROUPS":
       // "which permission set groups are assigned to nobody?" was confidently
@@ -3943,7 +3940,7 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
-    // R7-W6: AI/Agentforce exposure — "what data can my org's own AI see".
+    // AI/Agentforce exposure — "what data can my org's own AI see".
     // Anchored on Agentforce/GenAI/prompt-template/AI-agent vocabulary so it
     // never steals a generic PII/sensitive-data question (pii-inventory,
     // below) — a bare "sensitive data" or "pii" ask with no AI noun keeps
@@ -4318,7 +4315,7 @@ const RULES: readonly Rule[] = [
     reason:
       "A validation rule's condition and error message are in the vault — resolve the rule, then get_component for its formula and error text.",
     patterns: [
-      // Clause-bounded (P14-ROUTER-safe-delete-misroute): unbounded gaps let
+      // Clause-bounded: unbounded gaps let
       // "…validation rule, flow, … and whether the platform would BLOCK
       // deletion…" (and "validation rule … Account.Description") drag a
       // safe-to-delete-field question onto this explainer — the third
@@ -4370,7 +4367,7 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
-    // R7-W6: the RUNTIME schedule registry (CronTrigger) — what is ACTUALLY
+    // The RUNTIME schedule registry (CronTrigger) — what is ACTUALLY
     // scheduled right now. Anchored on a temporal/actual cue (mirrors the
     // automation-fired / picklist-usage live-vs-vault idiom) or a literal
     // CronTrigger/CronJobDetail API name, so a bare "what jobs are scheduled"
@@ -4483,10 +4480,10 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
-    // R7-W6: FIELD-LEVEL write-collision + save-recursion cycle detector for
+    // FIELD-LEVEL write-collision + save-recursion cycle detector for
     // ONE object — "is my org fighting itself on this object?". Its phrasing
     // space heavily overlaps automation-risk's ORG-WIDE "overlapping/duplicate/
-    // conflict automation" language (R6-15 grandfather note), so this rule is
+    // conflict automation" language (grandfather note), so this rule is
     // anchored SPECIFICALLY on same-FIELD write collisions and recursion/loop
     // language — vocabulary automation-risk's patterns never use (it keys on
     // "overlapping"/"duplicate"/"conflict"/"same object", never "same field" or
@@ -4630,7 +4627,7 @@ const RULES: readonly Rule[] = [
     patterns: [
       // Plurals + the two-word "data raptor" spelling were missed: `\bomniscript\b`
       // does not match "omniscript<s>" and `dataraptors?` does not match "data
-      // raptors" (space) — both fell to `unrouted` (P12-ROUTER-omni-cpq).
+      // raptors" (space) — both fell to `unrouted`.
       /\b(omni\s?scripts?|omni\s?studio|integration\s+procedures?|flex\s?cards?|data\s?raptors?|decision\s+tables?)\b/,
     ],
   },
@@ -4658,7 +4655,7 @@ const RULES: readonly Rule[] = [
     reason: 'Text grep over Flow XML for a literal reference.',
     // search_flow_metadata REQUIRES `query` — without suggestedArgs every
     // routed call died on the missing arg and the regression bank scored
-    // honest `route_only` (P14-ROUTER-stress-20). Derive the grep text by
+    // honest `route_only`. Derive the grep text by
     // stripping the routing scaffolding words; what remains is the content
     // the user actually named ("traa partner account affiliate stamping").
     suggestArgs: (q) => {
@@ -4775,7 +4772,7 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
-    // R7-W6: decode a PASTED Salesforce error string back to its source
+    // Decode a PASTED Salesforce error string back to its source
     // component — the support-desk "what does this error mean" ask. Anchored
     // on the concrete error-signature vocabulary (status-code taxonomy tokens,
     // Apex stack frames, flow-fault-email shapes) plus generic explain/decode
@@ -4983,7 +4980,7 @@ const RULES: readonly Rule[] = [
       /\bpackage\b.*\b(impact|depend|touch|safe|uninstall|upgrade|footprint)\b/,
       /\bnamespace\b.*\b(depend|impact|component|package|footprint)\b/,
       /\bwhat\b.*\b(does|breaks?)\b.*\b(package|namespace)\b/,
-      // Extension-first phrasing (P12-ROUTER-extension-first): "what components
+      // Extension-first phrasing: "what components
       // extend the X package" — your customizations grafted onto a managed
       // package's objects (the package_impact extensionCount surface).
       /\b(what|which)\s+(of\s+(my|our)\s+)?(components?|metadata|customizations?|objects?|fields?)\b.*\bextends?\b/,
@@ -5223,7 +5220,7 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
-    // R7-W6: pre-deploy change review over a CALLER-ASSEMBLED change set (a
+    // Pre-deploy change review over a CALLER-ASSEMBLED change set (a
     // PR / package.xml / git diff) — never a bare question's primary answer
     // since it needs the `components` array as input, but the deploy-gate
     // vocabulary ("review this PR/changeset", "is this deploy safe", "what
@@ -5834,7 +5831,7 @@ const RULES: readonly Rule[] = [
       // delete" goes to impact-analysis (whole-graph blast radius). The
       // high-precision verdict cues (hyphenated safe-to-delete, "block
       // deletion", "before deleting") live in the EARLY precision rule above
-      // unassigned-permsets (P14-ROUTER-safe-delete-misroute).
+      // unassigned-permsets.
       /\b(safe(?:[\s_-]+to[\s_-]+delete|_to_delete_field)|can\s+i\s+delete|ok\s+to\s+(delete|remove))\b/,
     ],
   },
@@ -5852,7 +5849,7 @@ const RULES: readonly Rule[] = [
       "Changing a field's stored VALUE (not its schema) has a distinct blast radius — identity / integration-key / uniqueness / automation / cross-object — surfaced by value_change_audit (a set of fields on an object) or what_if_change_field_value (one field). Distinct from the type/required/delete what-ifs.",
     patterns: [
       /\bvalue[-\s]changes?\b/,
-      // R7-W6: excludes the HISTORICAL "old value … new value" / "what was the
+      // Excludes the HISTORICAL "old value … new value" / "what was the
       // value before" framing — that is a runtime read of an actual past
       // change (live-field-history, earlier), not this HYPOTHETICAL what-if-
       // change-the-value simulator ask.
@@ -5866,8 +5863,7 @@ const RULES: readonly Rule[] = [
     // blast-radius rule below was swallowing ("what breaks if I change the
     // signature of a method in X" → get_impact, class-granular). The phrase
     // "method signature" / "signature of …" is unambiguous, so this sits
-    // BEFORE impact-analysis (P14-ROUTER-method-signature-impact;
-    // what_if_change_method_signature leaves the grandfather list).
+    // BEFORE impact-analysis (what_if_change_method_signature leaves the grandfather list).
     intent: 'what-if-method-signature',
     plane: 'vault',
     tools: ['sfi.resolve', 'sfi.what_if_change_method_signature'],
@@ -5947,11 +5943,11 @@ const RULES: readonly Rule[] = [
       /\b(impact|blast\s+radius)\b/,
       // A field-TYPE / required / picklist-value what-if is `what-if-field`, not a
       // generic blast-radius walk — exclude that phrasing so it falls through
-      // (P12-ROUTER-disambiguation: "what if I change X to a text field").
+      // ("what if I change X to a text field").
       /\bif\s+i\s+(change|rename|remove|deactivate|modify|delete)\b(?!.*\b(to\s+a\b.*\bfield|field\s+type|picklist\s+value|required)\b)/,
       /\bwhat\s+if\b.*\bdeactivat/,
       // "what uses / references / depends on X" are USAGE verbs → component-usage
-      // (P12-USAGE-router, §C3): impact-analysis keeps the CHANGE/DELETE blast-radius
+      // — impact-analysis keeps the CHANGE/DELETE blast-radius
       // verbs only ("what breaks if I change/delete"), not "where is X used".
       /\bdeactivating\b.*\b(break|would)\b/,
       /\breplacing\b.*\bwith\b.*\b(lwc|aura)\b/,
@@ -6026,7 +6022,7 @@ const RULES: readonly Rule[] = [
     patterns: [
       // "which validation rules reference the Stage field" belongs here too:
       // VR formulas produce the same incoming `references` edges
-      // (P14-ROUTER-goldset-expand). Noun-final phrasings ("what references
+      // Noun-final phrasings ("what references
       // the X validation rule") have no verb AFTER the noun, so they keep
       // component-usage.
       // The verb is matched in its present forms — `references` / `referencing`
@@ -6039,7 +6035,7 @@ const RULES: readonly Rule[] = [
       // "what references X IN FORMULAS / validation rules" — the verb comes
       // FIRST in this phrasing, so the formulas-first patterns above missed
       // it and the later component-usage rule stole it onto the generic
-      // usage tool (P14-ROUTER-formula-vs-usage).
+      // usage tool.
       /\b(reference|use|depend)\w*\b.*\bin\b.*\b(formulas?|validation\s+rules?)\b/,
     ],
   },
@@ -6057,7 +6053,7 @@ const RULES: readonly Rule[] = [
       /\bwhat('?s| is)\s+in\s+(this\s+|my\s+)?org\b/,
     ],
   },
-  // P13-CARD-tool: the cached refresh-time orientation card — cheaper and
+  // The cached refresh-time orientation card — cheaper and
   // more complete than the recomputed overview for "orient me first" asks.
   // High-precision literal patterns only (the broad overview phrasings stay
   // with org-overview above — first match wins).
@@ -6135,7 +6131,7 @@ const RULES: readonly Rule[] = [
   },
 
   // === Change / history / cross-org (vault, snapshots) ======================
-  // R7-W6: live_field_history and live_setup_audit_trail now cover TWO of the
+  // live_field_history and live_setup_audit_trail now cover TWO of the
   // three runtime-audit-trail gaps (field history, Setup Audit Trail — debug
   // logs / Event Monitoring stay genuinely out of scope). Both are placed
   // BEFORE runtime-audit-trail and anchored on STRONGER signals than its bare
@@ -6271,7 +6267,7 @@ const RULES: readonly Rule[] = [
   {
     // Component change TIMELINE over the vault's own git history — "when did
     // X change", "change history of the Payment flow"
-    // (P14-ROUTER-goldset-expand; sfi.component_history leaves the
+    // (sfi.component_history leaves the
     // grandfather list). Placed BEFORE history-change: its bare
     // history/timeline pattern would steal the component-anchored form.
     // Distinct from last-modified (org-declared stamp) and history-change
@@ -6291,7 +6287,7 @@ const RULES: readonly Rule[] = [
   },
   {
     // Curated OWNERSHIP / stewardship — "who owns the Status field" reads
-    // the annotations overlay (P14-ROUTER-goldset-expand; sfi.annotations
+    // the annotations overlay (sfi.annotations
     // leaves the grandfather list). The metadata-noun anchor keeps live
     // record ownership ("who owns most accounts") on owner-breakdown
     // (earlier rule, live plane).
@@ -6426,7 +6422,7 @@ const RULES: readonly Rule[] = [
     // "Churn/what changed SINCE THE LAST REFRESH" has a no-arg specialist —
     // the broad snapshot-diff rule below routed it to diff_snapshots, whose
     // REQUIRED from/to labels the router can never derive from this phrasing
-    // (P14-ROUTER-stress-20; what_changed_since_refresh leaves the
+    // (what_changed_since_refresh leaves the
     // grandfather list). Placed before snapshot-diff so the refresh anchor
     // wins; generic churn/trend phrasings keep the snapshot tools.
     intent: 'what-changed-since-refresh',
@@ -6641,7 +6637,7 @@ const RULES: readonly Rule[] = [
       /\bwhat\s+(does|is)\b.*\w+__c\b.*\b(mean|for)\b/,
       // "what is the help text for the Discount_Percent__c field" — the
       // inline help bubble IS explain_field's surface; a top baseline-300
-      // unrouted cluster (P14-ROUTER-goldset-expand).
+      // unrouted cluster.
       /\b(help\s+text|inline\s+help)\b/,
       /\bwhat\s+is\s+the\s+data\s+type\b/,
     ],
@@ -6833,7 +6829,7 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
-    // P12-USAGE-router (§C3): the universal "where is X used / what references X /
+    // The universal "where is X used / what references X /
     // what depends on X" intent for a NAMED component of ANY type → the
     // find_component_usages dispatcher. Ordered BEFORE locate-field so a non-field
     // usage ("where is MyClass used") wins the dispatcher instead of the field
@@ -7013,7 +7009,7 @@ const RULES: readonly Rule[] = [
   },
   {
     // Declared picklist values of a NAMED field — "what values are in the
-    // Status picklist". Unrouted before Phase 14 (gallery-probe miss + gap
+    // Status picklist". Previously unrouted (gallery-probe miss + gap
     // log). Placed AFTER record-type-picklist so cross-record-type value
     // diffs keep their specialist route (first match wins), and after
     // what-if-field so removal simulations win. Live USAGE phrasings
@@ -7066,7 +7062,7 @@ const RULES: readonly Rule[] = [
     ],
   },
   {
-    // List views inventory (B21.8). P14-USAGE-listview-general: the old
+    // List views inventory (B21.8). The old
     // "retrieved but not graph-modeled" note was STALE — ListView nodes carry
     // outgoing field-reference edges (a field used only in a list-view filter
     // shows the ListView among its referrers), and list_view_sharing covers
@@ -7086,7 +7082,7 @@ const RULES: readonly Rule[] = [
     // Default record of Marketo_Api_Setting__mdt set to", "what values does
     // the US record hold". The vault DOES carry configured CMDT/CustomSetting
     // records (sfi.lookup_record), but the phrasings were unrouted and the
-    // tool sat on the grandfather list (P14-ROUTER-cmdt-record-values).
+    // tool sat on the grandfather list.
     // Placed BEFORE custom-settings-cmdt: a record-VALUE ask outranks the
     // type-level "what custom settings exist" browse; record-type picklist
     // diffs already matched earlier (rule order).
@@ -7371,8 +7367,7 @@ const RULES: readonly Rule[] = [
       // Object RELATIONSHIP questions — "what is the relationship between
       // Account and Contact", "child objects of Case", "master-detail with
       // Opportunity": lookupTo edges + object structure are core vault
-      // schema (a top baseline-300 unrouted cluster;
-      // P14-ROUTER-goldset-expand).
+      // schema (a top baseline-300 unrouted cluster).
       /\b(relationships?\s+between|master[-\s]detail|junction\s+objects?|child\s+objects?\s+of)\b/,
       /\bwhat\s+(apex\s+)?classes?\b.*\b(exist|in\s+this\s+org|are\s+there)\b/,
       /\bwhat\s+apex\s+classes?\s+exist\b/,
@@ -7656,8 +7651,7 @@ export interface GapLogEntry {
   readonly plane: Plane;
   readonly note: string;
   /**
-   * The vault the question was asked against (P14-FEEDBACK-gaplog-scope /
-   * P-GAPLOG-GLOBAL). The log FILE stays machine-global, but entries are
+   * The vault the question was asked against. The log FILE stays machine-global, but entries are
    * stamped so `sfi feedback export` can scope to the current vault by
    * default — question text routinely names org-specific components, and a
    * multi-org machine must not bundle every org's questions into one
@@ -7716,7 +7710,6 @@ export interface RouteGapCategoryCount {
  * Aggregated view of the local route-gap log. Category counts only — never
  * echoes question text or vault paths (those can name org-specific components).
  * Used by `sfi doctor`, `sfi gaps report`, and the `sfi.capabilities` nudge
- * (R8-GAPLOG-SURFACE).
  */
 export interface RouteGapSummary {
   readonly exists: boolean;
@@ -7751,8 +7744,7 @@ export interface SummarizeRouteGapsOptions {
  * Summarize the local route-gap log (`question-gaps.jsonl`): how many questions
  * hit a router gap, and the ranked gap categories. Best-effort and never
  * throws — a missing/garbled log just reports zero gaps. Local-only telemetry;
- * the file never leaves the machine. (P12-ROUTER-confusion-report /
- * R8-GAPLOG-SURFACE.)
+ * the file never leaves the machine.
  */
 export const summarizeRouteGaps = async (
   logFile: string,
@@ -7820,7 +7812,7 @@ export const summarizeRouteGaps = async (
 
 /**
  * Open-gap count at which `sfi.capabilities` surfaces a review nudge
- * (R8-GAPLOG-SURFACE). Below this, the count is still reported but `nudge`
+ * Below this, the count is still reported but `nudge`
  * stays null so a quiet machine is not noisy.
  */
 export const ROUTE_GAP_NUDGE_THRESHOLD = 5;

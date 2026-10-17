@@ -1,15 +1,15 @@
 /**
  * Handler for the `sfi.find_clone_patterns` MCP tool.
  *
- * The v2.2 structural clone-detection surface — answers "are there
+ * The structural clone-detection surface — answers "are there
  * other classes / flows like THIS one?". Given a seed ApexClass /
  * ApexTrigger / Flow id, ranks every other same-type component by
  * structural-fingerprint similarity and returns the top matches.
  *
- * **Token shingling vs. fingerprint-set approach:** v2.2 R2 ships
+ * **Token shingling vs. fingerprint-set approach:** This ships
  * **structural fingerprint** Jaccard rather than token shingling for
  * Apex because the in-process `searchIndex` fingerprint property is
- * not yet materialized (it lands in v2.2 R3). The fingerprint is
+ * not yet materialized (it lands later). The fingerprint is
  * computed on-the-fly from the existing graph edges:
  *
  *   - For Apex: outgoing `callsApex`, `readsFrom`, `writesTo` edge
@@ -47,7 +47,7 @@
  * 0 (not 1) so that two components both with no field reads don't
  * get a free similarity boost.
  *
- * **Honesty axis (v2.2 constitutional rule):** every result carries
+ * **Honesty axis (constitutional rule):** every result carries
  * `confidence: 'heuristic'`. The structural fingerprint approximates
  * shape, NOT behavior. Two classes with identical fingerprints can
  * have radically different runtime behavior; the `boundaries` array
@@ -63,7 +63,7 @@
  *   - `seedFingerprint` is surfaced in the response so the user can
  *     see the structural shape the comparison is based on.
  *   - Cross-type comparison (Apex vs. Flow) is intentionally
- *     unsupported in v2.2 R2 — the fingerprint shapes differ across
+ *     unsupported — the fingerprint shapes differ across
  *     types and cross-type Jaccard is mostly noise.
  */
 
@@ -313,8 +313,8 @@ const isFlow = (id: string): boolean => id.startsWith(FLOW_PREFIX);
 /**
  * Compute the structural fingerprint for one component by walking its
  * outgoing edges. The fingerprint is recomputed on every call — the
- * v2.2 R3 task will materialize this as a stored property; until then
- * this on-the-fly computation is the v2.2 R2 honest path.
+ * task will materialize this as a stored property; until then
+ * this on-the-fly computation is the honest path.
  */
 const computeFingerprint = async (
   ctx: Context,
@@ -497,7 +497,7 @@ const buildClusters = async (
   const scannedNodes = scan.value.nodes.slice(0, MAX_CLUSTER_NODES);
   // Capped when the walk itself hit its residual ceiling OR when the overshoot
   // above was trimmed. A type holding EXACTLY MAX_CLUSTER_NODES nodes is
-  // neither, preserving the CR-P3 off-by-one fix (the old hand-rolled loop set
+  // neither, preserving the off-by-one fix (the old hand-rolled loop set
   // `capped` the instant the 800th node was appended).
   const capped = scan.value.scanIncomplete || scan.value.nodes.length > MAX_CLUSTER_NODES;
   const nodes: { id: ComponentId; apiName: string; fp: Fingerprint }[] = [];

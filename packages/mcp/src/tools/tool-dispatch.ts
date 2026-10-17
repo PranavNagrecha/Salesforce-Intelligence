@@ -2,7 +2,7 @@
  * Tool dispatch — handler imports and dispatchTool / runTool / jsonResult.
  *
  * Contains all per-handler imports, the dispatchTool switch, runTool,
- * and the jsonResult serialization layer. Split from tools/index.ts (R7-F2)
+ * and the jsonResult serialization layer. Split from tools/index.ts
  * to remove the merge hotspot on that file.
  *
  * @see roster.ts  — V01_TOOLS definition array + types
@@ -124,7 +124,7 @@ import {
   compareComponentsHandler,
   compareComponentsInputSchema,
 } from './compare-components.js';
-// v3.1 — cross-org / sandbox-vs-prod comparison tier.
+// Cross-org / sandbox-vs-prod comparison tier.
 import {
   compareObjectAcrossVaultsHandler,
   compareObjectAcrossVaultsInputSchema,
@@ -167,12 +167,12 @@ import {
   crudFlsAuditHandler,
   crudFlsAuditInputSchema,
 } from './crud-fls-audit.js';
-// v3.2 — OmniStudio composition tier (DataRaptor field-mapping table).
+// OmniStudio composition tier (DataRaptor field-mapping table).
 import {
   datatransformFieldMapHandler,
   datatransformFieldMapInputSchema,
 } from './datatransform-field-map.js';
-// v3.2 — OmniStudio declarative-process tier (DecisionTable browse).
+// OmniStudio declarative-process tier (DecisionTable browse).
 import {
   decisionTableBrowseHandler,
   decisionTableBrowseInputSchema,
@@ -261,7 +261,7 @@ import {
   fieldLineageHandler,
   fieldLineageInputSchema,
 } from './field-lineage.js';
-// v3.1 — Q174 honesty-anchor tool.
+// Honesty-anchor tool.
 import {
   fieldMappingBetweenObjectsHandler,
   fieldMappingBetweenObjectsInputSchema,
@@ -409,7 +409,7 @@ import {
   integrationMapHandler,
   integrationMapInputSchema,
 } from './integration-map.js';
-// v3.2 R3 — OmniStudio composer tier.
+// OmniStudio composer tier.
 import {
   integrationProcedureChainHandler,
   integrationProcedureChainInputSchema,
@@ -574,7 +574,7 @@ import { omniPathSimulatorHandler, omniPathSimulatorInputSchema } from './omni-p
 import { omniPrefillTraceHandler, omniPrefillTraceInputSchema } from './omni-prefill-trace.js';
 import { omniSaveTraceHandler, omniSaveTraceInputSchema } from './omni-save-trace.js';
 import { omniVersionDiffHandler, omniVersionDiffInputSchema } from './omni-version-diff.js';
-// v3.2 — OmniStudio (Salesforce Industries) declarative-process tier.
+// OmniStudio (Salesforce Industries) declarative-process tier.
 import {
   omniscriptFlowHandler,
   omniscriptFlowInputSchema,
@@ -903,7 +903,7 @@ export const dispatchTool = async (
         describeAnalysisHandler,
       );
     case 'sfi.run_analysis': {
-      // BYTE-IDENTITY CONTRACT (P13-GW-meta-tools): the gateway returns the
+      // BYTE-IDENTITY CONTRACT: the gateway returns the
       // target tool's envelope VERBATIM — no runTool re-wrap, so payload,
       // byte budget, and trust block are exactly a direct call's.
       const parsed = runAnalysisInputSchema.safeParse(args);
@@ -1809,7 +1809,7 @@ export const dispatchTool = async (
         generateOnboardingDocInputSchema,
         generateOnboardingDocHandler,
       );
-    // v2.7 R2 — deep code understanding tier (class granularity).
+    // Deep code understanding tier (class granularity).
     case 'sfi.call_graph':
       return runTool(ctx, args, callGraphInputSchema, callGraphHandler);
     case 'sfi.downstream_effects':
@@ -1906,7 +1906,7 @@ export const dispatchTool = async (
         communityCatalogInputSchema,
         communityCatalogHandler,
       );
-    // v2.9 R4 — vocabulary + semantic-disambiguation tier.
+    // Vocabulary + semantic-disambiguation tier.
     case 'sfi.field_meaning':
       return runTool(
         ctx,
@@ -1936,7 +1936,7 @@ export const dispatchTool = async (
         extraKnobs: ['ruleIds', 'concepts'],
         exampleCall: "sfi.interpret({ componentId, ruleIds: ['SOME_RULE_ID'] })",
       });
-    // v2.2 R2 — universal find-anywhere + discovery surface.
+    // Universal find-anywhere + discovery surface.
     case 'sfi.find_field_anywhere':
       return runTool(
         ctx,
@@ -1979,7 +1979,7 @@ export const dispatchTool = async (
         packageImpactInputSchema,
         packageImpactHandler,
       );
-    // v2.6a R2 — CPQ specialist tier.
+    // CPQ specialist tier.
     case 'sfi.cpq_rule_chain':
       return runTool(
         ctx,
@@ -2001,7 +2001,7 @@ export const dispatchTool = async (
         cpqDependencyMapInputSchema,
         cpqDependencyMapHandler,
       );
-    // v3.0 — unified field forensics synthesis tier.
+    // Unified field forensics synthesis tier.
     case 'sfi.field_360':
       return runTool(ctx, args, field360InputSchema, field360Handler);
     case 'sfi.field_lineage':
@@ -2011,7 +2011,7 @@ export const dispatchTool = async (
         fieldLineageInputSchema,
         fieldLineageHandler,
       );
-    // v3.1 — cross-org / sandbox-vs-prod comparison tier.
+    // Cross-org / sandbox-vs-prod comparison tier.
     case 'sfi.promotion_readiness':
       return runTool(
         ctx,
@@ -2047,7 +2047,7 @@ export const dispatchTool = async (
         fieldMappingBetweenObjectsInputSchema,
         fieldMappingBetweenObjectsHandler,
       );
-    // v3.2 — OmniStudio composition tier (DataRaptor field-mapping table).
+    // OmniStudio composition tier (DataRaptor field-mapping table).
     case 'sfi.datatransform_field_map':
       return runTool(
         ctx,
@@ -2055,7 +2055,7 @@ export const dispatchTool = async (
         datatransformFieldMapInputSchema,
         datatransformFieldMapHandler,
       );
-    // v3.2 — OmniStudio declarative-process tier (DecisionTable browse).
+    // OmniStudio declarative-process tier (DecisionTable browse).
     case 'sfi.decision_table_browse':
       return runTool(
         ctx,
@@ -2063,7 +2063,7 @@ export const dispatchTool = async (
         decisionTableBrowseInputSchema,
         decisionTableBrowseHandler,
       );
-    // v3.2 R3b — OmniStudio "walk this IP's action chain" Q177 surface.
+    // OmniStudio "walk this IP's action chain" surface.
     case 'sfi.integration_procedure_chain':
       return runTool(
         ctx,
@@ -2071,7 +2071,7 @@ export const dispatchTool = async (
         integrationProcedureChainInputSchema,
         integrationProcedureChainHandler,
       );
-    // v3.2 R3a — OmniStudio "walk this OmniScript end-to-end" surface.
+    // OmniStudio "walk this OmniScript end-to-end" surface.
     case 'sfi.omniscript_flow':
       return runTool(
         ctx,
@@ -2102,7 +2102,7 @@ export const dispatchTool = async (
       return runTool(ctx, args, omniPrefillTraceInputSchema, omniPrefillTraceHandler);
     case 'sfi.omni_changed_since':
       return runTool(ctx, args, omniChangedSinceInputSchema, omniChangedSinceHandler);
-    // v3.2 R3d — OmniStudio "what's inside this FlexCard" surface.
+    // OmniStudio "what's inside this FlexCard" surface.
     case 'sfi.omniuicard_widget_breakdown':
       return runTool(
         ctx,
@@ -2379,7 +2379,7 @@ export const runTool = async <S extends z.ZodTypeAny, T>(
 };
 
 /**
- * Register the v0.1 tool list and call handlers on `server`. Idempotent
+ * Register the tool list and call handlers on `server`. Idempotent
  * within a single `Server` instance; not safe to call across instances
  * (the SDK throws if a handler is registered twice).
  *
@@ -2387,7 +2387,7 @@ export const runTool = async <S extends z.ZodTypeAny, T>(
  *   const server = new Server({ name: 'sf-intelligence', version: '0.1.0' });
  *   registerTools(server, ctx);
  */
-// P13-GW profile primitives live in tool-profile.ts (cycle-free for
+// Profile primitives live in tool-profile.ts (cycle-free for
 // route-question's gateway envelopes); re-exported here as the public API.
 
 
@@ -2409,7 +2409,7 @@ interface ResponseNarrowing {
   readonly args?: Readonly<Record<string, unknown>>;
   /** Input-schema knobs that narrow a query (limit/offset/hops/filter/…). */
   readonly knobs?: readonly string[];
-  /** Vault root for the org-drift badge lookup (P13-WATCH-badges). */
+  /** Vault root for the org-drift badge lookup. */
   readonly vaultRoot?: string;
   /**
    * A concrete, tool-specific example call appended to the oversize remedy
@@ -2655,8 +2655,7 @@ const slimDataStrings = (node: unknown): number => {
  * body is canonical JSON. Centralized so the not-implemented and
  * unknown-tool branches share a shape.
  *
- * GLOBAL response budget (P13-GUARD-global-size — absorbs P12-B25-hardening +
- * P12-lazy-graph). Every body gains a top-level `estimatedPayloadBytes`. A
+ * GLOBAL response budget. Every body gains a top-level `estimatedPayloadBytes`. A
  * envelope over the budget is rescued by escalating passes — never
  * handed to the client as an opaque rejection:
  *
@@ -2733,7 +2732,7 @@ export const jsonResult = (
   const isErrorEnvelope =
     'error' in body && (body as { readonly error?: unknown }).error != null;
 
-  // P13-WATCH-badges: when a FRESH stale-sweep shows org drift whose types
+  // When a FRESH stale-sweep shows org drift whose types
   // intersect this answer, attach the orgDrift badge (silent otherwise; a
   // vault without staleness.json is byte-identical to pre-badge behavior).
   // Attached BEFORE the byte budget so the cap still holds with the badge.
@@ -2834,7 +2833,7 @@ export const jsonResult = (
     const args = narrowing?.args ?? {};
     const offset = args['offset'];
     const offsetShaped = 'offset' in args || typeof offset === 'number';
-    // CR-22 seam: a cursor-aware handler attaches its own `pageInfo`/`nextCursor`
+    // Seam: a cursor-aware handler attaches its own `pageInfo`/`nextCursor`
     // to `data`. When present, the handler's pagination is authoritative — do
     // NOT overwrite it with this guard's approximate `nextOffset` (which the
     // handler already accounted for). For UNCONVERTED offset tools the guard

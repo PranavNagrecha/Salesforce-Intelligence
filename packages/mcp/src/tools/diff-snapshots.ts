@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.diff_snapshots` MCP tool.
  *
- * The v2.0c headline tool for buyer-priority #8 — "what changed in
+ * The headline tool for buyer-priority #8 — "what changed in
  * this org since last week?". Reads two persisted snapshots (or one
  * persisted + the live current state) off `{vaultRoot}/snapshots/` and
  * reports the per-component-id `added`/`removed`/`modified` slices.
@@ -25,22 +25,22 @@
  *   4. Sort each list by `id` ASC for stable output, then trim to
  *      `limit` if needed and set `truncated` accordingly.
  *
- * **Honesty axis** (per the v2.0c spec):
+ * **Honesty axis**:
  *
  *   - The diff is structural: it reports ids that came in / went out /
  *     mutated between the two snapshots. It does NOT classify changes
  *     into "breaking" vs "safe" — that's the territory of the
- *     v2.0c change-history-narrator skill that consumes this tool's
+ *     change-history-narrator skill that consumes this tool's
  *     output.
- *   - Edges are not surfaced in the v2.0c output shape (added/removed
+ *   - Edges are not surfaced in the output shape (added/removed
  *     edges would explode the volume past what a chat UI can render).
  *     The diff narrator can re-query specific components via
  *     `sfi.compare_components` when the user wants edge-level detail.
  *   - `truncated: true` always indicates that more entries exist than
  *     the cap — callers can re-run with a higher `limit` or fall
  *     through to `sfi.list_components` for the full enumeration.
- *   - R7-W9: this module's `canonicalJson` carries the same defensive
- *     `undefined` branch added to `compare-vaults.ts` (R6-12) and
+ *   - this module's `canonicalJson` carries the same defensive
+ *     `undefined` branch added to `compare-vaults.ts` and
  *     `compare-object-across-vaults.ts` — see that function's own JSDoc.
  */
 
@@ -83,7 +83,7 @@ const DIFF_SNAPSHOTS_BYTE_BUDGET = 38_000;
 
 /**
  * Inclusive upper bound on `limit`. Mirrors the cap convention every
- * enumeration-style v0.1+ tool uses (500 is the universal blast-radius
+ * enumeration-style tool uses (500 is the universal blast-radius
  * limit).
  */
 const DIFF_SNAPSHOTS_MAX_LIMIT = 500;
@@ -132,7 +132,7 @@ export const diffSnapshotsInputSchema = z.object({
   fromLabel: z.string().min(1).optional(),
   toLabel: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(DIFF_SNAPSHOTS_MAX_LIMIT).optional(),
-  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // Continuation cursor: an OPAQUE token echoed back from a prior
   // truncated page's `nextCursor`; carries the resume offset + which list
   // (added | removed | modified) it advances. Omit = today's behavior.
   cursor: z.string().min(1).optional(),
@@ -178,7 +178,7 @@ export interface DiffSnapshotsOutput {
   };
   readonly truncated: boolean;
   /**
-   * CR-22 opaque continuation token, present ONLY when the designated (largest)
+   * Opaque continuation token, present ONLY when the designated (largest)
    * list overflowed `limit`/the byte budget. Echo it back as `cursor` to resume
    * THAT list; absent on a whole-fits page so the response is byte-identical.
    */
@@ -229,8 +229,8 @@ const compareComponents = (a: DiffSnapshotComponent, b: DiffSnapshotComponent): 
  * line up character-for-character with the hashes stored in any
  * persisted snapshot of equivalent state.
  *
- * R7-W9 crash-class sweep: `compare-vaults.ts`'s identical implementation
- * crashed for real under R6-12 — `JSON.stringify(undefined)` returns the JS
+ * Crash-class sweep: `compare-vaults.ts`'s identical implementation
+ * crashed for real — `JSON.stringify(undefined)` returns the JS
  * value `undefined`, NOT the string `"undefined"`, so the primitive
  * fallthrough silently returned a non-string, and that sibling's
  * `boundValue` helper threw calling `.length` on it. This file's two call
@@ -513,12 +513,12 @@ export const diffSnapshotsHandler = async (
 
   const limit = input.limit ?? DIFF_SNAPSHOTS_DEFAULT_LIMIT;
   const totalCount = added.length + removed.length + modified.length;
-  // KEEP the pre-CR-22 `truncated` semantics (sum-vs-single-limit) byte-for-byte
+  // KEEP the pre-paging `truncated` semantics (sum-vs-single-limit) byte-for-byte
   // so the golden does not move; the cursor block is layered ON TOP, emitted only
   // when the DESIGNATED list is actually paged.
   const truncated = totalCount > limit;
 
-  // CR-22 section cursor: page ONE designated list (the largest at request time)
+  // Section cursor: page ONE designated list (the largest at request time)
   // and disclose the others honestly. On resume the handler feeds token.listId
   // back as designatedListId (paginateSection does NOT cross-check — B0 note).
   const TOOL = 'sfi.diff_snapshots';
@@ -563,7 +563,7 @@ export const diffSnapshotsHandler = async (
   // The designated list shows its (byte-budgeted) page; the non-designated two
   // stay sliced-to-limit and disclosed via summary + otherSections. On a
   // whole-fits call no list is byte-trimmed and the designated page == its
-  // slice(0,limit), so the three arrays are byte-identical to pre-CR-22.
+  // slice(0,limit), so the three arrays are byte-identical to the pre-paging shape.
   const pageFor = (listId: string, full: readonly DiffSnapshotComponent[]): readonly DiffSnapshotComponent[] =>
     listId === designatedListId ? paged.items : full.slice(0, limit);
 

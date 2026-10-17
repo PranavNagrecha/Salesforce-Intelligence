@@ -253,7 +253,7 @@ describe('resolveInputSchema', () => {
   });
 });
 
-describe('glossary aliases (P13-ANNOT-glossary-resolve)', () => {
+describe('glossary aliases', () => {
   const annotate = async (
     componentId: string,
     value: string,

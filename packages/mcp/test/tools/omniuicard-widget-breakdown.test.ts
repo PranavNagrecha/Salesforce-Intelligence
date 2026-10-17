@@ -1,7 +1,7 @@
 /// <reference types="vitest/globals" />
 
 /**
- * Tests for the `sfi.omniuicard_widget_breakdown` MCP tool (v3.2 R3d).
+ * Tests for the `sfi.omniuicard_widget_breakdown` MCP tool.
  *
  * Coverage:
  *   - happy path on a two-state FlexCard fixture with nested Block
@@ -13,7 +13,7 @@
  *     contribute their own count + their children's counts).
  *   - metadata fields (`omniUiCardType`, `authorName`,
  *     `versionNumber`, `isActive`, `isManagedUsingStdDesigner`) come
- *     from the v3.2 R2 extractor's node properties.
+ *     from the extractor's node properties.
  *   - `dataSource.type` + `contextVariables[]` come from the
  *     extractor's parsed dataSourceConfig.
  *   - `dispatchedActions[]` come from the `dispatchesOmniAction`
@@ -92,13 +92,13 @@ const MALFORMED_JSON_CARD_ID = 'OmniUiCard:MalformedJson_Developer_1';
 const STALE_SOURCE_CARD_ID = 'OmniUiCard:StaleSource_Developer_1';
 // XML that does not validate at all (unclosed element).
 const MALFORMED_XML_CARD_ID = 'OmniUiCard:MalformedXml_Developer_1';
-// Node built by a refresh that predates the v3.2 R2 OmniUiCard extractor:
+// Node built by a refresh that predates the OmniUiCard extractor:
 // it carries NO `stateCount` property at all.
 const PRE_EXTRACTOR_CARD_ID = 'OmniUiCard:PreExtractor_Developer_1';
 // Same on-disk XML as the sample card, but the node's aggregates disagree
 // with what is on disk now (the file changed after the refresh).
 const DRIFTED_CARD_ID = 'OmniUiCard:Drifted_Developer_1';
-// A card whose one state hangs its widgets off `layer-1`, which v3.2 does
+// A card whose one state hangs its widgets off `layer-1`, which it does
 // not walk.
 const OTHER_LAYER_CARD_ID = 'OmniUiCard:OtherLayer_Developer_1';
 
@@ -134,7 +134,7 @@ const MALFORMED_XML = `<?xml version="1.0" encoding="UTF-8"?>
     <name>MalformedXml</name>
 `;
 
-// A single state whose widgets hang off `layer-1`. v3.2 walks `layer-0`
+// A single state whose widgets hang off `layer-1`. This walks `layer-0`
 // only, so the widget tree here is NEVER walked — which must not render
 // as "this state has no widgets".
 const OTHER_LAYER_XML = `<?xml version="1.0" encoding="UTF-8"?>
@@ -330,7 +330,7 @@ beforeAll(async () => {
         label: 'PreExtractor',
         sourcePath: join(tempDir, 'pre-extractor.ouc-meta.xml'),
         // No `stateCount` / `widgetCount` / warnings at all — this vault's
-        // refresh predates the v3.2 R2 OmniUiCard extractor.
+        // refresh predates the OmniUiCard extractor.
         properties: {
           omniUiCardType: 'Parent',
           authorName: 'Developer',
@@ -511,7 +511,7 @@ describe('omniuicardWidgetBreakdownHandler', () => {
     const data = result.value.data;
     // First disclosure is the propertySetConfig-parsing axis;
     // second is the Native-vs-Vlocity-Legacy disclosure. Both are
-    // load-bearing per PLAN-v3.2 §4 and the OmniUiCard.md verbatim
+    // load-bearing per the OmniUiCard.md verbatim
     // contract.
     expect(data.boundaries.length).toBe(2);
     expect(data.boundaries[0]).toContain('widget breakdown parses the propertySetConfig JSON blob');

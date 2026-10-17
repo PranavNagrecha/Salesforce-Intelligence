@@ -1,11 +1,11 @@
 /**
  * Handler for the `sfi.generate_sharing_summary` MCP tool.
  *
- * The v2.5 documentation-generation tier sharing-summary tool. Given
+ * The documentation-generation tier sharing-summary tool. Given
  * an optional `objectFilter` (api name string), emits a structured
  * markdown document covering every CustomObject's OWD (organization-
  * wide default), the SharingRules that apply to it (each NAMING its
- * `sharedWith` recipient — CR-CAP-05b — in a "Shared With" column;
+ * `sharedWith` recipient in a "Shared With" column;
  * a `roleAndSubordinates` recipient is marked "(and its subordinate
  * roles)" via the shared `expandRoleSubordinates` helper that
  * `who_can_access_object` also uses, so the two surfaces never drift),
@@ -21,7 +21,7 @@
  *   - `objectFilter` (optional string): when supplied, narrows the
  *     scan to the single CustomObject whose api name matches. Default
  *     scans every extracted CustomObject (capped at 50 per the
- *     architect-tier convention — CR-RV12: a >50-object org's response
+ *     architect-tier convention — a >50-object org's response
  *     discloses the truncation, see Output below, rather than silently
  *     reading as complete).
  *   - `objectApiName` / `componentId` (optional string, aliases —
@@ -34,7 +34,7 @@
  *     as "no objectFilter applied".
  *
  * Output: `{ document: GeneratedDocument, scanTruncated?, totalMatchingObjects? }`.
- *   `scanTruncated` (CR-RV12) is present ONLY when the org has more than 50
+ *   `scanTruncated` is present ONLY when the org has more than 50
  *   matching CustomObjects — the OBJECT_SCAN_CAP silently dropped the rest
  *   BEFORE this tool existed to say so. `totalMatchingObjects` carries the
  *   TRUE count alongside it (a `COUNT(*)` on the unfiltered path, never the
@@ -48,9 +48,9 @@
  *
  * Honesty axis: per-object sharing details come from declared metadata
  * (`properties.sharingModel` on the CustomObject; the SharingRule nodes
- * extracted in v1.1). Profile / PermissionSet counts are tallied from
+ * extracted). Profile / PermissionSet counts are tallied from
  * the OBJECT's incoming `grantedBy` edges that carry an object-CRUD flag
- * (allowCreate/Read/Edit/Delete or View/Modify-All). CR-04: field-level
+ * (allowCreate/Read/Edit/Delete or View/Modify-All). Field-level
  * security (FLS) is a separate plane — it is NOT counted here; see
  * `field_access_audit` for per-field grants.
  */
@@ -104,8 +104,8 @@ const byNameCaseInsensitive = (a: string, b: string): number => {
 
 /**
  * Honest disclosure of the sharing dimensions this summary does NOT model, so
- * the rules table is never read as the complete access model (P11-G5).
- * CR-CAP-16: territory & guest sharing rules are now EXTRACTED and listed (their
+ * the rules table is never read as the complete access model.
+ * Territory & guest sharing rules are now EXTRACTED and listed (their
  * row appears in the table with a guest/territory predicate), so they are no
  * longer "skipped" — but their APPLICABILITY is still record-level, so the
  * disclosure keeps them as a not-decidable dimension. Sharing sets,
@@ -169,7 +169,7 @@ export interface GenerateSharingSummaryOutput {
     readonly referencedBy: number;
   };
   /**
-   * CR-RV12: TRUE when the `OBJECT_SCAN_CAP` (50) slice dropped matching
+   * TRUE when the `OBJECT_SCAN_CAP` (50) slice dropped matching
    * CustomObjects BEFORE the per-object sharing entries were built — so the
    * document covers only the first 50 (by return order). Also TRUE when the
    * full multi-window type walk (`scanAllNodesOfTypes`) stopped at its residual
@@ -179,7 +179,7 @@ export interface GenerateSharingSummaryOutput {
    * shape, so a ≤50-object org's golden response is byte-identical.
    */
   readonly scanTruncated?: boolean;
-  /** CR-RV12: the TRUE matching-object count (only when the scan was capped). */
+  /** The TRUE matching-object count (only when the scan was capped). */
   readonly totalMatchingObjects?: number;
 }
 
@@ -213,7 +213,7 @@ const criteriaPredicate = (
   return 'unspecified criteria';
 };
 
-/** Rule families that are criteria-shaped (carry a predicate) — CR-CAP-16. */
+/** Rule families that are criteria-shaped (carry a predicate). */
 const PREDICATE_RULE_TYPES: ReadonlySet<string> = new Set([
   'criteria',
   'guest',
@@ -222,7 +222,7 @@ const PREDICATE_RULE_TYPES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The Criteria-column text for a rule row. CR-CAP-16: guest / territory rules
+ * The Criteria-column text for a rule row. Guest / territory rules
  * are criteria-shaped, so they show their predicate too; a guest rule also
  * prefixes its Experience-Cloud site name so the portal is visible. Owner rules
  * have no predicate ("—").
@@ -266,7 +266,7 @@ interface ObjectSharing {
   readonly profilesWithGrants: number;
   readonly permSetsWithGrants: number;
   /**
-   * CR-CAP-05b: the rendered "Shared With" recipient cell per rule id. The
+   * The rendered "Shared With" recipient cell per rule id. The
    * summary previously named NO recipient (4-column table); each cell now lists
    * the rule's `sharedWith` targets, appending "(and its subordinate roles)" for
    * a `roleAndSubordinates` / `…Internal` marker. Computed async (edge reads +
@@ -276,7 +276,7 @@ interface ObjectSharing {
 }
 
 /**
- * CR-CAP-05b: build the "Shared With" recipient cell for one sharing rule by
+ * Build the "Shared With" recipient cell for one sharing rule by
  * reading its outbound `sharedWith` edges. A `roleAndSubordinates` /
  * `…Internal` Role target is marked "(and its subordinate roles)" and its
  * descending subtree counted via the SAME `expandRoleSubordinates` helper
@@ -376,7 +376,7 @@ const renderObjectSection = (
         : '_(no sharing rules)_',
     );
   } else {
-    // CR-CAP-05b: a "Shared With" column names the recipient — previously the
+    // A "Shared With" column names the recipient — previously the
     // table OMITTED recipients entirely (the role/group a rule shared with was
     // never named). A `roleAndSubordinates` recipient is marked "(and its
     // subordinate roles)" via the shared expandRoleSubordinates helper.
@@ -388,7 +388,7 @@ const renderObjectSection = (
     for (const rule of sorted) {
       const ruleType = stringProp(rule.properties, 'ruleType', 'unknown');
       const access = stringProp(rule.properties, 'accessLevel', 'Unknown');
-      // Surface the criteria/guest/territory predicate (P11-G5, CR-CAP-16) so a
+      // Surface the criteria/guest/territory predicate so a
       // predicate-based access path isn't invisible. The predicate needs record
       // data to evaluate, so it is a declared rule definition, not a per-record
       // verdict.
@@ -465,7 +465,7 @@ const renderRoleHierarchySection = (
 };
 
 /**
- * The parent CustomObject api name a SharingRule applies to. The v1.1 sharing
+ * The parent CustomObject api name a SharingRule applies to. The sharing
  * extractor sets the rule's `parentId` to `CustomObject:{Object}` and its
  * `apiName` to `{Object}.{RuleName}`; it does NOT emit a `properties.sObjectType`.
  * The previous index keyed on that non-existent `sObjectType`, so it matched
@@ -510,7 +510,7 @@ const buildSharingRulesIndex = (
  * grantors carrying an object-CRUD flag (allowCreate/Read/Edit/Delete or
  * View/Modify-All), deduped by grantor id.
  *
- * CR-04: object CRUD, field-level security (FLS), and record sharing are three
+ * Object CRUD, field-level security (FLS), and record sharing are three
  * orthogonal planes. The previous implementation walked each child
  * CustomField's `grantedBy` edges and counted FLS grants toward this
  * object-access tally — conflating two planes (and inflating the count via
@@ -695,7 +695,7 @@ export const generateSharingSummaryHandler = async (
         byNameCaseInsensitive(a.apiName, b.apiName),
     );
   }
-  // CR-RV12: capture the TRUE matching count BEFORE the architect-tier
+  // Capture the TRUE matching count BEFORE the architect-tier
   // OBJECT_SCAN_CAP slice, so a >50-object org's summary discloses that it
   // covers only the first 50 rather than silently reading as complete.
   //
@@ -726,12 +726,12 @@ export const generateSharingSummaryHandler = async (
 
   // Build per-object sharing entries.
   const entries: ObjectSharing[] = [];
-  // CR-CAP-05b: doc-level disclosure flags — set if any rule's subordinate-role
+  // Doc-level disclosure flags — set if any rule's subordinate-role
   // subtree was incomplete, or any recipient was roleAndSubordinatesInternal.
   let roleSubtreeTruncated = false;
   let internalSubordinatesUndisclosable = false;
   for (const object of scanObjects) {
-    // CR-04: count OBJECT-level CRUD grants (one edge query on the object),
+    // Count OBJECT-level CRUD grants (one edge query on the object),
     // not field-level FLS grants (which conflated planes and inflated counts).
     const grantsResult = await tallyGrants(ctx, object);
     if (!grantsResult.ok) return err(grantsResult.error);
@@ -741,7 +741,7 @@ export const generateSharingSummaryHandler = async (
       ? externalOwdRaw
       : null;
     const rules = sharingIndex.get(object.apiName) ?? [];
-    // CR-CAP-05b: name each rule's sharedWith recipient (was omitted) via the
+    // Name each rule's sharedWith recipient (was omitted) via the
     // shared role-subtree helper, so this surface matches who_can_access_object.
     const ruleRecipients = new Map<string, string>();
     for (const rule of rules) {
@@ -805,7 +805,7 @@ export const generateSharingSummaryHandler = async (
     '',
     '## Overview',
     '',
-    // CR-RV12: when the OBJECT_SCAN_CAP truncated the scan, show "first N of M"
+    // When the OBJECT_SCAN_CAP truncated the scan, show "first N of M"
     // inline in the Overview a reader sees first — never let the plain scanned
     // count silently read as the org's complete object inventory.
     objectScanTruncated
@@ -842,7 +842,7 @@ export const generateSharingSummaryHandler = async (
     'Restriction & Scoping rules (Restrict / Scoping enforcement) NARROW record visibility on top of OWD + sharing rules — a user who otherwise has access still only sees records matching the rule\'s `recordFilter`. They are listed per object with their enforcement type and active state; whether a given record/user is scoped needs record-level + requester context the offline metadata lacks. An empty "Restriction & Scoping Rules" section means none were retrieved for that object, not a guarantee the object is unrestricted.',
     UNMODELED_SHARING_DIMENSIONS_DISCLOSURE,
   ];
-  // CR-RV12: the OBJECT_SCAN_CAP=50 slice (~L467) had NO reader-facing
+  // The OBJECT_SCAN_CAP=50 slice (~L467) had NO reader-facing
   // disclosure — on a >50-object org the summary silently read as complete.
   // Mirrors the scanTruncated / "showing first N of M" shape
   // `unassigned-permission-sets.ts` established for its own per-type scan cap.
@@ -883,7 +883,7 @@ export const generateSharingSummaryHandler = async (
       'Role coverage gap: the `Role` type was NOT retrieved into this vault, so the role hierarchy is **not checked**, never "no roles". Run `sfi refresh` including Role, then re-run this tool.',
     );
   }
-  // CR-CAP-05b: a roleAndSubordinates recipient expands to the role subtree
+  // A roleAndSubordinates recipient expands to the role subtree
   // below it; an incomplete subtree (a subordinate Role node not retrieved, or
   // the cap hit) is disclosed, never silently treated as complete.
   if (roleSubtreeTruncated) {
@@ -891,7 +891,7 @@ export const generateSharingSummaryHandler = async (
       'roleAndSubordinates subtree gap: a sharing rule shares with a role and its subordinates, but the role hierarchy BELOW that role is INCOMPLETE — a subordinate Role node was not retrieved into this vault (a partial refresh) or the subtree scan was capped. The "(and its subordinate roles)" count may UNDER-report; additional subordinate roles could also gain access. Run `sfi refresh` including Role, or see `coverage_report`.',
     );
   }
-  // CR-CAP-05b: the internal-vs-portal exclusion of roleAndSubordinatesInternal
+  // The internal-vs-portal exclusion of roleAndSubordinatesInternal
   // cannot be applied offline (Role nodes carry no portal/partner marker).
   if (internalSubordinatesUndisclosable) {
     boundaries.push(
@@ -906,7 +906,7 @@ export const generateSharingSummaryHandler = async (
     ...allRoles.map((r) => r.id),
   ];
 
-  // CR-08: fit the assembled doc (with the already-mutated CR-02/CR-04
+  // Fit the assembled doc (with the already-mutated
   // `boundaries[]`) under the response budget BEFORE the global guard, so its
   // slimDataStrings never 1024-cuts `document.body` and silently strips the
   // honesty footer. `targetMissing` is a sibling DATA field (outside the

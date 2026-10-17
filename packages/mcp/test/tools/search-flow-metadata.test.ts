@@ -366,14 +366,14 @@ describe('searchFlowMetadataInputSchema', () => {
     expect(parsed.success).toBe(true);
   });
 
-  // CR-06: new input combinations that were previously rejected.
-  it('CR-06: accepts summarize=true without a query', () => {
+  // New input combinations that were previously rejected.
+  it('accepts summarize=true without a query', () => {
     expect(
       searchFlowMetadataInputSchema.safeParse({ summarize: true }).success,
     ).toBe(true);
   });
 
-  it('CR-06: accepts summarize=true combined with a query', () => {
+  it('accepts summarize=true combined with a query', () => {
     expect(
       searchFlowMetadataInputSchema.safeParse({
         summarize: true,
@@ -382,7 +382,7 @@ describe('searchFlowMetadataInputSchema', () => {
     ).toBe(true);
   });
 
-  it('CR-06: accepts triggerObject alone (with summarize=true)', () => {
+  it('accepts triggerObject alone (with summarize=true)', () => {
     expect(
       searchFlowMetadataInputSchema.safeParse({
         summarize: true,
@@ -391,13 +391,13 @@ describe('searchFlowMetadataInputSchema', () => {
     ).toBe(true);
   });
 
-  it('CR-06: still rejects an empty object (no query AND no summarize)', () => {
+  it('still rejects an empty object (no query AND no summarize)', () => {
     expect(searchFlowMetadataInputSchema.safeParse({}).success).toBe(false);
   });
 });
 
 // =============================================================================
-// CR-06: summarize mode + triggerObject filter
+// summarize mode + triggerObject filter
 // Uses a self-contained temp vault so these tests are independent of the
 // shared fixture (which has no <status> elements in its flows).
 // =============================================================================
@@ -414,7 +414,7 @@ const makeObjectNode = (id: string): Node => ({
   properties: {},
 });
 
-/** The three objects the CR-06 flow corpus declares in its `<object>` tags. */
+/** The three objects the flow corpus declares in its `<object>` tags. */
 const OBJECT_SEED: ExtractionResult = {
   nodes: [
     makeObjectNode('CustomObject:Account'),
@@ -424,7 +424,7 @@ const OBJECT_SEED: ExtractionResult = {
   edges: [],
 };
 
-describe('searchFlowMetadataHandler — CR-06 summarize + triggerObject', () => {
+describe('searchFlowMetadataHandler — summarize + triggerObject', () => {
   let cr06Dir: string;
   let cr06Store: GraphStore;
   let cr06Ctx: Context;
@@ -477,7 +477,7 @@ describe('searchFlowMetadataHandler — CR-06 summarize + triggerObject', () => 
     rmSync(cr06Dir, { recursive: true, force: true });
   });
 
-  it('CR-06 fail-before: {summarize:true} would have been rejected by the old schema (no query)', () => {
+  it('fail-before: {summarize:true} would have been rejected by the old schema (no query)', () => {
     // The OLD schema required query to be present; the new refine allows
     // summarize:true with no query. This test verifies the schema ACCEPTS it
     // (the fail-before assertion is: the old schema would have returned
@@ -487,7 +487,7 @@ describe('searchFlowMetadataHandler — CR-06 summarize + triggerObject', () => 
     expect(parsed.success).toBe(true);
   });
 
-  it('CR-06: summarize=true returns statusSummary with correct totals', async () => {
+  it('summarize=true returns statusSummary with correct totals', async () => {
     const r = await searchFlowMetadataHandler(cr06Ctx, { summarize: true });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -506,7 +506,7 @@ describe('searchFlowMetadataHandler — CR-06 summarize + triggerObject', () => 
     expect(r.value.data.truncated).toBe(false);
   });
 
-  it('CR-06: summarize=true with triggerObject=Account counts only Account flows', async () => {
+  it('summarize=true with triggerObject=Account counts only Account flows', async () => {
     const r = await searchFlowMetadataHandler(cr06Ctx, {
       summarize: true,
       triggerObject: 'Account',
@@ -523,7 +523,7 @@ describe('searchFlowMetadataHandler — CR-06 summarize + triggerObject', () => 
     expect(summary.total).toBe(3);
   });
 
-  it('CR-06: summarize=true plus query returns both summary and line matches', async () => {
+  it('summarize=true plus query returns both summary and line matches', async () => {
     const r = await searchFlowMetadataHandler(cr06Ctx, {
       summarize: true,
       query: '<status>Active</status>',
@@ -536,7 +536,7 @@ describe('searchFlowMetadataHandler — CR-06 summarize + triggerObject', () => 
     expect(r.value.data.matches.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('CR-06: triggerObject filters line matches too (query + triggerObject)', async () => {
+  it('triggerObject filters line matches too (query + triggerObject)', async () => {
     const r = await searchFlowMetadataHandler(cr06Ctx, {
       query: 'status',
       triggerObject: 'Opportunity',

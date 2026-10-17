@@ -13,10 +13,12 @@ properties:
   enableHistory: true
   enableReports: true
   enableSearch: false
+  externalSharingModel: null
   label: Warranty Claim
   nameFieldLabel: Warranty Claim Number
   nameFieldType: AutoNumber
   pluralLabel: Warranty Claims
+  recordPageOverrides: []
   sharingModel: Private
   visibility: Public
 sourcePath: source/main/default/objects/Warranty_Claim__c/Warranty_Claim__c.object-meta.xml
@@ -39,9 +41,11 @@ A warranty claim raised against a completed installation.
 | enableHistory | `true` |
 | enableReports | `true` |
 | enableSearch | `false` |
+| externalSharingModel | `null` |
 | nameFieldLabel | `Warranty Claim Number` |
 | nameFieldType | `AutoNumber` |
 | pluralLabel | `Warranty Claims` |
+| recordPageOverrides | `` |
 | sharingModel | `Private` |
 | visibility | `Public` |
 

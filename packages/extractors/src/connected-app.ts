@@ -198,7 +198,7 @@ const validateRoot = (
  *
  * Returns one `Node` of type `'ConnectedApp'` and zero edges. The
  * callback URL, OAuth scopes, and SAML URLs are strings, not graph nodes;
- * linking to managed-package namespaces is deferred to v0.3.
+ * linking to managed-package namespaces is deferred.
  *
  * Error cases (per vendored `ConnectedApp.md`):
  *   - `file-not-found` if the file is missing

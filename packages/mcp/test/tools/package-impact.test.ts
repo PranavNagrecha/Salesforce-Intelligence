@@ -637,7 +637,7 @@ describe('packageImpactHandler — two-segment package members (PACKAGE-IMPACT-T
 });
 
 // =============================================================================
-// W6.1 — targetMissing package touchpoints (PACKAGE-IMPACT-TWO-SEGMENT-NAMESPACE-
+// targetMissing package touchpoints (PACKAGE-IMPACT-TWO-SEGMENT-NAMESPACE-
 // BLIND residual). A managed package's INTERNAL components are usually never
 // retrieved, so a reference from YOUR code to `Ns__ManagedThing` points at a
 // node that does NOT exist in the graph (a dangling / targetMissing edge). The
@@ -647,7 +647,7 @@ describe('packageImpactHandler — two-segment package members (PACKAGE-IMPACT-T
 // pass must recover them. Guard FAILS pre-fix (no phantom pass → 0 deps →
 // no-detected-dependencies).
 // =============================================================================
-describe('packageImpactHandler — W6.1 targetMissing package touchpoints', () => {
+describe('packageImpactHandler — targetMissing package touchpoints', () => {
   let dir: string;
   let local: GraphStore;
   let localCtx: Context;
@@ -719,14 +719,14 @@ describe('packageImpactHandler — W6.1 targetMissing package touchpoints', () =
 });
 
 // =============================================================================
-// W6.2 — verdict policy (GATE-HONESTY-EMPTY-GRAPH-EQUALS-SAFE). A
+// verdict policy (GATE-HONESTY-EMPTY-GRAPH-EQUALS-SAFE). A
 // `no-detected-dependencies` verdict reads as a soft "safe to uninstall". When
 // the package HAS visible members but the vault carries no coverage rows, that
 // absence is "not checked" — the "members exist with empty inbound edges" trap.
 // The verdict must carry the shared completeness caveat (fail-harder), yet STAY
 // bare on a fully-covered vault (calibrated, not a blanket floor).
 // =============================================================================
-describe('packageImpactHandler — W6.2 verdict policy (members-present not bare)', () => {
+describe('packageImpactHandler — verdict policy (members-present not bare)', () => {
   const completeCoverage = {
     ...FIXTURE_MANIFEST,
     coverage: DEFAULT_USAGE_SOURCE_FAMILIES.map((type) => ({
@@ -965,7 +965,7 @@ describe('packageImpactHandler — grant-only targetMissing two-segment touchpoi
 
 // =============================================================================
 // PACKAGE-IMPACT-TWO-SEGMENT-NAMESPACE-BLIND — grant-only count residual at REAL
-// VAULT SCALE. The synthetic W6.1 fixtures above have <50 dangling targets, so a
+// VAULT SCALE. The synthetic fixtures above have <50 dangling targets, so a
 // capped per-group sample happened to include the grant. On a busy org there are
 // far MORE than 50 dangling `(ApexClass, grantedBy, declared)` targets across the
 // installed packages, and a namespace whose members sort late (`Acme__*`)

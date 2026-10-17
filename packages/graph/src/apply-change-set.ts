@@ -263,7 +263,7 @@ export const computeChangeSet = async (
   // the change-set's node view, so a sibling representation outside the change
   // set is invisible and it under-mints vs a full refresh.
   mintPolymorphicActivityFieldEdges([...desiredNodes.values()], desiredEdgeList);
-  // R7-W3: mirror cold import — remap case-variant CustomObject targets onto
+  // mirror cold import — remap case-variant CustomObject targets onto
   // the vaulted object id. Same INCREMENTAL GAP as the CustomField mirror
   // above: only sees the change-set's node view.
   canonicalizeObjectEdgeTargets([...desiredNodes.values()], desiredEdgeList);
@@ -278,7 +278,7 @@ export const computeChangeSet = async (
   // runs. Same INCREMENTAL GAP as the mirrors above: a target outside a scoped
   // pull cannot anchor the remap until a full refresh.
   canonicalizeOmniStudioEdgeTargets([...desiredNodes.values()], desiredEdgeList);
-  // CR-CAP-09: mirror cold import — mint class-granular @future dispatchesAsync
+  // mirror cold import — mint class-granular @future dispatchesAsync
   // edges after canonicalize. INCREMENTAL GAP: this only sees the change-set's
   // node view (`desiredNodes`), so a future-holding target class outside the
   // change set is invisible and under-mints vs a full refresh; full
@@ -412,7 +412,7 @@ export const computeChangeSet = async (
  * statement of `chunk.length` value-tuples with flattened positional params),
  * issued on the connection the caller has ALREADY put in an open transaction.
  *
- * This is the CR-20 Part-1 batching: it replaces the row-at-a-time upsert loops
+ * This is the Part-1 batching: it replaces the row-at-a-time upsert loops
  * but deliberately does NOT begin/commit anything — atomicity stays with the
  * single transaction `applyChangeSet` owns. (Contrast cold import's
  * `commitBatched`, which commits per chunk; adopting that here would break the
@@ -492,7 +492,7 @@ export const applyChangeSet = async (
     // first keeps the working set small; node upserts before edge upserts so an
     // edge's freshly-added target node already exists when the edge is written.
     //
-    // CR-20 Part 1: the two upsert loops are batched into multi-row statements
+    // Part 1: the two upsert loops are batched into multi-row statements
     // (one `connection.run` per IMPORT_BATCH_SIZE chunk) to cut the per-row
     // round-trips on a large diff — still inside this single transaction, so the
     // all-or-nothing invariant is unchanged. Deletes stay per-row: the volume
@@ -561,7 +561,7 @@ export interface PruneCounts {
  * Prune ONLY the stale rows a scoped/partial reconcile produced — the delete
  * lists of a change set built with `computeChangeSet(..., { pruneNodeTypes })`.
  *
- * This is the CR-20 Part-2 path for the scoped/pruned WITH-PULL refresh, where
+ * This is the Part-2 path for the scoped/pruned WITH-PULL refresh, where
  * `importExtractionResults` has ALREADY persisted the reconciled type's fresh
  * rows; all that remains is dropping the stale rows of the reconciled types.
  *

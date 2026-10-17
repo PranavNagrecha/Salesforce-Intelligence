@@ -1,14 +1,14 @@
 /**
  * Handler for the `sfi.empty_queues_and_groups` MCP tool.
  *
- * The v2.4 "which queues / groups have no members?" surface. Walks
- * existing Queue + Group nodes' member properties (extracted in v0.1
+ * The "which queues / groups have no members?" surface. Walks
+ * existing Queue + Group nodes' member properties (extracted
  * + v1.x) — no enrichment-tier data required.
  *
  * **Routing-trap detection** — a Queue with zero members but multiple
  * incoming AssignmentRule references is the most operationally urgent
- * case for admins. v2.0b's `unused_components` would flag the queue
- * as "used" because incoming references exist; v2.4 separates "has
+ * case for admins. The `unused_components` would flag the queue
+ * as "used" because incoming references exist; this separates "has
  * no members" from "has no references" so the routing-trap surfaces
  * as a high-priority cleanup candidate (or, more usefully, a routing
  * redirect target before deletion).
@@ -17,7 +17,7 @@
  * whose own members chain to a Role the vault did not extract, the
  * tool returns `memberSource: 'unknown'` rather than asserting zero
  * members. The `unknownMemberCountQueues` / `unknownMemberCountGroups`
- * counters separate "unknown" from "confirmed empty" — the v2.4
+ * counters separate "unknown" from "confirmed empty" — the
  * constitutional rule.
  *
  * **Live-drift honesty (EMPTY-QUEUES-AND-GROUPS-FALSE-EMPTY-LIVE-DRIFT)** —
@@ -159,7 +159,7 @@ export const emptyQueuesAndGroupsInputSchema = z.object({
     .min(1)
     .max(EMPTY_QUEUES_MAX_LIMIT)
     .optional(),
-  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // Continuation cursor: an OPAQUE token echoed back from a prior
   // truncated page's `nextCursor`; carries the resume offset + which list
   // (queues | groups) it advances. Omit = today's behavior.
   cursor: z.string().min(1).optional(),
@@ -330,7 +330,7 @@ export interface EmptyQueuesAndGroupsOutput {
   /** Group nodes actually scanned (only when the Group walk was incomplete). */
   readonly totalGroupNodes?: number;
   /**
-   * CR-22 opaque continuation token, present ONLY when the designated list
+   * Opaque continuation token, present ONLY when the designated list
    * overflowed `limit`/the byte budget. Echo it back as `cursor` to resume;
    * absent on a whole-fits page so the response is byte-identical.
    */
@@ -490,7 +490,7 @@ const resolveGroupMemberCount = (node: Node): ResolvedMembers => {
 };
 
 /**
- * Compute whether a queue/group is "stale" per the v2.4 definition:
+ * Compute whether a queue/group is "stale" per the definition:
  * zero members, has incoming references, and lastModifiedAt > 180d
  * ago. Returns false when lastModifiedAt is null because we cannot
  * judge age.
@@ -724,7 +724,7 @@ export const emptyQueuesAndGroupsHandler = async (
   const sortedGroups = [...groups].sort(compareGroupById);
   const truncatedQ = sortedQueues.length > limit;
   const truncatedG = sortedGroups.length > limit;
-  // KEEP the pre-CR-22 `truncated` semantics byte-for-byte; the cursor block is
+  // KEEP the pre-paging `truncated` semantics byte-for-byte; the cursor block is
   // layered on top and emitted only when the designated list is actually paged.
   const truncated = truncatedQ || truncatedG;
 
@@ -765,7 +765,7 @@ export const emptyQueuesAndGroupsHandler = async (
     );
   }
 
-  // CR-22 section cursor: page ONE designated list (queues by default; groups
+  // Section cursor: page ONE designated list (queues by default; groups
   // when type:'Group') and disclose the other honestly. On resume the handler
   // feeds token.listId back as designatedListId (paginateSection does NOT
   // cross-check — B0 note).

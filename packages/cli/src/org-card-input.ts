@@ -1,5 +1,5 @@
 /**
- * Org-card input assembly (P13-CARD-render) — derives EVERY number on the
+ * Org-card input assembly — derives EVERY number on the
  * card from the graph/manifest, so each is independently re-derivable (the
  * unit tests assert exactly that). The renderer itself is pure
  * (`@sf-intelligence/renderers` `renderOrgCard`); this module is the only
@@ -134,7 +134,7 @@ export const buildOrgCardInput = async (
   }
   integrations.sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]));
 
-  // Data-shape facts (P13-FACTS-consumers): captured approximate counts for
+  // Data-shape facts: captured approximate counts for
   // the top objects, when the vault holds them. Graph state — deterministic.
   const factCounts: Array<readonly [string, number]> = [];
   let factStamp: string | null = null;

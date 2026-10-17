@@ -1,27 +1,27 @@
 /**
  * Handler for the `sfi.unassigned_permission_sets` MCP tool.
  *
- * The v2.4 "which permission sets are assigned to nobody?" surface.
+ * The "which permission sets are assigned to nobody?" surface.
  *
  * **Two-axis output** — this question cannot be fully answered from
  * v1.x's structural metadata alone. The authoritative answer requires
- * user→permission-set assignment data, which v1.7's optional R2
- * Tooling-API enrichment pass extracts. v2.4 ships the tool with two
+ * user→permission-set assignment data, which the optional
+ * Tooling-API enrichment pass extracts. This ships the tool with two
  * output paths:
  *
- *   - When v1.7 R2 has run, each PermissionSet node carries
+ *   - When has run, each PermissionSet node carries
  *     `properties.assignedUserCount`. PermissionSets with
  *     `assignedUserCount === 0` are authoritatively unassigned.
- *   - When v1.7 R2 has not run, the tool falls back to a structural
+ *   - When has not run, the tool falls back to a structural
  *     edge check: PermissionSets with no outgoing `grantedBy` edges
  *     (the v1.x emission shape) are surfaced as "no structural grants"
- *     — a v2.4-honest fallback rather than asserting "unassigned"
+ *     — an honest fallback rather than asserting "unassigned"
  *     from a different signal. The fallback flips the result's
  *     `enrichmentStatus` to `'structural-only'`, and the
  *     `unknownAssignmentCount` separates "no data" from
  *     "no assignments" so the caller never confuses the two.
  *
- * **Honesty discipline (v2.4 constitutional)** — `unassignedCount`
+ * **Honesty discipline (constitutional)** — `unassignedCount`
  * counts PermissionSets confirmed unassigned by either tooling-api or
  * structural-edges data. `unknownAssignmentCount` is the count of
  * PermissionSets for which neither signal can confirm the assignment
@@ -31,7 +31,7 @@
  * **Note on grantedBy direction** — v1.x's `grantedBy` emission is
  * from a PermissionSet/Profile (source) to the granted Component
  * (target): the PermissionSet → CustomField/CustomObject/etc. flow.
- * In v2.4's structural-only fallback we count OUTGOING `grantedBy`
+ * In the structural-only fallback we count OUTGOING `grantedBy`
  * edges from a PermissionSet: a PermissionSet with no outgoing
  * `grantedBy` grants nothing. This is "structurally orphaned from the
  * component graph" — a strict subset of "not assigned to users", but
@@ -90,7 +90,7 @@ export const unassignedPermissionSetsInputSchema = z.object({
     .min(1)
     .max(UNASSIGNED_MAX_LIMIT)
     .optional(),
-  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // Continuation cursor: an OPAQUE token echoed back from a prior
   // truncated page's `nextCursor`; carries the resume offset + which list
   // (unassigned | orphanedFromComponents) it advances. Omit = today's behavior.
   cursor: z.string().min(1).optional(),
@@ -159,13 +159,13 @@ export interface UnassignedPermissionSetsOutput {
    */
   readonly coverageCaveat?: CoverageCaveat;
   /**
-   * P13-PSA-counts: org-wide active-holder aggregate (`data_snapshot`), when
+   * Org-wide active-holder aggregate (`data_snapshot`), when
    * captured. `factualZeroAtCapture: true` upgrades a metadata inference to a
    * FACTUAL zero — the container had no active assignments at the stamp.
    */
   readonly dataShape?: HoldersShape;
   /**
-   * CR-RV12: TRUE when the >500 node SCAN cap (LIST_PAGE_SIZE) silently dropped
+   * TRUE when the >500 node SCAN cap (LIST_PAGE_SIZE) silently dropped
    * PermissionSet nodes BEFORE the lists/`totalScanned` were computed — so the
    * answer covers only the first 500 PermissionSets. Present ONLY when actually
    * true so a ≤500-PS org's golden does not move.
@@ -179,7 +179,7 @@ export interface UnassignedPermissionSetsOutput {
    */
   readonly totalPermissionSets?: number;
   /**
-   * CR-22 opaque continuation token, present ONLY when the designated list
+   * Opaque continuation token, present ONLY when the designated list
    * overflowed `limit`/the byte budget. Echo it back as `cursor` to resume;
    * absent on a whole-fits page so the response is byte-identical.
    */
@@ -225,8 +225,8 @@ const propertyNumberOrNull = (node: Node, key: string): number | null => {
 };
 
 /**
- * Detect whether the vault manifest indicates v1.7 R2 enrichment has
- * run. The manifest is the source of truth per PLAN-v2.4 §4. When the
+ * Detect whether the vault manifest indicates enrichment has
+ * run. The manifest is the source of truth. When the
  * specific timestamp property is absent we fall back to detecting it
  * from PermissionSet nodes: if ANY PermissionSet carries
  * `assignedUserCount`, the enrichment ran.
@@ -272,7 +272,7 @@ const compareById = (
 /**
  * The `sfi.unassigned_permission_sets` MCP tool. See module JSDoc for
  * the dual-axis output, the enrichment-status fallback path, and the
- * v2.4 constitutional discipline of separating
+ * constitutional discipline of separating
  * `unassignedCount` from `unknownAssignmentCount`.
  */
 export const unassignedPermissionSetsHandler = async (
@@ -293,10 +293,10 @@ export const unassignedPermissionSetsHandler = async (
     });
   }
 
-  // The manifest is on ctx.manifest; v2.4 reads any
+  // The manifest is on ctx.manifest; this reads any
   // `permissionAssignmentEnrichmentRanAt` extras the manifest carries.
   // Cast through unknown to read extras the typed VaultManifest
-  // doesn't declare (v1.7 R2 metadata adds the field as an extension).
+  // doesn't declare (the enrichment metadata adds the field as an extension).
   const manifestExtras = ctx.manifest as unknown as Readonly<
     Record<string, unknown>
   >;
@@ -384,7 +384,7 @@ export const unassignedPermissionSetsHandler = async (
       }
       // In structural-only mode, EVERY scanned PermissionSet counts
       // toward unknownAssignmentCount because user assignment data
-      // isn't extracted at all. This is the v2.4 honesty discipline:
+      // isn't extracted at all. This is the honesty discipline:
       // surface the unknown axis explicitly.
       unknownAssignmentCount += 1;
     }
@@ -402,10 +402,10 @@ export const unassignedPermissionSetsHandler = async (
   const sortedOrphaned = [...orphanedFromComponents].sort(compareById);
   const truncatedUnassigned = sortedUnassigned.length > limit;
   const truncatedOrphaned = sortedOrphaned.length > limit;
-  // KEEP pre-CR-22 `truncated` semantics byte-for-byte; cursor block layered on top.
+  // KEEP pre-paging `truncated` semantics byte-for-byte; cursor block layered on top.
   const truncated = truncatedUnassigned || truncatedOrphaned;
 
-  // CR-RV12: the PermissionSet scan above is capped at LIST_PAGE_SIZE, so on a
+  // The PermissionSet scan above is capped at LIST_PAGE_SIZE, so on a
   // >500-PS org the lists AND `totalScanned` silently under-count. Compare the
   // TRUE org-wide count against the cap; surface scanTruncated + totalPermissionSets
   // ONLY when actually capped so a ≤500-PS org's golden does not move.
@@ -433,7 +433,7 @@ export const unassignedPermissionSetsHandler = async (
       ? `${sortedUnassigned.length} permission set(s) confirmed unassigned via Tooling API enrichment (${enrichmentStatus}).`
       : `tooling-api enrichment recommended — without it, ${unknownAssignmentCount} permission set(s) cannot have assignment status determined. The 'orphanedFromComponents' list shows those with no structural grant edges as a fallback signal.`;
 
-  // CR-22 section cursor: only ONE list is populated per enrichment path —
+  // Section cursor: only ONE list is populated per enrichment path —
   // `unassigned` in the tooling-api path, `orphanedFromComponents` in the
   // structural-only path — so designate the populated one and disclose the
   // other honestly. On resume the handler feeds token.listId back as
@@ -483,7 +483,7 @@ export const unassignedPermissionSetsHandler = async (
   const coverageCaveat = buildEnumerationCoverageCaveat(ctx, 'PermissionSet');
 
   // dataShape reads the ids actually surfaced in BOTH emitted lists (same shape
-  // as pre-CR-22 on a whole-fits call).
+  // as pre-paging on a whole-fits call).
   const dataShape = await readActiveHoldersFor(ctx, [
     ...unassignedPage.map((e) => e.id),
     ...orphanedPage.map((e) => e.id),

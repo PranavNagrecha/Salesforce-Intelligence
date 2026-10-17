@@ -1,0 +1,580 @@
+{
+  "version": 1,
+  "refreshedAt": "2026-10-17T16:10:41.527Z",
+  "sourceOrg": "demo-org",
+  "pullRan": false,
+  "families": [
+    {
+      "type": "ApexClass",
+      "requested": true,
+      "retrieved": 5,
+      "errored": false
+    },
+    {
+      "type": "ApexTrigger",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "ApprovalProcess",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "AssignmentRule",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "AuraDefinitionBundle",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "AuthProvider",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "AutoResponseRule",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "Bot",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "BotVersion",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "BusinessProcess",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "Certificate",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "CompactLayout",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "ConnectedApp",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "CspTrustedSite",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "CustomApplication",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "CustomField",
+      "requested": true,
+      "retrieved": 64,
+      "errored": false
+    },
+    {
+      "type": "CustomLabel",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "CustomMetadataRecord",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "CustomObject",
+      "requested": true,
+      "retrieved": 13,
+      "errored": false
+    },
+    {
+      "type": "CustomPermission",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "CustomSettingRecord",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "CustomSite",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "CustomTab",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "Dashboard",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false,
+      "pending": true
+    },
+    {
+      "type": "DecisionTable",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "DuplicateRule",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "EmailTemplate",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "EntitlementProcess",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "EscalationRule",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "ExperienceBundle",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "ExternalDataSource",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "ExternalService",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "FieldServiceSettings",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "FieldSet",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "FlexiPage",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "Flow",
+      "requested": true,
+      "retrieved": 3,
+      "errored": false
+    },
+    {
+      "type": "GenAiFunction",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "GenAiPlannerBundle",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "GenAiPlugin",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "GenAiPromptTemplate",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "GlobalValueSet",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "Group",
+      "requested": true,
+      "retrieved": 2,
+      "errored": false
+    },
+    {
+      "type": "Index",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "InstalledPackage",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "Layout",
+      "requested": true,
+      "retrieved": 2,
+      "errored": false
+    },
+    {
+      "type": "Letterhead",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "LightningComponentBundle",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "ListView",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "MatchingRule",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "MilestoneType",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "MutingPermissionSet",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "NamedCredential",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "Network",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "NetworkAccess",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "OmniDataTransform",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "OmniIntegrationProcedure",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "OmniScript",
+      "requested": true,
+      "retrieved": 4,
+      "errored": false
+    },
+    {
+      "type": "OmniUiCard",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "PathAssistant",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "PermissionSet",
+      "requested": true,
+      "retrieved": 2,
+      "errored": false
+    },
+    {
+      "type": "PermissionSetGroup",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "PlatformEventChannel",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "PlatformEventChannelMember",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "PresenceUserConfig",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "Profile",
+      "requested": true,
+      "retrieved": 3,
+      "errored": false
+    },
+    {
+      "type": "Queue",
+      "requested": true,
+      "retrieved": 2,
+      "errored": false
+    },
+    {
+      "type": "QueueRoutingConfig",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "QuickAction",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "RecordType",
+      "requested": true,
+      "retrieved": 2,
+      "errored": false
+    },
+    {
+      "type": "RemoteSiteSetting",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "Report",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false,
+      "pending": true
+    },
+    {
+      "type": "ReportType",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "RestrictionRule",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "Role",
+      "requested": true,
+      "retrieved": 6,
+      "errored": false
+    },
+    {
+      "type": "SamlSsoConfig",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "ScopingRule",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "SecuritySettings",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "ServiceChannel",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "SessionSettings",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "SharingRule",
+      "requested": true,
+      "retrieved": 2,
+      "errored": false
+    },
+    {
+      "type": "SharingSet",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "Skill",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "StandardValueSet",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "StaticResource",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "TimeSheetTemplate",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "TransactionSecurityPolicy",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "ValidationRule",
+      "requested": true,
+      "retrieved": 3,
+      "errored": false
+    },
+    {
+      "type": "VisualforceComponent",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "VisualforcePage",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "WaveDashboard",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "WaveDataflow",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "WaveXmd",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "WebLink",
+      "requested": true,
+      "retrieved": 0,
+      "errored": false
+    },
+    {
+      "type": "WorkflowRule",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    },
+    {
+      "type": "certs",
+      "requested": true,
+      "retrieved": 1,
+      "errored": false
+    }
+  ]
+}

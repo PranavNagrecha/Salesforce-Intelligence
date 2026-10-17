@@ -1,5 +1,5 @@
 /**
- * Opt-in read-only live org plane (v4.0 R5 / AUDIT-F3).
+ * Opt-in read-only live org plane.
  *
  * Disabled unless a stored grant exists (`sfi.live_consent { grant: true }`)
  * or `SFI_LIVE_PLANE_ENABLED=1`. Per-call `liveEnabled: true` is intent only
@@ -37,7 +37,7 @@ import { isLivePlaneEnvEnabled } from '../live-plane-env.js';
 import type { Context } from '../server.js';
 
 import { renderHybridStalenessWarning, type HybridStaleness } from './hybrid-trust.js';
-// CR-09 leaf extraction: the raw execution primitives moved to live-exec.ts (a
+// Leaf extraction: the raw execution primitives moved to live-exec.ts (a
 // dependency-free leaf) so live-session.ts can import them WITHOUT pulling in
 // this handler module — breaking the would-be live-plane <-> live-session cycle
 // and letting THIS module import the budgeted seam (runLiveQuery / runLiveRest)
@@ -51,7 +51,7 @@ import { LIVE_PLANE_DISCLOSURE, nodeExecFile, redactSecrets } from './live-exec.
 import { enterLiveGrant, getActiveLiveGrant } from './live-grant-context.js';
 // The single budgeted/consented/cached seam. Importing it here (now acyclic via
 // the leaf above) is what routes EVERY live read in this module through the
-// per-session query budget (CR-09).
+// per-session query budget.
 import { runLiveQuery, runLiveRest } from './live-session.js';
 import {
   scanSoqlForPicklistMismatches,
@@ -72,7 +72,7 @@ import {
 
 // Re-export the leaf primitives so every existing import path that pulls them
 // FROM './live-plane.js' (live-session.ts, the public barrel, the test suites)
-// keeps resolving unchanged after the CR-09 leaf extraction.
+// keeps resolving unchanged after the leaf extraction.
 export {
   apiPath,
   getLiveAuth,
@@ -95,7 +95,7 @@ const SAMPLE_BYTE_BUDGET = 36_000;
  * table is just a preview. Was an inline `slice(0, 50)` repeated across eight
  * live handlers (stale_records, recent_activity, duplicate_check,
  * owner_breakdown, folder_access, email_template_usage, group_count,
- * org_history); named here so the preview cap has one source of truth (P10-B1).
+ * org_history); named here so the preview cap has one source of truth.
  */
 const LIVE_TABLE_ROW_CAP = 50;
 
@@ -159,7 +159,7 @@ export const resolveLiveAccess = async (
   capability?: LiveCapability,
   requiredScopes: readonly LiveScope[] | null = ['aggregate'],
 ): Promise<LiveAccessDecision> => {
-  // P13-REMOTE-http: over HTTP the live plane is HARD-DISABLED.
+  // Over HTTP the live plane is HARD-DISABLED.
   if (process.env['SFI_TRANSPORT'] === 'http') {
     return { allowed: false, source: 'none', grant: null, denial: 'http-transport' };
   }
@@ -395,7 +395,7 @@ export const liveDescribeHandler = async (
   if (!gate.ok) return gate;
   const org = resolveOrg(ctx, input.orgAlias);
   const queriedAt = new Date().toISOString();
-  // CR-09: budgeted/cached describe read (one unit per org call / cache miss).
+  // Budgeted/cached describe read (one unit per org call / cache miss).
   const parsed = await runLiveQuery(
     org,
     ['sobject', 'describe', '--sobject', input.objectApiName],
@@ -886,7 +886,7 @@ export const liveCountHandler = async (
   if (!scopeGate.ok) return scopeGate;
   const org = resolveOrg(ctx, input.orgAlias);
   const queriedAt = new Date().toISOString();
-  // CR-09: budgeted/cached count read (one unit per org call / cache miss).
+  // Budgeted/cached count read (one unit per org call / cache miss).
   const parsed = await runLiveQuery(
     org,
     ['data', 'query', '--query', soqlCheck.value],
@@ -1101,7 +1101,7 @@ export const checkVaultStaleness = async (
   let total = 0;
   for (const type of STALE_CHECK_TYPES) {
     const soql = `SELECT Id FROM ${type} WHERE LastModifiedDate > ${sinceLiteral}`;
-    // CR-09: budgeted/cached per-type Tooling read (the `--use-tooling-api` flag
+    // Budgeted/cached per-type Tooling read (the `--use-tooling-api` flag
     // is part of the args vector, so it is preserved AND keys the cache distinctly
     // from a non-Tooling query of the same SOQL). A failure — including a
     // budget-exhausted stop mid-loop — records the type into erroredTypes (the
@@ -1163,7 +1163,7 @@ export const liveStaleCheckHandler = async (
   const { byType, checkedTypes, erroredTypes, driftCount: total } = stale.value;
 
   const orgAheadOfVault = stale.value.vaultStale;
-  // CR-09: each of the 15 STALE_CHECK_TYPES is now ONE budgeted live query, so a
+  // Each of the 15 STALE_CHECK_TYPES is now ONE budgeted live query, so a
   // type can land in erroredTypes either because the org rejected the Tooling
   // query OR because the per-session live-query budget ran out mid-loop. Name
   // the un-checked types explicitly so a skipped type is never read as
@@ -1260,7 +1260,7 @@ export const liveSampleHandler = async (
   const org = resolveOrg(ctx, input.orgAlias);
   const queriedAt = new Date().toISOString();
   const soql = capSampleSoql(input.soql, limit);
-  // CR-09: budgeted/cached sample read (one unit per org call / cache miss).
+  // Budgeted/cached sample read (one unit per org call / cache miss).
   const parsed = await runLiveQuery(org, ['data', 'query', '--query', soql], exec);
   if (!parsed.ok) return parsed;
   const payload = parsed.value.value as {
@@ -1449,7 +1449,7 @@ export const liveOrgLimitsHandler = async (
   if (!gate.ok) return gate;
   const org = resolveOrg(ctx, input.orgAlias);
   const queriedAt = new Date().toISOString();
-  // CR-09: a USER-invoked REST limits read counts against the budget (one unit).
+  // A USER-invoked REST limits read counts against the budget (one unit).
   // (The INTERNAL budget cross-check in liveBudgetHandler stays on raw runSfJson
   // so a budget CHECK never spends budget — see live-session.ts.)
   const limitsResult = await runLiveRest(org, '/limits', exec);
@@ -1676,7 +1676,7 @@ export const liveInactiveUsersHandler = async (
     `SELECT Id, Name, Username, UserType, Profile.Name, LastLoginDate ` +
     `FROM User WHERE ${where} ` +
     `ORDER BY LastLoginDate ASC NULLS FIRST LIMIT ${limit}`;
-  // CR-09: route the detail read through the budget too — the count above already
+  // Route the detail read through the budget too — the count above already
   // routes via liveCountHandler, so this tool decrements by exactly 2 (count +
   // detail), no residual bypass and no double-count.
   const parsed = await runLiveQuery(org, ['data', 'query', '--query', detailSoql], exec);
@@ -1872,7 +1872,7 @@ export const liveLicenseUsageHandler = async (
   const limit = input.limit ?? MAX_RECLAIM_ROWS;
   const cutoff = soqlDateTime(new Date(Date.now() - inactiveDays * MS_PER_DAY));
 
-  // CR-09: all three license reads route through the budget (decrements 3).
+  // All three license reads route through the budget (decrements 3).
   const licRes = await runLiveQuery(
     org,
     ['data', 'query', '--query', 'SELECT Name, Status, TotalLicenses, UsedLicenses FROM UserLicense ORDER BY Name'],
@@ -2105,7 +2105,7 @@ interface LiveQueryResult {
 /**
  * Run a SOQL query, converting any failure into `available:false` (never throws).
  *
- * CR-09: routes through the budgeted/cached seam {@link runLiveQuery}, so every
+ * Routes through the budgeted/cached seam {@link runLiveQuery}, so every
  * one of the ~31 Wave-1 sites that flow through this helper (group_count,
  * stale_records, recent_activity, aggregate, duplicate_check, owner_breakdown,
  * report_usage, folder_access, email_template_usage, org_health SOQL signals,
@@ -2153,7 +2153,7 @@ const UNAVAILABLE_ERROR = (object: string, org: string, reason?: string): McpErr
 });
 
 /**
- * CR-09 budget legibility: detect a per-session budget-exhaustion reason coming
+ * Budget legibility: detect a per-session budget-exhaustion reason coming
  * back from a graceful `liveQuery` (available:false). A multi-signal tool
  * (org_health, security_exposure) swallows available:false into null/n-a, which
  * would otherwise make a budget STOP indistinguishable from "object not
@@ -2785,7 +2785,7 @@ export const liveOwnerBreakdownHandler = async (
     .map((row) => String((row as Record<string, unknown>).OwnerId ?? ''))
     .filter((id) => id.length > 0);
   const nameById = new Map<string, string>();
-  // CR-09: the two count queries above hard-fail (their budget reason surfaces
+  // The two count queries above hard-fail (their budget reason surfaces
   // through UNAVAILABLE_ERROR). The name-resolution queries below degrade
   // silently to ownerId-only — track a budget stop so it is named, not hidden.
   let nameResolutionBudgetStopped = false;
@@ -2913,7 +2913,7 @@ export interface LiveReportUsageOutput {
   readonly reports: readonly ReportUsageEntry[];
   readonly trust: TrustSummary;
   /**
-   * CR-P3-7: true when the live-query budget ran out on the stale-count or
+   * True when the live-query budget ran out on the stale-count or
    * detail query (after the gated COUNT succeeded). When true the staleReports
    * count is a partial floor, not an authoritative verdict, and `rendered`
    * surfaces the stop instead of a false clean "0 of N are stale".
@@ -2979,7 +2979,7 @@ export const liveReportUsageHandler = async (
     ['Report', 'Folder', 'Last run', 'Days', 'Stale'],
     reports.map((r) => [r.name, r.folderName ?? '—', r.lastRunDate ?? 'never', r.daysSinceRun ?? '—', r.stale ? 'yes' : '']),
   );
-  // CR-P3-7: the stale-count (verdict) and detail queries are NOT gated like
+  // The stale-count (verdict) and detail queries are NOT gated like
   // totalQ; a mid-tool budget stop returns total:0 with the budget reason, which
   // would otherwise render a FALSE CLEAN "0 of N are stale". Detect the stop on
   // either un-gated query and qualify the headline accordingly.
@@ -3080,7 +3080,7 @@ export interface LiveFolderAccessOutput {
   readonly folders: readonly FolderAccessEntry[];
   readonly trust: TrustSummary;
   /**
-   * CR-P3-8: true when the live-query budget ran out on the (un-gated) total
+   * True when the live-query budget ran out on the (un-gated) total
    * COUNT after the gated detail query succeeded. The folder total then falls
    * back to the returned-set size (an understatement); `rendered` names the stop.
    */
@@ -3118,7 +3118,7 @@ export const liveFolderAccessHandler = async (
   );
   if (!detailQ.available) return err(UNAVAILABLE_ERROR('Folder', org, detailQ.reason));
   const totalQ = await liveQuery(org, `SELECT COUNT() FROM Folder${whereClause}`, exec);
-  // CR-P3-8: totalQ is NOT gated; a mid-tool budget stop makes totalQ.total=0,
+  // totalQ is NOT gated; a mid-tool budget stop makes totalQ.total=0,
   // silently understating the universe (the verdict publicFolders is from the
   // gated detail rows and stays correct). Surface the stop.
   const budgetStopped = isBudgetExhaustedReason(totalQ.reason);
@@ -3242,7 +3242,7 @@ export interface LiveEmailTemplateUsageOutput {
   readonly templates: readonly TemplateUsageEntry[];
   readonly trust: TrustSummary;
   /**
-   * CR-P3-8: true when the live-query budget ran out on the (un-gated) total
+   * True when the live-query budget ran out on the (un-gated) total
    * COUNT after the gated detail query succeeded. The template total then falls
    * back to the returned-set size; `rendered` names the stop.
    */
@@ -3282,7 +3282,7 @@ export const liveEmailTemplateUsageHandler = async (
   );
   if (!detailQ.available) return err(UNAVAILABLE_ERROR('EmailTemplate', org, detailQ.reason));
   const totalQ = await liveQuery(org, `SELECT COUNT() FROM EmailTemplate${whereSql}`, exec);
-  // CR-P3-8: totalQ is NOT gated; a mid-tool budget stop makes totalQ.total=0,
+  // totalQ is NOT gated; a mid-tool budget stop makes totalQ.total=0,
   // understating the total (classic/migration verdicts come from the gated
   // detail rows and stay correct). Surface the stop.
   const budgetStopped = isBudgetExhaustedReason(totalQ.reason);
@@ -3411,7 +3411,7 @@ export const liveOrgHealthHandler = async (
     exec,
   );
 
-  // Governor limits via REST — CR-09: budgeted (one unit) and resilient. A
+  // Governor limits via REST — budgeted (one unit) and resilient. A
   // budget-exhausted REST read just skips the limits signal (like an auth
   // failure already does) and is flagged below, never a hard 500.
   const limitsAtRisk: LimitAtRisk[] = [];
@@ -3434,7 +3434,7 @@ export const liveOrgHealthHandler = async (
   const pendingAsyncJobs = pendingQ.available ? pendingQ.total : null;
   const pausedFlowInterviews = pausedQ.available ? pausedQ.total : null;
 
-  // CR-09: a budget stop on ANY signal must be legible, not a silent null/skip.
+  // A budget stop on ANY signal must be legible, not a silent null/skip.
   const budgetStopped =
     limitsBudgetStopped ||
     isBudgetExhaustedReason(failedQ.reason) ||
@@ -3510,7 +3510,7 @@ export const liveStorageByObjectHandler = async (
   const org = gate.value;
   const queriedAt = new Date().toISOString();
   const limit = input.limit ?? 50;
-  // CR-09: a USER-invoked REST recordCount read counts against the budget (one
+  // A USER-invoked REST recordCount read counts against the budget (one
   // unit). A budget-exhausted stop surfaces its reason through UNAVAILABLE_ERROR
   // so the user sees "budget", not a bare "not queryable".
   const result = await runLiveRest(org, '/limits/recordCount', exec);
@@ -3658,7 +3658,7 @@ export interface LiveSetupAuditTrailOutput {
   readonly changes: readonly SetupChange[];
   readonly trust: TrustSummary;
   /**
-   * CR-P3-8: true when the live-query budget ran out on the (un-gated) detail
+   * True when the live-query budget ran out on the (un-gated) detail
    * query after the gated COUNT succeeded. The change table is then silently
    * empty while totalChanges is exact; `rendered` names the partial.
    */
@@ -3688,7 +3688,7 @@ export const liveSetupAuditTrailHandler = async (
     `SELECT Action, Section, CreatedDate, Display, CreatedBy.Name FROM SetupAuditTrail WHERE CreatedDate = LAST_N_DAYS:${days} ORDER BY CreatedDate DESC LIMIT ${limit}`,
     exec,
   );
-  // CR-P3-8: detailQ is NOT gated; a mid-tool budget stop yields zero rows so
+  // detailQ is NOT gated; a mid-tool budget stop yields zero rows so
   // the change TABLE is silently empty while totalChanges (from the gated count)
   // is non-zero. Surface the partial.
   const budgetStopped = isBudgetExhaustedReason(detailQ.reason);
@@ -3771,7 +3771,7 @@ export const liveSecurityExposureHandler = async (
   const usersWithModifyAll = usersModifyAllQ.available ? usersModifyAllQ.total : null;
   const activeUsers = activeUsersQ.available ? activeUsersQ.total : null;
 
-  // CR-09: a budget stop on ANY of the 5 signals must be legible — otherwise a
+  // A budget stop on ANY of the 5 signals must be legible — otherwise a
   // null reads as "PermissionSet not queryable" and silently understates risk.
   const budgetStopped =
     isBudgetExhaustedReason(modifyAllQ.reason) ||
@@ -5435,7 +5435,7 @@ export interface SiblingObject {
  * Derive a record-scoped sibling object (`{Object}Share` / `{Object}History`)
  * and its parent-Id field from a base object API name, following Salesforce's
  * standard-vs-custom naming rule — the SHARED SOQL builder for the record-shares
- * (CR-CAP-L2) and field-history (R6-14) tools:
+ * and field-history tools:
  *   - Standard object `Account` → `Account{Suffix}`, parent field `AccountId`.
  *   - Custom object `Widget__c`  → `Widget__{Suffix}`, parent field `ParentId`.
  *
@@ -6099,7 +6099,7 @@ export const liveScheduledJobsHandler = async (
 // DATA (OldValue/NewValue are actual field values), so rows are capped HARD and
 // the default page is small.
 //
-// PRECONDITION COMPOSITION (R6-14): field history only exists when tracking is
+// PRECONDITION COMPOSITION: field history only exists when tracking is
 // enabled. The vault already knows per-field `trackHistory` (CustomField) and
 // per-object `enableHistory` (CustomObject), so we check the vault FIRST:
 //   - Vault says tracking is OFF for the field/object  → FAIL CLOSED with a

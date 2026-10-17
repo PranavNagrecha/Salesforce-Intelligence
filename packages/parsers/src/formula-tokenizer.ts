@@ -482,8 +482,8 @@ const peekNonWhitespace = (text: string, index: number): string => {
 // non-whitespace character. `functionCalls` is filtered to known
 // Salesforce function names (per Formula.md's vendored list); unknown
 // `(`-suffixed identifiers are silently skipped — they are neither
-// references nor emitted diagnostics in v0.2 (v0.3 may add a separate
-// `unknownCalls` channel). References preserve source order; function
+// references nor emitted diagnostics (a separate `unknownCalls` channel
+// would be a follow-up). References preserve source order; function
 // names are deduplicated and sorted.
 const extractReferencesAndCalls = (
   stripped: string,

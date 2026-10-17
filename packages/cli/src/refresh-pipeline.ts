@@ -227,25 +227,25 @@ export interface RenderCounts {
 type Extractor = (path: string) => Promise<Result<ExtractionResult, ExtractorError>>;
 
 /**
- * The metadata types the refresh pipeline understands. The v0.1 roster
- * (the nine `tests/fixtures/edu-org/package.xml` types) plus the v1.1
+ * The metadata types the refresh pipeline understands. The roster
+ * (the nine `tests/fixtures/edu-org/package.xml` types) plus the
  * sharing & visibility tier (`Group`, `Queue`, `Role`, `SharingRule`)
- * plus the v1.2 record-types + UI-surfaces tier (`BusinessProcess`,
+ * plus the record-types + UI-surfaces tier (`BusinessProcess`,
  * `CustomApplication`, `CustomLabel`, `CustomTab`, `GlobalValueSet`,
  * `PathAssistant`, `QuickAction`, `RecordType`, `StaticResource`) plus
- * the v1.3 legacy-automation + communications tier (`ApprovalProcess`,
+ * the legacy-automation + communications tier (`ApprovalProcess`,
  * `AssignmentRule`, `AutoResponseRule`, `DuplicateRule`, `EmailTemplate`,
  * `EscalationRule`, `Letterhead`, `MatchingRule`, `WorkflowRule`) plus
- * the v1.4 frontend code tier (`AuraDefinitionBundle`,
+ * the frontend code tier (`AuraDefinitionBundle`,
  * `LightningComponentBundle`, `VisualforceComponent`,
- * `VisualforcePage`) plus the v1.5 integration topology tier
+ * `VisualforcePage`) plus the integration topology tier
  * (`AuthProvider`, `CspTrustedSite`, `ExternalDataSource`,
  * `ExternalService`, `NetworkAccess`, `RemoteSiteSetting` — each is a
  * file-based extractor surfaced by a top-level Salesforce DX directory;
  * `ExternalDataSource` carries a `references` edge to its declared
  * `AuthProvider` and `ExternalService` carries a `references` edge to
  * its declared `NamedCredential`, the other four produce zero outgoing
- * edges) plus the v1.6 business-user record-value tier
+ * edges) plus the business-user record-value tier
  * (`CustomMetadataRecord`, `CustomSettingRecord` — each carries a single
  * record's configured values and attaches to its parent `CustomObject`
  * via the existing `parentOf` edge; no new EdgeType is introduced) plus
@@ -261,8 +261,8 @@ type Extractor = (path: string) => Promise<Result<ExtractionResult, ExtractorErr
  * `grantedBy` from each granted profile, no new EdgeType).
  *
  * Directories that don't exist under `source/` are skipped cleanly by
- * `walkDir`'s readdir try/catch — orgs without the v1.1 / v1.2 / v1.3 /
- * v1.4 / v1.5 / v1.6 / R6-17 directories (the edu-org fixture has no v1.1
+ * `walkDir`'s readdir try/catch — orgs without some tier's directories (the
+ * edu-org fixture has no
  * sharing tree, for instance) produce zero nodes of those types without
  * surfacing as failures.
  */
@@ -389,7 +389,7 @@ const coEmits = (
 /**
  * Lookup from supported type to its extractor function.
  *
- * The v1.4 frontend tier mixes file-based extractors
+ * The frontend tier mixes file-based extractors
  * (`VisualforcePage`, `VisualforceComponent` — each takes the path to
  * the `.page` / `.component` markup file and reads the `-meta.xml`
  * sibling itself) with directory-based extractors
@@ -527,7 +527,7 @@ const dispatchFile = (
 
 /**
  * A single entry the walker hands to the dispatch loop. File-shaped
- * extractors get `isDirectory: false`; the v1.4 bundle-shaped
+ * extractors get `isDirectory: false`; the bundle-shaped
  * extractors (`LightningComponentBundle`, `AuraDefinitionBundle`) get
  * `isDirectory: true` and `path` points at the bundle directory itself.
  */
@@ -547,11 +547,11 @@ const holdsDataPack = async (dir: string): Promise<boolean> => {
 
 /**
  * Recursively walk `currentDir` in alphabetical order, appending each
- * regular file (or v1.4 bundle directory) to `found`. Hidden entries
+ * regular file (or bundle directory) to `found`. Hidden entries
  * (names starting with `.`) are skipped to mirror the source-tree-hash
  * walk.
  *
- * v1.4 bundle handling: when the current directory's basename matches
+ * Bundle handling: when the current directory's basename matches
  * `BUNDLE_PARENT_DIRS` (`lwc`, `aura`), each child directory is pushed
  * to `found` as a bundle entry (`isDirectory: true`) and **not**
  * recursed into. Pushing the directory path with the `isDirectory`
@@ -1762,7 +1762,7 @@ export const renderVault = async (
       const page = nodesResult.value;
       if (page.length === 0) break;
       const nodes = [...page].sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0));
-      // CR-17: fetch every incident edge for the whole page in ONE batched
+      // Fetch every incident edge for the whole page in ONE batched
       // `listEdgesForNodes` query (direction='both', matching the old
       // per-node `listEdges(node.id)`), instead of an N+1 loop of one
       // `listEdges` per node. The helper partitions edges per node and sorts

@@ -13,10 +13,12 @@ properties:
   enableHistory: true
   enableReports: true
   enableSearch: false
+  externalSharingModel: null
   label: Payment
   nameFieldLabel: Payment Number
   nameFieldType: AutoNumber
   pluralLabel: Payments
+  recordPageOverrides: []
   sharingModel: ControlledByParent
   visibility: Public
 sourcePath: source/main/default/objects/Payment__c/Payment__c.object-meta.xml
@@ -39,9 +41,11 @@ A payment applied against an Invoice. Child of Invoice via master-detail.
 | enableHistory | `true` |
 | enableReports | `true` |
 | enableSearch | `false` |
+| externalSharingModel | `null` |
 | nameFieldLabel | `Payment Number` |
 | nameFieldType | `AutoNumber` |
 | pluralLabel | `Payments` |
+| recordPageOverrides | `` |
 | sharingModel | `ControlledByParent` |
 | visibility | `Public` |
 
@@ -63,3 +67,9 @@ A payment applied against an Invoice. Child of Invoice via master-detail.
 | `CustomField:Payment__c.Method__c` | declared | custom-field-extractor |
 | `CustomField:Payment__c.Payment_Date__c` | declared | custom-field-extractor |
 | `ValidationRule:Payment__c.Amount_Positive` | declared | validation-rule-extractor |
+
+### references (incoming, 1)
+
+| Source | Confidence | Producer |
+| --- | --- | --- |
+| `ApexClass:PaymentService` | heuristic | apex-scanner |

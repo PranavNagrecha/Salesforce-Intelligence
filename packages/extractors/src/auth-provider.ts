@@ -101,14 +101,14 @@ const validateRoot = (
  * `portal`, `registrationHandler`, `sendAccessTokenInHeader`,
  * `sendClientCredentialsInHeader`). The `<providerType>` value is
  * surfaced verbatim — Salesforce extends the allowed set over time and
- * v1.5 deliberately does not validate against it.
+ * this deliberately does not validate against it.
  *
  * Returns one `Node` of type `'AuthProvider'` and zero edges. Per
  * `AuthProvider.md` §Edges, Auth Providers are the *target* of
  * `references` edges emitted by `ExternalDataSource` and
  * `NamedCredential`; they do not reference other components themselves.
  * The `registrationHandler` and `executionUser` properties name an
- * ApexClass and a User respectively but v1.5 does NOT emit edges for
+ * ApexClass and a User respectively but it does NOT emit edges for
  * either — both are string bindings that the architect-integration-
  * topology skill surfaces as plain properties.
  *

@@ -6,7 +6,7 @@
  * answer. This tool returns a curated, honest SUMMARY plus pointers to official
  * Salesforce docs for a topic — explicitly NOT specific to the connected org.
  * It reads only the static `KNOWLEDGE_TOPICS` table; it never touches the vault
- * or fabricates org data (the v0.1 no-speculation contract).
+ * or fabricates org data (the no-speculation contract).
  *
  *   - With `topic`: resolve it (exact key or loose match) and return that
  *     topic's title/summary/docs, plus the full topic list for discovery.

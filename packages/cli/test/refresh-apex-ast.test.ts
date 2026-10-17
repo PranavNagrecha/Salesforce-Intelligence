@@ -10,7 +10,7 @@ import { loadManifest, vaultPaths } from '@sf-intelligence/vault';
 import { runRefresh } from '../src/commands/refresh.js';
 
 /**
- * P13-AST-edges — the --apex-ast flag: parsed-confidence apex-ast edges
+ * The --apex-ast flag: parsed-confidence apex-ast edges
  * coexist with scanner edges; a parse-failing file falls back to
  * scanner-only and is counted; flag OFF is byte-identical (zero apex-ast
  * rows).
@@ -32,7 +32,7 @@ const CALLEE = `public class Callee {
   public void help(String s) { System.debug(s); }
 }`;
 const BROKEN = `public class Broken { this is not valid apex %%% }`;
-// P14-USAGE-scanner-fp-downgrade: the scanner keys `rw.id = ...` on the
+// The scanner keys `rw.id = ...` on the
 // receiver TOKEN's declared type when it pattern-matches `Type var` pairs,
 // emitting CustomField:ReportWrapper.id — but ReportWrapper is an INNER
 // CLASS the AST can prove is not an sObject. Test.setMock-style `.class`
@@ -46,7 +46,7 @@ const WRAPPER = `public class Wrapper {
     Test.setMock(HttpCalloutMock.class, null);
   }
 }`;
-// CR-06 (H5): a child-relationship subquery. Outer fields belong to Account;
+// A child-relationship subquery. Outer fields belong to Account;
 // the child `(SELECT ... FROM Contacts)` names a RELATIONSHIP, not an sObject —
 // its fields and the relationship token must NOT mint parsed edges.
 const CHILDSUB = `public class ChildSub {
@@ -54,14 +54,14 @@ const CHILDSUB = `public class ChildSub {
     List<Account> rows = [SELECT Id, Name, (SELECT Email, FirstName FROM Contacts) FROM Account];
   }
 }`;
-// CR-06 (H5b): a semi-join. Inner `(SELECT AccountId FROM Contact)` is a real
+// A semi-join. Inner `(SELECT AccountId FROM Contact)` is a real
 // sObject scope — its fields key to Contact, NOT to the outer Account.
 const SEMIJOIN = `public class SemiJoin {
   public void run() {
     List<Account> rows = [SELECT Id, Name FROM Account WHERE Id IN (SELECT AccountId FROM Contact WHERE Email != null)];
   }
 }`;
-// CR-CAP-06: a caller whose TWO methods both call Callee — method m1 calls
+// A caller whose TWO methods both call Callee — method m1 calls
 // Callee.help, method m2 also calls Callee.help. The single Caller->Callee
 // callsApex edge must carry callerMethods === ['m1','m2'] (class-level union)
 // AND a per-target-method partition so what_if can attribute correctly.
@@ -226,7 +226,7 @@ afterEach(async () => {
   await rm(cwd, { recursive: true, force: true });
 });
 
-describe('refresh apex-ast (DEFAULT ON — P13-AST-flip)', () => {
+describe('refresh apex-ast (DEFAULT ON)', () => {
   it('FAIL-BEFORE/PASS-AFTER: a field read only in a SOQL string literal is stamped soql-string-literal', { timeout: 30_000 }, async () => {
     const r = await runRefresh({ cwd, noPull: true });
     expect(r.status).toBe('success');
@@ -264,7 +264,7 @@ describe('refresh apex-ast (DEFAULT ON — P13-AST-flip)', () => {
     }
   });
 
-  it('drops typed-receiver + .class heuristic FPs on parsed files (P14-USAGE-scanner-fp-downgrade)', { timeout: 30_000 }, async () => {
+  it('drops typed-receiver + .class heuristic FPs on parsed files', { timeout: 30_000 }, async () => {
     const r = await runRefresh({ cwd, noPull: true });
     expect(r.status).toBe('success');
     const opened = await openGraph(vaultPaths(vaultRoot).graphDb);
@@ -351,7 +351,7 @@ describe('refresh apex-ast (DEFAULT ON — P13-AST-flip)', () => {
     }
   });
 
-  it('SOQL subquery edges attribute to the right object; child-relationship + cross-scope phantoms are absent (CR-06 / H5)', { timeout: 30_000 }, async () => {
+  it('SOQL subquery edges attribute to the right object; child-relationship + cross-scope phantoms are absent', { timeout: 30_000 }, async () => {
     const r = await runRefresh({ cwd, noPull: true });
     expect(r.status).toBe('success');
     const opened = await openGraph(vaultPaths(vaultRoot).graphDb);
@@ -383,7 +383,7 @@ describe('refresh apex-ast (DEFAULT ON — P13-AST-flip)', () => {
     }
   });
 
-  it('callsApex edge carries callerMethods (class-level union) without touching methods[] (CR-CAP-06)', { timeout: 30_000 }, async () => {
+  it('callsApex edge carries callerMethods (class-level union) without touching methods[]', { timeout: 30_000 }, async () => {
     const r = await runRefresh({ cwd, noPull: true });
     expect(r.status).toBe('success');
     // Caller.run() is the only method that calls Callee.help → callerMethods=['run'].
@@ -398,7 +398,7 @@ describe('refresh apex-ast (DEFAULT ON — P13-AST-flip)', () => {
     expect(props2?.['methods']).toEqual(['help']);
   });
 
-  it('callsApex edge carries callerMethodsByMethod partitioned by TARGET method (CR-CAP-06 — no phantom)', { timeout: 30_000 }, async () => {
+  it('callsApex edge carries callerMethodsByMethod partitioned by TARGET method (no phantom)', { timeout: 30_000 }, async () => {
     const r = await runRefresh({ cwd, noPull: true });
     expect(r.status).toBe('success');
     // The per-target-method partition lets what_if attribute caller methods to
@@ -407,7 +407,7 @@ describe('refresh apex-ast (DEFAULT ON — P13-AST-flip)', () => {
     expect(props?.['callerMethodsByMethod']).toEqual({ help: ['m1', 'm2'] });
   });
 
-  it('callsApex edge COUNT is unchanged: callerMethods is property-only, one edge per target class (CR-CAP-06)', { timeout: 30_000 }, async () => {
+  it('callsApex edge COUNT is unchanged: callerMethods is property-only, one edge per target class', { timeout: 30_000 }, async () => {
     const r = await runRefresh({ cwd, noPull: true });
     expect(r.status).toBe('success');
     // TwoCaller calls the SAME target (Callee) from two methods → still exactly
@@ -426,7 +426,7 @@ describe('refresh apex-ast (DEFAULT ON — P13-AST-flip)', () => {
   });
 });
 
-describe('reports-cap coverage decoration (P13-REPORTS-default)', () => {
+describe('reports-cap coverage decoration', () => {
   it('a capped pull marks Report/Dashboard coverage pending; absence caveats fire', async () => {
     // decoration is exercised through the manifest path: simulate by writing
     // a manifest the way runWithOpenGraph does — here we unit the helper via

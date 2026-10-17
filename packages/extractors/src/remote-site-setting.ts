@@ -101,9 +101,9 @@ const validateRoot = (
  * filename's API name per `RemoteSiteSetting.md` §"Node field mapping".
  *
  * Returns one `Node` of type `'RemoteSiteSetting'` and zero edges.
- * RemoteSiteSettings have no inter-component references — the v1.5
+ * RemoteSiteSettings have no inter-component references — the
  * integration map surfaces them as stand-alone outbound-callout
- * allowlist entries. v1.5 does NOT attempt to correlate Apex
+ * allowlist entries. This does NOT attempt to correlate Apex
  * `Http.send` calls to specific RemoteSiteSetting URL prefixes (a
  * runtime concern; the offline scanner cannot reliably replicate it).
  *

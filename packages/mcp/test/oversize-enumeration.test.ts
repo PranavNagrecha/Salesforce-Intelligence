@@ -82,13 +82,13 @@ describe('analyzeOversizeEnumeration', () => {
     expect(kinds.has('global-response-budget')).toBe(true);
   });
 
-  // CR-22 regression: the strengthened `paginated`-requires-a-resume-knob audit
+  // The strengthened `paginated`-requires-a-resume-knob audit
   // must pass against the REAL roster schemas, not only synthesized tools. The
   // synthesized happy-path test above always stamps `offset`, so it gave false
   // confidence while 22 real top-N truncators were mislabeled `paginated`. This
   // pins the gate at the unit level (the qa harness checks the same thing with
   // a real high-fanout org probe set).
-  // CR-P3 (oversize-enumeration): code_quality_audit, find_hardcoded_values,
+  // Oversize enumeration: code_quality_audit, find_hardcoded_values,
   // and governor_limit_risks gained REAL cursors (B3) — they expose
   // limit+offset+cursor and window past the per-type cap. They must be
   // classified `paginated` (consistent with the other cursored tools), not
@@ -139,7 +139,7 @@ describe('analyzeOversizeEnumeration', () => {
   //
   // SPLIT by FIX 4. `record_creation_paths` is untouched and keeps its
   // `handler-capped` pin below — it is still a limit-only truncator.
-  // `flow_fault_audit` gained a REAL resume knob (offset + CR-22 cursor +
+  // `flow_fault_audit` gained a REAL resume knob (offset + cursor +
   // handler-side byte budget), so `handler-capped` became right-about-
   // yesterday: the classification moves to `paginated` in the same change that
   // added the knob, and the sibling assertion further down ("every `paginated`

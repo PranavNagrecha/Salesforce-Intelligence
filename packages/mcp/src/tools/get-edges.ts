@@ -96,7 +96,7 @@ export const getEdgesInputSchema = z.object({
   confidence: z.enum(CONFIDENCE_LEVELS).optional(),
   limit: z.number().int().positive().max(GET_EDGES_MAX_LIMIT).optional(),
   offset: z.number().int().nonnegative().optional(),
-  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // Continuation cursor: an OPAQUE token echoed back from a prior
   // truncated page's `nextCursor`. When present it supplies the resume offset;
   // omitting it = today's behavior (offset 0 / explicit `offset`).
   cursor: z.string().min(1).optional(),
@@ -128,7 +128,7 @@ export interface GetEdgesOutput {
   /** Approximate next offset (legacy), or `null` when the list is exhausted. */
   readonly nextOffset: number | null;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page was truncated
+   * Opaque continuation token, present ONLY when this page was truncated
    * (over `limit` OR over the byte budget). Echo it back as `cursor` to resume.
    * Absent on a whole-fits page so an in-budget response stays byte-identical.
    */
@@ -204,7 +204,7 @@ export const getEdgesHandler = async (
     });
   }
 
-  // Resolve the resume offset: an echoed CR-22 cursor wins over an explicit
+  // Resolve the resume offset: an echoed cursor wins over an explicit
   // `offset`; ANY stale/forged cursor (wrong tool/vault/filters) is rejected
   // with `invalid-query` rather than silently paging the wrong result set.
   const fingerprint = argsFingerprint({
@@ -241,7 +241,7 @@ export const getEdgesHandler = async (
   });
 
   // The `note` (and `nextCursor`/`pageInfo`) are emitted ONLY on a byte-trimmed
-  // page, so an in-budget response is byte-identical to the pre-CR-22 shape.
+  // page, so an in-budget response is byte-identical to the pre-paging shape.
   const note = paged.byteTrimmed
     ? `Page byte-trimmed to ${paged.items.length} of the requested ${limit} edge(s) to ` +
       `stay under the ~45 KB MCP response limit. Advance with the returned nextCursor ` +

@@ -1,10 +1,10 @@
 /**
  * Handler for the `sfi.code_quality_audit` MCP tool.
  *
- * The v2.1 general-purpose entry point over the
- * `properties.qualityIssues[]` array that the v2.1
+ * The general-purpose entry point over the
+ * `properties.qualityIssues[]` array that the
  * `code-quality-patterns` recognizer family populates at extraction
- * time. CR-22 B3: scans EVERY node of each relevant ComponentType
+ * time. Scans EVERY node of each relevant ComponentType
  * (`ApexClass` / `ApexTrigger` / `Flow`) by paging the graph SQL
  * `OFFSET` forward window-by-window (`scanAllNodesOfTypes`), so
  * findings on a node past the per-page scan cap (501+) are reachable
@@ -20,11 +20,11 @@
  * are walked: every quality observation rides in the parent node's
  * `properties.qualityIssues` array. The tool itself does NOT call the
  * recognizer at request time; it surfaces what extraction has already
- * persisted. A vault refreshed before v2.1 ships will return an empty
+ * persisted. A vault refreshed before the recognizers shipped will return an empty
  * `issues` list with all-zero summary counts — the honest "nothing to
  * report" answer rather than a fabricated one.
  *
- * **Severity ordering** — the v2.1 catalog defines a five-tier scale
+ * **Severity ordering** — the catalog defines a five-tier scale
  * `critical > high > medium > low > info`. The default sort is
  * severity DESC then `componentId` ASC then `rule` ASC, so the
  * highest-priority findings surface first in the slice the response
@@ -39,7 +39,7 @@
  *   - Static recognition has dynamic blind spots. Dynamic SOQL,
  *     reflective field access, and dynamic method dispatch are
  *     invisible. The `boundaries` array surfaces this verbatim.
- *   - Severity is industry-consensus, not user-tuned in v2.1. Per-org
+ *   - Severity is industry-consensus, not user-tuned. Per-org
  *     overrides are deferred. Surfaced verbatim in `boundaries` when
  *     the response carries at least one finding.
  *
@@ -47,19 +47,19 @@
  *   - `severityFilter: 'all'` and an absent filter behave identically.
  *     The literal `'all'` is preserved in the input contract so the
  *     advertised JSON Schema can document the sentinel explicitly.
- *   - CR-22 B3: the per-type scan WINDOWS the graph SQL `OFFSET` at
+ *   - the per-type scan WINDOWS the graph SQL `OFFSET` at
  *     `clampedNodeScanLimit()` (≤500) per page until each type is
  *     exhausted, so an org with more than 500 ApexClasses is scanned
  *     in full (no dropped tail). `scanTruncated` / a `fullScanTruncationNote`
  *     fire only for a pathological type past `FULL_SCAN_MAX_NODES`.
  *     An operator setting `SFI_NODE_SCAN_LIMIT > 500` is clamped (no
- *     hard error — CR-RV10).
+ *     hard error).
  *   - `limit` defaults to 100 and is capped at 500 by Zod. The
  *     `totalCount` in the response reports the FULL unsorted matched
  *     count, not the paged slice — callers can render "showing X of Y
  *     findings" without a re-query. A truncated page emits a `nextCursor`
  *     to walk the rest; a whole-fits no-cursor page omits the paging
- *     fields entirely (byte-identical to pre-CR-22).
+ *     fields entirely (byte-identical to the pre-paging shape).
  */
 
 import type {
@@ -139,7 +139,7 @@ const SEVERITY_RANK: Readonly<Record<Severity, number>> = Object.freeze({
 /**
  * Verbatim boundary disclosures surfaced when the response carries at
  * least one finding. The three-axis honesty disclosure parallels the
- * v2.0 three-axis pattern.
+ * three-axis pattern.
  */
 const HEURISTIC_CONFIDENCE_DISCLOSURE =
   'pattern recognition is heuristic — every finding carries confidence: heuristic. The recognizer cannot verify the developer intent; false positives are expected. Review the cited location before treating as a bug.';
@@ -189,7 +189,7 @@ export const codeQualityAuditInputSchema = z
       .min(1)
       .max(CODE_QUALITY_AUDIT_MAX_LIMIT)
       .optional(),
-    // CR-22: page cursor for walking the full issue list when truncated.
+    // Page cursor for walking the full issue list when truncated.
     offset: z.number().int().min(0).optional(),
     cursor: z.string().min(1).optional(),
   })
@@ -312,7 +312,7 @@ export interface CodeQualityAuditOutput {
   /**
    * Page size applied. Present only on a PAGED response (`truncated` or a
    * resumed `offset > 0`); omitted on a whole-fits no-cursor call so that
-   * response stays byte-identical to the pre-CR-22 shape.
+   * response stays byte-identical to the pre-paging shape.
    */
   readonly limit?: number;
   /** Zero-based offset of the first returned issue. Present only when paged. */
@@ -320,7 +320,7 @@ export interface CodeQualityAuditOutput {
   /** Offset to pass on the next call to fetch the following page. Present only when `truncated`. */
   readonly nextOffset?: number;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated.
+   * Opaque continuation token, present ONLY when this page is truncated.
    * Echo it back as `cursor` to resume. Absent on a complete page.
    */
   readonly nextCursor?: string;
@@ -373,7 +373,7 @@ const coerceIssue = (raw: unknown): QualityIssueLike | null => {
  * ASC, then location ASC, then explanation ASC. Stable across runs so fixtures
  * don't flap.
  *
- * CR-22: the trailing `location` + `explanation` tiebreaks make the order a
+ * The trailing `location` + `explanation` tiebreaks make the order a
  * STRICT TOTAL order. A single class can carry MULTIPLE issues with the SAME
  * rule + SAME severity (e.g. two `soql-in-loop` findings at different lines), so
  * (severity, componentId, rule) alone returned 0 for them — an offset resume
@@ -414,7 +414,7 @@ const emptyBySeverity = (): Record<Severity, number> => ({
 
 /**
  * The `sfi.code_quality_audit` MCP tool. Returns every quality issue
- * across the v2.1-scanned ComponentTypes, optionally filtered by
+ * across the scanned ComponentTypes, optionally filtered by
  * severity and / or rule id, sorted by severity DESC then id ASC.
  * See the module JSDoc for the per-honesty-axis boundary text the
  * response carries when at least one finding qualifies.
@@ -447,7 +447,7 @@ export const codeQualityAuditHandler = async (
   const collected: CodeQualityAuditIssue[] = [];
 
   // Class-scope: read just the one node; org-wide: scan EVERY quality type by
-  // paging the SQL OFFSET forward (CR-22 B3 — window-by-window at the clamped
+  // paging the SQL OFFSET forward (window-by-window at the clamped
   // cap) so findings on node 501+ are reachable rather than dropped. The FULL
   // issue set is then sorted (severity-first) and paged on the output axis
   // below. Because the complete set is sorted BEFORE paging, the severity-first
@@ -525,7 +525,7 @@ export const codeQualityAuditHandler = async (
     byType[issue.type] = (byType[issue.type] ?? 0) + 1;
   }
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // Resolve the resume offset (echoed cursor wins over explicit offset).
   // The fingerprint covers the narrowing args (severityFilter / ruleFilter) so a
   // token can't be replayed against a different filter.
   const fingerprintArgs: Record<string, unknown> = {};

@@ -2,7 +2,7 @@
  * @sf-intelligence/mcp
  *
  * The Model Context Protocol server that exposes `org-kb/` to Claude
- * Code. v0.1 ships the server lifecycle, tool registry, and a single
+ * Code. This ships the server lifecycle, tool registry, and a single
  * vault resource; tool handlers themselves remain stubs that Phase F's
  * `mcp-tool-*` tasks fill in. This barrel is the single public surface.
  *
@@ -15,10 +15,10 @@
 
 export { registerPrompts, MCP_PROMPTS, getMcpPrompt } from './prompts.js';
 export { registerResources } from './resources.js';
-// P13-FACTS-capture: the CLI's refresh-time data-shape capture shares the
+// The CLI's refresh-time data-shape capture shares the
 // canonical consent check (the capture is opt-in twice over: flag + consent).
 export { hasLiveConsent } from './live-consent.js';
-// P13-WATCH-sweep: the CLI stale-sweep reuses the canonical staleness check +
+// The CLI stale-sweep reuses the canonical staleness check +
 // sf-CLI JSON runner (with the injectable exec for tests).
 export {
   checkVaultStaleness,
@@ -26,7 +26,7 @@ export {
   STALE_CHECK_TYPES,
   type VaultStalenessResult,
 } from './tools/live-plane.js';
-// CR-09 follow-up: the per-session live-query budget/cache is an MCP-session
+// The per-session live-query budget/cache is an MCP-session
 // safety. A discrete, user-invoked drift sweep (`sfi stale-sweep`) and the watch
 // daemon's periodic tick must each run in a FRESH budget+cache scope so a single
 // 15-type sweep (<< the 50 budget) never trips the guard and the daemon does not
@@ -36,7 +36,7 @@ export {
 export { resetLiveSession } from './tools/live-session.js';
 // Route-gap telemetry: the local question-gap log the router appends to when a
 // question hits a gap. `sfi doctor` / `sfi gaps report` / `sfi.capabilities`
-// read it (P12-ROUTER-confusion-report / R8-GAPLOG-SURFACE) — exported here so
+// read it — exported here so
 // the CLI shares the canonical path/shape/summarizer instead of duplicating it.
 export {
   gapLogPath,

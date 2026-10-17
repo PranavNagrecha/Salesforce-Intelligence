@@ -1,6 +1,6 @@
 /**
- * Shared facts consumption (P13-FACTS-consumers) — the uniform block a tool
- * embeds when a captured record-DATA observation (P13-FACTS-store/capture)
+ * Shared facts consumption — the uniform block a tool
+ * embeds when a captured record-DATA observation
  * is relevant to its answer.
  *
  * HONESTY CONTRACT:
@@ -88,7 +88,7 @@ export const readFactBlock = async (
   };
 };
 
-/** Per-container active-holder counts (P13-PSA-counts). */
+/** Per-container active-holder counts. */
 export interface HoldersShape {
   readonly provenance: 'data_snapshot';
   readonly capturedAt: string;
@@ -110,7 +110,7 @@ export interface HoldersShape {
 
 /**
  * Active-holder counts for the given Profile/PermissionSet ids, when a
- * P13-PSA capture exists in this vault — `undefined` otherwise (no-capture
+ * capture exists in this vault — `undefined` otherwise (no-capture
  * vaults stay byte-identical). COUNTS ONLY by construction.
  */
 export const readActiveHoldersFor = async (

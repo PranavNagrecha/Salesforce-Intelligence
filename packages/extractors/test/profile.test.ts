@@ -56,7 +56,7 @@ describe('extractProfile', () => {
     });
   });
 
-  describe('UI visibility extraction (P11-UI-app-tab-visibility-extract)', () => {
+  describe('UI visibility extraction', () => {
     it('extracts applicationVisibilities + tabVisibilities onto properties', async () => {
       const xml = `<?xml version="1.0"?>
 <Profile xmlns="http://soap.sforce.com/2006/04/metadata">
@@ -118,7 +118,7 @@ describe('extractProfile', () => {
     });
   });
 
-  describe('user ability extraction (P11-USER-ability-run)', () => {
+  describe('user ability extraction', () => {
     it('emits a grantedBy edge to Flow per enabled flowAccess + captures login restrictions', async () => {
       const xml = `<?xml version="1.0"?>
 <Profile xmlns="http://soap.sforce.com/2006/04/metadata">
@@ -183,7 +183,7 @@ describe('extractProfile', () => {
       }
     });
 
-    // CR-CAP-10 profile parity: zero in-vault profiles use <customPermissions>,
+    // Profile parity: zero in-vault profiles use <customPermissions>,
     // so this synthetic fixture is the ONLY proof the symmetric profile edit
     // works. enabled=false is excluded by the same continue-guard.
     it('emits a grantedBy edge to CustomPermission per enabled customPermissions block (false excluded)', async () => {

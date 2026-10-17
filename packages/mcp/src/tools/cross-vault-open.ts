@@ -9,8 +9,8 @@
  * writer lock and so FAILED to compare a vault that was being served (or under
  * a concurrent refresh).
  *
- * The read-only open ladder (probe, CR-19 schema-version self-heal, and the
- * CR-19-amended best-effort lock-tolerant fallback that DEFERS an additive
+ * The read-only open ladder (probe, schema-version self-heal, and the
+ * amended best-effort lock-tolerant fallback that DEFERS an additive
  * migration when the read-write re-open hits a held lock) is shared with
  * `server.ts#openServerGraph` via the single {@link openGraphServeReadOnly}
  * helper in the graph package — so these two near-identical open paths cannot

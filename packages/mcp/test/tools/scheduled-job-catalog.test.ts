@@ -57,7 +57,7 @@ const makeEdge = (
 // =============================================================================
 // Seed 1: a Schedulable class (NightlyJob) invoked from two callers via
 // System.schedule(...). One caller writes a literal cron expression in the
-// edge properties; the other writes nothing (the v1.5 scanner does not
+// edge properties; the other writes nothing (the scanner does not
 // extract cron strings, so cronExpression is null on those edges).
 // =============================================================================
 

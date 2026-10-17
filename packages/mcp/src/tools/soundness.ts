@@ -1,7 +1,7 @@
 /**
  * P12-soundness-envelope — a uniform soundness block for static-analysis tools.
  *
- * Static dependency analysis is blind to references built at RUNTIME. The v2.1
+ * Static dependency analysis is blind to references built at RUNTIME. The
  * `dynamic-apex` recognizer already flags the Apex classes/triggers that use
  * such constructs (dynamic SOQL, reflective describe, `Type.forName`, untyped
  * JSON) and persists the signal on each node's `properties.qualityIssues[]`.

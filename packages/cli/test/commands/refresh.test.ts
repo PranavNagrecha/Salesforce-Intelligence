@@ -876,7 +876,7 @@ describe('buildFolderedReportManifest', () => {
   });
 });
 
-describe('countLandedReportMembers (P14-USAGE-reports-retrieve-fidelity)', () => {
+describe('countLandedReportMembers', () => {
   it('counts a requested member as landed only when its meta file exists', () => {
     const fidelity = countLandedReportMembers(
       { Report: ['Sales_Reports/Pipeline', 'Sales_Reports/Ghost'], Dashboard: [] },
@@ -922,7 +922,7 @@ describe('countLandedReportMembers (P14-USAGE-reports-retrieve-fidelity)', () =>
   });
 });
 
-describe('formatReportsCapSummary (P14-USAGE-reports-retrieve-fidelity)', () => {
+describe('formatReportsCapSummary', () => {
   it('surfaces silent per-member drops as "did not land — not checked"', () => {
     const lines = formatReportsCapSummary({
       reports: { total: 412, requested: 412, retrieved: 412 },
@@ -947,7 +947,7 @@ describe('formatReportsCapSummary (P14-USAGE-reports-retrieve-fidelity)', () => 
   });
 });
 
-describe('CR-01 / C1 — shell-injection hardening of the `sf` exec path', () => {
+describe('shell-injection hardening of the `sf` exec path', () => {
   // TEST B — the config-load chokepoint rejects a poisoned config.json.
   it('loadVaultConfig rejects a poisoned targetOrg before it can reach any `sf` call', async () => {
     const cwd = await makeTempCwd();

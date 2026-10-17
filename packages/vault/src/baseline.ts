@@ -1,6 +1,6 @@
 /**
  * Finding baseline — stable fingerprints for acknowledged SAST/heuristic
- * findings that persist across vault refreshes (v4.0 R8).
+ * findings that persist across vault refreshes.
  */
 
 import { createHash } from 'node:crypto';

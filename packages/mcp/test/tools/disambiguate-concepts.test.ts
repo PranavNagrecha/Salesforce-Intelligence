@@ -46,7 +46,7 @@ const makeNode = (overrides: Partial<Node> & Pick<Node, 'id'>): Node => ({
 });
 
 // =============================================================================
-// Seed (per PLAN-v2.9 Q149):
+// Seed:
 //   - Opportunity.Status__c, Opportunity.Stage__c
 //   - Case.Status (standard)
 //   - Lead.Status (standard)
@@ -84,8 +84,8 @@ const seed: ExtractionResult = {
       },
     }),
     // NOTE: in a fully-classified vault, Opportunity.Stage__c would
-    // ALSO have semanticCategory: 'status' (the v2.9 classifier matches
-    // both Status and Stage to the same status category). For Q149's
+    // ALSO have semanticCategory: 'status' (the classifier matches
+    // both Status and Stage to the same status category). For the
     // bucket-separation test, we leave semanticCategory unset on Stage__c
     // so the apiName-token axis is exercised in isolation. A separate
     // test covers the semantic-category cross-match below.
@@ -193,7 +193,7 @@ describe('disambiguateConceptsInputSchema', () => {
 });
 
 describe('disambiguateConceptsHandler', () => {
-  it('partitions Status (3 fields) and Stage (1 field) per Q149', async () => {
+  it('partitions Status (3 fields) and Stage (1 field)', async () => {
     const result = await disambiguateConceptsHandler(ctx, {
       conceptA: 'Status',
       conceptB: 'Stage',
@@ -223,7 +223,7 @@ describe('disambiguateConceptsHandler', () => {
     expect(axes).toContain('parent-object');
   });
 
-  it('surfaces the verbatim Q155 boundary on every result', async () => {
+  it('surfaces the verbatim boundary on every result', async () => {
     const result = await disambiguateConceptsHandler(ctx, {
       conceptA: 'Status',
       conceptB: 'Stage',
@@ -238,7 +238,7 @@ describe('disambiguateConceptsHandler', () => {
     expect(boundary).toContain('Verify');
   });
 
-  it('returns empty differences and null suggested when same concept passed twice (Q150)', async () => {
+  it('returns empty differences and null suggested when same concept passed twice', async () => {
     const result = await disambiguateConceptsHandler(ctx, {
       conceptA: 'Status',
       conceptB: 'Status',

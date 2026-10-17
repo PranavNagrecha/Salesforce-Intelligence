@@ -212,9 +212,9 @@ const listUnionMembers = (src, startMarker, endMarker) => {
   return members;
 };
 
-const countDirEntries = (dir, predicate) => {
+const countDirEntries = (dir, predicate, opts = {}) => {
   if (!existsSync(dir)) return 0;
-  return readdirSync(dir, { withFileTypes: true }).filter(predicate).length;
+  return readdirSync(dir, { withFileTypes: true, ...opts }).filter(predicate).length;
 };
 
 const requireDist = (path, label) => {
@@ -347,8 +347,11 @@ export async function buildProductManifest(productRoot) {
   const slashCommandCount = countDirEntries(join(root, '.claude/commands'), (d) =>
     d.isFile() && d.name.endsWith('.md'),
   );
-  const agentCount = countDirEntries(join(root, '.claude/agents'), (d) =>
-    d.isFile() && d.name.endsWith('.md'),
+  // Recursive: maintainer agents live in .claude/agents/maintainer/.
+  const agentCount = countDirEntries(
+    join(root, '.claude/agents'),
+    (d) => d.isFile() && d.name.endsWith('.md'),
+    { recursive: true },
   );
 
   // Stable identity for eval reports (excludes generatedAt).

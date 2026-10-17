@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.why_field_changed` MCP tool.
  *
- * v2.0e W1 — the field-write-tracing headline. Answers the buyer-
+ * The field-write-tracing headline. Answers the buyer-
  * priority #1 question: "why did this field get updated?". Walks every
  * incoming `writesTo` edge to the target CustomField and surfaces each
  * writer with its categorisation (declared vs heuristic), the
@@ -19,7 +19,7 @@
  *     target field.
  *   - **heuristic** writers: producers whose write was inferred from
  *     a source scan rather than a metadata declaration — ApexClass /
- *     ApexTrigger writes emitted by the v0.3 Apex scanner with
+ *     ApexTrigger writes emitted by the Apex scanner with
  *     `source: 'apex-scanner'` and `confidence: 'heuristic'`. These
  *     may include false positives (dynamic SOQL, reflective access);
  *     callers should spot-check before acting on them.
@@ -1066,7 +1066,7 @@ export const whyFieldChangedHandler = async (
       heuristicCount += 1;
     } else {
       // `declared` and `parsed` both count as declared for this
-      // categorisation. The parsed confidence ships from the v0.2
+      // categorisation. The parsed confidence ships from the
       // formula tokenizer; the field is still extracted from
       // metadata, not inferred from a body scan.
       declaredCount += 1;

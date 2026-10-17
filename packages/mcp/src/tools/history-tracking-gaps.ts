@@ -69,7 +69,7 @@
  *     `trust.completeness` drops to `partial`. It is never presented as a
  *     complete bill of health.
  *
- * Byte-budget + pagination mirror `sfi.pii_inventory` exactly (CR-22 opaque
+ * Byte-budget + pagination mirror `sfi.pii_inventory` exactly (opaque
  * continuation cursor, ~38 KB per-page byte budget, global classification
  * computed ONCE per request).
  */
@@ -160,7 +160,7 @@ const PAYLOAD_BUDGET_BYTES = 38_000;
  *   - `objectApiName` optional; bare api name or `CustomObject:X`. Narrows the
  *     scan to one object's fields; omitted scans the whole vault.
  *   - `limit` optional; defaults to 200 in the handler.
- *   - `offset` / `cursor` optional pagination knobs — same CR-22 continuation
+ *   - `offset` / `cursor` optional pagination knobs — same continuation
  *     protocol `pii_inventory` uses.
  */
 const historyTrackingGapsInputBaseSchema = z.object({
@@ -435,7 +435,7 @@ const resolveParentObjectId = (node: Node): ComponentId | null => {
  * corpus still read `trust.completeness: 'complete'`. This now delegates to the
  * shared `scanAllNodesOfTypes`, which windows the SQL `OFFSET` forward, bounds
  * the walk at {@link historyScanCeiling}, and settles the exactly-at-the-ceiling
- * boundary with one probe (CR-P3) instead of over-disclosing.
+ * boundary with one probe instead of over-disclosing.
  */
 const scanCorpus = async (
   ctx: Context,
@@ -809,7 +809,7 @@ export const historyTrackingGapsHandler = async (
     summary,
   } = classified.value;
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // Resolve the resume offset (echoed cursor wins over explicit offset).
   const fingerprint = argsFingerprint({
     ...(resolvedObjectApiName !== undefined ? { objectApiName: resolvedObjectApiName } : {}),
   });

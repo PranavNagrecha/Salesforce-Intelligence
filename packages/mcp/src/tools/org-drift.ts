@@ -1,5 +1,5 @@
 /**
- * Org-drift badge (P13-WATCH-badges) — when a RECENT stale-sweep
+ * Org-drift badge — when a RECENT stale-sweep
  * (`meta/staleness.json`, written by `sfi stale-sweep` / the `sfi watch`
  * daemon) shows the org has moved since the vault was built, tool responses
  * carry a top-level `orgDrift` badge — but ONLY when the drift could touch

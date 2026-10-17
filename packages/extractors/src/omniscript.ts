@@ -11,11 +11,13 @@ import { err, ok } from '@sf-intelligence/core';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 import { extractProcessDataPack, isDataPackSource } from './datapack-extract.js';
+import { buildOmniProcessDoc } from './omnistudio/process.js';
 import { type ApexRemoteCall, apexRemoteTarget, buildApexRemoteEdges, literalObjectArgs } from './omnistudio/remote.js';
+import { buildSaveUrlPatternWrites } from './omnistudio/save-patterns.js';
 import { deriveComponentApiName } from './path-utils.js';
 
 /**
- * v3.2 OmniScript extractor.
+ * OmniScript extractor.
  *
  * Reads a single Salesforce Industries `*.os-meta.xml` file (the user-facing
  * no-code form flow primitive) and produces:
@@ -41,17 +43,22 @@ import { deriveComponentApiName } from './path-utils.js';
  *     `remoteClass` (Remote Action, Calculation Action, File upload, …),
  *     with every routed `remoteMethod` in `methods[]` and every call site in
  *     `callSites[]` (`omnistudio/remote.ts`).
+ *   - `writesTo` edges for each top-level `propertySetConfig.saveURLPatterns`
+ *     key that names a field on the script's declared save object
+ *     (`saveObject`, `objectType`, …, or a literal object on a DataRaptor
+ *     Post Action). Patterns without a declared object are listed on
+ *     `properties.unresolvedSavePatterns` (`omnistudio/save-patterns.ts`).
  *
  * The XML body's `<omniProcessElements>` carry a per-child
  * `<propertySetConfig>` HTML-entity-escaped JSON blob. fast-xml-parser
  * with the default `processEntities` (decoding `&quot;` etc.) returns
  * the JSON as a plain string; the extractor then `JSON.parse()`s it.
  * Malformed JSON in a single child becomes a per-element warning rather
- * than a whole-file failure — the v3.2 honesty axis says best-effort
+ * than a whole-file failure — the honesty axis says best-effort
  * JSON parsing.
  *
  * The `OmniScript` XML root is shared with `OmniIntegrationProcedure`
- * via the legacy `<isIntegrationProcedure>` boolean inside the file. v3.2's
+ * via the legacy `<isIntegrationProcedure>` boolean inside the file. The
  * extractor branches at the top-level `<omniProcessType>` and `<isIntegrationProcedure>`
  * flags — the extractor here only emits nodes for OmniScript (i.e.,
  * `<isIntegrationProcedure>false</isIntegrationProcedure>` AND
@@ -60,7 +67,6 @@ import { deriveComponentApiName } from './path-utils.js';
  * the sibling `omni-integration-procedure` extractor.
  *
  * @see docs/vendor/salesforce-metadata/OmniScript.md
- * @see PLAN-v3.2.md §3 (contracts), §4 (composing tool), §7 Q176.
  */
 const OMNISCRIPT_FILE_SUFFIX = '.os-meta.xml';
 const ROOT_ELEMENT = 'OmniScript';
@@ -203,7 +209,7 @@ interface ParsedElement {
  * Recursively walk the `<omniProcessElements>` tree (which may carry
  * nested `<childElements>`) and flatten every node into a single list.
  * The walk preserves source order so call sites can iterate
- * deterministically; v3.2 doesn't sort here (consumers re-sort by
+ * deterministically; this doesn't sort here (consumers re-sort by
  * `sequenceNumber` per the tool spec).
  *
  * Each element's `<propertySetConfig>` is JSON-parsed at walk time so
@@ -626,7 +632,7 @@ export const extractOmniScriptRoot = (
     });
   }
 
-  // The canonical id and api-name come from the filename per the v3.2
+  // The canonical id and api-name come from the filename
   // convention (the XML's `<uniqueName>` should match — surfaced as a
   // property for the rare case where it doesn't, so downstream tools
   // can flag drift).
@@ -634,13 +640,19 @@ export const extractOmniScriptRoot = (
 
   const warnings: string[] = [];
   const elements = collectElements(rootObj, warnings);
-  const rawEdges = buildDispatchEdges(omniScriptId, elements, warnings);
+  const processDoc = buildOmniProcessDoc(rootObj, false, () => null);
+  warnings.push(...processDoc.warnings);
+  const savePatterns = buildSaveUrlPatternWrites(omniScriptId, processDoc, EDGE_SOURCE);
+  const rawEdges = [
+    ...buildDispatchEdges(omniScriptId, elements, warnings),
+    ...savePatterns.edges,
+  ];
   const edges = dedupeAndSortEdges(rawEdges);
 
   // Top-level `<propertySetConfig>` carries the OmniScript-level UI
   // configuration (persistent components, save-for-later, knowledge,
-  // stylesheets). v3.2 surfaces a few well-known keys as properties;
-  // the rest is available through the v3.2 R3 MCP tool's
+  // stylesheets). This surfaces a few well-known keys as properties;
+  // the rest is available through the MCP tool's
   // `includeChildPropertySetConfig` flag.
   const topPsc = parsePropertySetConfig(
     rootObj['propertySetConfig'],
@@ -659,7 +671,7 @@ export const extractOmniScriptRoot = (
   // OmniProcess key is the `{Type}_{SubType}` shape used by Integration
   // Procedure Actions to reference an OmniScript. For an OmniScript the
   // key conventionally equals `${type}_${subType}` when both are
-  // present; v3.2 surfaces it verbatim per the doc, falling back to
+  // present; this surfaces it verbatim per the doc, falling back to
   // `null` when either field is missing.
   const omniProcessKey =
     type !== null && subType !== null ? `${type}_${subType}` : null;
@@ -716,6 +728,9 @@ export const extractOmniScriptRoot = (
           ? topPsc['stepChartPlacement']
           : null,
       omniScriptExtractionWarnings: warnings,
+      ...(savePatterns.unresolvedSavePatterns.length > 0
+        ? { unresolvedSavePatterns: savePatterns.unresolvedSavePatterns }
+        : {}),
     },
   };
 

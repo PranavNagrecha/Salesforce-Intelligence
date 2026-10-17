@@ -21,6 +21,9 @@ properties:
   relationshipName: null
   required: false
   scale: null
+  summarizedField: Payment__c.Amount__c
+  summaryForeignKey: Payment__c.Invoice__c
+  summaryOperation: sum
   trackHistory: false
   unique: false
 sourcePath: source/main/default/objects/Invoice__c/fields/Total_Paid__c.field-meta.xml
@@ -50,6 +53,9 @@ Sum of all Payment amounts applied to this invoice.
 | relationshipName | `null` |
 | required | `false` |
 | scale | `null` |
+| summarizedField | `Payment__c.Amount__c` |
+| summaryForeignKey | `Payment__c.Invoice__c` |
+| summaryOperation | `sum` |
 | trackHistory | `false` |
 | unique | `false` |
 
@@ -72,3 +78,10 @@ Sum of all Payment amounts applied to this invoice.
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `CustomField:Invoice__c.Balance__c` | parsed | formula-tokenizer |
+
+### references (outgoing, 2)
+
+| Target | Confidence | Producer |
+| --- | --- | --- |
+| `CustomField:Payment__c.Amount__c` | declared | rollup-summary |
+| `CustomField:Payment__c.Invoice__c` | declared | rollup-summary |

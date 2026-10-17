@@ -22,7 +22,7 @@ interface ExtractorGolden {
 }
 
 // Build a synthetic Flow node with only the keys the test cares about; the
-// rest of Node's required fields are filled with v0.1 defaults (parentId
+// rest of Node's required fields are filled with defaults (parentId
 // null, lastModified* null, no apiVersion). Keeps each test's intent
 // localized — what the test asserts is what the test sets.
 const buildFlowNode = (overrides: {
@@ -158,9 +158,9 @@ describe('renderFlowMarkdown', () => {
   it('names the source endpoint for incoming edges in the defensive non-empty branch (not the rendered node itself)', () => {
     // Regression: previously the renderer hardcoded `toId` as the cell value,
     // so an incoming edge where `toId === thisNode.id` dumped the node's own
-    // id into the table. After the fix, incoming edges name `fromId`. v0.1
+    // id into the table. After the fix, incoming edges name `fromId`.
     // Flow nodes carry zero edges in practice, but the defensive branch must
-    // still get this right for v0.2.
+    // still get this right.
     const node = buildFlowNode({
       apiName: 'OrderProcessor',
       label: 'Order Processor',
@@ -307,7 +307,7 @@ describe('renderFlowMarkdown', () => {
   });
 });
 
-describe('renderFlowMarkdown — markdown injection / escaping (CR-16c)', () => {
+describe('renderFlowMarkdown — markdown injection / escaping', () => {
   it('does not let a backtick in a Flow detail value close the code span early', () => {
     const node = buildFlowNode({
       apiName: 'EvilFlow',
@@ -329,7 +329,7 @@ describe('renderFlowMarkdown — markdown injection / escaping (CR-16c)', () => 
     expect(lines.filter((l) => /^# /.test(l))).toHaveLength(1);
 
     // The Status bullet's backtick is escaped so the inline span is intact on
-    // one line; the value tail is not leaked into prose. CR-16d: a single
+    // one line; the value tail is not leaked into prose. A single
     // embedded backtick forces a wider (2-backtick) fence, per CommonMark —
     // backslash-escaping the backtick does NOT work inside a code span
     // (backslash escapes are inert there), so the fence must be widened.

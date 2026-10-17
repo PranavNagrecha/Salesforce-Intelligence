@@ -1,6 +1,6 @@
 /**
  * `sfi vault git enable` — turn the vault into its own git history
- * (P13-GITHIST-enable). Git already IS a versioned property store, so
+ * Git already IS a versioned property store, so
  * instead of building one: init a repo INSIDE org-kb with a generated
  * .gitignore (graph db, snapshots, caches — the rebuildable/transient
  * surfaces), and let every refresh whose source tree actually changed

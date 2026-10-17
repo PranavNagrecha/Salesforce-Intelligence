@@ -1,18 +1,18 @@
 /**
  * Handler for the `sfi.explain_apex_method` MCP tool.
  *
- * v2.0f W1 — the second of three explainer composers (buyer-priority
+ * The second of three explainer composers (buyer-priority
  * #6: "what does this Flow / Apex method / formula actually do?
  * Explain in English."). Given an ApexClass canonical id (and
  * optionally a method name), return a structured narrative payload
  * Claude composes into the natural-language explanation.
  *
- * Method-level granularity is the v2.7 milestone; v2.0f operates at
+ * Method-level granularity is a later milestone; this operates at
  * class level. The `methodName` input parameter is accepted but only
  * surfaced verbatim in the response so callers can pass it through to
- * a future v2.7 method-scoped narrative. The tool does NOT subset the
- * class's outgoing edges by method in v2.0f — that would require an
- * Apex AST (the v2.0a scope was deliberately heuristic-only).
+ * a future method-scoped narrative. The tool does NOT subset the
+ * class's outgoing edges by method — that would require an
+ * Apex AST (the scope was deliberately heuristic-only).
  * METHOD-SCOPE-NEVER-APPLIED: the bare echo used to be the ONLY trace of
  * that, which reads as "honoured" — the payload underneath still described
  * the whole class, so mirrored `qualityIssues[].location` line numbers
@@ -26,17 +26,17 @@
  *
  *   1. **Identity** — apiName, apiVersion, status, modifiers
  *      (e.g., `['global', 'with sharing']`), the source's lineCount
- *      and sourceBytes (from the v1.5 properties). For an ApexTrigger,
+ *      and sourceBytes. For an ApexTrigger,
  *      also `triggerObject` (the SObject it fires on) and `events` (the
  *      DML events it handles); `null`/`[]` for an ApexClass.
- *   2. **Async classifiers** — the v1.5 boolean classifiers
+ *   2. **Async classifiers** — the boolean classifiers
  *      (`isQueueable`, `isSchedulable`, `isBatchable`,
  *      `hasFutureMethod`, `hasInvocableMethod`,
  *      `hasAuraEnabledMethod`, `isRestResource`). Each is surfaced
  *      explicitly so the renderer can pick a per-class narrative
  *      ("this class is queueable + future-method holder" vs "this is
  *      a REST resource").
- *   3. **Test flag** — `isTest` from the v1.5 properties. Test classes
+ *   3. **Test flag** — `isTest` from the properties. Test classes
  *      get a distinct narrative branch.
  *   4. **Calls** — every outgoing `callsApex` edge from the class to
  *      another ApexClass / ApexTrigger. Surfaced as
@@ -48,8 +48,8 @@
  *      'both' }` rows; a field that the class both reads and writes
  *      collapses to a single `'both'` row.
  *   6. **Quality issues** — surfaced verbatim from
- *      `properties.qualityIssues` if the v2.1 R2 quality-issue
- *      enricher has populated it. v2.0f does NOT compute issues;
+ *      `properties.qualityIssues` if the quality-issue
+ *      enricher has populated it. This does NOT compute issues;
  *      missing property surfaces as an empty array (the honesty axis).
  *
  * Implementation notes:
@@ -67,7 +67,7 @@
  *     `fieldAccess` axis: a field with both edges shows as
  *     `accessType: 'both'`; otherwise as `'read'` or `'write'`. The
  *     merge runs in memory after the two listEdges calls.
- *   - `qualityIssues` is surfaced via the v2.1 R2 property mirror as the
+ *   - `qualityIssues` is surfaced via the property mirror as the
  *     structured OBJECT array (`{rule, severity, location, explanation}`)
  *     the recognizer emits — the same shape `governor_limit_risks` /
  *     `code_quality_audit` consume. (Earlier this tool read it with a
@@ -184,7 +184,7 @@ const methodScopeNotAppliedSuffix = (classId: string, methodName: string): strin
  *     (`ApexTrigger:{TriggerName}`). Other prefixes surface as
  *     `invalid-query` from the handler.
  *   - `methodName`: optional. ACCEPTED BUT NEVER APPLIED — carried verbatim
- *     into the response so callers can pass it through to a future v2.7
+ *     into the response so callers can pass it through to a future
  *     method-scoped narrative. Nothing is subset by method, and the response
  *     says so in the typed `methodScope` block and in `disclosure` rather than
  *     letting the echo read as "honoured".
@@ -208,7 +208,7 @@ export const explainApexMethodInputSchema = z.preprocess(
 export type ExplainApexMethodInput = z.infer<typeof explainApexMethodInputSchema>;
 
 /**
- * The v1.5 async / API-surface classifier booleans. Each is surfaced
+ * The async / API-surface classifier booleans. Each is surfaced
  * explicitly (not collapsed into a single union) so callers can pick
  * per-classifier rendering branches without re-reading the raw flags.
  */
@@ -335,7 +335,7 @@ export interface ExplainApexFieldAccess {
 }
 
 /**
- * One v2.1 R2 quality-issue finding, mirrored verbatim from
+ * One quality-issue finding, mirrored verbatim from
  * `properties.qualityIssues[]`. These are OBJECTS (not strings), the same
  * shape `sfi.governor_limit_risks` / `sfi.code_quality_audit` consume.
  */
@@ -462,7 +462,7 @@ export interface ExplainApexMethodOutput {
     readonly demoted: ApexReceiverDemotionCounts | null;
   };
   readonly qualityIssues: readonly ExplainApexQualityIssue[];
-  readonly disclosure: string;  /** P13-ANNOT-tools: curated annotations for the CLASS (provenance `annotation`); absent when none. */
+  readonly disclosure: string;  /** Curated annotations for the CLASS (provenance `annotation`); absent when none. */
   readonly annotations?: AnnotationsBlock;
   /**
    * REASONING-REACHABILITY — deterministic concept-rule claims about THIS class
@@ -494,7 +494,7 @@ export interface ExplainApexMethodOutput {
 }
 
 /**
- * Pull a boolean property with explicit `false` default. The v1.5
+ * Pull a boolean property with explicit `false` default. The
  * extractor always emits each classifier (the unconditionally-present
  * property), but the strict-equals check keeps the response shape
  * stable for malformed inputs (e.g., a hand-edited node).
@@ -523,7 +523,7 @@ const readNullableString = (node: Node, key: string): string | null => {
 
 /**
  * Pull a number property with 0 default. Used for `lineCount` and
- * `sourceBytes` from the v1.5 properties.
+ * `sourceBytes` from the properties.
  */
 const readNumber = (node: Node, key: string): number => {
   const raw = node.properties[key];
@@ -541,7 +541,7 @@ const readStringArray = (node: Node, key: string): readonly string[] => {
 };
 
 /**
- * Read the v2.1 R2 quality-issue array from `properties.qualityIssues`.
+ * Read the quality-issue array from `properties.qualityIssues`.
  * Each finding is an OBJECT (`{rule, severity, location, explanation}`), so
  * the generic string-array reader silently dropped EVERY finding — this tool
  * always reported `qualityIssues: []` even when the recognizer fired (the
@@ -569,9 +569,9 @@ const readQualityIssues = (node: Node): readonly ExplainApexQualityIssue[] => {
 };
 
 /**
- * Build the `classifiers` block from the v1.5 boolean properties.
+ * Build the `classifiers` block from the boolean properties.
  * Each classifier is read explicitly so the response shape stays
- * stable even when the v1.5 extractor's defaults shift.
+ * stable even when the extractor's defaults shift.
  */
 const buildClassifiers = (node: Node): ExplainApexClassifiers => ({
   isQueueable: readBool(node, 'isQueueable'),
@@ -678,7 +678,7 @@ const TRIGGER_SHARING: ExplainApexSharingSemantics = {
   note: 'An Apex trigger CANNOT declare a sharing keyword — `declared: null` here means the keyword does not exist for this component type, not that one was omitted. Triggers execute in SYSTEM CONTEXT: record sharing, object CRUD, and field-level security are NOT enforced for the running user, and any class the trigger calls that declares no sharing keyword inherits that system context. To enforce sharing for the work a trigger does, move the logic into a `with sharing` handler class and call that.',
 };
 
-/** The v1.5 classifier property keys, in one place for the presence check. */
+/** The classifier property keys, in one place for the presence check. */
 const CLASSIFIER_KEYS = [
   'isQueueable',
   'isSchedulable',

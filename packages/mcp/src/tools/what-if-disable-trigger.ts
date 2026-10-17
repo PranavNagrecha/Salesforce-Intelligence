@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.what_if_disable_trigger` MCP tool.
  *
- * v2.3 R2b — the second of three component-level what-if composers.
+ * The second of three component-level what-if composers.
  * Given an ApexTrigger canonical id (`ApexTrigger:{Name}`), enumerates
  * the downstream impact of disabling the trigger: every outgoing edge
  * the trigger has becomes a potential lost-effect when the trigger no
@@ -51,7 +51,7 @@
  * `after update`, etc.). The response surfaces this so the renderer
  * can render "the before-insert + after-update handler will no longer
  * fire on this object". Empty array surfaces when the extractor did
- * not populate the property (the v0.1 ApexTrigger extractor always
+ * not populate the property (the ApexTrigger extractor always
  * populates events, so the empty case should only occur for malformed
  * trigger headers).
  *
@@ -61,7 +61,7 @@
  *
  *   - `structuralVerdict` is what the dependency structure says, over
  *     the VERDICT-BEARING impacts only (`input-only` entries are
- *     excluded). Cascade, mirroring R2a's `aggregateVerdict`:
+ *     excluded). Cascade, mirroring `aggregateVerdict`:
  *       * `safe` when there is no verdict-bearing impact at all — and
  *         then `notProvenHarmless` states what that `safe` does and does
  *         not prove, because `safe` alone over-claims.
@@ -83,10 +83,10 @@
  * attachCoverageToWhatIf}); being switched off is not a
  * coverage-dependent claim, so `already-inactive` is never downgraded.
  *
- * **Honesty axis.** v2.3 applies a fail-conservative approach when
+ * **Honesty axis.** This applies a fail-conservative approach when
  * disclosing impact. Disabling is a runtime metadata flag, not a
  * deletion: the trigger remains in the org and a later re-enable
- * restores every effect listed. The v0.3 apex-scanner's edge
+ * restores every effect listed. The apex-scanner's edge
  * confidence is `heuristic` for most outgoing edges (regex-based
  * token-pair extraction); the caller should spot-check the trigger
  * body when a finding's confidence is `heuristic`. Indirect dispatch
@@ -107,7 +107,7 @@
  *     verdict alongside the resolvable rows. Dropping it (the old
  *     behaviour, justified only by a comment claiming parity with
  *     unnamed peers) mattered most on `writesTo`, the ONLY category that
- *     produces `blocking`: the v0.3 apex-scanner emits heuristic
+ *     produces `blocking`: the apex-scanner emits heuristic
  *     `writesTo` edges to `CustomField:<localVar>.<Field>` whenever it
  *     cannot resolve the receiver's object, so a trigger whose writes all
  *     left the vault reported `impacts: []`, which `aggregateVerdict`
@@ -154,9 +154,9 @@ const APEX_TRIGGER_PREFIX = 'ApexTrigger:';
 
 /**
  * One finding category in the `WhatIfImpactItem` shape, mirroring
- * R2a's `what-if-change-field-type.ts` and R2b's
+ * `what-if-change-field-type.ts` and R2b's
  * `what-if-deactivate-flow.ts`. The composer module uses the same
- * union across every v2.3 tool so the `architect-what-if-analysis`
+ * union across every tool so the `architect-what-if-analysis`
  * skill can group by category uniformly.
  */
 type Category =
@@ -175,8 +175,8 @@ type Category =
 
 /**
  * One impact entry in the response's `impacts` array. Mirrors the
- * `WhatIfImpactItem` interface in R2a's `what-if-change-field-type.ts`
- * — scoped to the fields v2.3 R2 populates.
+ * `WhatIfImpactItem` interface in `what-if-change-field-type.ts`
+ * — scoped to the fields that tool populates.
  */
 export interface WhatIfImpactItem {
   readonly category: Category;
@@ -315,7 +315,7 @@ export interface WhatIfDisableTriggerOutput {
  * The verbatim disclosure surfaced in every response. Frozen so the
  * test suite can assert the exact string; rephrasing during rendering
  * is a code-review concern, not silent drift. The phrasing mirrors
- * R2a's `what-if-change-field-type.ts` disclosure to keep the v2.3
+ * `what-if-change-field-type.ts` disclosure to keep the
  * tool surface uniform, with the trigger-specific
  * "trigger-framework-partial" caveat appended.
  */
@@ -364,7 +364,7 @@ const readTriggerStatus = (node: Node): string => {
 
 /**
  * Pull the trigger's `events` property — the lifecycle phases the
- * trigger listens to (`before insert`, `after update`, etc.). The v0.1
+ * trigger listens to (`before insert`, `after update`, etc.). The
  * extractor always populates this from the parsed trigger header; the
  * empty-array fallback keeps the response shape stable for malformed
  * headers.
@@ -395,7 +395,7 @@ const entryPointNoteFor = (edgeType: string): string | undefined =>
  * Classify one outgoing edge into a `(category, verdict)` pair. The
  * rule table is documented in the module JSDoc above. Entry-point edge
  * types ({@link ENTRY_POINT_NOTES}) never reach this function.
- *   - `writesTo` is metadata-declared from the v0.3 apex-scanner;
+ *   - `writesTo` is metadata-declared from the apex-scanner;
  *     stopping a write is a behavior change other automation may
  *     depend on. Blocking.
  *   - `callsApex` and `dispatchesAsync` are code-needs-update: the
@@ -431,7 +431,7 @@ const classifyOutgoingEdge = (
  * Synthesise the per-finding `explanation` string. The phrasing
  * mirrors the sibling `what_if_deactivate_flow` shape so the renderer
  * can rely on a uniform "the trigger does X to Y" shape across the
- * v2.3 surface.
+ * surface.
  */
 const buildExplanation = (
   toNode: Node,
@@ -542,7 +542,7 @@ const isVerdictBearing = (impact: { readonly category: Category }): boolean =>
 
 /**
  * Aggregate the verdict-bearing impacts into the STRUCTURAL severity. The
- * cascade mirrors R2a's `aggregateVerdict`; the filter is what stops an
+ * cascade mirrors `aggregateVerdict`; the filter is what stops an
  * input-only read from producing a downstream-effect verdict.
  */
 const aggregateVerdict = (
@@ -623,7 +623,7 @@ const compareImpacts = (a: SortableImpact, b: SortableImpact): number => {
  * Find the trigger's `triggersOn` target — the
  * `CustomObject:{ApiName}` the trigger handler attaches to. Returns
  * `null` for triggers without a declared `triggersOn` (which should
- * not happen in practice with the v0.1 extractor — every trigger
+ * not happen in practice with the extractor — every trigger
  * emits the edge declaratively) and sparse-graph misses. The renderer
  * uses the scalar for the "automation on Account" line; the impacts
  * array carries the same identity for the structural-diff path.
@@ -715,7 +715,7 @@ export const whatIfDisableTriggerHandler = async (
   const entryPoints: WhatIfEntryPoint[] = [];
   for (const edge of edgesResult.value) {
     // `parentOf` is structural — the trigger's container relationship —
-    // and never an impact. `firesWhen` is the deferred v2.0a.1
+    // and never an impact. `firesWhen` is the deferred
     // apex-scanner if-guard surface; if a future enricher emits it
     // from a trigger we'd want to skip it here too (mirrors
     // `what-if-deactivate-flow`'s handling).

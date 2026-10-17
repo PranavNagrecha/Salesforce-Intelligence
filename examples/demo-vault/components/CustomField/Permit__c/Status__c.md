@@ -32,6 +32,7 @@ properties:
   referenceTo: null
   relationshipName: null
   required: false
+  restricted: false
   scale: null
   trackHistory: false
   unique: false
@@ -59,6 +60,7 @@ type: CustomField
 | referenceTo | `null` |
 | relationshipName | `null` |
 | required | `false` |
+| restricted | `false` |
 | scale | `null` |
 | trackHistory | `false` |
 | unique | `false` |
@@ -77,6 +79,12 @@ type: CustomField
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `CustomObject:Permit__c` | declared | custom-field-extractor |
+
+### readsFrom (incoming, 1)
+
+| Source | Confidence | Producer |
+| --- | --- | --- |
+| `ConditionalContext:ValidationRule:Permit__c.Approved_Needs_Date.condition-0` | parsed | condition-extractor |
 
 ### references (incoming, 1)
 

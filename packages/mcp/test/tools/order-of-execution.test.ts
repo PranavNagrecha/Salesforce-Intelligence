@@ -294,9 +294,9 @@ const nodelessSeed: ExtractionResult = {
 // >=2 post-save phases together, so this synthetic seed is the only way
 // to assert the cross-phase emit order. Has a before+after-insert
 // ApexTrigger (with dispatchesAsync), a ValidationRule, an active
-// blocking DuplicateRule (R6-07), a Create Flow, an onCreateOnly
+// blocking DuplicateRule, a Create Flow, an onCreateOnly
 // WorkflowRule, an AssignmentRule, an ApprovalProcess, and — as the child
-// of a Summary field on a separate parent object (R6-07) — a
+// of a Summary field on a separate parent object — a
 // post-save-rollup-recalc entry.
 // =============================================================================
 
@@ -1093,7 +1093,7 @@ describe('orderOfExecutionHandler', () => {
     }
   });
 
-  it('places before-save-flows FIRST on insert + update, absent on delete (P12-TEST-soe-ooe-before-save; parity with what_happens_on_save)', async () => {
+  it('places before-save-flows FIRST on insert + update, absent on delete (parity with what_happens_on_save)', async () => {
     const result = await orderOfExecutionHandler(ctx, { objectApiName: 'MixedObj' });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -1328,7 +1328,7 @@ describe('orderOfExecutionHandler', () => {
     });
   });
 
-  it('CR-CAP-11b: time-trigger disclosure is byte-identical to what_happens_on_save and makes no firing claim', async () => {
+  it('time-trigger disclosure is byte-identical to what_happens_on_save and makes no firing claim', async () => {
     const result = await orderOfExecutionHandler(ctx, {
       objectApiName: 'EmptyObj',
     });
@@ -1366,9 +1366,9 @@ describe('orderOfExecutionHandler', () => {
     // OrderObj is the one seed where every post-save phase co-occurs.
     // Assert the EXACT documented Salesforce order of execution: before
     // triggers precede custom validation rules, duplicate rules run after
-    // validation but before the save (R6-07), post-save automation runs
+    // validation but before the save, post-save automation runs
     // assignment → workflow rules → after-save flows (NOT flows first), and
-    // roll-up recalculation (R6-07) runs after approval but before async.
+    // roll-up recalculation runs after approval but before async.
     // This is the regression guard for the phase-order bug.
     expect(soe.map((s) => s.phase)).toEqual([
       'pre-save-triggers',
@@ -1395,7 +1395,7 @@ describe('orderOfExecutionHandler', () => {
   });
 
   // ===========================================================================
-  // R6-07: duplicate-rules + post-save-rollup-recalc per-event coverage.
+  // duplicate-rules + post-save-rollup-recalc per-event coverage.
   // ===========================================================================
 
   it('duplicate-rules is present on insert/update but absent on delete/undelete', async () => {

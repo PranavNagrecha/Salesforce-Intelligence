@@ -1,10 +1,10 @@
 /// <reference types="vitest/globals" />
 
 /**
- * Tests for the v3.1 `sfi.compare_object_across_vaults` MCP tool.
+ * Tests for the `sfi.compare_object_across_vaults` MCP tool.
  *
  * Mirrors the compare-vaults two-vault fixture pattern but focuses on
- * one CustomObject's field-by-field diff (PLAN-v3.1 Q167).
+ * one CustomObject's field-by-field diff.
  */
 
 import { mkdir, mkdtemp, rm } from 'node:fs/promises';
@@ -102,9 +102,9 @@ beforeAll(async () => {
         properties: { dataType: 'Text' },
       }),
     ],
-    // R7-W10 edgeDrift fixture — outgoing edges from Discount__c (present in
+    // edgeDrift fixture — outgoing edges from Discount__c (present in
     // BOTH vaults, so it lands in `commonNodes`). Mirrors compare-vaults.ts's
-    // Flow:Sync_Account R6-12 fixture: one identical edge, one A-only edge
+    // Flow:Sync_Account fixture: one identical edge, one A-only edge
     // (removed in B), and a referenceKind pair (fieldRef in A / filterRef in B).
     edges: [
       // Present in BOTH — must never appear in edgesAdded/edgesRemoved.
@@ -152,8 +152,8 @@ beforeAll(async () => {
         apiName: 'Discount__c',
         parentId: 'CustomObject:Account',
         // `helpText` exists ONLY on the B side (absent, not null, on A) —
-        // regression fixture for the R7-W9 canonicalJson(undefined)
-        // crash-class sweep (mirrors compare-vaults.ts's R6-12 fixture).
+        // regression fixture for the canonicalJson(undefined)
+        // crash-class sweep (mirrors compare-vaults.ts's fixture).
         properties: { dataType: 'Number', precision: 16, helpText: 'Enter the discount amount' },
       }),
       makeNode({
@@ -224,7 +224,7 @@ describe('compareObjectAcrossVaultsHandler', () => {
     expect(parsed.success).toBe(true);
   });
 
-  it('Q167 — surfaces Discount__c precision drift in shapeModifiedFields', async () => {
+  it('surfaces Discount__c precision drift in shapeModifiedFields', async () => {
     const r = await compareObjectAcrossVaultsHandler(ctx, {
       objectApiName: 'Account',
       vaultA: 'acme-prod',
@@ -239,7 +239,7 @@ describe('compareObjectAcrossVaultsHandler', () => {
     expect(drift?.drift?.some((d) => d.propertyPath === 'precision')).toBe(true);
   });
 
-  it('R7-W9 regression: a property present on only ONE side does not crash canonicalJson (crash-class sweep of the R6-12 compare-vaults.ts fix)', async () => {
+  it('a property present on only ONE side does not crash canonicalJson (crash-class sweep of the compare-vaults.ts fix)', async () => {
     const r = await compareObjectAcrossVaultsHandler(ctx, {
       objectApiName: 'Account',
       vaultA: 'acme-prod',
@@ -300,7 +300,7 @@ describe('compareObjectAcrossVaultsHandler', () => {
     expect(b.some((s) => s.includes('field correspondence is by api-name match'))).toBe(true);
   });
 
-  describe('edgeDrift (R7-W10)', () => {
+  describe('edgeDrift', () => {
     it('reports NO edge drift for CustomObject:Account, which has zero outgoing edges in either vault', async () => {
       const r = await compareObjectAcrossVaultsHandler(ctx, {
         objectApiName: 'Account',
@@ -507,7 +507,7 @@ describe('compareObjectAcrossVaultsHandler', () => {
   });
 });
 
-describe('compareObjectAcrossVaultsHandler — extractorVersionCaveat (R7-W10)', () => {
+describe('compareObjectAcrossVaultsHandler — extractorVersionCaveat', () => {
   let versionRoot: string;
   let versionCtx: Context;
   let versionStoreA: GraphStore;
@@ -576,7 +576,7 @@ describe('compareObjectAcrossVaultsHandler — extractorVersionCaveat (R7-W10)',
   });
 });
 
-describe('compareObjectAcrossVaultsHandler — edgeDrift ROW cap (R7-W10)', () => {
+describe('compareObjectAcrossVaultsHandler — edgeDrift ROW cap', () => {
   let capRoot: string;
   let capCtx: Context;
   let capStoreA: GraphStore;

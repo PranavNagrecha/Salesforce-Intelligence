@@ -132,7 +132,7 @@ describe('findDependencyCyclesInputSchema', () => {
   it('rejects limit above 200', () => {
     expect(findDependencyCyclesInputSchema.safeParse({ limit: 201 }).success).toBe(false);
   });
-  it('accepts offset and cursor (CR-22)', () => {
+  it('accepts offset and cursor', () => {
     expect(
       findDependencyCyclesInputSchema.safeParse({ offset: 1, cursor: 'abc' }).success,
     ).toBe(true);
@@ -140,11 +140,11 @@ describe('findDependencyCyclesInputSchema', () => {
 });
 
 // =============================================================================
-// CR-22 B4 — output cursor over the cycle list (members.join tiebreak) + full
+// output cursor over the cycle list (members.join tiebreak) + full
 // Apex scan. A whole-fits no-cursor call omits paging fields; a truncated page
 // resumes the full set with no gaps / dupes.
 // =============================================================================
-describe('findDependencyCyclesHandler — output cursor (CR-22)', () => {
+describe('findDependencyCyclesHandler — output cursor', () => {
   it('whole-fits no-cursor call omits paging fields', async () => {
     const r = await findDependencyCyclesHandler(ctx, {});
     expect(r.ok).toBe(true);

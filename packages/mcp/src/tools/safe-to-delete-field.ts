@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.safe_to_delete_field` MCP tool.
  *
- * The v2.0b headline tool — the buyer-facing answer to admin #4 on the
+ * The headline tool — the buyer-facing answer to admin #4 on the
  * top-10 questions list: "is it safe to delete this field?". Composes
  * every incoming dependency edge into a verdict-weighted reasoning
  * chain a caller can either render verbatim or summarise.
@@ -78,7 +78,7 @@
  * testing a field its direct reference could not resolve, a Flow that WRITES
  * and separately TESTS one field — keeps its own row and its own count.
  *
- * **Honesty axis** (per the v2.0b spec): when an incoming edge carries
+ * **Honesty axis**: when an incoming edge carries
  * `properties.confirmedByApi === true` (stamped by `sfi refresh
  * --with-tooling-api`'s MetadataComponentDependency pass), the tool
  * surfaces that as additive evidence (`apiConfirmed: true` on the
@@ -94,7 +94,7 @@
  * per category to keep the response small) so they can verify
  * heuristic matches by hand.
  *
- * Apex evidence granularity (R6-03): the default-on Apex AST pass emits
+ * Apex evidence granularity: the default-on Apex AST pass emits
  * `confidence: 'parsed'` readsFrom/writesTo edges for dot-access AND for
  * fields referenced inside inline static SOQL (SELECT / WHERE / ORDER BY /
  * GROUP BY) or constant-string `Database.query` literals — a field used
@@ -243,7 +243,7 @@ const CUSTOM_FIELD_PREFIX = 'CustomField:';
 const EXAMPLES_PER_CATEGORY_LIMIT = 5;
 
 /**
- * The categories the v2.0b reasoning chain recognises. Stable order
+ * The categories the reasoning chain recognises. Stable order
  * keeps consumer fixtures deterministic across runs. `unknown` is the
  * fall-through bucket for incoming edges whose source-node type +
  * edge-type combination is not in the classification table.
@@ -309,7 +309,7 @@ export const safeToDeleteFieldInputSchema = z
    */
   format: z.enum(['json', 'checklist', 'proposal']).optional(),
   /**
-   * CR-CAP-L5: opt-in live plane. When the STATIC verdict would be `safe`,
+   * Opt-in live plane. When the STATIC verdict would be `safe`,
    * cross-check the field's live production population before trusting that
    * verdict — a field with real data despite zero static references may be
    * written by dynamic Apex, an integration, or another blind spot the
@@ -520,7 +520,7 @@ export interface SafeToDeleteFieldOutput {
    */
   readonly proposal?: ProposalArtifact;
   /**
-   * P13-FACTS-consumers: captured fill rate for this field (`data_snapshot`),
+   * Captured fill rate for this field (`data_snapshot`),
    * when one exists. CONTEXT ONLY — the verdict above is computed purely from
    * the metadata graph and NEVER moves toward safe because of a sampled
    * observation (adversarial unit pins this).
@@ -532,7 +532,7 @@ export interface SafeToDeleteFieldOutput {
    */
   readonly flsGrantCount?: number;
   /**
-   * CR-CAP-L5: live production population evidence, present ONLY when the
+   * Live production population evidence, present ONLY when the
    * static verdict was `safe` AND the live plane answered (a standing grant
    * covers the org, or `SFI_LIVE_PLANE_ENABLED=1`; per-call `liveEnabled` is
    * intent only). A `populatedCount > 0` DOWNGRADES `verdict` from
@@ -546,7 +546,7 @@ export interface SafeToDeleteFieldOutput {
    */
   readonly livePopulation?: LivePopulationEvidence;
   /**
-   * Finding #36 / R6-24-WIRE: WHICH reports/dashboards reference this field.
+   * WHICH reports/dashboards reference this field.
    * Present only when at least one family carries a folded usage stamp — feeds
    * `format:'proposal'` evidence comments so a delete bundle names what would
    * break, not just a boolean.
@@ -976,7 +976,7 @@ export const buildSafeToDeleteFieldProposal = (
   vaultState: { readonly sourceTreeHash: string; readonly refreshedAt: string },
 ): ProposalArtifact => {
   const reasons: string[] = [];
-  // R6-24-WIRE: lead with named report/dashboard break evidence when the fold
+  // WIRE: lead with named report/dashboard break evidence when the fold
   // stamped usedInReports / usedInDashboards — the differentiator vs a boolean.
   if (out.reportUsage !== undefined) {
     reasons.push(
@@ -1617,7 +1617,7 @@ const coreSafeToDeleteFieldHandler = async (
   // `applyReportDashboardPersistence`. Inject it as an `analytics` (blocking)
   // reason so a field used only in a report column / dashboard component never
   // reads as `safe`.
-  // Finding #36 / R6-24-WIRE: the fold stamps capped name lists, surfaced as
+  // The fold stamps capped name lists, surfaced as
   // examples (and later as proposal evidence) so the answer names WHICH
   // reports/dashboards would break — not just a boolean.
   //
@@ -1885,7 +1885,7 @@ const coreSafeToDeleteFieldHandler = async (
     ...(reportTypeColumnIds.length > 0 ? [reportTypeColumnNote(reportTypeColumnIds)] : []),
   ];
 
-  // CR-CAP-L5: cross-check a `safe` static verdict against live production
+  // Cross-check a `safe` static verdict against live production
   // population. NEVER attempted for a non-`safe` verdict — the live plane is
   // a cross-check on "no static evidence found", not a general enrichment.
   let verdict: Verdict = staticVerdict;

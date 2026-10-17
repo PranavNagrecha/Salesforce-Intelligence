@@ -6,7 +6,7 @@
  */
 
 /**
- * Native vs managed-package (Vlocity) OmniStudio (Q180 anchor): where each
+ * Native vs managed-package (Vlocity) OmniStudio: where each
  * kind of component comes from, and what the vault cannot know about it.
  */
 export const NATIVE_VS_VLOCITY_DISCLOSURE =

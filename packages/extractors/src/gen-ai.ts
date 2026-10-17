@@ -55,7 +55,7 @@ import { deriveComponentApiName } from './path-utils.js';
  *
  * Bot / BotVersion (legacy Einstein Bots) were deliberately OUT of scope for
  * the original R6-13 slice (verification org shape + nested folder layout).
- * They landed as R7-C7 (`bot.ts`); `sfi.ai_exposure_report` now composes both
+ * They landed later (`bot.ts`); `sfi.ai_exposure_report` now composes both
  * the GenAI tier and Bot context-variable / planner reach.
  */
 

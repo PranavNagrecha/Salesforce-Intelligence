@@ -40,7 +40,7 @@ const seed: ExtractionResult = {
     node({ id: 'CustomObject:Account', type: 'CustomObject', apiName: 'Account' }),
     node({ id: 'FlexiPage:Account_Record_Page', type: 'FlexiPage', apiName: 'Account_Record_Page', properties: { sobjectType: 'Account', pageType: 'RecordPage', masterLabel: 'Account Record Page', activationsModeled: false } }),
     node({ id: 'FlexiPage:Account_Console', type: 'FlexiPage', apiName: 'Account_Console', properties: { sobjectType: 'Account', pageType: 'RecordPage', masterLabel: 'Account Console', activationsModeled: false } }),
-    // A third page on Account so the CR-22 cursor can page (3 pages, limit 2).
+    // A third page on Account so the cursor can page (3 pages, limit 2).
     node({ id: 'FlexiPage:Account_Mobile', type: 'FlexiPage', apiName: 'Account_Mobile', properties: { sobjectType: 'Account', pageType: 'RecordPage', masterLabel: 'Account Mobile', activationsModeled: false } }),
     // A second object (with its own page) so a cursor minted for Account can be
     // replayed against a DIFFERENT existing object → fingerprint mismatch.
@@ -200,7 +200,7 @@ describe('lightningPagesHandler', () => {
   });
 });
 
-describe('lightningPagesHandler — CR-22 continuation cursor (object mode)', () => {
+describe('lightningPagesHandler — continuation cursor (object mode)', () => {
   it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
     const r = await lightningPagesHandler(ctx, { componentId: 'CustomObject:Account' });
     expect(r.ok).toBe(true); if (!r.ok) return;

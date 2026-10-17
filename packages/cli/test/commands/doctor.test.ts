@@ -15,7 +15,7 @@ const makeTempCwd = async (): Promise<string> => mkdtemp(join(tmpdir(), 'sfi-doc
 
 /**
  * A `sf` stub: version succeeds, org display reports Connected. Argv-shaped
- * (binary, args) to match the post-CR-01 `DoctorExec` seam — `run` spawns `sf`
+ * (binary, args) to match the hardened `DoctorExec` seam — `run` spawns `sf`
  * via execFile, so the stub matches on the args array, never a shell string.
  */
 const connectedStub: DoctorExec = async (_binary: string, args: readonly string[]) => {
@@ -160,7 +160,7 @@ describe('runDoctor', () => {
     }
   });
 
-  it('distinguishes an ABSENT gap log (never used) from a clean one (P12-ROUTER-confusion-report)', async () => {
+  it('distinguishes an ABSENT gap log (never used) from a clean one', async () => {
     const cwd = await makeTempCwd();
     try {
       const report = await runDoctor({ cwd, exec: connectedStub, gapLogFile: join(cwd, 'nope.jsonl') });
@@ -174,7 +174,7 @@ describe('runDoctor', () => {
     }
   });
 
-  it('reports a present-but-empty gap log as genuinely clean (P12-ROUTER-confusion-report)', async () => {
+  it('reports a present-but-empty gap log as genuinely clean', async () => {
     const cwd = await makeTempCwd();
     try {
       const logFile = join(cwd, 'question-gaps.jsonl');
@@ -188,7 +188,7 @@ describe('runDoctor', () => {
     }
   });
 
-  it('counts logged route gaps and surfaces the top category, never blocking health (P12-ROUTER-confusion-report)', async () => {
+  it('counts logged route gaps and surfaces the top category, never blocking health', async () => {
     const cwd = await makeTempCwd();
     try {
       const logFile = join(cwd, 'question-gaps.jsonl');
@@ -212,7 +212,7 @@ describe('runDoctor', () => {
     }
   });
 
-  it('flags an EMPTY vault (manifest with 0 components) with a re-refresh fix (P12-FIRSTRUN-failure-ux)', async () => {
+  it('flags an EMPTY vault (manifest with 0 components) with a re-refresh fix', async () => {
     const cwd = await makeTempCwd();
     try {
       const metaDir = join(cwd, 'org-kb', 'meta');
@@ -251,7 +251,7 @@ describe('runDoctor', () => {
     expect(text).toMatch(/sfi quickstart/);
   });
 
-  it('surfaces vault git history as INFO when disabled (P15-VAULT-git-adoption-nudge)', async () => {
+  it('surfaces vault git history as INFO when disabled', async () => {
     const cwd = await makeTempCwd();
     try {
       const metaDir = join(cwd, 'org-kb', 'meta');
@@ -278,7 +278,7 @@ describe('runDoctor', () => {
     }
   });
 
-  it('names multi-vault registry and fleet tools when registry has 2+ vaults (P15-VAULT-registry-discovery)', async () => {
+  it('names multi-vault registry and fleet tools when registry has 2+ vaults', async () => {
     const cwd = await makeTempCwd();
     // Hermetic against an ambient `SF_INTELLIGENCE_REGISTRY_PATH` (CI sets it
     // globally to eval/registry.ci.json), which `findRegistryFile` honours
@@ -376,7 +376,7 @@ describe('runDoctor', () => {
     }
   });
 
-  it('does NOT reach `sf org display` for a poisoned targetOrg in config (CR-01 / C1 defense in depth)', async () => {
+  it('does NOT reach `sf org display` for a poisoned targetOrg in config (defense in depth)', async () => {
     const cwd = await makeTempCwd();
     try {
       const metaDir = join(cwd, 'org-kb', 'meta');
@@ -406,7 +406,7 @@ describe('runDoctor', () => {
     }
   });
 
-  it('default `sf` runner passes a timeout + SIGTERM so a hung child cannot wedge doctor (CR-01 / H8)', async () => {
+  it('default `sf` runner passes a timeout + SIGTERM so a hung child cannot wedge doctor', async () => {
     // Drive the DEFAULT runner (no injected exec). `sf --version` may or may not
     // resolve on the box, but either way doctor must complete deterministically
     // — the timeout guarantees no hang. With SFI_SF_QUERY_TIMEOUT_MS tiny, even

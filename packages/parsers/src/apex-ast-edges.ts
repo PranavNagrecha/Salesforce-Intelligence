@@ -1,5 +1,5 @@
 /**
- * P13-AST-edges — parser-grade Apex edge extraction (flag-gated).
+ * parser-grade Apex edge extraction (flag-gated).
  *
  * Two passes over the ANTLR tree the spike vendored:
  *   1. SYMBOLS — class fields/properties (file-wide); method params / locals /
@@ -46,7 +46,7 @@ export interface ApexAstEdges {
   /** First syntax error when the file did not parse — caller falls back to the scanner. */
   readonly parseError?: string;
   /**
-   * INNER class names declared in this file (P14-USAGE-scanner-fp-downgrade):
+   * INNER class names declared in this file:
    * the AST proves these receivers are class types, not sObjects — the
    * heuristic scanner's `CustomField:{InnerType}.{prop}` edges keyed on them
    * are typed false positives the import dedupe drops.
@@ -61,7 +61,7 @@ export interface ApexAstEdges {
    */
   readonly variables?: readonly string[];
   /**
-   * CR-CAP-06: per-call-site CALLER-method attribution. Each entry pairs a
+   * per-call-site CALLER-method attribution. Each entry pairs a
    * cross-class (or self) `callee` (`Class.method`, the same string as in
    * `calls`) with the NAME of the enclosing `MethodDeclaration` that contains
    * the call-site (`callerMethod`, ORIGINAL case for display). A call-site with
@@ -321,7 +321,7 @@ export const extractApexAstEdges = (
   const calls = new Set<string>();
   const reads = new Set<string>();
   const writes = new Set<string>();
-  // CR-CAP-06: parallel collector — keep `calls` byte-stable (dedupe /
+  // parallel collector — keep `calls` byte-stable (dedupe /
   // innerTypes / scanner-fallback logic depends on it), record the enclosing
   // caller method per call-site separately. The enclosing method NAME is read
   // with the SAME accessor as the ownMethods seed (the first child `Id` of the

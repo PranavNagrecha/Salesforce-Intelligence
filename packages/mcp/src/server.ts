@@ -120,7 +120,7 @@ Rules:
  */
 
 /**
- * Resolved HTTP caller from a `--tokens-file` entry (R8-PERCALLER-TOKENS).
+ * Resolved HTTP caller from a `--tokens-file` entry.
  * Identity attribution only — no role/permission tiers.
  */
 export interface CallerIdentity {
@@ -239,8 +239,8 @@ export interface ServerError {
  * harness run". (A `sfi refresh` still needs exclusive write — see the
  * `locked` error from openGraph.)
  *
- * The actual open ladder — read-only first, content probe, CR-19 schema-version
- * self-heal, and (CR-19 amended) the best-effort lock-tolerant fallback that
+ * The actual open ladder — read-only first, content probe, schema-version
+ * self-heal, and the best-effort lock-tolerant fallback that
  * DEFERS an additive migration when the read-write re-open collides with a held
  * lock — lives in ONE place, {@link openGraphServeReadOnly} in the graph
  * package, so this and `cross-vault-open.ts#openVaultReadOnly` cannot drift.
@@ -251,7 +251,7 @@ const openServerGraph = async (
 ): Promise<Result<GraphStore, GraphError>> => openGraphServeReadOnly(graphDb);
 
 /**
- * P13-WATCH-epoch: the per-vault last-seen mtime of `meta/refresh-epoch`.
+ * The per-vault last-seen mtime of `meta/refresh-epoch`.
  * A refresh bumps the file; the next tool call notices, closes the old graph
  * connection, and rebuilds the context — so an open server serves the NEW
  * vault without a restart (retiring the stale-loaded-vault class). Absent
@@ -274,7 +274,7 @@ const epochMtime = (vaultRoot: string): number => {
  * kept and the next call retries — never a dead server.
  */
 export const maybeReopenOnEpochChange = async (ctx: Context): Promise<Context> => {
-  // P13-REMOTE-http: the HTTP server owns its context lifecycle (serialized
+  // The HTTP server owns its context lifecycle (serialized
   // epoch swap + grace-delayed close so concurrent requests never lose their
   // connection mid-flight). The per-dispatch hook must not fight it.
   if (process.env['SFI_TRANSPORT'] === 'http') return ctx;
@@ -340,11 +340,11 @@ export const buildContext = async (
 };
 
 /**
- * Construct an MCP `Server` instance, register the v0.1 tool list and
+ * Construct an MCP `Server` instance, register the tool list and
  * vault resources on it, and return the instance ready to be connected
  * to a transport.
  *
- * For v0.1, every tool handler is a stub that returns
+ * Every tool handler is a stub that returns
  * `{ error: 'not-implemented' }`. Phase F's `mcp-tool-*` tasks replace
  * each stub by editing `dispatchTool` in `tools/index.ts`. The
  * registration shape and request handlers wired here are stable.

@@ -106,7 +106,7 @@ const makeFreshManifest = (): VaultManifest =>
     components: { PermissionSet: 2 },
     edges: {},
     sourceTreeHash: 'sha256:fixture-A',
-    // v1.7 R2 enrichment timestamp (within last 24h)
+    // Enrichment timestamp (within last 24h)
     permissionAssignmentEnrichmentRanAt: new Date().toISOString(),
   } as unknown as VaultManifest);
 
@@ -252,7 +252,7 @@ describe('unassignedPermissionSetsHandler — Scenario B (structural-only fallba
     expect(ids).toContain(MUTING_PS);
   });
 
-  // ---- CR-22 cursor + CR-RV12 ----------------------------------------
+  // ---- cursor + scan-cap disclosure ----------------------------------------
 
   it('whole-fits omits cursor block + scanTruncated (byte-identical golden)', async () => {
     const r = await unassignedPermissionSetsHandler(ctx, {});

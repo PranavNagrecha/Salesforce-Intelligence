@@ -9,7 +9,7 @@ import { appendAnnotationEvent, readAnnotations, vaultPaths } from '@sf-intellig
 import { runRefresh } from '../src/commands/refresh.js';
 
 /**
- * P13-ANNOT-store — the refresh-time ORPHAN report: annotations whose
+ * The refresh-time ORPHAN report: annotations whose
  * component vanished from the fresh graph surface in the pulse; annotations
  * on live components do not. Annotation-free vaults add nothing.
  */

@@ -10,6 +10,10 @@ properties:
   accessLevel: Edit
   booleanFilter: 1
   criteriaItemCount: 1
+  criteriaItems:
+    - field: Status__c
+      operation: notEqual
+      value: Cancelled
   ruleType: criteria
   sharedFromName: null
   sharedFromType: null
@@ -31,6 +35,7 @@ type: SharingRule
 | accessLevel | `Edit` |
 | booleanFilter | `1` |
 | criteriaItemCount | `1` |
+| criteriaItems | `Cancelled` |
 | ruleType | `criteria` |
 | sharedFromName | `null` |
 | sharedFromType | `null` |
@@ -44,6 +49,12 @@ type: SharingRule
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `CustomObject:Project__c` | declared | sharing-rule-extractor |
+
+### references (outgoing, 1)
+
+| Target | Confidence | Producer |
+| --- | --- | --- |
+| `CustomField:Project__c.Status__c` | declared | sharing-rule-extractor |
 
 ### sharedWith (outgoing, 1)
 

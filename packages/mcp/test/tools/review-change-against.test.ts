@@ -1,7 +1,7 @@
 /// <reference types="vitest/globals" />
 
 /**
- * R7-C2 — `sfi.review_change` cross-vault mode (`againstVault`).
+ * `sfi.review_change` cross-vault mode (`againstVault`).
  *
  * Proves that when `againstVault` (a registered alias OR a path) is supplied,
  * every signal is computed against THAT vault's graph, not the current one:
@@ -13,11 +13,11 @@
  *     is disclosed in `absentInAgainstVault` (added relative to the target;
  *     own contents not analysed).
  *   - `extractorVersionCaveat` appears only when the two vaults' product
- *     versions differ (mirrors R6-12), and is absent when they match.
+ *     versions differ (mirrors compare_vaults), and is absent when they match.
  *   - The `againstVault` string resolves as an alias OR a filesystem path.
  *   - An unknown alias/path is a structured `component-not-found`, never a
  *     silent empty review.
- *   - The DEFAULT (no-`againstVault`) path is byte-identical to R6-16 — it
+ *   - The DEFAULT (no-`againstVault`) path is byte-identical — it
  *     carries NONE of the cross-vault keys.
  *
  * Two co-resident vaults (A = current/sandbox, B = prod) plus a third
@@ -185,7 +185,7 @@ describe('reviewChangeHandler — againstVault cross-vault impact', () => {
     if (!r.ok) return;
     expect(r.value.data.disclosure).toMatch(/IMPACT COMPUTED AGAINST vault 'prod-b'/);
     expect(r.value.data.disclosure).toMatch(/NOT the current vault/);
-    // The verbatim R6-16 disclosure is still appended after the prefix.
+    // The verbatim disclosure is still appended after the prefix.
     expect(r.value.data.disclosure).toMatch(/SELECTION ≠ VALIDATION/);
     expect(r.value.data.boundaries[0]).toMatch(/computed against vault 'prod-b'/);
   });
@@ -207,7 +207,7 @@ describe('reviewChangeHandler — againstVault cross-vault impact', () => {
   });
 });
 
-describe('reviewChangeHandler — extractor-version caveat (R6-12 parity)', () => {
+describe('reviewChangeHandler — extractor-version caveat', () => {
   it('OMITS the caveat when both vaults report the same product version', async () => {
     const r = await reviewChangeHandler(ctx, { ...DELETE_SHARED, againstVault: 'prod-b' });
     expect(r.ok).toBe(true);
@@ -249,8 +249,8 @@ describe('reviewChangeHandler — againstVault resolution', () => {
   });
 });
 
-describe('reviewChangeHandler — default path is byte-identical to R6-16', () => {
-  it('carries exactly the R6-16 key set and none of the cross-vault keys', async () => {
+describe('reviewChangeHandler — default path is byte-identical', () => {
+  it('carries exactly the key set and none of the cross-vault keys', async () => {
     const r = await reviewChangeHandler(ctx, DELETE_SHARED);
     expect(r.ok).toBe(true);
     if (!r.ok) return;

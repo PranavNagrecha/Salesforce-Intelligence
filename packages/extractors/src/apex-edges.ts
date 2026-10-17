@@ -83,7 +83,7 @@ const isApexMemberFieldName = (field: string): boolean =>
  * Strip Apex line / block comments and single-quoted string literals
  * from `source`, replacing them with same-length runs of spaces so
  * caller-side offsets stay valid. Mirrors the helper of the same name
- * in `apex-scanner.ts` — duplicated here so the v1.5
+ * in `apex-scanner.ts` — duplicated here so the
  * `dispatchesAsync` regex pass doesn't have to depend on the scanner's
  * private internals.
  */
@@ -99,15 +99,15 @@ const stripApexCommentsAndStrings = (source: string): string =>
  * `Triggerable<...>` interface reference, or when the generic argument
  * is malformed / empty.
  *
- * The v1.5 apex-class extractor calls this against every entry of
+ * The apex-class extractor calls this against every entry of
  * `header.implements`. Whether the resulting event name is emitted as
  * a `listensTo` edge is decided at the call site (see
  * `buildClassListensToEdge` below) by checking the `__e` suffix:
- * PLAN-v1.5.md §3 reserves `listensTo` for Platform Event subscribers
+ * §3 reserves `listensTo` for Platform Event subscribers
  * specifically, mirroring the Salesforce convention that splits
  * `triggersOn` (sObject lifecycle) from `listensTo` (Platform Events).
  * `IntegrationTopologySemantics.md` Rule 2 has a more permissive
- * reading; the worker brief defers to PLAN-v1.5's stricter rule.
+ * reading; the worker brief defers to the stricter rule.
  *
  * @example
  *   triggerableEventFromImplements('Triggerable<Account_Change__e>')
@@ -131,7 +131,7 @@ export const triggerableEventFromImplements = (
 };
 
 /**
- * Build a v1.5 `listensTo` edge from an `ApexClass` to the Platform
+ * Build a `listensTo` edge from an `ApexClass` to the Platform
  * Event it subscribes to via `implements Triggerable<{Event}__e>`.
  * Carries `confidence: 'declared'` per
  * `IntegrationTopologySemantics.md` Rule 2 — the interface declaration
@@ -141,7 +141,7 @@ export const triggerableEventFromImplements = (
  * `Triggerable<...>`, or when the captured event name does not end in
  * `__e` (the apex-class extractor restricts production to Platform
  * Events; non-`__e` event names produce no edge so that the empty-
- * since-v1.0 `listensTo` slot stays semantically clean).
+ * reserved `listensTo` slot stays semantically clean).
  *
  * Returns at most one edge — if the (unusual) case of multiple
  * `Triggerable<...>` entries on one class shows up, only the first is
@@ -158,7 +158,7 @@ export const buildClassListensToEdge = (
     // production to `__e` events. A `Triggerable<Account>` would
     // be malformed Salesforce — letting it through would create a
     // listensTo edge to a non-Platform-Event CustomObject, which
-    // breaks the `listensTo` / `triggersOn` separation v1.5
+    // breaks the `listensTo` / `triggersOn` separation
     // depends on.
     if (!eventName.endsWith('__e')) continue;
     return {
@@ -174,18 +174,18 @@ export const buildClassListensToEdge = (
 };
 
 /**
- * Build the v1.5 `exposes` edges for the three API-surface annotations
+ * Build the `exposes` edges for the three API-surface annotations
  * the apex-class extractor recognizes:
  *
  *   - `@RestResource(urlMapping='/Foo')` → `ExternalApi:rest/Foo`
  *   - `@AuraEnabled` (any method) → `ExternalApi:aura/{Class}.{method}`
- *     — but since v1.5's parseApexHeader only captures bare
+ *     — but since the parseApexHeader only captures bare
  *     annotation names (not method names), the synthetic-id for Aura
  *     and Invocable surfaces is the class-level
  *     `ExternalApi:aura/{Class}` form. Per
  *     `IntegrationTopologySemantics.md` §"Known limitations" #11, the
- *     v1.5 surface is per-class; method-level granularity is a
- *     v1.6+ extension.
+ *     surface is per-class; method-level granularity is a
+ *     later extension.
  *   - `@InvocableMethod` (any method) → `ExternalApi:invocable/{Class}`
  *
  * All three carry `confidence: 'declared'`. The synthetic `toId` is
@@ -244,7 +244,7 @@ export const buildExposesEdges = (
 };
 
 /**
- * Build v1.5 `dispatchesAsync` edges for the three Apex-builtin
+ * Build `dispatchesAsync` edges for the three Apex-builtin
  * async-dispatch shapes the apex-class extractor recognizes in source:
  *
  *   - `System.enqueueJob(new X(...))` — Queueable dispatch.
@@ -253,15 +253,15 @@ export const buildExposesEdges = (
  *
  * All three emit `confidence: 'declared'` because the dispatch shape
  * unambiguously names the target class via the inline `new
- * {ClassName}(` constructor (see PLAN-v1.5.md §3 and
+ * {ClassName}(` constructor (
  * `IntegrationTopologySemantics.md` §"`dispatchesAsync` heuristic
  * patterns" Patterns 1-3).
  *
  * Pattern 4 (`@future`-method invocation, heuristic confidence)
- * requires a cross-class two-pass scan and is documented as a v1.6+
- * follow-up; the v1.5 producer does NOT emit those edges. The
+ * requires a cross-class two-pass scan and is documented as a later
+ * follow-up; the producer does NOT emit those edges. The
  * `properties.hasFutureMethod: true` flag on each affected class is
- * the v1.5 surface for the architect's "what's async" question;
+ * the surface for the architect's "what's async" question;
  * `dispatchesAsync` from the caller side waits for the resolver
  * upgrade.
  *
@@ -470,7 +470,7 @@ export interface ApexEdgesResult {
 
 /**
  * Map the frontend scanner's `resourceRefs` to graph `references` edges
- * (P14-USAGE-label-static-graph): CustomLabel / StaticResource get their own
+ * CustomLabel / StaticResource get their own
  * node types; a Custom Setting read targets the CustomObject node (custom
  * settings are modeled as CustomObject in the vault). The CALLER picks the
  * confidence: LWC refs come from declarative `import` statements
@@ -583,7 +583,7 @@ export const mergeAndSortEdges = (edges: readonly Edge[]): readonly Edge[] => {
 };
 
 /**
- * Scan Apex source for field accesses and method calls via the v0.3
+ * Scan Apex source for field accesses and method calls via the
  * heuristic scanner and project the results onto `Edge` records owned by
  * `ownerId` (an `ApexClass:{name}` or `ApexTrigger:{name}` canonical ID).
  *
@@ -605,7 +605,7 @@ export const mergeAndSortEdges = (edges: readonly Edge[]): readonly Edge[] => {
  *     `ApexClass:{className}` per target class, with
  *     `properties: { methods: string[], methodName, offset, length }` —
  *     `methods` is the complete sorted set of that target's methods this
- *     owner calls (P4-C5 method-level), `methodName` the first for
+ *     owner calls (method-level), `methodName` the first for
  *     back-compat, `offset`/`length` the span of the first call site.
  *     EXCEPTION (APEX-SOBJECT-REF-MINTED-AS-APEXCLASS): when `className` is an
  *     object-suffixed api name (`Custom_Setting__c.getOrgDefaults()`), the call
@@ -639,7 +639,7 @@ export const mergeAndSortEdges = (edges: readonly Edge[]): readonly Edge[] => {
  *
  * The scanner does no symbol resolution: `object` is a variable name as
  * it appears in source (e.g., `this`, `acc`, `mainMarketoSetting`). The
- * `toId` preserves that literal under the `CustomField:` prefix; a v0.4
+ * `toId` preserves that literal under the `CustomField:` prefix; a
  * resolver will rewrite to canonical SObject IDs once Apex AST analysis
  * lands. Until then these edges are intentionally noisy — the
  * `heuristic` label tells consumers to rank them lower than `parsed` or
@@ -723,7 +723,7 @@ export const buildApexScannerEdges = (
         ...buildApexCalloutEdges(ownerId, source),
         ...buildApexLabelEdges(ownerId, source),
       ]),
-      // Format documented in v0.3 wiring spec; consumers parse this
+      // Format documented in the wiring spec; consumers parse this
       // by prefix to surface scanner failures in the vault UI.
       warnings: [`apex-scanner: ${kind} at offset ${offset}: ${message}`],
     };
@@ -796,7 +796,7 @@ export const buildApexScannerEdges = (
       properties: { offset: access.offset, length: access.length },
     });
   }
-  // P4-C5 method-level: aggregate every call site to the same target class
+  // Method-level: aggregate every call site to the same target class
   // into ONE `callsApex` edge that carries the COMPLETE set of called methods.
   // Previously one edge was pushed per `(className, methodName)` pair and
   // `mergeAndSortEdges` then deduped by `(from, to, edgeType)` — keeping only
@@ -805,7 +805,7 @@ export const buildApexScannerEdges = (
   // callers (and making `what_if_change_method_signature` miss callers of the
   // dropped method). Grouping here preserves every method on a `methods[]`
   // property; `methodName` is kept (the alphabetically-first) for back-compat
-  // with pre-P4-C5 readers.
+  // with legacy readers.
   const callsByClass = new Map<
     string,
     { methods: Set<string>; offset: number; length: number }

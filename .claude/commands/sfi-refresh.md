@@ -10,7 +10,7 @@ You are about to refresh the sf-intelligence vault.
 The plugin installs the MCP server, not the `sfi` command. Before the first
 command, run `command -v sfi` via the Bash tool. If it prints a path, run the
 commands below as written. If it prints nothing, run every `sfi …` command
-below as `npx -y sf-intelligence@0.6.0 …` instead, with the same arguments.
+below as `npx -y sf-intelligence@0.7.0 …` instead, with the same arguments.
 The Bash tool has no terminal, so the CLI cannot prompt: always pass the
 flags it would otherwise ask for.
 

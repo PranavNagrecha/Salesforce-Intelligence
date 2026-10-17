@@ -1,8 +1,8 @@
 /**
  * Handler for the `sfi.compare_profile_across_vaults` MCP tool.
  *
- * The v3.1 surface for "does System Administrator have the same
- * permissions in sandbox as in prod?" (PLAN-v3.1 §4). Reads each
+ * The surface for "does System Administrator have the same
+ * permissions in sandbox as in prod?". Reads each
  * Profile's grant set from both vaults, pairs by target-component id,
  * and emits per-category drift arrays across the five grant
  * categories: object permissions, field permissions, tab visibilities,
@@ -10,7 +10,7 @@
  *
  * Honesty axis (verbatim in `boundaries[]`, surfaced ALWAYS):
  *
- *   Profile-edition rollup — v0.1 cannot reliably detect Salesforce
+ *   Profile-edition rollup — this cannot reliably detect Salesforce
  *   edition (Production / Developer / Enterprise). When vaults come
  *   from different editions, user-permission drift may reflect edition
  *   differences not configuration drift.
@@ -109,7 +109,7 @@ export const compareProfileAcrossVaultsInputSchema = z.object({
   vaultA: z.string().min(1),
   vaultB: z.string().min(1),
   includeVolatileProperties: z.boolean().optional(),
-  // CR-22 paging knobs. Reading grants from `grantedBy` edges made these
+  // Paging knobs. Reading grants from `grantedBy` edges made these
   // arrays real (thousands of rows on a big profile), so the dropped tail has
   // to be REACHABLE, not merely trimmed.
   limit: z.number().int().min(1).max(COMPARE_PROFILE_MAX_LIMIT).optional(),
@@ -198,7 +198,7 @@ interface ProfileRow {
 
 /**
  * C-3 (finding 28) — `canonicalJson(undefined)` crash-class sweep. This
- * module's `canonicalJson` was a copy of `compare-vaults.ts`'s pre-R6-12
+ * module's `canonicalJson` was a copy of `compare-vaults.ts`'s pre
  * implementation, missing the explicit `undefined` branch: a naive `typeof
  * value !== 'object'` fall-through calls `JSON.stringify(undefined)`, which
  * returns the JS value `undefined` (NOT a string) rather than throwing —
@@ -207,7 +207,7 @@ interface ProfileRow {
  * presence guards mean `va`/`vb` are usually defined when compared, but a
  * grant map could legitimately carry an explicit `undefined` value (e.g. a
  * malformed/partial extraction), so the branch is latent, not provably
- * unreachable. The explicit `undefined` branch below (matching R6-12's fix
+ * unreachable. The explicit `undefined` branch below (matching the fix
  * in `compare-vaults.ts`) closes that landmine pre-emptively; the sentinel
  * cannot collide with any real JSON value.
  *
@@ -327,7 +327,7 @@ const loadEdgeGrantMaps = async (
 
 /**
  * Read a grant-category map from the Profile's properties blob. The
- * v1.0 Profile extractor stores each category as either an array of
+ * Profile extractor stores each category as either an array of
  * grant objects, an array of plain permission NAMES (`userPermissions`),
  * or a record keyed by target id. We normalise to a record
  * { targetId -> grant value } here.
@@ -404,7 +404,7 @@ const PROFILE_EDITION_DISCLOSURE =
 /**
  * Honesty disclosure surfaced when a compared vault has no `tabVisibilities`
  * on the profile. The Profile extractor DOES emit `tabVisibilities` (and
- * `applicationVisibilities`) since P11-UI-app-tab-visibility-extract — so a
+ * `applicationVisibilities`) — so a
  * vault that lacks it was refreshed BEFORE that extraction (a stale vault),
  * not a product gap. Comparing the absent map would falsely report "no
  * tab-visibility drift", so we DISCLOSE instead. Self-heals: once both vaults
@@ -509,7 +509,7 @@ const pageNote = (
  * payload with `profileExistsInA/B: false` — a false negative there
  * reads as a confident "the profile is absent from this org" when the
  * truth is "we never managed to look". The verbatim register-vault
- * directive (Q170) rides on the error `message`.
+ * directive rides on the error `message`.
  */
 const vaultNotFoundError = (
   missingAlias: string,

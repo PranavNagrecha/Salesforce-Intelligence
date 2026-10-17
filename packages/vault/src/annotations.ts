@@ -1,5 +1,5 @@
 /**
- * P13-ANNOT-store — the vault-local annotations overlay.
+ * the vault-local annotations overlay.
  *
  * Annotations are MEANING the org's metadata cannot carry: ownership
  * ("RevOps owns this field"), lifecycle status ("deprecated"), glossary

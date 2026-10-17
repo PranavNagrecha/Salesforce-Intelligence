@@ -127,10 +127,10 @@ for (let i = 0; i < 15; i++) {
 
 const highDebtSeed: ExtractionResult = { nodes: highDebtNodes, edges: [] };
 
-// ----- Q115 honesty anchor: no qualityIssues, no freshness data -----
+// ----- honesty anchor: no qualityIssues, no freshness data -----
 // (Use the lowDebtSeed which has no qualityIssues / no lastModifiedDate)
 
-describe('techDebtScoreHandler — Q111 low-debt band', () => {
+describe('techDebtScoreHandler — low-debt band', () => {
   let tempDir: string;
   let store: GraphStore;
   let ctx: Context;
@@ -272,7 +272,7 @@ describe('readPriorTechDebtScore (P9-risk-delta)', () => {
   });
 });
 
-describe('techDebtScoreHandler — Q112 high-debt band', () => {
+describe('techDebtScoreHandler — high-debt band', () => {
   let tempDir: string;
   let store: GraphStore;
   let ctx: Context;
@@ -316,7 +316,7 @@ describe('techDebtScoreHandler — Q112 high-debt band', () => {
   });
 });
 
-describe('techDebtScoreHandler — P10-A4 codeQuality heuristic-tier citation', () => {
+describe('techDebtScoreHandler — codeQuality heuristic-tier citation', () => {
   let tempDir: string;
   let store: GraphStore;
   let ctx: Context;
@@ -388,7 +388,7 @@ describe('techDebtScoreHandler — P10-A4 codeQuality heuristic-tier citation', 
   });
 });
 
-describe('techDebtScoreHandler — Q113 weighting override', () => {
+describe('techDebtScoreHandler — weighting override', () => {
   let tempDir: string;
   let store: GraphStore;
   let ctx: Context;
@@ -419,7 +419,7 @@ describe('techDebtScoreHandler — Q113 weighting override', () => {
   });
 });
 
-describe('techDebtScoreHandler — Q114 user-opted-out exclusion', () => {
+describe('techDebtScoreHandler — user-opted-out exclusion', () => {
   let tempDir: string;
   let store: GraphStore;
   let ctx: Context;
@@ -452,7 +452,7 @@ describe('techDebtScoreHandler — Q114 user-opted-out exclusion', () => {
   });
 });
 
-describe('techDebtScoreHandler — Q115 honesty anchor (extractor-not-run)', () => {
+describe('techDebtScoreHandler — honesty anchor (extractor-not-run)', () => {
   let tempDir: string;
   let store: GraphStore;
   let ctx: Context;
@@ -503,7 +503,7 @@ describe('techDebtScoreHandler — Q115 honesty anchor (extractor-not-run)', () 
     expect(optOut.value.data.scoreBand).not.toBe('insufficient-evidence');
   });
 
-  it('emits the verbatim Q115 disclosure when extractor-not-run', async () => {
+  it('emits the verbatim disclosure when extractor-not-run', async () => {
     const r = await techDebtScoreHandler(ctx, {});
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -579,7 +579,7 @@ describe('techDebtScoreHandler — Q115 honesty anchor (extractor-not-run)', () 
   });
 });
 
-describe('techDebtScoreHandler — neverModified honesty (CR-16a)', () => {
+describe('techDebtScoreHandler — neverModified honesty', () => {
   let tempDir: string;
   let store: GraphStore;
   let ctx: Context;
@@ -790,13 +790,13 @@ describe('techDebtScoreInputSchema', () => {
 });
 
 // =============================================================================
-// CR-12 — page-to-exhaustion. The composite SCORE inspects per-node properties
+// page-to-exhaustion. The composite SCORE inspects per-node properties
 // (apiVersion, qualityIssues, lastModifiedDate) and must be computed over the
 // COMPLETE node set, not just the first page. With SFI_NODE_SCAN_LIMIT=2 the
 // loadAllNodes offset loop walks multiple pages; a deprecated/smelly class
 // sorted PAST the cap by id ASC used to be invisible, undercounting the score.
 // =============================================================================
-describe('techDebtScoreHandler — past-cap score completeness (CR-12 de-cap)', () => {
+describe('techDebtScoreHandler — past-cap score completeness', () => {
   let tempDir: string;
   let store: GraphStore;
   let ctx: Context;
@@ -1162,7 +1162,7 @@ describe('techDebtScoreHandler — unchecked zero vs checked zero', () => {
     const joined = r.value.data.boundaries.join(' ');
     expect(joined).toContain('UNCHECKED, NOT ZERO');
     expect(joined).toContain('legacyAutomation');
-    // The Q115 anchor must still be there — it is now actually true.
+    // The anchor must still be there — it is now actually true.
     expect(joined).toContain('missing axes are EXCLUDED, not assumed zero');
   });
 
@@ -1288,7 +1288,7 @@ describe('techDebtScoreHandler — legacyAutomation scan-truncation honesty (R1)
   });
 
   // The exclusion must NOT borrow `'extractor-not-run'`: that reason is the
-  // key that appends the verbatim Q115 boundary, whose remedy is "run the
+  // key that appends the verbatim boundary, whose remedy is "run the
   // appropriate refresh command" — a remedy that cannot lift a 500-node scan
   // cap. A disclosure tool emitting a dead-end remedy as fact is the same
   // class of defect this brief exists to remove, so the reason is
@@ -1335,7 +1335,7 @@ describe('techDebtScoreHandler — legacyAutomation scan-truncation honesty (R1)
 
   // Moving the reason off `'extractor-not-run'` (correctly — a refresh cannot
   // lift a page cap) took the axis OUT of the only sentence that mentioned it:
-  // Q115 is keyed on that reason, so the scan-cap exclusion lived in the typed
+  // The disclosure is keyed on that reason, so the scan-cap exclusion lived in the typed
   // `excludedCategories` and in NO prose at all. A host reads `boundaries`
   // aloud; a 0.20-weight axis silently dropped from the weighted mean has to
   // be said there too, not only in a field a summarizer may never quote.

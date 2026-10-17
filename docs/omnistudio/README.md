@@ -67,7 +67,7 @@ containers (an Edit Block, a Block with `repeat: true`) hold one row per entry; 
 | `dispatchesOmniAction` | OmniScript, IP, FlexCard, **Apex** | calls an IP (by key, or through the managed runtime's IntegrationProcedureService — `via: runtime-service`), a DataMapper (by bundle), or another OmniScript; resolved at import onto the **active** version (`targetResolution`). From Apex (`via: apex`): `<ns>.IntegrationProcedureService.runIntegrationService('Type_SubType', …)` / `<ns>.DRGlobal.process(…, 'Bundle')` with a LITERAL key — a key built at runtime is not seen |
 | `callsApex` | OmniScript, IP, FlexCard | runs an Apex class named by a `remoteClass`; `methods[]` holds the routed methods, `callSites[]` every site, `entryVia: omnistudio-remote` |
 | `readsFrom` | DataMapper (Extract), FlexCard (SOQL) | reads a field (`roles`: `filter` / `mapping`) or an object |
-| `writesTo` | DataMapper (Load), IP (Delete Action) | writes a field; creates / upserts an object (`operation: recordCreate` / `recordUpsert`); deletes records (`operation: recordDelete`) |
+| `writesTo` | DataMapper (Load), IP (Delete Action), OmniScript (`saveURLPatterns`) | writes a field; creates / upserts an object (`operation: recordCreate` / `recordUpsert`); deletes records (`operation: recordDelete`); save-for-later URL pattern keys on the script's declared save object (`mechanism: saveURLPatterns`, confidence parsed — patterns without a declared object stay on `unresolvedSavePatterns`) |
 
 Relationship paths (`alias:Parent__r.Field__c`, a SOQL `Owner.Name`) are resolved at import against the vault's lookups,
 or dropped — never guessed. Active OmniScripts, IPs and FlexCards count as entry points for Apex reachability.

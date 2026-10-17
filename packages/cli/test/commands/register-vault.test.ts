@@ -1,7 +1,7 @@
 /// <reference types="vitest/globals" />
 
 /**
- * Tests for the v3.1 R7 `sfi register-vault` CLI subcommand.
+ * Tests for the `sfi register-vault` CLI subcommand.
  *
  * The handler is a thin shim around `registerVault` in
  * `@sf-intelligence/vault`; these tests verify the CLI's path

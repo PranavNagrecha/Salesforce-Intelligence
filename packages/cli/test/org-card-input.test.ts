@@ -25,7 +25,7 @@ import { renderOrgCard } from '@sf-intelligence/renderers';
 import { buildOrgCardInput } from '../src/org-card-input.js';
 
 /**
- * P13-CARD-render — "every number re-derivable from graph/manifest": build a
+ * "every number re-derivable from graph/manifest": build a
  * small synthetic graph, assemble the card input, and re-derive each headline
  * number with direct queries. The card may never claim a number the graph
  * does not produce.

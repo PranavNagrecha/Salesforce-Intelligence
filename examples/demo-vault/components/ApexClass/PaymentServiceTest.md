@@ -142,5 +142,5 @@ private class PaymentServiceTest {
 
 | Target | Confidence | Producer |
 | --- | --- | --- |
-| `ApexClass:Invoice__c` | heuristic | apex-scanner |
-| `ApexClass:Project__c` | heuristic | apex-scanner |
+| `CustomObject:Invoice__c` | heuristic | apex-scanner |
+| `CustomObject:Project__c` | heuristic | apex-scanner |

@@ -1,5 +1,5 @@
 /**
- * CR-22 continuation-cursor protocol — the shared FOUNDATION (B0).
+ * Continuation-cursor protocol — the shared FOUNDATION.
  *
  * A handler that pages a list emits a `PageInfo` with an opaque `nextCursor`
  * ONLY when the page it just produced was truncated (over a byte budget OR over
@@ -629,7 +629,7 @@ export const encodeScanOffset = (
 
 /**
  * Back-compat fields the B1 tools already emit on their `data` payload BEFORE
- * CR-22 — kept byte-identical so the golden-diff does not move.
+ * kept byte-identical so the golden-diff does not move.
  */
 export interface LegacyPageFields<T> {
   /** The page of items (already byte-trimmed / forward-progress-slimmed). */
@@ -648,7 +648,7 @@ export interface PaginateLegacyResult<T> extends LegacyPageFields<T> {
    * Opaque continuation token — present (non-null) ONLY when this page was
    * truncated (over `limit` OR over the byte budget). A whole-fits page omits
    * it entirely (the handler must spread it conditionally so an in-budget
-   * response is byte-identical to pre-CR-22).
+   * response is byte-identical to the pre-paging shape).
    */
   readonly nextCursor: string | null;
   /** The structured {@link PageInfo} (used by the seam detector via `pageInfo`). */

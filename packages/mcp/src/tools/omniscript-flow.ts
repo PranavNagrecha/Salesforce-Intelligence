@@ -1,11 +1,11 @@
 /**
  * Handler for the `sfi.omniscript_flow` MCP tool.
  *
- * The v3.2 R3 "walk this OmniScript end-to-end" surface. Given an
+ * The "walk this OmniScript end-to-end" surface. Given an
  * `OmniScript:` canonical id, returns:
  *
  *   - `metadata`: identity + top-level discriminators copied from the
- *     v3.2 R2 extractor's node properties (omniProcessType, versionNumber,
+ *     extractor's node properties (omniProcessType, versionNumber,
  *     language, subType, type, uniqueName, isActive, isWebCompEnabled).
  *   - `steps`: the ordered `<omniProcessElements>` children (recursive),
  *     parsed at tool-invocation time from `node.sourcePath`. Each step
@@ -19,20 +19,20 @@
  *     when the target is missing from the vault — dangling reference),
  *     the verbatim `targetRawName` from the XML, and the edge confidence.
  *   - `boundaries[]`: three verbatim disclosures surfaced ALWAYS per
- *     PLAN-v3.2 §4 honesty axes — Native-vs-Vlocity-Legacy detection
- *     heuristic, the OmniProcessElement record-level boundary (Q179
- *     anchor), and the Apex-coupling scope (Q180 anchor).
+ *     §4 honesty axes — Native-vs-Vlocity-Legacy detection
+ *     heuristic, the OmniProcessElement record-level boundary, and the
+ *     Apex-coupling scope.
  *
  * **Composition recipe**: loads the OmniScript node via
  * `getNodeById`, reads `node.sourcePath`, re-parses the XML with
- * fast-xml-parser to recover the per-element shape (the v3.2 R2
+ * fast-xml-parser to recover the per-element shape (the
  * extractor surfaces summary counts, not the individual elements), then
  * walks `listEdges` filtered to `dispatchesOmniAction` outgoing edges,
  * resolving each `toId` to `componentExistsInVault`. The Native-vs-
  * Vlocity disclosure (shared, `omni-disclosures.ts`) surfaces verbatim
  * regardless of vault state: whether a managed-package export is
  * current, or a mid-migration org is fully covered, is not knowable
- * from the vault (Q180 constitutional anchor). A managed-package
+ * from the vault. A managed-package
  * (Vlocity DataPack) OmniScript is read through the same parser as a
  * native one.
  *
@@ -45,7 +45,6 @@
  * disclosure makes that gap visible.
  *
  * @see docs/vendor/salesforce-metadata/OmniScript.md
- * @see PLAN-v3.2.md §4, §7 (Q176 reference question)
  */
 
 import { readFile } from 'node:fs/promises';
@@ -75,8 +74,7 @@ const DISPATCH_EDGE_TYPE = 'dispatchesOmniAction';
 
 /**
  * The OmniProcessElement record-level boundary disclosure, surfaced
- * verbatim on EVERY `sfi.omniscript_flow` response per PLAN-v3.2 §4
- * honesty axis 2 / Q179 anchor — runtime user-entered state lives in
+ * verbatim on EVERY `sfi.omniscript_flow` response — runtime user-entered state lives in
  * SObject records, NOT in the metadata XML this tool reads.
  */
 const RECORD_LEVEL_DISCLOSURE =
@@ -84,7 +82,7 @@ const RECORD_LEVEL_DISCLOSURE =
 
 /**
  * The Apex-coupling scope disclosure, surfaced verbatim on EVERY
- * `sfi.omniscript_flow` response (Q180 anchor): calls OUT to Apex are in
+ * `sfi.omniscript_flow` response: calls OUT to Apex are in
  * the graph as `callsApex` edges, but this tool lists only the OmniStudio
  * dispatches; Apex that runs OmniStudio by a literal key is an edge from
  * the class (the usage tools list it).
@@ -127,7 +125,7 @@ export interface OmniScriptStep {
    * `includeChildPropertySetConfig: true`. The verbatim parsed JSON
    * blob from the XML (HTML-entity-escaped in source). `null` when the
    * source XML carried no `<propertySetConfig>` element OR the parse
-   * failed (the v3.2 extractor's best-effort JSON parse boundary).
+   * failed (the extractor's best-effort JSON parse boundary).
    */
   readonly propertySetConfigParsed?: Readonly<Record<string, unknown>> | null;
 }
@@ -213,7 +211,7 @@ const toNullableNumber = (value: unknown): number | null => {
 
 /**
  * Best-effort parse of an HTML-entity-escaped JSON string. Mirrors the
- * v3.2 R2 extractor's parser — fast-xml-parser's default
+ * extractor's parser — fast-xml-parser's default
  * `processEntities` decodes `&quot;` etc. into `"`, so the input is
  * plain JSON. Failures produce `null` rather than aborting.
  */
@@ -261,7 +259,7 @@ const walkElements = (raw: unknown, acc: WalkAccumulator): void => {
     const sequenceNumber = toNullableNumber(obj['sequenceNumber']);
     const isActive = coerceBoolean(obj['isActive']);
     // Skip elements with no name+type — those are XML noise (defensive;
-    // the v3.2 extractor's malformed-input check should already catch
+    // the extractor's malformed-input check should already catch
     // genuine corruption upstream).
     if (name === null || type === null) continue;
     const baseStep = {
@@ -288,7 +286,7 @@ const walkElements = (raw: unknown, acc: WalkAccumulator): void => {
 
 /**
  * Read and parse the OmniScript's source XML into its `<OmniScript>` root.
- * Wraps fast-xml-parser with the same options the v3.2 R2 `omniscript`
+ * Wraps fast-xml-parser with the same options the `omniscript`
  * extractor uses so the two surfaces produce structurally identical step
  * views — only the storage location differs (extractor persists counts to
  * node properties; this tool re-parses for full step shape).
@@ -412,7 +410,7 @@ const compareDispatched = (
  * dispatches resolved through `dispatchesOmniAction` edges. Surfaces
  * three verbatim boundary disclosures (Native-vs-Vlocity heuristic,
  * record-level data out of scope, Apex coupling listed elsewhere) on
- * EVERY response per PLAN-v3.2 §4 / Q176-Q180 anchors.
+ * EVERY response.
  *
  * @example
  *   const r = await omniscriptFlowHandler(ctx, {
@@ -462,7 +460,7 @@ export const omniscriptFlowHandler = async (
 
   // Walk outgoing dispatchesOmniAction edges and expand each into a
   // DispatchedAction. Each edge's properties carry the caller's
-  // stepName / stepType / targetRawName per the v3.2 R2 extractor.
+  // stepName / stepType / targetRawName per the extractor.
   const edgeRes = await listEdges(ctx.graph, omniScriptId, {
     direction: 'out',
     edgeType: DISPATCH_EDGE_TYPE,
@@ -506,7 +504,7 @@ export const omniscriptFlowHandler = async (
   }
   dispatchedActions.sort(compareDispatched);
 
-  // Re-parse the source XML for the per-step shape (the v3.2 R2
+  // Re-parse the source XML for the per-step shape (the
   // extractor stores only summary counts). When the source file has
   // moved / been deleted between refresh and query, surface the failure
   // as `internal` so the renderer can fall back to dispatchedActions
@@ -520,7 +518,7 @@ export const omniscriptFlowHandler = async (
   }
   const steps = stepsRes.value;
 
-  // Pull metadata from the v3.2 R2 extractor's properties surface. The
+  // Pull metadata from the extractor's properties surface. The
   // extractor populates these from top-level XML elements (uniqueName,
   // omniProcessType, versionNumber, language, subType, type) plus the
   // boolean flags (isActive, isWebCompEnabled).

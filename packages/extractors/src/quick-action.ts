@@ -11,6 +11,7 @@ import type {
 import { err, ok } from '@sf-intelligence/core';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
+import { bundleId } from './bundle-id.js';
 import { deriveComponentApiName, deriveParentApiName } from './path-utils.js';
 
 const QUICK_ACTION_FILE_SUFFIX = '.quickAction-meta.xml';
@@ -293,7 +294,7 @@ const buildReferencesEdge = (
     if (name === null || name.length === 0) return null;
     return {
       fromId,
-      toId: `AuraDefinitionBundle:${name}`,
+      toId: bundleId('AuraDefinitionBundle', name),
       edgeType: 'references',
       confidence: 'declared',
       source: EXTRACTOR_SOURCE,
@@ -305,7 +306,7 @@ const buildReferencesEdge = (
     if (name === null || name.length === 0) return null;
     return {
       fromId,
-      toId: `LightningComponentBundle:${name}`,
+      toId: bundleId('LightningComponentBundle', name),
       edgeType: 'references',
       confidence: 'declared',
       source: EXTRACTOR_SOURCE,

@@ -1,6 +1,6 @@
 /**
- * Body merge-token scanner for the v1.3 EmailTemplate extractor's v3.0
- * extension (PLAN-v3.0 §3 + §4 R2).
+ * Body merge-token scanner for the EmailTemplate extractor's
+ * extension (§4 R2).
  *
  * The `<content>` element of a Salesforce EmailTemplate carries either
  * plain text or HTML; both flavours embed merge tokens of the form
@@ -15,19 +15,19 @@
  *   {!IF(Account.Customer_Segment__c == "Enterprise", "Premium support",
  *        "Standard support")}
  *
- * The grammar v3.0 captures: every dotted `Object.Field` token reachable
+ * The grammar captures: every dotted `Object.Field` token reachable
  * inside any `{! ... }` envelope. This includes references nested inside
- * function calls (`IF`, `CASE`, etc.). The v3.0 honesty axis: the parser
+ * function calls (`IF`, `CASE`, etc.). The honesty axis: the parser
  * captures the field REFERENCES inside conditional merges; it does NOT
  * capture the firing semantics of the condition itself. When ANY merge
  * uses function-call syntax, `richTemplateSyntaxDetected` flips true so
  * the renderer can surface the "field refs captured; firing logic not"
  * disclosure verbatim.
  *
- * Per PLAN-v3.0 §3 "EdgeType union — No additions" — the extension emits
+ * Per the "EdgeType union — No additions" rule, the extension emits
  * the existing `references` family with `confidence: 'parsed'`. The
  * `{!Object.Field}` syntax is a deterministic parseable grammar; the
- * emission shape mirrors the v0.2 formula tokenizer's `references`
+ * emission shape mirrors the formula tokenizer's `references`
  * emission (both `parsed`).
  *
  * The parser is pure: it takes a body string and returns a structured
@@ -48,7 +48,7 @@
  * confidence — references inside conditional merges are still parsed —
  * but the email-template node's `richTemplateSyntaxDetected` property
  * surfaces the overall posture so the renderer can attach the
- * "firing logic NOT captured" disclosure per PLAN-v3.0 §4 honesty axis.
+ * "firing logic NOT captured" disclosure.
  *
  * @example
  *   const ref: BodyMergeReference = {
@@ -85,7 +85,7 @@ export interface BodyParseOutput {
 
 /**
  * Matches a merge envelope `{!...}` where `...` is the inner expression.
- * The non-greedy `[^}]*` body intentionally rejects nested `}` — the v3.0
+ * The non-greedy `[^}]*` body intentionally rejects nested `}` — the
  * grammar treats the first `}` as the envelope close, which mirrors the
  * Salesforce merge-token recognizer behaviour. The `g` flag drives
  * iteration over the body string.
@@ -99,7 +99,7 @@ const MERGE_ENVELOPE_RE = /\{!([^}]*)\}/g;
  * class. The `g` flag drives iteration inside each envelope's inner
  * expression.
  *
- * The parser is intentionally namespace-naive in v3.0 — a managed-package
+ * The parser is intentionally namespace-naive — a managed-package
  * reference `{!npsp__Household.Name}` produces a reference with
  * `objectApiName: 'npsp__Household'`. The downstream graph lookup will
  * either find or not find that field; either outcome is the right one.
@@ -108,7 +108,7 @@ const DOTTED_IDENTIFIER_RE = /\b([A-Za-z][A-Za-z0-9_]*)\.([A-Za-z][A-Za-z0-9_]*)
 
 /**
  * Detects a function-call shape (`IDENT(...)`) anywhere inside the inner
- * expression. Used to flag conditional merges; the v3.0 axis is "did the
+ * expression. Used to flag conditional merges; the axis is "did the
  * author wrap field refs in a function?". Both `IF`/`CASE`/`AND` and
  * less-common functions count — the recognizer is shape-only, not
  * semantically informed.

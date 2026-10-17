@@ -24,7 +24,7 @@ const SCANNER_SOURCE = 'vf-scanner';
 
 /**
  * Match the opening `<apex:page ...>` tag (single line or wrapped). The
- * extractor only inspects the first such tag — the v1.4 worker spec calls
+ * extractor only inspects the first such tag — the worker spec calls
  * out that we deliberately do not fully parse the markup XML; the
  * declared controller / extensions attributes always live on the root.
  *
@@ -108,7 +108,7 @@ interface PageMeta {
 
 /**
  * Parse the `<ApexPage>` companion metadata XML and return the values
- * required by the v1.4 node. Validates the root element name and the
+ * required by the node. Validates the root element name and the
  * required child elements per the vendored `ApexPage.md` spec.
  */
 const parseMetaXml = (
@@ -275,7 +275,7 @@ const readPageSource = async (
  * Project scanner output (`fieldAccesses`, `apexCalls`, `componentRefs`)
  * onto graph edges owned by `ownerId`.
  *
- * Per the v1.4 spec table:
+ * Per the spec table:
  *   - `fieldAccesses` → `readsFrom` / `writesTo` to `CustomField:{object}.{field}`,
  *     `confidence: 'heuristic'`, `source: 'vf-scanner'`.
  *   - `apexCalls` → `callsApex` to `ApexClass:{className}`,
@@ -351,7 +351,7 @@ const buildScannerEdges = (
     });
   }
   // $Label.X / $Resource.X / $Setup.X__c value-provider tokens →
-  // references edges (heuristic regex tokens; P14-USAGE-label-static-graph).
+  // references edges (heuristic regex tokens).
   raw.push(...buildResourceRefEdges(ownerId, result.value.resourceRefs, SCANNER_SOURCE, 'heuristic'));
   return {
     edges: raw,
@@ -369,7 +369,7 @@ const buildScannerEdges = (
  *
  * Reads both the `.page` markup and its companion `.page-meta.xml`,
  * parses the `<apex:page>` opening-tag attributes for declared
- * `controller=` / `extensions=` references, and runs the v1.4 frontend
+ * `controller=` / `extensions=` references, and runs the frontend
  * scanner (`'vf'` dialect) over the full markup body for
  * `{!Object.Field}` reads, `{!ClassName.method()}` calls, and
  * `<c:Component>` references.
@@ -497,7 +497,7 @@ export const extractVisualforcePage = async (
 
   // mergeAndSortEdges deduplicates by (fromId, toId, edgeType). The
   // declared-vs-heuristic origin doesn't influence ordering — sort is
-  // strictly (toId asc, edgeType asc) per the v0.3 apex-edges precedent.
+  // strictly (toId asc, edgeType asc) per the apex-edges precedent.
   // First occurrence wins on dedupe; declared edges are pushed first so
   // a declared `references` survives a scanner-emitted duplicate.
   const edges = mergeAndSortEdges([...declaredEdges, ...scannerOutput.edges]);

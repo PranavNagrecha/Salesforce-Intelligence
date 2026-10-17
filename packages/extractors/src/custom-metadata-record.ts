@@ -377,7 +377,7 @@ const extractValueEntry = (
   // Managed-package masked content: Salesforce serializes protected
   // values as the three-character literal `***` when the record is in a
   // managed package. The extractor MUST NOT fabricate the underlying
-  // value (per PLAN-v1.6.md §3) — collapse to `value: null, isMasked: true`.
+  // value — collapse to `value: null, isMasked: true`.
   if (textContent === MASKED_LITERAL) {
     const valueType = mapXsiType(xsiType);
     return ok({
@@ -426,7 +426,7 @@ const extractValueEntry = (
  * Reads the file, parses it as XML, validates the `<CustomMetadata>` root
  * per the vendored `CustomMetadataRecord.md` spec, and returns an
  * `ExtractionResult` containing one `Node` of type `'CustomMetadataRecord'`,
- * one `parentOf` edge from `CustomObject:{TypeApiName}` (mirroring v1.0's
+ * one `parentOf` edge from `CustomObject:{TypeApiName}` (mirroring the
  * CustomField parentOf pattern), and — CUSTOM-METADATA-VALUE-FIELD-REFS-
  * UNGRAPHED — one `references` edge (heuristic) per object/field-shaped value
  * cell (`*Object__c` -> `CustomObject:{value}`, `*Field__c` ->
@@ -437,7 +437,7 @@ const extractValueEntry = (
  * `{RecordName}` are obtained by splitting the basename (minus
  * `.md-meta.xml`) on the first dot. The `__mdt` suffix is preserved in
  * both the canonical id and the `parentId` so the edge's `fromId`
- * visually aligns with the v1.0 type definition's id.
+ * visually aligns with the type definition's id.
  *
  * Per-value handling follows the `<value>` shape table in the doc:
  * the literal `***` collapses to `{ value: null, isMasked: true }` (the

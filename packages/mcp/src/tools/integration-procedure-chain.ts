@@ -28,10 +28,10 @@
  *   6. The verbatim honesty disclosures bundled into `boundaries[]`:
  *      Native-vs-Vlocity-Legacy (ALWAYS), the Apex-coupling scope
  *      (ALWAYS), the OmniProcessElement record-level boundary
- *      (ALWAYS — Q179 anchor), and the REST-endpoint reachability
+ *      (ALWAYS — anchor), and the REST-endpoint reachability
  *      caveat (ALWAYS — URLs are `parsed`, not verified).
  *
- * Implementation notes (composition recipe per PLAN-v3.2 §4):
+ * Implementation notes (composition recipe):
  *
  *   - The graph carries the IP node + outgoing `dispatchesOmniAction`
  *     edges, but NOT the action list or the per-step
@@ -116,7 +116,7 @@ const APEX_COUPLING_DEFERRAL_DISCLOSURE =
   'impact tools for callers; a key built at runtime is not seen.';
 
 /**
- * OmniProcessElement record-level boundary (Q179 anchor). Surfaced on
+ * OmniProcessElement record-level boundary. Surfaced on
  * every IP-chain response because runtime state callers might assume
  * the record-level data is queryable through this tool. It is not.
  */
@@ -130,7 +130,7 @@ const RECORD_LEVEL_BOUNDARY_DISCLOSURE =
  * REST endpoint reachability disclosure. Per the task's honesty
  * boundary: "REST endpoint URLs documented as `parsed` confidence
  * (not verified)." Each Rest Action's URL is read from the
- * propertySetConfig JSON; v3.2 does NOT probe the endpoint, verify
+ * propertySetConfig JSON; this does NOT probe the endpoint, verify
  * DNS / TLS, or resolve the Named Credential against live state.
  */
 const REST_REACHABILITY_DISCLOSURE =
@@ -162,7 +162,7 @@ export type IntegrationProcedureChainInput = z.infer<
 >;
 
 /**
- * One row in the response's `actions` array. Mirrors PLAN-v3.2 §4's
+ * One row in the response's `actions` array. Mirrors §4's
  * `IntegrationProcedureAction` interface — name, type, description,
  * sequenceNumber, isActive, executionConditionalFormula, and the
  * optional parsed propertySetConfig.
@@ -187,7 +187,7 @@ export interface IntegrationProcedureAction {
 
 /**
  * One row in the response's `externalEndpoints` array. Mirrors
- * PLAN-v3.2 §4's `ExternalEndpoint` interface, extended with
+ * §4's `ExternalEndpoint` interface, extended with
  * `endpointConfidence` per the task's "URLs documented as `parsed`"
  * boundary.
  */
@@ -356,7 +356,7 @@ const nonEmptyString = (value: unknown): string | null => {
  *
  * Returns `null` when the blob is absent, empty, or unparseable —
  * malformed blobs are rare but surface as `null` rather than aborting
- * the walk, per the v3.2 "best-effort propertySetConfig parsing"
+ * the walk, per the "best-effort propertySetConfig parsing"
  * axis.
  */
 const parsePropertySetConfig = (

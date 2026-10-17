@@ -1,14 +1,14 @@
 /**
  * Handler for the `sfi.cpq_quote_template_breakdown` MCP tool.
  *
- * The second of three v2.6a CPQ-specialist tools. Given a
+ * The second of three CPQ-specialist tools. Given a
  * CpqQuoteTemplate canonical id, returns the template's top-level
  * configuration (template content reference, format, landscape flag,
  * page-break behavior, active flag) plus a best-effort section list
  * derived from values whose `field` token begins with
  * `SBQQ__Section__c`.
  *
- * Honesty axis: v2.6a recognizes the template's top-level
+ * Honesty axis: this recognizes the template's top-level
  * configuration only. The full section / field mapping sub-records
  * (`SBQQ__TemplateSection__c`, `SBQQ__TemplateContent__c`) are NOT
  * extracted — the section list surfaced here is a best-effort
@@ -98,7 +98,7 @@ export interface CpqQuoteTemplateBreakdownOutput {
 /**
  * Pull a typed scalar out of the CPQ node's properties. Returns the
  * value when it matches the expected runtime type, the typed
- * fallback otherwise. Mirrors the v1.6 lookup_record handler's
+ * fallback otherwise. Mirrors the lookup_record handler's
  * defensive read pattern.
  */
 const readStringProperty = (node: Node, key: string): string | null => {

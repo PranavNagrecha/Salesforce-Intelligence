@@ -1,16 +1,16 @@
 /**
  * Handler for the `sfi.find_semantic_field` MCP tool.
  *
- * The v2.2 "do we already have a field for X?" discovery surface. Takes
+ * The "do we already have a field for X?" discovery surface. Takes
  * a natural-language description (e.g., "customer health score",
  * "renewal date") and returns CustomField nodes whose combined apiName
  * + label + description token bag has the highest token-overlap score
  * against the query.
  *
- * **Heuristic-only:** the v2.2 implementation uses lexical token
+ * **Heuristic-only:** the implementation uses lexical token
  * overlap (Jaccard-style) rather than TF-IDF cosine similarity because
  * the in-process TF-IDF cache is the search-index infrastructure that
- * R4 (this task ships ahead of the v2.2.R4-mcp-tools dispatch) does not
+ * (this task ships ahead of the MCP-tools dispatch) does not
  * have access to. Until the cache lands, the heuristic is:
  *
  *   1. Tokenize the query per the description-tokenization path in
@@ -35,10 +35,10 @@
  *      noisy).
  *   5. Return the top `limit` (default 10).
  *
- * **Q95 honesty anchor (v2.2 constitutional axis):** every result
+ * **Honesty anchor (constitutional axis):** every result
  * carries `confidence: 'heuristic'` and the response's `boundaries`
- * always surfaces the verbatim Q95 disclosure for similarity-ranked
- * results. This is the v2.2 axis that locks the disclosure language —
+ * always surfaces the verbatim disclosure for similarity-ranked
+ * results. This is the axis that locks the disclosure language —
  * the skill MUST echo it verbatim to the user. A field named
  * `Customer_Industry__c` will rank above zero for the query
  * "customer health" because they share the `customer` token, even
@@ -68,7 +68,7 @@
  *
  * Implementation notes:
  *   - The CustomField corpus is scanned via repeated `listNodesByType`
- *     pages (the v0.1 `LIST_MAX_LIMIT` is 500 per page). The handler
+ *     pages (the `LIST_MAX_LIMIT` is 500 per page). The handler
  *     walks at most 20 pages (10,000 fields) — a hard cap that
  *     prevents pathological orgs from creating runaway queries.
  *   - Scoring is a synonym-aware symmetric Jaccard so a one-token query
@@ -79,7 +79,7 @@
  *   - The output `matchedTokens` array carries the query tokens that
  *     hit the field's token bag (literally or via synonym) — the
  *     user-facing explanation for "why was this field ranked highly"
- *     and the verification surface for the Q95 false-positive case.
+ *     and the verification surface for the false-positive case.
  *   - `confidence: 'heuristic'` is hard-coded on every match (the type
  *     enforces it via the literal type rather than the broader
  *     `ConfidenceLevel` union).
@@ -120,7 +120,7 @@ const SEMANTIC_FIELD_DEFAULT_MIN_SCORE = 0.1;
  */
 const SYNONYM_SCORE = 0.9;
 
-/** Verbatim Q95 disclosure surfaced on every result. */
+/** Verbatim disclosure surfaced on every result. */
 const Q95_DISCLOSURE =
   "this is a similarity-ranked recommendation based on overlapping tokens in the field's apiName, label, and description; it is not a declared match. A field named `Customer_Industry__c` will rank highly for the query `customer health` because they share the token `customer`. Verify the returned field's label and description before treating as the answer.";
 /**
@@ -310,9 +310,9 @@ export const tokenizeText = (
 /**
  * Build the combined token-bag for a CustomField: union of identifier
  * tokens (apiName), text tokens (label), and text tokens (description).
- * Returns a deduplicated Set since the v2.2 R4 ships Jaccard rather
- * than TF — TF-IDF requires the in-process cache R4 has not yet
- * landed; this v2.2 R2 implementation surfaces a heuristic-grade
+ * Returns a deduplicated Set since this ships Jaccard rather
+ * than TF — TF-IDF requires the in-process cache that has not yet
+ * landed; this implementation surfaces a heuristic-grade
  * lexical-overlap score that approximates the same ranking signal.
  */
 const fieldTokenBag = (node: Node): Set<string> => {
@@ -420,7 +420,7 @@ const findSemanticFieldInputBaseSchema = z.object({
     .max(SEMANTIC_FIELD_MAX_LIMIT)
     .optional(),
   minScore: z.number().min(0).max(1).optional(),
-  // CR-22: page cursor for walking the full ranked match list when truncated.
+  // Page cursor for walking the full ranked match list when truncated.
   offset: z.number().int().min(0).optional(),
   cursor: z.string().min(1).optional(),
 });
@@ -445,7 +445,7 @@ export interface SemanticFieldMatch {
   readonly objectId: ComponentId | null;
   readonly score: number;
   readonly matchedTokens: readonly string[];
-  /** Always 'heuristic' — Q95 enforcement at the type level. */
+  /** Always 'heuristic' — enforcement at the type level. */
   readonly confidence: 'heuristic';
 }
 
@@ -458,7 +458,7 @@ export interface FindSemanticFieldOutput {
   /**
    * Page size applied to this response. Present ONLY on a PAGED response
    * (`truncated` or a resumed `offset > 0`); omitted on a whole-fits no-cursor
-   * call so that response stays byte-identical to the pre-CR-22 shape.
+   * call so that response stays byte-identical to the pre-paging shape.
    */
   readonly limit?: number;
   /** Zero-based offset of the first returned match. Present only when paged (see `limit`). */
@@ -466,9 +466,9 @@ export interface FindSemanticFieldOutput {
   /** Offset to pass on the next call to fetch the following page. Present only when truncated. */
   readonly nextOffset?: number;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated.
+   * Opaque continuation token, present ONLY when this page is truncated.
    * Echo it back as `cursor` to resume. Absent on a complete page so an
-   * in-budget response is byte-identical to pre-CR-22.
+   * in-budget response is byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
@@ -519,7 +519,7 @@ export const findSemanticFieldHandler = async (
       ? new Set(input.objectIds)
       : null;
 
-  // CR-22 B4: scan EVERY CustomField by paging the SQL OFFSET forward (window-
+  // Scan EVERY CustomField by paging the SQL OFFSET forward (window-
   // by-window) so fields past 10k are reachable — the old FIELD_PAGE_SIZE(500) x
   // FIELD_MAX_PAGES(20) loop SILENTLY dropped fields past 10,000 from BOTH
   // scoring and totalCount with no disclosure. objectFilter is applied post-scan
@@ -556,14 +556,14 @@ export const findSemanticFieldHandler = async (
 
   // Rank: score DESC, then componentId ASC for determinism. componentId is the
   // unique field id, so (score DESC, componentId ASC) is a STRICT TOTAL order —
-  // the componentId-ASC tiebreak resolves any score tie uniquely, so a CR-22
+  // the componentId-ASC tiebreak resolves any score tie uniquely, so a
   // offset resume cannot dup or skip across a tie boundary.
   scored.sort((a, b) => {
     if (a.score !== b.score) return b.score - a.score;
     return a.componentId < b.componentId ? -1 : 1;
   });
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // Resolve the resume offset (echoed cursor wins over explicit offset).
   // The fingerprint covers the NARROWING args — the canonical description (after
   // alias merge), objectIds, and minScore — so a token can't replay against a
   // different query.

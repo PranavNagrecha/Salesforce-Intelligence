@@ -134,7 +134,7 @@ const validateRoot = (
  *
  * Returns one `Node` of type `'NamedCredential'` and zero edges. The
  * endpoint URL is a string, not a graph node; linking to referenced
- * components is deferred to v0.3.
+ * components is deferred.
  *
  * Error cases (per vendored `NamedCredential.md`):
  *   - `file-not-found` if the file is missing

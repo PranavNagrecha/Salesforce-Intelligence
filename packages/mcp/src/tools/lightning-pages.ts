@@ -1,5 +1,5 @@
 /**
- * Handler for the `sfi.lightning_pages` MCP tool (P11-UI-flexipage-activation).
+ * Handler for the `sfi.lightning_pages` MCP tool.
  *
  * Lightning record pages (FlexiPage) used to be a bare node. The extractor now
  * captures `sobjectType` / `pageType` / `masterLabel` and a `references` edge
@@ -76,7 +76,7 @@ export const lightningPagesInputSchema = z
     profile: z.string().min(1).optional(),
     limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
     offset: z.number().int().min(0).optional(),
-    // CR-22 continuation cursor (object mode only): an OPAQUE token echoed back
+    // Continuation cursor (object mode only): an OPAQUE token echoed back
     // from a prior truncated page's `nextCursor`. When present it supplies the
     // resume offset; omitting it = today's behavior (offset 0 / explicit
     // `offset`). The flexipage branch is a single-node fast path with no list.
@@ -158,7 +158,7 @@ export interface LightningPagesOutput {
   readonly hasMore: boolean;
   readonly truncated: boolean;
   /**
-   * CR-22 opaque continuation token (object mode), present ONLY when the pages
+   * Opaque continuation token (object mode), present ONLY when the pages
    * page was truncated (more pages remain past `limit`). Echo it back as
    * `cursor` to resume. Absent on a whole-fits page so an in-budget response
    * stays byte-identical.
@@ -317,7 +317,7 @@ export const lightningPagesHandler = async (
   // TOTAL-ORDER sort by the FlexiPage `componentId` (= edge.fromId). This single
   // key is ALREADY unique: each row's componentId is a distinct FlexiPage id,
   // and the extractor emits EXACTLY ONE flexiPageObject edge per FlexiPage to a
-  // fixed CustomObject — so no two surviving rows share a componentId. A CR-22
+  // fixed CustomObject — so no two surviving rows share a componentId. A
   // resume over this list cannot dup or skip; no extra tiebreak is needed.
   pages.sort((a, b) => (a.componentId < b.componentId ? -1 : a.componentId > b.componentId ? 1 : 0));
 
@@ -347,7 +347,7 @@ export const lightningPagesHandler = async (
   flexiPagesNotChecked.sort();
   const pagesScanTruncated = flexiPageScan.value.scanIncomplete;
 
-  // CR-22 (object mode only): resolve the resume offset — an echoed cursor wins
+  // Object mode only: resolve the resume offset — an echoed cursor wins
   // over an explicit `offset`; a stale/forged cursor (changed componentId,
   // different tool, or refreshed vault) is rejected with `invalid-query`. The
   // input.componentId being an OBJECT id is part of the fingerprint, so a cursor

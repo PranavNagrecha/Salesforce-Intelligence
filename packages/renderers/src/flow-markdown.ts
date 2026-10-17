@@ -55,7 +55,7 @@ const formatFlowDetailValue = (value: unknown): string => {
   // escapeMarkdownInline returns the full fenced code span (fence included) —
   // it picks a fence long enough that an embedded backtick in a Flow detail
   // value (status, processType, triggerObject/type, recordTriggerType) can't
-  // close it early and leak the tail into prose (CR-16c / CR-16d).
+  // close it early and leak the tail into prose.
   return escapeMarkdownInline(String(value));
 };
 
@@ -77,7 +77,7 @@ const renderFlowDetailsSection = (
   return lines.join('\n');
 };
 
-// v0.1 stub copy. The italicized line tells readers that Flow semantic edges
+// Stub copy. The italicized line tells readers that Flow semantic edges
 // (callsApex, readsFrom, writesTo) aren't tracked yet — without it an empty
 // "Incident edges" section reads as a bug.
 const EMPTY_EDGES_STUB =
@@ -114,7 +114,7 @@ const renderEdgesSection = (thisNodeId: ComponentId, edges: readonly Edge[]): st
   if (edges.length === 0) {
     return ['## Incident edges', '', EMPTY_EDGES_STUB].join('\n');
   }
-  // Defensive path: in v0.1 Flow nodes carry zero edges, but the parameter
+  // Defensive path: Flow nodes carry zero edges, but the parameter
   // is part of the renderer contract for uniformity. If a caller does pass
   // edges, render them per the component-markdown pattern so the output
   // doesn't silently drop data.
@@ -156,7 +156,7 @@ const renderEdgesSection = (thisNodeId: ComponentId, edges: readonly Edge[]): st
 const buildBody = (node: Node, edges: readonly Edge[]): string => {
   const blocks: string[] = [];
   // Block 1: top heading. label/apiName are free-text metadata — escape so a
-  // newline or markdown special cannot inject structure (CR-16c). node.type is
+  // newline or markdown special cannot inject structure. node.type is
   // a closed enum and is left raw.
   blocks.push(`# ${escapeMarkdownHeading(node.label ?? node.apiName)}`);
   // Block 2: API name + Type. Two trailing spaces on the API-name line
@@ -179,7 +179,7 @@ const buildBody = (node: Node, edges: readonly Edge[]): string => {
   blocks.push(renderFlowDetailsSection(node.properties));
   // Block 5: Properties table (excluding the keys already shown above).
   blocks.push(renderPropertiesTable(node.properties));
-  // Block 6: Incident edges section (stub in v0.1; real groups thereafter).
+  // Block 6: Incident edges section (stub; real groups thereafter).
   blocks.push(renderEdgesSection(node.id, edges));
   return blocks.join('\n\n');
 };
@@ -198,7 +198,7 @@ const buildFrontmatter = (node: Node): Readonly<Record<string, unknown>> => ({
 });
 
 const buildOutputPath = (node: Node): string => {
-  // Flow nodes always have parentId: null in v0.1. The conditional matches
+  // Flow nodes always have parentId: null. The conditional matches
   // the component-markdown precedent so future Flow variants with a parent
   // (e.g., subflows) don't surprise this function.
   const parentSegment = node.parentId === null ? '' : node.parentId.replace(':', '/');
@@ -216,7 +216,7 @@ const buildOutputPath = (node: Node): string => {
  * Synchronous and disk-free: Flow Markdown is fully derivable from
  * `node.properties` (the Flow extractor parses the `.flow-meta.xml` once;
  * the renderer doesn't re-read it). The `edges` parameter is part of the
- * renderer contract for uniformity — in v0.1 Flow nodes carry zero edges
+ * renderer contract for uniformity — Flow nodes carry zero edges
  * and the section emits a stub note, but if a caller passes a non-empty
  * array the defensive branch renders them per the component pattern.
  *

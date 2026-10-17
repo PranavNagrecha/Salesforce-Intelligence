@@ -1,21 +1,22 @@
 {
-  "generatedAt": "2026-06-25T15:19:46.650Z",
-  "sourceTreeHash": "ec3078be5664a9ac51be30123be8bbf4b2747acc85fbd99aa38f2c22e45e8824",
-  "refreshedAt": "2026-06-25T15:19:46.650Z",
+  "generatedAt": "2026-10-17T16:10:41.527Z",
+  "sourceTreeHash": "937e69c4140fa1b350bf5c90b68d850e6b314bf005122976ccf07520ce92cb33",
+  "refreshedAt": "2026-10-17T16:10:41.527Z",
   "kind": "org-card",
   "targetOrg": "demo-org",
   "totals": {
-    "components": 113,
-    "edges": 323
+    "components": 141,
+    "edges": 361
   },
   "componentCounts": {
-    "CustomField": 63,
+    "CustomField": 64,
     "CustomObject": 13,
     "Role": 6,
     "ApexClass": 5,
+    "OmniScript": 4,
+    "Flow": 3,
     "Profile": 3,
     "ValidationRule": 3,
-    "Flow": 2,
     "Group": 2,
     "Layout": 2,
     "PermissionSet": 2,
@@ -24,75 +25,106 @@
     "SharingRule": 2,
     "ApexTrigger": 1,
     "ApprovalProcess": 1,
+    "AuthProvider": 1,
+    "Bot": 1,
+    "BotVersion": 1,
+    "Certificate": 1,
+    "ConnectedApp": 1,
+    "CustomSite": 1,
+    "ExperienceBundle": 1,
+    "GenAiPlannerBundle": 1,
+    "GlobalValueSet": 1,
+    "LightningComponentBundle": 1,
+    "MutingPermissionSet": 1,
+    "NamedCredential": 1,
+    "Network": 1,
+    "NetworkAccess": 1,
     "OmniDataTransform": 1,
     "OmniIntegrationProcedure": 1,
-    "OmniScript": 1,
+    "PlatformEventChannel": 1,
+    "PlatformEventChannelMember": 1,
+    "SamlSsoConfig": 1,
+    "Skill": 1,
+    "StandardValueSet": 1,
+    "TimeSheetTemplate": 1,
+    "TransactionSecurityPolicy": 1,
+    "WaveDashboard": 1,
+    "WaveXmd": 1,
     "WorkflowRule": 1
   },
   "coverage": {
     "status": "partial",
-    "coveredTypeCount": 19,
+    "coveredTypeCount": 42,
     "partialTypes": [
+      "Dashboard",
+      "Report",
       "AssignmentRule",
       "AuraDefinitionBundle",
-      "AuthProvider",
       "AutoResponseRule",
       "BusinessProcess",
       "CompactLayout",
-      "ConnectedApp",
       "CspTrustedSite",
       "CustomApplication",
       "CustomLabel",
       "CustomMetadataRecord",
+      "CustomPermission",
       "CustomSettingRecord",
       "CustomTab",
-      "Dashboard",
       "DecisionTable",
       "DuplicateRule",
       "EmailTemplate",
+      "EntitlementProcess",
       "EscalationRule",
       "ExternalDataSource",
       "ExternalService",
+      "FieldServiceSettings",
       "FieldSet",
       "FlexiPage",
-      "GlobalValueSet",
+      "GenAiFunction",
+      "GenAiPlugin",
+      "GenAiPromptTemplate",
       "Index",
       "InstalledPackage",
       "Letterhead",
-      "LightningComponentBundle",
       "ListView",
       "MatchingRule",
-      "MutingPermissionSet",
-      "NamedCredential",
-      "NetworkAccess",
+      "MilestoneType",
       "OmniUiCard",
       "PathAssistant",
       "PermissionSetGroup",
+      "PresenceUserConfig",
+      "QueueRoutingConfig",
       "QuickAction",
       "RemoteSiteSetting",
-      "Report",
       "ReportType",
       "RestrictionRule",
       "ScopingRule",
+      "SecuritySettings",
+      "ServiceChannel",
+      "SessionSettings",
+      "SharingSet",
       "StaticResource",
       "VisualforceComponent",
       "VisualforcePage",
+      "WaveDataflow",
       "WebLink"
     ],
-    "notModeledTypes": [],
+    "notModeledTypes": [
+      "certs"
+    ],
     "erroredTypes": []
   },
   "topObjects": [
     {
       "id": "CustomObject:Project__c",
-      "inboundRefs": 17
-    },
-    {
-      "id": "CustomObject:Installation__c",
-      "inboundRefs": 5
+      "inboundRefs": 20
     },
     {
       "id": "CustomObject:Invoice__c",
+      "inboundRefs": 6
+    },
+    {
+      "id": "CustomObject:Installation__c",
       "inboundRefs": 5
     },
     {
@@ -112,6 +144,10 @@
       "inboundRefs": 4
     },
     {
+      "id": "CustomObject:Payment__c",
+      "inboundRefs": 3
+    },
+    {
       "id": "CustomObject:Service_Visit__c",
       "inboundRefs": 3
     },
@@ -122,10 +158,6 @@
     {
       "id": "CustomObject:Warranty_Claim__c",
       "inboundRefs": 3
-    },
-    {
-      "id": "CustomObject:Payment__c",
-      "inboundRefs": 2
     },
     {
       "id": "CustomObject:Equipment_Allocation__c",
@@ -140,8 +172,8 @@
   "automation": [
     {
       "type": "Flow",
-      "total": 2,
-      "active": 2
+      "total": 3,
+      "active": 3
     },
     {
       "type": "ApexTrigger",
@@ -165,7 +197,12 @@
     "godModeContainers": 0,
     "godModeScanCount": 5
   },
-  "integrations": {},
+  "integrations": {
+    "AuthProvider": 1,
+    "ConnectedApp": 1,
+    "NamedCredential": 1,
+    "NetworkAccess": 1
+  },
   "naming": [
     {
       "pattern": "Custom fields on Invoice__c use PascalCase naming (4 of 6 fields)",

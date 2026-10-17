@@ -113,7 +113,7 @@ describe('classifyPhantom + managedNamespaceOf', () => {
     expect(classifyPhantom('WorkflowAlert:X.Y', ['references'], ['references'], 'notModeled')).toBe('blindspot-manifest');
     expect(classifyPhantom('CustomObject:ns__M__c', ['grantedBy'], ['grantedBy'], 'covered')).toBe('managed-extension');
     expect(classifyPhantom('CustomObject:Account', ['grantedBy'], ['grantedBy'], 'covered')).toBe('standard-field-phantom');
-    // P14-PHANTOM-edges: a LOWERCASE no-__ object part is an un-type-resolved
+    // A LOWERCASE no-__ object part is an un-type-resolved
     // Apex local variable (CustomField:app.Id), NEVER a standard object — it
     // must not get the "treat it as standard" remedy. Falls to its honest
     // bucket instead (unknown here: only a heuristic functional ref).

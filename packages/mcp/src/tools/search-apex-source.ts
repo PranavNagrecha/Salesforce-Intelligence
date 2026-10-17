@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.search_apex_source` MCP tool.
  *
- * Unlike the other v0.1 tools, this one does NOT consult the graph. It
+ * Unlike the other tools, this one does NOT consult the graph. It
  * recursively walks `{vaultRoot}/source/` for `.cls` and `.trigger`
  * files (flat or DX-nested under `main/default/`) and grep-searches
  * each file line by line.
@@ -75,7 +75,7 @@ export const searchApexSourceInputSchema = z.object({
    */
   offset: z.number().int().nonnegative().optional(),
   /**
-   * CR-22 continuation cursor: the opaque token from a prior truncated page's
+   * Continuation cursor: the opaque token from a prior truncated page's
    * `nextCursor`. Supplies the resume offset and is bound to this tool, this
    * vault hash and this query's narrowing args; a stale or foreign token is
    * refused with `invalid-query` rather than silently paging the wrong list.
@@ -195,7 +195,7 @@ export interface SearchApexSourceOutput {
   /** Offset to pass next, or `null` when the list is exhausted. */
   readonly nextOffset: number | null;
   /**
-   * Opaque CR-22 continuation token, present ONLY on a truncated page. Echo it
+   * Opaque continuation token, present ONLY on a truncated page. Echo it
    * back verbatim as `cursor`. Never parse or construct it.
    */
   readonly nextCursor?: string;
@@ -246,7 +246,7 @@ export interface GrepVaultSourceResult {
  * handler below is the original consumer; `find_component_usages` reuses it
  * for the FRONTEND bundle tier (LWC / Aura / Visualforce — `$Label`,
  * `@salesforce/label`, `$Resource` / `@salesforce/resourceUrl` references the
- * Apex-only walk could never see; P14-USAGE-grep-frontend). `pathFilter`
+ * Apex-only walk could never see). `pathFilter`
  * bounds the walk (e.g. to bundle directories so an unzipped static
  * resource's `.js` payload cannot flood the results).
  */

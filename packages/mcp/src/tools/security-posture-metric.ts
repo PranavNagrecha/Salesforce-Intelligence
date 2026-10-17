@@ -1,5 +1,5 @@
 /**
- * Capture-time security posture metric (R8-SECURITY-TREND).
+ * Capture-time security posture metric.
  *
  * Reconstructs the graded Security dimension that used to live inside the
  * deleted `org_scorecard` tool — without resurrecting that tool. Grades come

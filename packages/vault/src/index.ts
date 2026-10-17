@@ -114,7 +114,7 @@ export type {
   SnapshotMeta,
   SnapshotNode,
 } from './snapshot.js';
-// v3.1 — vault registry for cross-org/sandbox-vs-prod comparison tier.
+// vault registry for cross-org/sandbox-vs-prod comparison tier.
 export {
   findRegistryFile,
   findRegistryRoot,

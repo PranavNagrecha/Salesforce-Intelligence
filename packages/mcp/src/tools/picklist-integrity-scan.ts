@@ -89,7 +89,7 @@ import {
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { clampedNodeScanLimit, scanTruncationNote } from './scan-cap.js';
 
-/** Tool name stamped onto minted cursors and checked on resume (R6 / CR-22). */
+/** Tool name stamped onto minted cursors and checked on resume. */
 const PICKLIST_INTEGRITY_SCAN_TOOL = 'sfi.picklist_integrity_scan';
 
 /** Inclusive upper bound on `limit` (the shared enumeration-style cap). */
@@ -153,7 +153,7 @@ const PICKLIST_INTEGRITY_RESTRICTED_DISCLOSURE =
  *     a field with 4 orphaned literals counts as 1 entry in the limit budget.
  *   - `offset`: optional zero-based offset for paging the FIELD list forward.
  *   - `cursor`: optional opaque continuation token from a prior truncated
- *     page's `nextCursor` (R6 / CR-22, via `paginateLegacy`). Bound to this
+ *     page's `nextCursor` (via `paginateLegacy`). Bound to this
  *     tool + the vault's `sourceTreeHash`, so a cursor minted before a refresh
  *     is rejected with `invalid-query` instead of silently reading the wrong
  *     page — a raw `offset` carried across a refresh cannot be checked this

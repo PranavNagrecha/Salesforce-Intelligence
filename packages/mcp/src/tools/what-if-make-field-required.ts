@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.what_if_make_field_required` MCP tool.
  *
- * v2.3 R2a — the "I want to make this field required — what breaks?"
+ * The "I want to make this field required — what breaks?"
  * surface. Given a `CustomField:{Object}.{Field}` id, walks the parent
  * object's write paths and flags incomplete writes that would fail at
  * runtime once the field is required:
@@ -20,8 +20,8 @@
  * **NOT walked: Apex insert/update sites.** Determining whether an Apex
  * `insert acc;` statement sets `acc.Industry__c` requires dataflow
  * analysis — tracking assignments to the `acc` variable through the
- * method body. The v0.3 apex-scanner does not have this capability,
- * and the v2.3 milestone deliberately defers this analysis. The
+ * method body. The apex-scanner does not have this capability,
+ * and the milestone deliberately defers this analysis. The
  * boundary disclosure surfaces this limitation verbatim.
  *
  * **No-op case.** When the field is already required
@@ -132,7 +132,7 @@ const MAKE_REQUIRED_COVERAGE = [
   'VisualforcePage',
   'VisualforceComponent',
   'FlexiPage',
-  // CR-CAP-01: declarative populators credited via the inbound-writesTo walk.
+  // Declarative populators credited via the inbound-writesTo walk.
   // Listing these means the coverageCaveat reflects the new dependency families
   // (an org whose refresh skipped workflow/approval metadata cannot have those
   // populator findings, so absence ≠ "no populator").
@@ -189,7 +189,7 @@ export interface WhatIfMakeFieldRequiredOutput {
   readonly trust: TrustSummary;
   readonly disclosure: string;
   /**
-   * P13-FACTS-consumers: captured fill rate for this field (`data_snapshot`),
+   * Captured fill rate for this field (`data_snapshot`),
    * when one exists. CONTEXT ONLY — the verdict is computed purely from the
    * metadata graph and NEVER moves toward safe because of a sampled
    * observation (a high sampled fill rate does not soften the verdict).
@@ -465,9 +465,9 @@ const flowCreatesParentRecords = async (
 };
 
 /**
- * CR-CAP-01 — a declarative populator discovered on the field's inbound
+ * A declarative populator discovered on the field's inbound
  * `writesTo` edges: a WorkflowRule field-update or an ApprovalProcess
- * field-update (CR-05 + CR-CAP-07) that SETS this field.
+ * field-update that SETS this field.
  */
 interface DeclarativePopulator {
   readonly componentId: ComponentId;
@@ -478,13 +478,13 @@ interface DeclarativePopulator {
 }
 
 /**
- * CR-CAP-01 — credit DECLARATIVE populators of the field.
+ * Credit DECLARATIVE populators of the field.
  *
  * Walk the field's INBOUND `writesTo` edges and partition the source nodes by
  * type, surfacing WorkflowRule and ApprovalProcess field-update writers — the
  * exact gap named in field-provenance.ts:328 ("Writers of other types (e.g.
  * WorkflowRule field updates) are skipped"). The WorkflowRule writesTo edges
- * already exist (CR-05); the ApprovalProcess ones land via CR-CAP-07. Both were
+ * already exist; the ApprovalProcess ones land alongside. Both were
  * INVISIBLE to this safety tool before.
  *
  * Flow writers are intentionally NOT returned here — the Flow create-path loop
@@ -549,11 +549,11 @@ const fieldPopulators = async (
  * For an integration (ExternalService / ExternalDataSource), determine
  * whether the integration's outgoing `references` edges touch any
  * field on the parent object. The integration's schema is encoded as
- * `references` edges per the v1.5 integration topology extractor.
+ * `references` edges per the integration topology extractor.
  *
  * Returns true when the integration references at least one field on
  * the parent — used as a coarse proxy for "this integration writes to
- * the parent object". v2.3 deliberately does not walk the integration's
+ * the parent object". This deliberately does not walk the integration's
  * payload schema in detail; the boundary disclosure surfaces this.
  */
 const integrationReferencesParent = async (
@@ -809,10 +809,10 @@ export const whatIfMakeFieldRequiredHandler = async (
     });
   }
 
-  // === Declarative populator coverage (CR-CAP-01) ===
+  // === Declarative populator coverage ===
   // Credit the field's inbound `writesTo` writers that are declarative
-  // automation — WorkflowRule field-updates (CR-05) and ApprovalProcess
-  // field-updates (CR-CAP-07). These were INVISIBLE to this tool before; the
+  // automation — WorkflowRule field-updates and ApprovalProcess
+  // field-updates. These were INVISIBLE to this tool before; the
   // gap was named verbatim in field-provenance.ts:328. They are CONDITIONAL
   // writers, so they are surfaced as informational `configuration-only`
   // findings (verdict → `review`) — NOT `metadata-blocker`, and they NEVER
@@ -841,7 +841,7 @@ export const whatIfMakeFieldRequiredHandler = async (
 
   // === Integration write coverage ===
   // For every ExternalService / ExternalDataSource referencing the
-  // parent object, emit an integration-touch finding. The v1.5
+  // parent object, emit an integration-touch finding. The
   // integration extractor populates `references` edges; the boundary
   // disclosure covers the schema-detail gap.
   for (const integrationType of ['ExternalService', 'ExternalDataSource'] as const) {
@@ -864,7 +864,7 @@ export const whatIfMakeFieldRequiredHandler = async (
       if (!refsResult.value) continue;
       // The integration touches the parent object; whether its payload
       // includes this field cannot be determined precisely from the
-      // v1.5 surface, so flag it for migration coordination.
+      // integration surface, so flag it for migration coordination.
       impacts.push({
         category: 'integration-touch',
         componentId: integration.id,

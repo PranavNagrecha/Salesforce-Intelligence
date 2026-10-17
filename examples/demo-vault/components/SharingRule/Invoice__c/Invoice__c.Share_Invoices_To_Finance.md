@@ -10,6 +10,10 @@ properties:
   accessLevel: Read
   booleanFilter: 1
   criteriaItemCount: 1
+  criteriaItems:
+    - field: Status__c
+      operation: notEqual
+      value: Draft
   ruleType: criteria
   sharedFromName: null
   sharedFromType: null
@@ -31,6 +35,7 @@ type: SharingRule
 | accessLevel | `Read` |
 | booleanFilter | `1` |
 | criteriaItemCount | `1` |
+| criteriaItems | `Draft` |
 | ruleType | `criteria` |
 | sharedFromName | `null` |
 | sharedFromType | `null` |
@@ -44,6 +49,12 @@ type: SharingRule
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `CustomObject:Invoice__c` | declared | sharing-rule-extractor |
+
+### references (outgoing, 1)
+
+| Target | Confidence | Producer |
+| --- | --- | --- |
+| `CustomField:Invoice__c.Status__c` | declared | sharing-rule-extractor |
 
 ### sharedWith (outgoing, 1)
 

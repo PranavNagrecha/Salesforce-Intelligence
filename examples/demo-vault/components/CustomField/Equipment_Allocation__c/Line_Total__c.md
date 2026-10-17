@@ -12,7 +12,10 @@ properties:
   description: null
   externalId: false
   formula: "Quantity__c * Solar_Panel__r.Unit_Cost__c"
+  formulaRelationshipRefs:
+    - Solar_Panel__r.Unit_Cost__c
   inlineHelpText: null
+  isFormula: true
   label: Line Total
   length: null
   picklistValues: null
@@ -40,7 +43,9 @@ type: CustomField
 | defaultValue | `null` |
 | externalId | `false` |
 | formula | `Quantity__c * Solar_Panel__r.Unit_Cost__c` |
+| formulaRelationshipRefs | `Solar_Panel__r.Unit_Cost__c` |
 | inlineHelpText | `null` |
+| isFormula | `true` |
 | length | `null` |
 | picklistValues | `null` |
 | precision | `16` |
@@ -59,8 +64,9 @@ type: CustomField
 | --- | --- | --- |
 | `CustomObject:Equipment_Allocation__c` | declared | custom-field-extractor |
 
-### references (outgoing, 1)
+### references (outgoing, 2)
 
 | Target | Confidence | Producer |
 | --- | --- | --- |
 | `CustomField:Equipment_Allocation__c.Quantity__c` | parsed | formula-tokenizer |
+| `CustomField:Solar_Panel__c.Unit_Cost__c` | parsed | relationship-resolver |

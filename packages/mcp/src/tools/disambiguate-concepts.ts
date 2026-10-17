@@ -1,20 +1,20 @@
 /**
  * Handler for the `sfi.disambiguate_concepts` MCP tool.
  *
- * v2.9 R4 — the "is `Status` the same as `Stage` here?" surface
- * (PLAN-v2.9 §4). Given two org-specific concept tokens, finds every
+ * The "is `Status` the same as `Stage` here?" surface
+ * Given two org-specific concept tokens, finds every
  * CustomField whose tokenized apiName or label overlaps each concept,
  * partitions them into two buckets, and computes per-axis differences
  * (parent-object distribution, declared types, picklist values,
  * usage patterns).
  *
- * Concept matching rules (PLAN-v2.9 §4):
+ * Concept matching rules:
  *   1. apiName tokenized form overlaps the concept's tokens, OR
  *   2. label tokenized form overlaps the concept's tokens, OR
  *   3. `properties.semanticCategory.value` equals the concept,
  *      lowercased (e.g., `'status'` matches `Status`).
  *
- * Honesty anchor (PLAN-v2.9 §4 / Q155):
+ * Honesty anchor:
  *   Every result carries the verbatim "vocabulary is org-specific"
  *   disclosure in `boundaries`. The skill SHOULD surface this anchor
  *   to the user unconditionally.
@@ -23,13 +23,12 @@
  *   - When `conceptA === conceptB` (case-insensitive trimmed), the
  *     tool returns identical buckets and an empty `differences` array.
  *     The skill detects this and explains there is no distinction
- *     (PLAN-v2.9 §5 refusal pattern, Q150).
  *   - `suggestedWhenToUseEach` is `null` when bucket parent-object
  *     distributions overlap heavily; only set when distributions are
  *     distinct enough to recommend.
  *   - Tokenization is the lightweight fallback (matches
- *     field-meaning.ts) — v2.2's full tokenizer is the canonical
- *     source per PLAN-v2.9 §3.
+ *     field-meaning.ts) — the full tokenizer is the canonical
+ *     source.
  *   - `limit` caps each bucket's `matchingFields` count to keep
  *     payloads bounded; default 50, max 200.
  */
@@ -49,7 +48,7 @@ import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { fullScanTruncationNote } from './scan-cap.js';
 
 /**
- * Verbatim Q155 honesty anchor (PLAN-v2.9 §7). Frozen here so the test
+ * Verbatim honesty anchor. Frozen here so the test
  * suite can assert the exact string and so caller-facing rephrasing
  * during rendering is a code-review concern, not silent drift.
  */
@@ -122,7 +121,7 @@ export interface ConceptDifference {
 /**
  * Optional "when to use each" inference. `null` when bucket
  * distributions overlap heavily — the tool refuses to fabricate
- * distinction (PLAN-v2.9 §4).
+ * distinction.
  */
 export interface SuggestedWhenToUseEach {
   readonly conceptA: string;
@@ -187,7 +186,7 @@ const parentTypeApiName = (node: Node): string => {
 };
 
 /**
- * Pull the v2.9 semanticCategory value from the field's properties.
+ * Pull the semanticCategory value from the field's properties.
  * Returns the empty string when the property is absent or malformed
  * (the concept-match step then can't fire on the semantic-category
  * axis, which is the correct degradation).
@@ -351,7 +350,7 @@ const computeDifferences = (
     out.push({ axis: 'type', summary });
   }
 
-  // picklist-values axis: best-effort signal. Without v2.2 TF-IDF and
+  // picklist-values axis: best-effort signal. Without TF-IDF and
   // a full per-field picklist enumeration, the axis only fires when
   // the two buckets disagree on whether any picklist fields are
   // present at all (heuristic; the skill surfaces the boundary).
@@ -384,7 +383,7 @@ const computeDifferences = (
  * Decide whether to emit a "when to use each" inference. Heuristic:
  * fires only when the parent-object distributions are entirely
  * disjoint AND both buckets have at least one match. Otherwise null —
- * the tool refuses to fabricate distinction (PLAN-v2.9 §4).
+ * the tool refuses to fabricate distinction.
  */
 const inferWhenToUseEach = (
   a: ConceptBucket,
@@ -409,7 +408,6 @@ const inferWhenToUseEach = (
  * Detect "same concept twice" — case-insensitive trimmed equality.
  * When detected the tool returns mirror buckets + empty differences;
  * the skill is responsible for refusing to fabricate a distinction
- * (PLAN-v2.9 §5 refusal pattern; Q150).
  */
 const isSameConcept = (a: string, b: string): boolean =>
   a.trim().toLowerCase() === b.trim().toLowerCase();
@@ -417,7 +415,7 @@ const isSameConcept = (a: string, b: string): boolean =>
 /**
  * The `sfi.disambiguate_concepts` MCP tool. Returns per-concept
  * matching-field buckets, per-axis differences, an optional
- * "when to use each" inference, and the Q155 honesty disclosure.
+ * "when to use each" inference, and the honesty disclosure.
  * See module JSDoc for the matching rules and the same-concept refusal.
  *
  * @example

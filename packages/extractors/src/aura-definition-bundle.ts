@@ -19,6 +19,7 @@ import {
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
 import { buildResourceRefEdges, mergeAndSortEdges } from './apex-edges.js';
+import { bundleId } from './bundle-id.js';
 import { buildMarkupFieldBindingEdges } from './frontend-markup-field-edges.js';
 import { deriveBundleApiName } from './path-utils.js';
 
@@ -290,9 +291,9 @@ interface AuraScanResult {
 }
 
 /**
- * Run the v1.4 Aura frontend scanner across one source string and
+ * Run the Aura frontend scanner across one source string and
  * collect the component references plus `$Label.c.X` / `$Resource.X`
- * value-provider tokens (P14-USAGE-label-static-graph). Scanner errors
+ * value-provider tokens. Scanner errors
  * (empty-source, unknown-dialect) are non-fatal — they surface as
  * warnings so a parse glitch in one file doesn't void the whole bundle.
  */
@@ -334,7 +335,7 @@ const scanOne = (source: string, label: string): AuraScanResult => {
  * Reads the bundle's `-meta.xml` (required), the root markup file
  * (`.cmp` / `.app` / `.evt` / `.intf` / `.tokens` — first match wins,
  * required), and any optional controller / helper / renderer JS files.
- * Each non-empty source is passed to the v1.4 Aura frontend scanner
+ * Each non-empty source is passed to the Aura frontend scanner
  * (`scanFrontendSource(..., 'aura')`); the scanner extracts component
  * references from markup tags (`<c:CustomerCard ... />`) and `$A.get`
  * event references. Scanner errors surface as
@@ -435,7 +436,7 @@ export const extractAuraDefinitionBundle = async (
   const rendererResult = await readOptionalFile(rendererPath);
   if (!rendererResult.ok) return rendererResult;
 
-  const ownerId = `${ROOT_ELEMENT}:${apiName}`;
+  const ownerId = bundleId(ROOT_ELEMENT, apiName);
 
   // Scan markup + each optional JS file. Each contributes to the same
   // dedup set keyed by component name.

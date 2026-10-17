@@ -447,14 +447,14 @@ describe('unusedComponentsHandler — entry-point types', () => {
 });
 
 // =============================================================================
-// CR-12 — page-to-exhaustion. scanType walks each type to the end, not just the
+// page-to-exhaustion. scanType walks each type to the end, not just the
 // first page. The `unused` verdict is destructive and byType is a tally, so an
 // unused node sorted PAST the cap by id ASC used to be dropped (and byType
 // saturated at the cap). With SFI_NODE_SCAN_LIMIT=2 the offset loop walks
 // multiple pages. Uses a dedicated store so the shared exact-order assertions
 // stay intact.
 // =============================================================================
-describe('unusedComponentsHandler — past-cap byType + enumeration (CR-12 de-cap)', () => {
+describe('unusedComponentsHandler — past-cap byType + enumeration', () => {
   beforeEach(() => {
     process.env['SFI_NODE_SCAN_LIMIT'] = '2';
   });
@@ -546,7 +546,7 @@ describe('unusedComponentsInputSchema', () => {
     expect(parsed.success).toBe(true);
   });
 
-  it('accepts offset and cursor (CR-22)', () => {
+  it('accepts offset and cursor', () => {
     expect(
       unusedComponentsInputSchema.safeParse({ offset: 1, cursor: 'abc' }).success,
     ).toBe(true);
@@ -554,11 +554,11 @@ describe('unusedComponentsInputSchema', () => {
 });
 
 // =============================================================================
-// CR-22 B4 — output cursor over the global unused list. A whole-fits no-cursor
+// output cursor over the global unused list. A whole-fits no-cursor
 // call is byte-identical; a truncated page resumes the full set with no gaps /
 // dupes; byType stays the FULL per-type count.
 // =============================================================================
-describe('unusedComponentsHandler — output cursor (CR-22)', () => {
+describe('unusedComponentsHandler — output cursor', () => {
   it('whole-fits no-cursor call omits all paging fields', async () => {
     const r = await unusedComponentsHandler(ctx, {});
     expect(r.ok).toBe(true);
@@ -621,7 +621,7 @@ describe('unusedComponentsHandler — output cursor (CR-22)', () => {
   });
 });
 
-describe('unusedComponentsHandler — coverage caveat (P13-STAGED-absence-battery)', () => {
+describe('unusedComponentsHandler — coverage caveat', () => {
   const completeCoverage = (): VaultManifest => ({
     ...FIXTURE_MANIFEST,
     coverage: [

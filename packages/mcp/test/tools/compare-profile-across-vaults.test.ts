@@ -1,9 +1,9 @@
 /// <reference types="vitest/globals" />
 
 /**
- * Tests for the v3.1 `sfi.compare_profile_across_vaults` MCP tool.
+ * Tests for the `sfi.compare_profile_across_vaults` MCP tool.
  *
- * The Q169 anchor — System Administrator's Discount__c read/edit
+ * The anchor case — System Administrator's Discount__c read/edit
  * permissions drift between sandbox and prod.
  */
 
@@ -216,7 +216,7 @@ describe('compareProfileAcrossVaultsHandler', () => {
     expect(parsed.success).toBe(true);
   });
 
-  it('Q169 — surfaces Account.Discount__c field-permission drift', async () => {
+  it('surfaces Account.Discount__c field-permission drift', async () => {
     const r = await compareProfileAcrossVaultsHandler(ctx, {
       profileName: 'System Administrator',
       vaultA: 'acme-prod',
@@ -327,10 +327,10 @@ describe('compareProfileAcrossVaultsHandler', () => {
   });
 
   it('discloses tabVisibilities as not-evaluated when a vault predates the P11 extraction', async () => {
-    // P11-UI-tabvis-consumer-bug: the fixture profiles carry no
+    // The fixture profiles carry no
     // `tabVisibilities` property (a pre-P11 / stale vault), so the tool must
     // NOT report a fabricated "0 tab drift" — it must disclose the gap.
-    // P12-HONESTY-stale-disclosures: the extractor DOES emit tabVisibilities
+    // The extractor DOES emit tabVisibilities
     // since P11, so the disclosure blames the stale vault, not the product.
     const r = await compareProfileAcrossVaultsHandler(ctx, {
       profileName: 'System Administrator',

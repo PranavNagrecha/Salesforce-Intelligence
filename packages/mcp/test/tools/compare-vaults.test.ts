@@ -1,7 +1,7 @@
 /// <reference types="vitest/globals" />
 
 /**
- * Tests for the v3.1 `sfi.compare_vaults` MCP tool.
+ * Tests for the `sfi.compare_vaults` MCP tool.
  *
  * Two synthetic vault stores are seeded into a co-resident root with
  * a `registry.json` that registers both aliases. The tool resolves
@@ -113,7 +113,7 @@ beforeAll(async () => {
         label: 'Contact',
         properties: { sharingModel: 'Private' },
       }),
-      // R6-12: Flow node is BYTE-IDENTICAL in A and B (same properties) — it
+      // Flow node is BYTE-IDENTICAL in A and B (same properties) — it
       // never appears in added/removed/shapeModified. Its OUTGOING edges
       // differ between A and B, which is exactly the "invisible to node-hash
       // comparison" gap edgeDrift closes.
@@ -177,7 +177,7 @@ beforeAll(async () => {
         parentId: 'CustomObject:Account',
         // `helpText` exists ONLY on the B side (absent, not null, on A) —
         // regression fixture for the canonicalJson(undefined) crash fixed
-        // alongside R6-12 (real-vault verification surfaced it).
+        // alongside edge drift (real-vault verification surfaced it).
         properties: { dataType: 'Number', precision: 16, scale: 2, helpText: 'Enter the discount amount' },
       }),
       makeNode({
@@ -296,7 +296,7 @@ describe('compareVaultsHandler', () => {
     );
   });
 
-  it('Q166 — surfaces added components from vaultB not present in vaultA', async () => {
+  it('surfaces added components from vaultB not present in vaultA', async () => {
     const r = await compareVaultsHandler(ctx, {
       vaultA: 'acme-prod',
       vaultB: 'acme-sandbox',
@@ -321,7 +321,7 @@ describe('compareVaultsHandler', () => {
     expect(removedIds).toContain('CustomObject:Contact');
   });
 
-  it('Q167 — flags Discount__c precision drift as shape-modified', async () => {
+  it('flags Discount__c precision drift as shape-modified', async () => {
     const r = await compareVaultsHandler(ctx, {
       vaultA: 'acme-prod',
       vaultB: 'acme-sandbox',
@@ -367,7 +367,7 @@ describe('compareVaultsHandler', () => {
     ).toBe(true);
   });
 
-  it('Q170 — surfaces vault-not-found refusal for an unknown alias', async () => {
+  it('surfaces vault-not-found refusal for an unknown alias', async () => {
     const r = await compareVaultsHandler(ctx, {
       vaultA: 'acme-prod',
       vaultB: 'the-vault-that-doesnt-exist',
@@ -378,7 +378,7 @@ describe('compareVaultsHandler', () => {
     expect(r.value.data.boundaries.some((b) => b === phrase)).toBe(true);
   });
 
-  it('Q171 — typeFilter narrows the diff to the requested ComponentType', async () => {
+  it('typeFilter narrows the diff to the requested ComponentType', async () => {
     const r = await compareVaultsHandler(ctx, {
       vaultA: 'acme-prod',
       vaultB: 'acme-sandbox',
@@ -396,7 +396,7 @@ describe('compareVaultsHandler', () => {
     }
   });
 
-  it('Q172 — objectFilter narrows the diff to the requested object', async () => {
+  it('objectFilter narrows the diff to the requested object', async () => {
     const r = await compareVaultsHandler(ctx, {
       vaultA: 'acme-prod',
       vaultB: 'acme-sandbox',
@@ -487,7 +487,7 @@ describe('compareVaultsHandler', () => {
     }
   });
 
-  describe('edgeDrift (R6-12)', () => {
+  describe('edgeDrift', () => {
     it('reports NO edge drift for Flow:Sync_Account, which is node-hash IDENTICAL in both vaults, unless its edges differ', async () => {
       const r = await compareVaultsHandler(ctx, {
         vaultA: 'acme-prod',
@@ -646,7 +646,7 @@ describe('compareVaultsHandler', () => {
   });
 });
 
-describe('compareVaultsHandler — extractorVersionCaveat (R6-12)', () => {
+describe('compareVaultsHandler — extractorVersionCaveat', () => {
   let versionRoot: string;
   let versionCtx: Context;
   let versionStoreA: GraphStore;
@@ -714,7 +714,7 @@ describe('compareVaultsHandler — extractorVersionCaveat (R6-12)', () => {
   });
 });
 
-describe('compareVaultsHandler — edgeDrift COMPONENT cap (R6-12)', () => {
+describe('compareVaultsHandler — edgeDrift COMPONENT cap', () => {
   let capRoot: string;
   let capCtx: Context;
   let capStoreA: GraphStore;
@@ -794,7 +794,7 @@ describe('compareVaultsHandler — edgeDrift COMPONENT cap (R6-12)', () => {
   });
 });
 
-describe('compareVaultsHandler — edgeDrift ROW cap (R6-12)', () => {
+describe('compareVaultsHandler — edgeDrift ROW cap', () => {
   let capRoot: string;
   let capCtx: Context;
   let capStoreA: GraphStore;

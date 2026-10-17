@@ -142,7 +142,7 @@ const templateToEmailTemplateId = (template: string): string => {
 /**
  * The per-`<ruleEntry>` derived bundle: the resolved EmailTemplate
  * canonical id, the sender name/email/reply-to, the counted criteria,
- * the `<formula>` presence, and (v2.0a) the per-entry condition source
+ * the `<formula>` presence, and the per-entry condition source
  * for the shared `extractConditions` helper.
  */
 interface ResolvedRuleEntry {
@@ -152,7 +152,7 @@ interface ResolvedRuleEntry {
   readonly replyToEmail: string | null;
   readonly criteriaItemCount: number;
   readonly hasFormula: boolean;
-  /** v2.0a — the per-entry condition source for `extractConditions`. */
+  /** the per-entry condition source for `extractConditions`. */
   readonly conditionSource: ConditionSource | null;
 }
 
@@ -184,7 +184,7 @@ const parseCriteriaItem = (raw: unknown): CriteriaItem | null => {
 };
 
 /**
- * Build the per-entry condition source per the v2.0a spec — formula
+ * Build the per-entry condition source per the spec — formula
  * takes precedence over criteria; an entry with neither produces
  * `null` (no ConditionalContext).
  */
@@ -320,7 +320,7 @@ const buildRule = (
   const ruleId = `AutoResponseRule:${objectApiName}.${fullName}`;
   const templateCount = new Set(resolvedEntries.map((e) => e.templateId)).size;
 
-  // v2.0a — emit one ConditionalContext per `<ruleEntry>` carrying a
+  // emit one ConditionalContext per `<ruleEntry>` carrying a
   // condition source. Entries without a `<formula>` / `<criteriaItems>`
   // produce no condition (silently dropped).
   const conditionSources: ConditionSource[] = [];
@@ -385,7 +385,7 @@ const buildRule = (
     });
   }
 
-  // v2.0a — Append the firesWhen edges at the tail.
+  // Append the firesWhen edges at the tail.
   edges.push(...firesWhenEdges, ...conditionFieldEdges);
 
   return ok({ node, edges, conditionNodes });
@@ -402,7 +402,7 @@ const buildRule = (
  * only the individual rules do.
  *
  * Auto-response rules are the **primary `sendsEmail` edge producer** in
- * v1.3. For each rule the extractor emits a `parentOf` edge from
+ * For each rule the extractor emits a `parentOf` edge from
  * `CustomObject:{ObjectApiName}` to the rule, plus one `sendsEmail`
  * edge per `<ruleEntry>` to the resolved EmailTemplate canonical id
  * (`EmailTemplate:{Folder}.{TemplateName}`). `entryIndex` preserves the
@@ -468,7 +468,7 @@ export const extractAutoResponseRule = async (
     const built = buildRule(rule, objectApiName, parentId, path);
     if (!built.ok) return built;
     nodes.push(built.value.node);
-    // v2.0a — Append the synthetic ConditionalContext nodes per rule.
+    // Append the synthetic ConditionalContext nodes per rule.
     nodes.push(...built.value.conditionNodes);
     edges.push(...built.value.edges);
   }

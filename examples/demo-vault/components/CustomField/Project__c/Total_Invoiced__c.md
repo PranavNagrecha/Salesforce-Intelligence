@@ -21,6 +21,9 @@ properties:
   relationshipName: null
   required: false
   scale: null
+  summarizedField: Invoice__c.Amount__c
+  summaryForeignKey: Invoice__c.Project__c
+  summaryOperation: sum
   trackHistory: false
   unique: false
 sourcePath: source/main/default/objects/Project__c/fields/Total_Invoiced__c.field-meta.xml
@@ -48,6 +51,9 @@ type: CustomField
 | relationshipName | `null` |
 | required | `false` |
 | scale | `null` |
+| summarizedField | `Invoice__c.Amount__c` |
+| summaryForeignKey | `Invoice__c.Project__c` |
+| summaryOperation | `sum` |
 | trackHistory | `false` |
 | unique | `false` |
 
@@ -64,6 +70,13 @@ type: CustomField
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `CustomField:Project__c.Margin_Percent__c` | parsed | formula-tokenizer |
+
+### references (outgoing, 2)
+
+| Target | Confidence | Producer |
+| --- | --- | --- |
+| `CustomField:Invoice__c.Amount__c` | declared | rollup-summary |
+| `CustomField:Invoice__c.Project__c` | declared | rollup-summary |
 
 ### usedInLayout (incoming, 1)
 

@@ -13,10 +13,12 @@ properties:
   enableHistory: false
   enableReports: false
   enableSearch: false
+  externalSharingModel: null
   label: Project
   nameFieldLabel: Project Name
   nameFieldType: Text
   pluralLabel: Projects
+  recordPageOverrides: []
   sharingModel: Private
   visibility: Public
 sourcePath: source/main/default/objects/Project__c/Project__c.object-meta.xml
@@ -37,9 +39,11 @@ type: CustomObject
 | enableHistory | `false` |
 | enableReports | `false` |
 | enableSearch | `false` |
+| externalSharingModel | `null` |
 | nameFieldLabel | `Project Name` |
 | nameFieldType | `Text` |
 | pluralLabel | `Projects` |
+| recordPageOverrides | `` |
 | sharingModel | `Private` |
 | visibility | `Public` |
 
@@ -65,7 +69,7 @@ type: CustomObject
 | `CustomField:Permit__c.Project__c` | declared | custom-field-extractor |
 | `CustomField:Site_Survey__c.Project__c` | declared | custom-field-extractor |
 
-### parentOf (outgoing, 17)
+### parentOf (outgoing, 18)
 
 | Target | Confidence | Producer |
 | --- | --- | --- |
@@ -81,6 +85,7 @@ type: CustomObject
 | `CustomField:Project__c.Status__c` | declared | custom-field-extractor |
 | `CustomField:Project__c.System_Size_kW__c` | declared | custom-field-extractor |
 | `CustomField:Project__c.Total_Invoiced__c` | declared | custom-field-extractor |
+| `CustomField:Project__c.Utility_Provider__c` | declared | custom-field-extractor |
 | `Layout:Project__c.Residential Layout` | declared | layout-extractor |
 | `RecordType:Project__c.Commercial` | declared | record-type-extractor |
 | `RecordType:Project__c.Residential` | declared | record-type-extractor |
@@ -95,10 +100,13 @@ type: CustomObject
 | `ApexClass:ProjectTriggerHandlerTest` | heuristic | apex-scanner |
 | `Flow:Installation_On_Complete` | parsed | flow-extractor |
 
-### references (incoming, 1)
+### references (incoming, 4)
 
 | Source | Confidence | Producer |
 | --- | --- | --- |
+| `ApexClass:IncentiveBatch` | heuristic | apex-scanner |
+| `ApexClass:PaymentServiceTest` | heuristic | apex-scanner |
+| `ApexClass:ProjectTriggerHandlerTest` | heuristic | apex-scanner |
 | `OmniDataTransform:Quote_To_Project_Map_1` | declared | omni-data-transform |
 
 ### triggersOn (incoming, 2)

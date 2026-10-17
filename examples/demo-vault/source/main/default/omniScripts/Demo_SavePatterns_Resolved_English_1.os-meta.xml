@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<OmniScript xmlns="http://soap.sforce.com/2006/04/metadata">
+    <isActive>true</isActive>
+    <isIntegrationProcedure>false</isIntegrationProcedure>
+    <language>English</language>
+    <name>Demo Save Patterns Resolved</name>
+    <omniProcessType>OmniScript</omniProcessType>
+    <propertySetConfig>{&quot;allowSaveForLater&quot;:true,&quot;saveObject&quot;:&quot;Demo_Obj__c&quot;,&quot;saveURLPatterns&quot;:{&quot;Demo_Resume__c&quot;:&quot;/s/demo-resume?id={0}&quot;}}</propertySetConfig>
+    <subType>SavePatterns</subType>
+    <type>Demo</type>
+    <uniqueName>Demo_SavePatterns_Resolved_English_1</uniqueName>
+    <versionNumber>1.0</versionNumber>
+</OmniScript>

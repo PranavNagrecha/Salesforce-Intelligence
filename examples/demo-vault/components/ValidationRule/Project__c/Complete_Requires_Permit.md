@@ -54,9 +54,10 @@ A project cannot be marked Complete unless its permit has been approved.
 | --- | --- | --- |
 | `CustomObject:Project__c` | declared | validation-rule-extractor |
 
-### references (outgoing, 2)
+### references (outgoing, 3)
 
 | Target | Confidence | Producer |
 | --- | --- | --- |
 | `CustomField:Project__c.Permit_Approved__c` | parsed | formula-tokenizer |
 | `CustomField:Project__c.Status__c` | parsed | formula-tokenizer |
+| `CustomField:Project__c.Status__c` | declared | validation-rule-extractor |

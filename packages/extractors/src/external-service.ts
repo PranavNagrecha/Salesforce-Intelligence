@@ -66,7 +66,7 @@ const readAndValidateXml = async (
  * Locate the `<ExternalServiceRegistration>` root and verify required
  * children per `ExternalService.md`. Note: the metadata-XML root tag is
  * `<ExternalServiceRegistration>` (matching the Salesforce metadata
- * type name) but the ComponentType in the v1.5 contract is the shorter
+ * type name) but the ComponentType in the contract is the shorter
  * `ExternalService`.
  */
 const validateRoot = (
@@ -107,7 +107,7 @@ const validateRoot = (
  *
  * The XML root tag is `<ExternalServiceRegistration>` (the Salesforce
  * metadata-type name) but the canonical-ID prefix is `ExternalService`
- * (the shorter conversational name carried in the v1.5 contract). The
+ * (the shorter conversational name carried in the contract). The
  * extractor does NOT validate which of `<schemaUrl>` / `<schema>` is
  * present — both may be absent, or both present, and the renderer
  * surfaces whichever it sees as a property.
@@ -115,9 +115,9 @@ const validateRoot = (
  * Emits one `references` edge from this service to
  * `NamedCredential:{namedCredential}` when the `<namedCredential>`
  * element is set. The edge confidence is `declared` (the binding is
- * explicit in the metadata XML); v1.5 does NOT validate that the
+ * explicit in the metadata XML); this does NOT validate that the
  * named credential exists in the extracted set — dangling edges are
- * surfaced per the v0.1 dangling-edge policy. The edge's
+ * surfaced per the dangling-edge policy. The edge's
  * `properties.role` is `'credential'` per the task spec.
  *
  * Error cases (per vendored `ExternalService.md`):

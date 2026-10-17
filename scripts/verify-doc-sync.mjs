@@ -29,6 +29,7 @@ import {
   stripVolatile,
   toProductSurface,
 } from './lib/build-product-manifest.mjs';
+import { collectMarkdownFiles, findBrokenRelativeLinks } from './lib/doc-links.mjs';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 const failures = [];
@@ -518,6 +519,27 @@ const architectureMd = join(root, 'docs/architecture.md');
 if (existsSync(architectureMd) && manifest) {
   for (const message of checkArchitectureGraphTables(read(architectureMd), GRAPH_TABLES)) {
     fail(message);
+  }
+}
+
+// ── Relative Markdown links in public docs ─────────────────────────────────
+const docLinkRoots = [
+  join(root, 'README.md'),
+  join(root, 'CONTRIBUTING.md'),
+  join(root, 'RELEASING.md'),
+  join(root, 'SECURITY.md'),
+  join(root, 'llms-install.md'),
+];
+const docLinkFiles = [
+  ...docLinkRoots.filter((path) => existsSync(path)),
+  ...collectMarkdownFiles(join(root, 'docs'), []),
+];
+for (const path of docLinkFiles) {
+  for (const { linkingFile, linkText, resolvedPath } of findBrokenRelativeLinks(
+    read(path),
+    path,
+  )) {
+    fail(`${linkingFile}: broken link "${linkText}" -> ${resolvedPath}`);
   }
 }
 

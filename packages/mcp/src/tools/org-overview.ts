@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.org_overview` MCP tool.
  *
- * The v2.0g headline tool — the buyer-facing answer to admin/architect
+ * The headline tool — the buyer-facing answer to admin/architect
  * priority #9 on the top-10 questions list: "I'm new — give me a tour
  * of this org". One call returns a structured snapshot of the org's
  * shape: component counts, the most-referenced data model, the most-
@@ -21,7 +21,7 @@
  *     the SQL `IN (...)` list stays bounded) for the inbound-reference,
  *     inbound-callsApex and outgoing-grantedBy counts.
  *   - `recognizeNamingConventions` (zero-scope call so the response
- *     carries the existing v0.1 naming-pattern observations summary).
+ *     carries the existing naming-pattern observations summary).
  *
  * Every ranking is therefore computed over the WHOLE org, not over an
  * id-ASC prefix. The scans used to stop at the first 500 nodes per type
@@ -30,7 +30,7 @@
  * `automationSummary.activeRatio` measured a 500-node sample against a
  * `COUNT(*)` denominator — a flatly wrong number with no hedge.
  *
- * **Honesty axis** (per the v2.0g spec): every "top X" ranking in the
+ * **Honesty axis**: every "top X" ranking in the
  * response is a heuristic proxy. "Top objects by inbound reference
  * count" doesn't mean "the most important objects" — it means "the
  * objects with the most edges pointing at them in the v1.x graph",
@@ -47,7 +47,7 @@
  *
  * Implementation notes:
  *   - The tool takes no input arguments; the schema is `z.object({})`.
- *     A future extension may add a `topN` knob, but v2.0g keeps the
+ *     A future extension may add a `topN` knob, but it keeps the
  *     response shape stable for a fresh-onboarding caller who hasn't
  *     yet learned what knobs to twist.
  *   - The `migrationCandidate` rating on `legacyDebtIndicators` is a
@@ -55,9 +55,9 @@
  *     is `'medium'`, > 30 is `'high'`. The thresholds are documented
  *     constants so a future tuning pass can argue from data.
  *   - `largestApexClasses` reads from `properties.sourceBytes` and
- *     `properties.lineCount` (when the v0.3 Apex extractor populated
+ *     `properties.lineCount` (when the Apex extractor populated
  *     them). Classes missing both fields are scored as 0 and naturally
- *     fall to the bottom of the sort; this matches the v0.1 honesty
+ *     fall to the bottom of the sort; this matches the honesty
  *     boundary for unparsed sources rather than fabricating sizes.
  */
 
@@ -187,7 +187,7 @@ const INTEGRATION_TYPES_FOR_SUMMARY: readonly ComponentType[] = [
  * and produce side effects. Process Builder placeholders are NOT
  * separately tracked because the v1.x metadata model surfaces Process
  * Builder records as Flow nodes with `properties.processType` ===
- * 'Workflow' (see PLAN-v1.3.md §3); the Flow count already includes
+ * 'Workflow'; the Flow count already includes
  * them and the legacy-debt indicator below double-counts them via
  * WorkflowRule.
  */
@@ -207,7 +207,7 @@ const AUTOMATION_TYPES_FOR_SUMMARY: readonly ComponentType[] = [
  * Note on frontend types: the four ComponentTypes the `frontendSummary`
  * tallies (`LightningComponentBundle`, `AuraDefinitionBundle`,
  * `VisualforcePage`, `VisualforceComponent`) are enumerated inline in
- * the handler's stage 5 logic rather than a named constant — the v1.4
+ * the handler's stage 5 logic rather than a named constant — the
  * frontend tier divides into modern (LWC, Aura) and legacy (VF page,
  * VF component) families, and the ratio between the two IS the legacy-
  * debt signal the summary surfaces.
@@ -337,7 +337,7 @@ export interface LegacyDebtIndicators {
 /**
  * One entry in the `largestApexClasses` ranking. Reports both
  * `sourceBytes` and `lineCount` — both are best-effort honest
- * tallies populated by the v0.3 Apex extractor; classes missing the
+ * tallies populated by the Apex extractor; classes missing the
  * properties surface as `0` here rather than `null` so the JSON
  * shape stays stable.
  */
@@ -353,7 +353,7 @@ export interface OrgOverviewOutput {
   /** Per-ComponentType node counts. Keys are ComponentType names. */
   readonly componentCounts: Readonly<Record<string, number>>;
   /**
-   * P13-FACTS-consumers: captured approximate record counts for the top
+   * Captured approximate record counts for the top
    * objects (`data_snapshot` observations from `refresh --with-data-shape`),
    * when any exist. Context only — stamped, sampled-or-approximate, never a
    * live read; absent entirely on a vault with no captured facts.
@@ -389,7 +389,7 @@ export interface OrgOverviewOutput {
   /**
    * Per-summary-family retrieval flags. `false` means the family was NOT in this
    * org's retrieve manifest (no coverage AND no nodes), so the matching 0/low
-   * tally above means "not checked", not "none in the org" — the v4.0 honesty
+   * tally above means "not checked", not "none in the org" — the honesty
    * axis that keeps the tour from asserting absence it never verified.
    */
   readonly coverage: {
@@ -570,7 +570,7 @@ const bucketMigrationCandidate = (
 /**
  * Deterministic comparator for the top-objects / top-apex-classes /
  * top-profiles rankings: count DESC, then id ASC for ties. Keeps the
- * v2.0g output stable across runs so fixture-based tests can pin to
+ * output stable across runs so fixture-based tests can pin to
  * a specific ordering.
  */
 const compareRankedDesc = <T extends { readonly id: ComponentId }>(
@@ -742,7 +742,7 @@ export const orgOverviewHandler = async (
       frontendTotal === 0 ? 0 : (vfPages + vfComponents) / frontendTotal,
   };
 
-  // Coverage honesty (PLAN-v4.0 axis): a 0 in a summary family is only "none"
+  // Coverage honesty: a 0 in a summary family is only "none"
   // if that family was actually retrieved. Families absent from this org's
   // retrieve manifest report 0 too. A family counts as retrieved when it has
   // ANY nodes (proof it was pulled) OR the manifest's coverage marks it
@@ -917,7 +917,7 @@ export const orgOverviewHandler = async (
     boundaries,
   };
 
-  // P13-FACTS-consumers: attach captured record counts for the top objects.
+  // Attach captured record counts for the top objects.
   const factRows: Array<{ readonly id: string } & FactsBlock> = [];
   for (const top of data.topObjects) {
     const block = await readFactBlock(ctx, top.id as ComponentId, 'recordCount');

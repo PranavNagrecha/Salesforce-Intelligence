@@ -139,7 +139,7 @@ const computeBodyLength = (
  * Read the `<content>` body as a string, returning `''` for absent or
  * null content and for visualforce templates (whose merge tokens live
  * in the referenced VF page and are picked up by the visualforce-page
- * extractor). Used by the v3.0 body-merge scan.
+ * extractor). Used by the body-merge scan.
  */
 const extractBodyForMergeScan = (
   rootObj: Record<string, unknown>,
@@ -158,10 +158,10 @@ const extractBodyForMergeScan = (
  * Reads the file, parses it as XML, validates the `<EmailTemplate>` root
  * per the vendored `EmailTemplate.md` spec, and returns an
  * `ExtractionResult` containing one `Node` of type `'EmailTemplate'`
- * and a `references` edge set. v1.3 emitted at most one edge (the
- * `<letterhead>` reference); v3.0 augments the edge set with one
+ * and a `references` edge set. Emitted at most one edge (the
+ * `<letterhead>` reference); this augments the edge set with one
  * `references` edge per distinct field merged inside the `<content>`
- * body — see PLAN-v3.0 §3 + §4 R2.
+ * body.
  *
  * The canonical ID is `EmailTemplate:{FolderName}.{TemplateName}`,
  * where `FolderName` is derived from the directory chain between the
@@ -177,7 +177,7 @@ const extractBodyForMergeScan = (
  * (a real-world scenario for templates inherited from managed
  * packages).
  *
- * The v3.0 body-merge scan tokenizes the `<content>` body for
+ * The body-merge scan tokenizes the `<content>` body for
  * `{!Object.Field}` and conditional `{!IF(... Object.Field ...)}`
  * merges. Each distinct field produces one `references` edge with
  * `confidence: 'parsed'`, `properties.role: 'body-merge'`,
@@ -186,7 +186,7 @@ const extractBodyForMergeScan = (
  * function-call merge). When ANY conditional merge appears, the
  * EmailTemplate node's `properties.richTemplateSyntaxDetected` flag is
  * set so consumers can surface the "field refs captured; firing logic
- * NOT captured" disclosure per PLAN-v3.0 §4. Visualforce templates
+ * NOT captured" disclosure. Visualforce templates
  * skip the body scan — their merge tokens live in the referenced VF
  * page and are picked up by the visualforce-page extractor.
  *
@@ -283,8 +283,8 @@ export const extractEmailTemplate = async (
   const letterheadName = optionalString(rootObj, 'letterhead');
   const visualforcePageRef = optionalString(rootObj, 'contentVisualforcePage');
 
-  // v3.0 body merge-token scan. The `<content>` element holds the body
-  // text/HTML; per PLAN-v3.0 §3 + §4 R2, we tokenize `{!Object.Field}`
+  // Body merge-token scan. The `<content>` element holds the body
+  // text/HTML; we tokenize `{!Object.Field}`
   // and `{!FN(...Object.Field...)}` patterns and emit `references`
   // edges with `confidence: 'parsed'`. Visualforce templates skip the
   // scan since their merge tokens live in the referenced VF page.
@@ -301,7 +301,7 @@ export const extractEmailTemplate = async (
     type: 'EmailTemplate',
     apiName: scopedApiName,
     label,
-    // Per `EmailTemplate.md`: EmailFolder is not extracted in v1.3, so
+    // Per `EmailTemplate.md`: EmailFolder is not extracted, so
     // templates have no graph parent — `parentId` is always null.
     parentId: null,
     sourcePath: path,
@@ -319,7 +319,7 @@ export const extractEmailTemplate = async (
       uiType: optionalString(rootObj, 'uiType'),
       visualforcePageRef,
       bodyLength: computeBodyLength(rootObj, templateType),
-      // v3.0 additive properties (PLAN-v3.0 §4 emails section). The
+      // Additive properties. The
       // body-merge extension surfaces three new keys; `mergeFields`
       // mirrors the canonical edge target ids, `referencedObjects`
       // is the dedup'd object summary, and `richTemplateSyntaxDetected`
@@ -331,7 +331,7 @@ export const extractEmailTemplate = async (
   };
 
   // Per `EmailTemplate.md` §"Edges": one `references` edge is emitted
-  // when `<letterhead>` is present. v3.0 augments with one `references`
+  // when `<letterhead>` is present. This augments with one `references`
   // edge per distinct merged field; both edge families share the
   // `references` EdgeType but carry different `properties.role` markers
   // so consumers can distinguish letterhead from body-merge references.

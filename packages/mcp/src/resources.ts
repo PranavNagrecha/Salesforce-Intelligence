@@ -1,11 +1,11 @@
 /**
- * MCP resource bindings for the v0.1 server.
+ * MCP resource bindings for the server.
  *
- * v0.1 advertises a single resource — `sfi://vault/manifest` — that
+ * This advertises a single resource — `sfi://vault/manifest` — that
  * returns the loaded `VaultManifest` as canonical JSON. Component bodies
  * (`sfi://component/{type}/{id}`) and raw source files
  * (`sfi://source/{path}`) are intentionally NOT exposed as resources at
- * v0.1; the equivalent reads happen through the
+ * the equivalent reads happen through the
  * `sfi.get_component` and `sfi.search_apex_source` tools, which carry
  * the `vaultState` envelope. Phase G may revisit if clients ask for
  * URI-based access.
@@ -33,7 +33,7 @@ const JSON_INDENT = 2;
 /**
  * Register `resources/list` and `resources/read` handlers on `server`.
  *
- * v0.1 lists exactly one resource and only honors reads for that
+ * This lists exactly one resource and only honors reads for that
  * specific URI; any other URI receives a structured error block.
  *
  * @example

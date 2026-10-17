@@ -137,7 +137,7 @@ describe('valueChangeAuditHandler', () => {
     expect(detail.value.data.rows[0]!.buckets).toBeDefined();
   });
 
-  // ---- CR-22 cursor ----------------------------------------------------
+  // ---- cursor ----------------------------------------------------
 
   it('whole-fits call omits nextCursor/pageInfo (golden-identical)', async () => {
     const r = await valueChangeAuditHandler(ctx, { object: 'User' });

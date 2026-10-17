@@ -109,7 +109,7 @@ describe('capabilitiesHandler', () => {
     }
   });
 
-  it('exposes the admin / developer / architect / release-manager / support personas (P12-UX-capabilities-personas)', async () => {
+  it('exposes the admin / developer / architect / release-manager / support personas', async () => {
     const r = await capabilitiesHandler(ctx, {});
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -140,7 +140,7 @@ describe('capabilitiesHandler', () => {
     }
   });
 
-  it('every published question path actually routes into its own tool list (P12-UX-capabilities-router-contract)', async () => {
+  it('every published question path actually routes into its own tool list', async () => {
     // A persona path advertises "ask THIS, the answer comes from THESE tools".
     // If `route_question` sends the advertised question somewhere outside the
     // path, the published path is a lie. Assert the router routes each question
@@ -313,7 +313,7 @@ describe('capabilitiesHandler', () => {
     expect(JSON.stringify(a)).toBe(JSON.stringify(b));
   });
 
-  it('surfaces an open-gap nudge above threshold and stays quiet below (R8-GAPLOG-SURFACE)', async () => {
+  it('surfaces an open-gap nudge above threshold and stays quiet below', async () => {
     const quiet = join(tempDir, 'quiet-gaps.jsonl');
     writeFileSync(quiet, '', 'utf8');
     const quietR = await capabilitiesHandler(ctx, {}, null, { gapLogFile: quiet });
@@ -350,7 +350,7 @@ describe('capabilitiesHandler', () => {
   });
 });
 
-describe('logGap privacy posture (R8-GAPLOG-SURFACE)', () => {
+describe('logGap privacy posture', () => {
   it('keeps logGap opt-in: optional boolean with no default true', () => {
     const omitted = routeQuestionInputSchema.safeParse({ question: 'x' });
     expect(omitted.success).toBe(true);

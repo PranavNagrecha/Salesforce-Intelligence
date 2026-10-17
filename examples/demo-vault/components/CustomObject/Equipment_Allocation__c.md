@@ -13,10 +13,12 @@ properties:
   enableHistory: false
   enableReports: false
   enableSearch: false
+  externalSharingModel: null
   label: Equipment Allocation
   nameFieldLabel: Equipment Allocation Name
   nameFieldType: AutoNumber
   pluralLabel: Equipment Allocations
+  recordPageOverrides: []
   sharingModel: ControlledByParent
   visibility: Public
 sourcePath: source/main/default/objects/Equipment_Allocation__c/Equipment_Allocation__c.object-meta.xml
@@ -37,9 +39,11 @@ type: CustomObject
 | enableHistory | `false` |
 | enableReports | `false` |
 | enableSearch | `false` |
+| externalSharingModel | `null` |
 | nameFieldLabel | `Equipment Allocation Name` |
 | nameFieldType | `AutoNumber` |
 | pluralLabel | `Equipment Allocations` |
+| recordPageOverrides | `` |
 | sharingModel | `ControlledByParent` |
 | visibility | `Public` |
 

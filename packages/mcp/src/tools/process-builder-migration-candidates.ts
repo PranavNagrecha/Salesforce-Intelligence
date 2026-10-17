@@ -1,13 +1,13 @@
 /**
  * Handler for the `sfi.process_builder_migration_candidates` MCP tool.
  *
- * The v2.4 "Process Builders are deprecated; which ones still need
+ * The "Process Builders are deprecated; which ones still need
  * migration?" surface. Composes over Flow + WorkflowRule + ApprovalProcess
  * nodes — no new extractors required.
  *
  * **Process Builder detection** — Salesforce represents Process Builder
- * as a Flow with `<processType>Workflow</processType>` (per v1.3's
- * documented boundary in PLAN-v1.3). This tool filters Flow nodes by
+ * as a Flow with `<processType>Workflow</processType>` (per the
+ * documented boundary). This tool filters Flow nodes by
  * that property; an admin asking "which Process Builders are active?"
  * gets the structurally-correct subset.
  *
@@ -18,7 +18,7 @@
  * the full backlog rather than forcing them to compose two queries.
  *
  * **Complexity classification** — per-firer complexity is heuristic
- * based on outgoing edge counts and time-trigger presence. v2.4
+ * based on outgoing edge counts and time-trigger presence.
  * defines three tiers:
  *   - `simple`: single decision/criterion, single action.
  *   - `moderate`: multi-criterion or multi-action.
@@ -32,7 +32,7 @@
  * **Active-only default** — the default is `activeOnly: true`. Inactive
  * rules are deletion candidates, not migration candidates; they're
  * surfaced by `sfi.unused_components` instead. The skill's routing
- * discipline (per PLAN-v2.4 §5) enforces the distinction.
+ * discipline enforces the distinction.
  *
  * A Process Builder's liveness is its Flow `status` string
  * (`FLOW_LIFECYCLE_PROPERTY`), NOT a boolean `active` — see that constant for
@@ -42,7 +42,7 @@
  * "never checked" must never be filtered away as "inactive".
  *
  * **Honesty axis** — the migration tool itself (Setup → Workflow Rules
- * → Migrate to Flow) does not run here. v2.4 produces the inventory
+ * → Migrate to Flow) does not run here. This produces the inventory
  * plus per-rule guidance; the user runs the migration tool themselves
  * after reviewing the inventory. The `boundaries[]` array surfaces
  * this verbatim.
@@ -149,7 +149,7 @@ export const processBuilderMigrationCandidatesInputSchema = z.object({
     .min(1)
     .max(PROCESS_BUILDER_MAX_LIMIT)
     .optional(),
-  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // Continuation cursor: an OPAQUE token echoed back from a prior
   // truncated page's `nextCursor`; carries the resume offset + which list it
   // advances. Omit = today's behavior.
   cursor: z.string().min(1).optional(),
@@ -288,20 +288,20 @@ export interface ProcessBuilderMigrationCandidatesOutput {
    */
   readonly coverageCaveat?: CoverageCaveat;
   /**
-   * CR-RV12: TRUE when the >500 node SCAN cap (LIST_PAGE_SIZE) dropped Flow /
+   * TRUE when the >500 node SCAN cap (LIST_PAGE_SIZE) dropped Flow /
    * WorkflowRule / ApprovalProcess nodes BEFORE filtering — so the lists and
    * total* counts under-count that type. Present ONLY when actually true so a
    * ≤500-node org's golden does not move.
    */
   readonly scanTruncated?: boolean;
-  /** CR-RV12: true org-wide counts per scanned type (only when a scan was capped). */
+  /** True org-wide counts per scanned type (only when a scan was capped). */
   readonly trueTypeCounts?: {
     readonly flows?: number;
     readonly workflowRules?: number;
     readonly approvalProcesses?: number;
   };
   /**
-   * CR-22 opaque continuation token, present ONLY when the designated list
+   * Opaque continuation token, present ONLY when the designated list
    * overflowed `limit`/the byte budget. Echo it back as `cursor` to resume;
    * absent on a whole-fits page so the response is byte-identical.
    */
@@ -651,7 +651,7 @@ export const processBuilderMigrationCandidatesHandler = async (
       return err({ kind: 'internal', message: emailRes.error });
     }
     // Sub-flow count surfaces via outgoing `references` edges to
-    // another Flow; v2.0a's Flow extractor emits these.
+    // another Flow; the Flow extractor emits these.
     const refRes = await countOutgoingEdges(ctx, flow.id, 'references');
     if (!refRes.ok) {
       return err({ kind: 'internal', message: refRes.error });
@@ -824,7 +824,7 @@ export const processBuilderMigrationCandidatesHandler = async (
       ? BOUNDARIES
       : [lifecycleUnknown.disclosure, ...BOUNDARIES];
 
-  // KEEP pre-CR-22 `truncated` semantics byte-for-byte (any list over limit);
+  // KEEP pre-paging `truncated` semantics byte-for-byte (any list over limit);
   // the cursor block is layered on top, emitted only when the designated list
   // is actually paged.
   const truncatedPbs = sortedPbs.length > limit;
@@ -832,7 +832,7 @@ export const processBuilderMigrationCandidatesHandler = async (
   const truncatedAps = sortedAps.length > limit;
   const truncated = truncatedPbs || truncatedWrs || truncatedAps;
 
-  // CR-RV12: the per-type scans above are capped at LIST_PAGE_SIZE, so a
+  // The per-type scans above are capped at LIST_PAGE_SIZE, so a
   // >500-node type silently under-counts BEFORE filtering. Compare TRUE counts
   // against the cap; surface scanTruncated + true counts ONLY for the scanned,
   // capped types so a ≤500-node org's golden does not move.
@@ -859,7 +859,7 @@ export const processBuilderMigrationCandidatesHandler = async (
     if (c.value > LIST_PAGE_SIZE) { scanTruncated = true; trueTypeCounts.approvalProcesses = c.value; }
   }
 
-  // CR-22 section cursor over the three lists in a STABLE order. Page the
+  // Section cursor over the three lists in a STABLE order. Page the
   // largest (most-likely-oversized) by default; on resume the handler feeds
   // token.listId back as designatedListId (paginateSection does NOT cross-check).
   const TOOL = 'sfi.process_builder_migration_candidates';

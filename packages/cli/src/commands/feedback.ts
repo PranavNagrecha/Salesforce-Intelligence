@@ -86,7 +86,7 @@ export interface FeedbackExport {
     /**
      * Gap entries DROPPED by vault scoping (other vaults' gaps + unstamped
      * pre-0.1.10 entries). Surfaced so a small export never silently reads
-     * as "that's all the gaps this machine has" (P14-FEEDBACK-gaplog-scope).
+     * as "that's all the gaps this machine has".
      */
     readonly routeGapsExcludedByScope: number;
   };
@@ -95,7 +95,7 @@ export interface FeedbackExport {
 /**
  * Build the scrubbed, shareable export from the local gap + ratings logs.
  *
- * SCOPING (P14-FEEDBACK-gaplog-scope / FINDINGS P-GAPLOG-GLOBAL): the gap log
+ * SCOPING (FINDINGS P-GAPLOG-GLOBAL): the gap log
  * FILE is machine-global, but question text routinely names org-specific
  * components — a multi-org machine must not bundle every org's questions into
  * one shareable file. Entries are stamped with their vault at log time; by

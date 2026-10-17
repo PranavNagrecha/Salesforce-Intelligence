@@ -1,6 +1,5 @@
 /**
  * Handler for the `sfi.recordtype_availability` MCP tool
- * (P11-ACCESS-recordtype-availability).
  *
  * Answers "what record types can this user create / see" for a Profile or
  * PermissionSet. Salesforce record-type access lives on a profile /
@@ -58,7 +57,7 @@ const asStr = (v: unknown): string | undefined =>
  * prefix. This is the visibility SUBJECT and is resolved SEPARATELY from any
  * object mentioned in the same call.
  *
- * W3.5 residual fix (RECORDTYPE-AVAILABILITY-REJECTS-PROFILEAPINAME): a natural
+ * Residual fix (RECORDTYPE-AVAILABILITY-REJECTS-PROFILEAPINAME): a natural
  * "record types on Case for {profile}?" passes an object key (`objectApiName` /
  * `object` / `objectId`) ALONGSIDE a profile key (`profileApiName` / `profileId`
  * / …). Pre-fix the object was consumed into the container slot and the profile
@@ -66,7 +65,7 @@ const asStr = (v: unknown): string | undefined =>
  * container SUBJECT and the object becomes an OPTIONAL FILTER (`object`) the
  * handler narrows to, echoed in `appliedScope`.
  *
- * W3.3 misbind fix (ADMIN-SURFACE-ALIAS-SKEW-CLUSTER, preserved): an OBJECT-only
+ * Misbind fix (ADMIN-SURFACE-ALIAS-SKEW-CLUSTER, preserved): an OBJECT-only
  * input — a `CustomObject:` `componentId`, or an object alias with NO container
  * key — must NOT be coerced into a phantom `Profile:CustomObject:Case`. It is
  * bound to the object (`CustomObject:X`) so the handler rejects it HONESTLY as a
@@ -122,7 +121,7 @@ export const recordtypeAvailabilityInputSchema = z.preprocess((raw) => {
     if (objectFilter !== undefined) out['object'] = objectFilter;
   } else if (objectFilter !== undefined || (cid !== undefined && cid.startsWith('CustomObject:'))) {
     // Object given but NO container: bind to the OBJECT so the handler rejects it
-    // HONESTLY as a CustomObject (W3.3), never a phantom `Profile:CustomObject:X`.
+    // HONESTLY as a CustomObject, never a phantom `Profile:CustomObject:X`.
     out['componentId'] =
       cid !== undefined && cid.startsWith('CustomObject:')
         ? cid
@@ -158,7 +157,7 @@ export interface ObjectRecordTypes {
 export interface RecordtypeAvailabilityOutput {
   /**
    * Echoes the scope ACTUALLY applied so a host never assumes a `profileApiName`
-   * / `object` it passed was silently stripped (the W3.5 residual this closes).
+   * / `object` it passed was silently stripped (the residual this closes).
    * `componentId` is the resolved Profile / PermissionSet subject; `object` is
    * the object filter that narrowed the result (or null when unscoped).
    */
@@ -200,7 +199,7 @@ export const recordtypeAvailabilityHandler = async (
   input: RecordtypeAvailabilityInput,
 ): Promise<Result<McpResponse<RecordtypeAvailabilityOutput>, McpError>> => {
   if (!GRANTER_PREFIXES.some((p) => input.componentId.startsWith(p))) {
-    // W3.3: a CustomObject-shaped id is a common misroute ("record types on
+    // A CustomObject-shaped id is a common misroute ("record types on
     // <object> for <profile>?") — name it as such rather than the generic
     // message, and never a phantom `Profile:CustomObject:X` not-found.
     const isObject = input.componentId.startsWith('CustomObject:');

@@ -201,7 +201,7 @@ export const extractBusinessProcess = async (
   const isActive = coerceBoolean(unwrapSingle(rootObj['isActive']));
   // Each `<values>` entry declares one stage the process moves through: its
   // `<fullName>` is the picklist value (e.g. Open / Closed) and `<default>`
-  // marks the entry stage. v1.2 counted these but dropped the value names, so
+  // marks the entry stage. Counted these but dropped the value names, so
   // "what statuses can a record in this process go through?" could not be
   // answered from the node (BUSINESS-PROCESS-OMITS-STAGE-VALUES). Emit the
   // ordered stage list alongside the count. `default` collapses to `false` for

@@ -359,7 +359,7 @@ describe('extractQueue', () => {
     });
 
     it('reads memberCount=2 and emits hasMember edges for Sample_Payment_Approval real-org XML shape', async () => {
-      // Verifies v1.2 member resolution: memberEmails array on node properties
+      // Verifies member resolution: memberEmails array on node properties
       // and hasMember edges emitted for each <user> element.
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Queue xmlns="http://soap.sforce.com/2006/04/metadata">

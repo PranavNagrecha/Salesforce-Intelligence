@@ -49,7 +49,7 @@ const MAX_LIMIT = 120;
 /** Bound the per-object scan (listNodesByType caps at 500 per page). */
 const SCAN_PAGE = 500;
 /**
- * Hard ceiling on the per-object child-scan walk. CR-22 B3: a child count past
+ * Hard ceiling on the per-object child-scan walk. A child count past
  * this is a pathological object (no real org has >20k list views on one
  * object); it is disclosed via `scanTruncated` rather than dropped SILENTLY as
  * before (the tool used to stop at 4000 with NO disclosure at all).
@@ -88,7 +88,7 @@ export const listViewSharingInputSchema = z
   nameContains: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
-  // CR-22 continuation cursor from a prior truncated page's nextCursor.
+  // Continuation cursor from a prior truncated page's nextCursor.
   cursor: z.string().min(1).optional(),
   })
   .refine(
@@ -176,7 +176,7 @@ export interface ListViewSharingOutput {
   readonly hasMore: boolean;
   readonly truncated: boolean;
   /**
-   * CR-22 B3: true ONLY when an object has more list views than the per-object
+   * True ONLY when an object has more list views than the per-object
    * scan walk (`SCAN_MAX`) could read — a pathological object. Was a SILENT
    * drop before. False for any real org.
    */
@@ -184,9 +184,9 @@ export interface ListViewSharingOutput {
   readonly confidence: 'declared';
   readonly boundaryNote: string;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated.
+   * Opaque continuation token, present ONLY when this page is truncated.
    * Echo it back as `cursor` to resume. Absent on a complete page so an
-   * in-budget response is byte-identical to pre-CR-22.
+   * in-budget response is byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
@@ -395,7 +395,7 @@ export const listViewSharingHandler = async (
       for (const node of page.value) collected.push(toRow(node));
       if (page.value.length < SCAN_PAGE) break;
     }
-    // CR-22 B3: the walk above stops at SCAN_MAX. Use a TRUE per-object count to
+    // The walk above stops at SCAN_MAX. Use a TRUE per-object count to
     // disclose (rather than SILENTLY drop) when an object has more list views
     // than the walk read — pre-B3 this was an undisclosed truncation.
     if (collected.length >= SCAN_MAX) {
@@ -461,7 +461,7 @@ export const listViewSharingHandler = async (
     matched: scopedRows.length,
   };
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // Resolve the resume offset (echoed cursor wins over explicit offset).
   // The fingerprint covers `componentId` + the filter args so a token minted for
   // one object/view/filter can't be replayed against another (a differently
   // filtered set would otherwise skip or duplicate rows on resume). The output

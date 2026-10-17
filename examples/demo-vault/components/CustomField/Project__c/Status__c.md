@@ -44,6 +44,7 @@ properties:
   referenceTo: null
   relationshipName: null
   required: false
+  restricted: false
   scale: null
   trackHistory: false
   unique: false
@@ -71,6 +72,7 @@ type: CustomField
 | referenceTo | `null` |
 | relationshipName | `null` |
 | required | `false` |
+| restricted | `false` |
 | scale | `null` |
 | trackHistory | `false` |
 | unique | `false` |
@@ -92,20 +94,25 @@ type: CustomField
 | --- | --- | --- |
 | `CustomObject:Project__c` | declared | custom-field-extractor |
 
-### readsFrom (incoming, 3)
+### readsFrom (incoming, 5)
 
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `ApexClass:IncentiveBatch` | parsed | apex-ast |
 | `ApexClass:ProjectTriggerHandler` | parsed | apex-ast |
 | `ApexClass:ProjectTriggerHandlerTest` | parsed | apex-ast |
+| `ConditionalContext:Flow:Project_On_Approve.condition-0` | declared | condition-extractor |
+| `ConditionalContext:ValidationRule:Project__c.Complete_Requires_Permit.condition-0` | parsed | condition-extractor |
 
-### references (incoming, 2)
+### references (incoming, 5)
 
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `CustomField:Project__c.Is_Complete__c` | parsed | formula-tokenizer |
+| `SharingRule:Project__c.Share_Projects_To_Ops` | declared | sharing-rule-extractor |
 | `ValidationRule:Project__c.Complete_Requires_Permit` | parsed | formula-tokenizer |
+| `ValidationRule:Project__c.Complete_Requires_Permit` | declared | validation-rule-extractor |
+| `WaveXmd:Project_Pipeline` | declared | wave-xmd-extractor |
 
 ### usedInLayout (incoming, 1)
 
@@ -113,9 +120,10 @@ type: CustomField
 | --- | --- | --- |
 | `Layout:Project__c.Residential Layout` | declared | layout-extractor |
 
-### writesTo (incoming, 2)
+### writesTo (incoming, 3)
 
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `ApexClass:ProjectTriggerHandlerTest` | parsed | apex-ast |
 | `Flow:Installation_On_Complete` | parsed | flow-extractor |
+| `LightningComponentBundle:projectSummaryCard` | declared | lwc-extractor |

@@ -208,7 +208,6 @@ const buildPageEdges = (
 /**
  * Emit one `grantedBy` edge per `<flowAccesses>` entry with `<enabled>` true —
  * the flows this permission set lets a user RUN (`flowAccess: true` marker).
- * (P11-USER-ability-run)
  */
 const buildFlowEdges = (
   rootObj: Record<string, unknown>,
@@ -225,12 +224,12 @@ const buildFlowEdges = (
 };
 
 /**
- * CR-CAP-10: emit one `grantedBy` edge per `<customPermissions>` entry with
+ * emit one `grantedBy` edge per `<customPermissions>` entry with
  * `<enabled>` true — the custom permissions this permission set CONFERS. The
  * grant element is `<customPermissions>` with `<name>` (the CustomPermission
  * DeveloperName) and `<enabled>` (the gate, identical to classAccesses /
  * flowAccesses). `enabled=false` confers nothing and is skipped. The edge
- * target id is the flat `CustomPermission:{name}` (CR-CAP-15's definition node);
+ * target id is the flat `CustomPermission:{name}` (the definition node);
  * a managed-package name whose definition is not in the vault produces a
  * `targetMissing` edge the consumer discloses (it does NOT fabricate a node).
  */
@@ -251,7 +250,7 @@ const buildCustomPermissionEdges = (
 /**
  * Return enabled `<userPermissions>` names, sorted alphabetically. Surfaced
  * on `Node.properties.userPermissions` rather than as edges because system
- * permissions don't correspond to graph nodes in v0.1.
+ * permissions don't correspond to graph nodes.
  */
 const collectEnabledUserPermissions = (
   rootObj: Record<string, unknown>,
@@ -387,11 +386,11 @@ const buildProperties = (
  *   - `fieldPermissions` -> `CustomField:{Object.Field}` (both-false skipped)
  *   - `classAccesses` -> `ApexClass:{apexClass}` (disabled skipped)
  *   - `flowAccesses` -> `Flow:{flow}` (disabled skipped)
- *   - `customPermissions` -> `CustomPermission:{name}` (`enabled=false` skipped) (CR-CAP-10)
+ *   - `customPermissions` -> `CustomPermission:{name}` (`enabled=false` skipped)
  *
  * `userPermissions` are surfaced on `Node.properties.userPermissions`
  * (sorted) rather than as edges since system permissions don't correspond
- * to graph nodes in v0.1.
+ * to graph nodes.
  *
  * `<recordTypeVisibilities>` surfaces on `Node.properties.recordTypeVisibilities`
  * (array of `{ recordType, default, visible }`, verbatim order). `visible` is

@@ -220,7 +220,7 @@ export interface ApexStructureMeta {
   readonly status: string | null;
   /** `null` when the metadata carried no `<apiVersion>`. */
   readonly apiVersion: number | null;
-  /** `null` when the vault node never recorded it (pre-v1.5 vault) — never 0. */
+  /** `null` when the vault node never recorded it (legacy vault) — never 0. */
   readonly lineCount: number | null;
   readonly sourceBytes: number | null;
   readonly isTest: boolean | null;
@@ -563,7 +563,7 @@ const readStringArrayOrNull = (node: Node, key: string): readonly string[] | nul
   return raw.filter((v): v is string => typeof v === 'string');
 };
 
-/** The seven async / API-surface classifier keys the v1.5 extractor writes. */
+/** The seven async / API-surface classifier keys the extractor writes. */
 const CLASSIFIER_KEYS = [
   'isQueueable',
   'isSchedulable',

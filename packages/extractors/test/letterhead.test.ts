@@ -82,7 +82,7 @@ describe('extractLetterhead', () => {
   });
 
   describe('zero outgoing edges (leaf node)', () => {
-    itHarness('never emits an edge — Letterhead is a v1.3 leaf', async () => {
+    itHarness('never emits an edge — Letterhead is a leaf', async () => {
       // Letterhead.md §"Edges": "The Letterhead extractor produces
       // zero edges." Inbound `references` from EmailTemplate are
       // emitted by the EmailTemplate extractor, not here.

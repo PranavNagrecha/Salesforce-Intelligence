@@ -66,10 +66,16 @@ Maps an incoming solar quote payload onto Project__c fields for the Customer Int
 
 ## Incident edges
 
-### references (outgoing, 3)
+### dispatchesOmniAction (incoming, 2)
+
+| Source | Confidence | Producer |
+| --- | --- | --- |
+| `OmniIntegrationProcedure:Project_Provision_1` | parsed | omni-integration-procedure |
+| `OmniScript:Customer_Intake_English_1` | parsed | omniscript-extractor |
+
+### references (outgoing, 2)
 
 | Target | Confidence | Producer |
 | --- | --- | --- |
 | `CustomObject:Project` | parsed | omni-data-transform |
 | `CustomObject:Project__c` | declared | omni-data-transform |
-| `CustomObject:Quote` | parsed | omni-data-transform |

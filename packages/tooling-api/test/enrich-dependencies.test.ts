@@ -376,7 +376,7 @@ describe('enrichDependencies — rows with unknown target id are dropped', () =>
         },
         // Second row: target is managed-package internal — vault
         // has no such node. Per the vendored doc, the row is skipped
-        // (no dangling-id synthesis in v1.7).
+        // (no dangling-id synthesis).
         {
           Id: 'dep-2',
           MetadataComponentId: '01p',

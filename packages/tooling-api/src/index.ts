@@ -1,8 +1,8 @@
 /**
  * @sf-intelligence/tooling-api
  *
- * The v1.7 Salesforce Tooling API client + auth delegation + freshness
- * enricher. Loaded by `sfi refresh --with-tooling-api` and the v1.7
+ * The Salesforce Tooling API client + auth delegation + freshness
+ * enricher. Loaded by `sfi refresh --with-tooling-api` and the
  * MCP tools that need live freshness data
  * (`sfi.changed_since`, etc.). Opt-in throughout — default
  * `sfi refresh` produces an un-enriched, offline-only vault.

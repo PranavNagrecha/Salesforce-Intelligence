@@ -264,13 +264,13 @@ global class Foo {}`;
     });
   });
 
-  // v1.5-R3: methodAnnotations and restUrlMapping. The v1.5 extension
+  // methodAnnotations and restUrlMapping. The extension
   // captures all `@Name` patterns inside the class body so the
   // apex-class extractor can set its `hasFutureMethod` /
   // `hasInvocableMethod` / `hasAuraEnabledMethod` booleans without a
   // separate body-scan pass, and pulls the `urlMapping` argument out
   // of any class-level `@RestResource` for synthetic-id construction.
-  describe('v1.5 method-annotation and restUrlMapping extraction', () => {
+  describe('method-annotation and restUrlMapping extraction', () => {
     it('captures @future on a method', () => {
       const source = `public class AccountActions {
   @future(callout=true)

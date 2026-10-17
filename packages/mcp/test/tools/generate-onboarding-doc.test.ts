@@ -20,7 +20,7 @@ import {
 import type { Context } from '../../src/server.js';
 import { generateOnboardingDocHandler } from '../../src/tools/generate-onboarding-doc.js';
 
-// A graph query that FAILS must not be reported as an absent v1.7 enrichment.
+// A graph query that FAILS must not be reported as an absent enrichment.
 // There is no way to make a real DuckDB query fail for one type, so
 // `listNodesByType` is wrapped: ApexClass reads are counted, and the read whose
 // 1-based index is >= `scanState.failFrom` returns a typed query-failed Result.
@@ -454,7 +454,7 @@ describe('generateOnboardingDocHandler — a failed code scan is NOT an enrichme
     scanState.apexCalls = 0;
   });
 
-  it('propagates a graph failure instead of printing the v1.7 enrichment remedy', async () => {
+  it('propagates a graph failure instead of printing the enrichment remedy', async () => {
     // Calibrate: how many ApexClass list queries does one full run issue?
     // The LAST one is the Key Contacts scan (step 5) — everything before it
     // belongs to the chained handbook / architecture / org-overview calls,

@@ -298,7 +298,7 @@ describe('renderApexMarkdown', () => {
   });
 });
 
-describe('renderApexMarkdown — markdown injection / escaping (CR-16c)', () => {
+describe('renderApexMarkdown — markdown injection / escaping', () => {
   it('escapes header/apiName but leaves the apex source fence raw', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'sf-intel-apex-escape-'));
     try {
@@ -329,7 +329,7 @@ describe('renderApexMarkdown — markdown injection / escaping (CR-16c)', () => 
       // Heading newline collapsed + injected leading hash neutralized → one `# `.
       expect(lines.filter((l) => /^# /.test(l))).toHaveLength(1);
 
-      // API Name span not closed early by the backtick in apiName. CR-16d: a
+      // API Name span not closed early by the backtick in apiName. A
       // single embedded backtick forces a wider (2-backtick) fence, per
       // CommonMark — backslash-escaping the backtick does NOT work inside a
       // code span (backslash escapes are inert there), so the fence must be

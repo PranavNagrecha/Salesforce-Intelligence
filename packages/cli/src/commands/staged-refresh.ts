@@ -1,5 +1,5 @@
 /**
- * P13-STAGED-tiers — `sfi refresh --staged`: build the vault in tiers so a
+ * `sfi refresh --staged`: build the vault in tiers so a
  * first-time (or rebuilding) operator gets a servable, HONEST vault in
  * minutes instead of waiting for one monolithic refresh.
  *
@@ -345,7 +345,7 @@ export const runStagedRefresh = async (
   const vaultRoot = configResult.value.vaultRoot;
   const paths = vaultPaths(vaultRoot);
   const targetOrg = opts.targetOrg ?? configResult.value.targetOrg;
-  // Defense in depth (CR-01 / C1): validate the `--target-org` flag override
+  // Defense in depth: validate the `--target-org` flag override
   // here so a malicious alias fails BEFORE captureSkeletonCounts (T0) runs,
   // not only later inside runRefresh. The config branch is gated in
   // loadVaultConfig above.

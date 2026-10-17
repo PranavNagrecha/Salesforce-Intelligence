@@ -1,5 +1,5 @@
 /**
- * CR-22 B3 — full multi-window node scan.
+ * Full multi-window node scan.
  *
  * The scan-cap tools (`find_hardcoded_values`, `governor_limit_risks`,
  * `crud_fls_audit`, …) enumerate one or more node TYPES and derive output rows
@@ -21,7 +21,7 @@
  * false, so a tool's `scanTruncated` disclosure becomes false once the whole
  * type is read (strictly more honest than the old single-page cap).
  *
- * CR-P3 (scan-cap): a type with EXACTLY `FULL_SCAN_MAX_NODES` nodes is NOT
+ * Scan-cap: a type with EXACTLY `FULL_SCAN_MAX_NODES` nodes is NOT
  * incomplete — every node was scanned and nothing is behind it. The walk
  * confirms this with a single bounded probe at the cap boundary (does a
  * next-window read return any row?) rather than declaring incompleteness purely
@@ -30,7 +30,7 @@
  * R6 adoption: the walk originally accepted only `types`, so every tool that
  * needed a `parentId` narrow (the fields of ONE object) could not use it and
  * re-implemented the same OFFSET windowing locally — `live-drift-check.ts`
- * (`scanObjectFields`, a faithful copy including the CR-P3 probe) and
+ * (`scanObjectFields`, a faithful copy including the probe) and
  * `value-change-audit.ts` (`listObjectFields`, an UNBOUNDED copy with no
  * residual-cap disclosure at all). {@link ScanAllNodesOptions.parentId} lets
  * both adopt this one implementation instead of keeping a third and fourth
@@ -66,7 +66,7 @@ export interface ScanAllNodesOptions {
   /**
    * Restrict the walk to children of ONE parent (e.g. every `CustomField`
    * parented by one `CustomObject`), applied as the graph's `parent_id = ?`
-   * WHERE clause on EVERY window AND on the CR-P3 cap probe — an unnarrowed
+   * WHERE clause on EVERY window AND on the cap probe — an unnarrowed
    * probe would read a FOREIGN parent's row past the cap and disclose a
    * residual truncation that does not exist.
    *

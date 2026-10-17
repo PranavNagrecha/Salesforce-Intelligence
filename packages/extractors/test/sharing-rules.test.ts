@@ -337,13 +337,13 @@ describe('extractSharingRules', () => {
     });
   });
 
-  describe('guest & territory rule kinds (CR-CAP-16)', () => {
+  describe('guest & territory rule kinds', () => {
     it('extracts a <sharingGuestRules> rule with the site name as the named Group target', async () => {
-      // CR-CAP-16: a guest rule's <guestUser> inner text is the Experience-Cloud
+      // a guest rule's <guestUser> inner text is the Experience-Cloud
       // SITE NAME. The extractor emits ONE SharingRule node (ruleType 'guest',
       // sharedToType 'guestUser', siteName Customer_Site) + a parentOf edge + a
       // sharedWith edge to a NAMED Group:Customer_Site carrying synthetic:true.
-      // Before CR-CAP-16 this asserted empty nodes/edges — fails today.
+      // Previously this asserted empty nodes/edges — fails today.
       const xml = `<?xml version="1.0"?>
 <SharingRules xmlns="http://soap.sforce.com/2006/04/metadata">
   <sharingGuestRules>
@@ -557,7 +557,7 @@ describe('extractSharingRules', () => {
     it('back-compat: a self-closing <guestUser/> still resolves to the synthetic Group:GuestUser', async () => {
       // A standard criteria rule whose <sharedTo> is a self-closing <guestUser/>
       // (the shared VARIANT_TABLE entry) must STILL collapse to Group:GuestUser —
-      // CR-CAP-16's guest-branch-local resolver only applies to the guest
+      // The guest-branch-local resolver only applies to the guest
       // FAMILY, leaving the exported table untouched for the criteria path.
       const xml = `<?xml version="1.0"?>
 <SharingRules xmlns="http://soap.sforce.com/2006/04/metadata">

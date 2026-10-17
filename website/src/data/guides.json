@@ -137,6 +137,15 @@
       "text": "Generate one from your org’s real metadata instead of a spreadsheet that goes stale."
     },
     {
+      "href": "/blog/sf-intelligence-0-7-0",
+      "section": "blog",
+      "kind": "release",
+      "date": "2026-11-03",
+      "home": false,
+      "title": "0.7.0: finish the review",
+      "text": "No new tools. OmniScript save-for-later patterns count as field writes, Flow screen components reference the component that exists, the field audit runs without agents, and the demo org shows every 0.6.0 reference family."
+    },
+    {
       "href": "/blog/sf-intelligence-0-6-0",
       "section": "blog",
       "kind": "release",

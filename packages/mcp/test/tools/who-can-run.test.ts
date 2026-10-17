@@ -43,7 +43,7 @@ const seed: ExtractionResult = {
     node({ id: 'Profile:Sales', type: 'Profile', apiName: 'Sales', properties: { flowGrantCount: 2 } }),
     node({ id: 'PermissionSet:FlowRunner', type: 'PermissionSet', apiName: 'FlowRunner', properties: { flowGrantCount: 1 } }),
     node({ id: 'Profile:NoRun', type: 'Profile', apiName: 'NoRun', properties: { flowGrantCount: 0 } }),
-    // A third granter so the CR-22 cursor can page (3 granters, limit 2).
+    // A third granter so the cursor can page (3 granters, limit 2).
     node({ id: 'Profile:Marketing', type: 'Profile', apiName: 'Marketing', properties: { flowGrantCount: 1 } }),
     // A second flow (with its own granter) so a cursor minted for FLOW can be
     // replayed against a DIFFERENT existing flow → fingerprint mismatch.
@@ -103,7 +103,7 @@ describe('whoCanRunHandler', () => {
   });
 });
 
-describe('whoCanRunHandler — CR-22 continuation cursor', () => {
+describe('whoCanRunHandler — continuation cursor', () => {
   it('in-budget whole-fits call emits NO cursor/pageInfo and no internal __source', async () => {
     const r = await whoCanRunHandler(ctx, { componentId: FLOW });
     expect(r.ok).toBe(true); if (!r.ok) return;

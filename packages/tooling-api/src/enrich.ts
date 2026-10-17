@@ -1,5 +1,5 @@
 /**
- * The v1.7 freshness enricher.
+ * The freshness enricher.
  *
  * Given an opened `ToolingApiClient` and the in-memory set of vault
  * nodes whose freshness should be hydrated, the enricher issues one

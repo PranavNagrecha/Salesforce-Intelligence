@@ -16,7 +16,7 @@
  * Passing `shell: true` (or building a single shell string) would let the shell
  * re-interpret the arguments — a `targetOrg` alias read from config could carry
  * shell metacharacters and inject a command. The no-shell, argv-shaped exec is a
- * deliberate hardening (CR-01 / C1). This helper keeps that guarantee: on
+ * deliberate hardening. This helper keeps that guarantee: on
  * Windows it invokes `cmd.exe /d /s /c` with each argument individually escaped
  * per `cmd.exe`'s quoting rules (the same technique `cross-spawn` uses), so the
  * argv semantics are preserved and nothing is shell-interpreted beyond the
@@ -75,7 +75,7 @@ export interface ExecHelperOptions {
 
 /**
  * Per-call timeout for every `sf` shellout that defaults through this helper
- * (RV3 / CR-01 follow-up / H8). Read from `SFI_SF_EXEC_TIMEOUT_MS`, falling back
+ * (hardening follow-up). Read from `SFI_SF_EXEC_TIMEOUT_MS`, falling back
  * to a generous 10-min backstop that clips no legitimate read-only call yet caps
  * a wedged process (e.g. an interactive `sf` auth re-prompt waiting on stdin).
  */

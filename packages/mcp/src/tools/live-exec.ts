@@ -19,7 +19,7 @@
  *
  * `live-plane.ts` re-exports every symbol here, so existing import paths that
  * pull `runSfJson` / `apiPath` / `redactSecrets` FROM `live-plane.ts` keep
- * resolving unchanged (CR-09 leaf extraction).
+ * resolving unchanged (leaf extraction).
  */
 
 import type { McpError } from '@sf-intelligence/contracts';
@@ -44,7 +44,7 @@ import { getActiveLiveGrant } from './live-grant-context.js';
 
 /**
  * The production `sf` exec for this leaf: the shared cross-platform
- * {@link execHelper} from `@sf-intelligence/core` (RV3 / CR-01 follow-up / H8).
+ * {@link execHelper} from `@sf-intelligence/core` (RV3 / follow-up / H8).
  *
  * The handlers here run only SHORT read-only ops — Tooling SELECTs, `sf org
  * display`/auth, `sobject describe` — so `execHelper`'s generous 10-min default
@@ -53,7 +53,7 @@ import { getActiveLiveGrant } from './live-grant-context.js';
  * retrieve` runs ONLY via refresh.ts and never through this helper, so it is
  * unaffected.
  *
- * `execHelper` carries the SIGTERM→SIGKILL escalation (CR-P3) so a wedged `sf`
+ * `execHelper` carries the SIGTERM→SIGKILL escalation so a wedged `sf`
  * that ignores SIGTERM cannot outlive the timeout — the reject carries
  * `killed:true`, which `runSfJson` already catches and reports as a redacted
  * internal error. It ALSO fixes Windows, where `sf` resolves to `sf.cmd` and a

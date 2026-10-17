@@ -7,21 +7,44 @@
     "ApexClass": 5,
     "ApexTrigger": 1,
     "ApprovalProcess": 1,
-    "CustomField": 63,
+    "AuthProvider": 1,
+    "Bot": 1,
+    "BotVersion": 1,
+    "Certificate": 1,
+    "ConnectedApp": 1,
+    "CustomField": 64,
     "CustomObject": 13,
-    "Flow": 2,
+    "CustomSite": 1,
+    "ExperienceBundle": 1,
+    "Flow": 3,
+    "GenAiPlannerBundle": 1,
+    "GlobalValueSet": 1,
     "Group": 2,
     "Layout": 2,
+    "LightningComponentBundle": 1,
+    "MutingPermissionSet": 1,
+    "NamedCredential": 1,
+    "Network": 1,
+    "NetworkAccess": 1,
     "OmniDataTransform": 1,
     "OmniIntegrationProcedure": 1,
-    "OmniScript": 1,
+    "OmniScript": 4,
     "PermissionSet": 2,
+    "PlatformEventChannel": 1,
+    "PlatformEventChannelMember": 1,
     "Profile": 3,
     "Queue": 2,
     "RecordType": 2,
     "Role": 6,
+    "SamlSsoConfig": 1,
     "SharingRule": 2,
+    "Skill": 1,
+    "StandardValueSet": 1,
+    "TimeSheetTemplate": 1,
+    "TransactionSecurityPolicy": 1,
     "ValidationRule": 3,
+    "WaveDashboard": 1,
+    "WaveXmd": 1,
     "WorkflowRule": 1
   },
   "coverage": [
@@ -64,7 +87,7 @@
       "errored": false,
       "neverModeled": false,
       "requested": true,
-      "retrieved": 0,
+      "retrieved": 1,
       "type": "AuthProvider"
     },
     {
@@ -78,8 +101,29 @@
       "errored": false,
       "neverModeled": false,
       "requested": true,
+      "retrieved": 1,
+      "type": "Bot"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 1,
+      "type": "BotVersion"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
       "retrieved": 0,
       "type": "BusinessProcess"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 1,
+      "type": "Certificate"
     },
     {
       "errored": false,
@@ -92,7 +136,7 @@
       "errored": false,
       "neverModeled": false,
       "requested": true,
-      "retrieved": 0,
+      "retrieved": 1,
       "type": "ConnectedApp"
     },
     {
@@ -113,7 +157,7 @@
       "errored": false,
       "neverModeled": false,
       "requested": true,
-      "retrieved": 63,
+      "retrieved": 64,
       "type": "CustomField"
     },
     {
@@ -142,7 +186,21 @@
       "neverModeled": false,
       "requested": true,
       "retrieved": 0,
+      "type": "CustomPermission"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
       "type": "CustomSettingRecord"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 1,
+      "type": "CustomSite"
     },
     {
       "errored": false,
@@ -154,6 +212,7 @@
     {
       "errored": false,
       "neverModeled": false,
+      "pending": true,
       "requested": true,
       "retrieved": 0,
       "type": "Dashboard"
@@ -184,7 +243,21 @@
       "neverModeled": false,
       "requested": true,
       "retrieved": 0,
+      "type": "EntitlementProcess"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
       "type": "EscalationRule"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 1,
+      "type": "ExperienceBundle"
     },
     {
       "errored": false,
@@ -205,6 +278,13 @@
       "neverModeled": false,
       "requested": true,
       "retrieved": 0,
+      "type": "FieldServiceSettings"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
       "type": "FieldSet"
     },
     {
@@ -218,7 +298,7 @@
       "errored": false,
       "neverModeled": false,
       "requested": true,
-      "retrieved": 2,
+      "retrieved": 3,
       "type": "Flow"
     },
     {
@@ -226,6 +306,34 @@
       "neverModeled": false,
       "requested": true,
       "retrieved": 0,
+      "type": "GenAiFunction"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 1,
+      "type": "GenAiPlannerBundle"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "GenAiPlugin"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "GenAiPromptTemplate"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 1,
       "type": "GlobalValueSet"
     },
     {
@@ -267,7 +375,7 @@
       "errored": false,
       "neverModeled": false,
       "requested": true,
-      "retrieved": 0,
+      "retrieved": 1,
       "type": "LightningComponentBundle"
     },
     {
@@ -289,20 +397,34 @@
       "neverModeled": false,
       "requested": true,
       "retrieved": 0,
+      "type": "MilestoneType"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 1,
       "type": "MutingPermissionSet"
     },
     {
       "errored": false,
       "neverModeled": false,
       "requested": true,
-      "retrieved": 0,
+      "retrieved": 1,
       "type": "NamedCredential"
     },
     {
       "errored": false,
       "neverModeled": false,
       "requested": true,
-      "retrieved": 0,
+      "retrieved": 1,
+      "type": "Network"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 1,
       "type": "NetworkAccess"
     },
     {
@@ -323,7 +445,7 @@
       "errored": false,
       "neverModeled": false,
       "requested": true,
-      "retrieved": 1,
+      "retrieved": 4,
       "type": "OmniScript"
     },
     {
@@ -358,6 +480,27 @@
       "errored": false,
       "neverModeled": false,
       "requested": true,
+      "retrieved": 1,
+      "type": "PlatformEventChannel"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 1,
+      "type": "PlatformEventChannelMember"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "PresenceUserConfig"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
       "retrieved": 3,
       "type": "Profile"
     },
@@ -367,6 +510,13 @@
       "requested": true,
       "retrieved": 2,
       "type": "Queue"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "QueueRoutingConfig"
     },
     {
       "errored": false,
@@ -392,6 +542,7 @@
     {
       "errored": false,
       "neverModeled": false,
+      "pending": true,
       "requested": true,
       "retrieved": 0,
       "type": "Report"
@@ -421,8 +572,36 @@
       "errored": false,
       "neverModeled": false,
       "requested": true,
+      "retrieved": 1,
+      "type": "SamlSsoConfig"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
       "retrieved": 0,
       "type": "ScopingRule"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "SecuritySettings"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "ServiceChannel"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "SessionSettings"
     },
     {
       "errored": false,
@@ -436,7 +615,42 @@
       "neverModeled": false,
       "requested": true,
       "retrieved": 0,
+      "type": "SharingSet"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 1,
+      "type": "Skill"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 1,
+      "type": "StandardValueSet"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
       "type": "StaticResource"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 1,
+      "type": "TimeSheetTemplate"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 1,
+      "type": "TransactionSecurityPolicy"
     },
     {
       "errored": false,
@@ -463,6 +677,27 @@
       "errored": false,
       "neverModeled": false,
       "requested": true,
+      "retrieved": 1,
+      "type": "WaveDashboard"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 0,
+      "type": "WaveDataflow"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
+      "retrieved": 1,
+      "type": "WaveXmd"
+    },
+    {
+      "errored": false,
+      "neverModeled": false,
+      "requested": true,
       "retrieved": 0,
       "type": "WebLink"
     },
@@ -472,37 +707,46 @@
       "requested": true,
       "retrieved": 1,
       "type": "WorkflowRule"
+    },
+    {
+      "errored": false,
+      "neverModeled": true,
+      "requested": true,
+      "retrieved": 1,
+      "type": "certs"
     }
   ],
-  "coverageComputedAt": "2026-06-25T15:19:46.650Z",
+  "coverageComputedAt": "2026-10-17T16:10:41.527Z",
   "edges": {
     "callsApex": 2,
     "dispatchesOmniAction": 4,
-    "firesWhen": 5,
+    "firesWhen": 7,
     "grantedBy": 134,
     "inheritsFrom": 4,
     "lookupTo": 16,
-    "parentOf": 73,
-    "readsFrom": 27,
-    "references": 20,
+    "parentOf": 76,
+    "readsFrom": 32,
+    "references": 41,
     "sharedWith": 4,
     "triggersOn": 4,
-    "usedInLayout": 18,
-    "writesTo": 12
+    "usedInLayout": 20,
+    "writesTo": 17
   },
   "phantomSummary": {
     "buckets": {
-      "automation-critical": 6,
+      "automation-critical": 11,
       "blindspot-manifest": 1,
       "standard-field-phantom": 7,
-      "unknown": 5
+      "unknown": 3
     },
-    "computedAt": "2026-06-25T15:19:46.650Z",
-    "distinctPhantoms": 19
+    "computedAt": "2026-10-17T16:10:41.529Z",
+    "distinctPhantoms": 22
   },
-  "refreshedAt": "2026-06-25T15:19:46.650Z",
-  "skippedDirectories": {},
+  "refreshedAt": "2026-10-17T16:10:41.527Z",
+  "skippedDirectories": {
+    "certs": 1
+  },
   "sourceOrg": "demo-org",
-  "sourceTreeHash": "ec3078be5664a9ac51be30123be8bbf4b2747acc85fbd99aa38f2c22e45e8824",
-  "version": "0.1.12"
+  "sourceTreeHash": "937e69c4140fa1b350bf5c90b68d850e6b314bf005122976ccf07520ce92cb33",
+  "version": "0.6.0"
 }

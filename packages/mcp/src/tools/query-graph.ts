@@ -265,7 +265,7 @@ export const queryGraphHandler = async (
     });
   }
 
-  // ADOPT the shared CR-22 pager: it owns the slice, the byte-trim, the
+  // ADOPT the shared pager: it owns the slice, the byte-trim, the
   // forward-progress guarantee, `returnedCount` and the `nextOffset` pointer.
   // The byte-trim it performs replaces this file's own `byteTrimRows`, which was
   // a second spelling of the same arithmetic with no `nextOffset` attached —

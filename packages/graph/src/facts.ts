@@ -1,5 +1,5 @@
 /**
- * Facts store (P13-FACTS-store) — record-DATA-derived observations about the
+ * Facts store — record-DATA-derived observations about the
  * org (approximate record counts, field fill rates, automation-fired tallies)
  * captured by the OPT-IN live plane at refresh time and persisted in their
  * own DuckDB table, deliberately OUTSIDE the metadata graph:

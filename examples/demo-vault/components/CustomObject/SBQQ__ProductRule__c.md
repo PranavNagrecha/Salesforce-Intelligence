@@ -13,10 +13,12 @@ properties:
   enableHistory: false
   enableReports: true
   enableSearch: false
+  externalSharingModel: null
   label: Product Rule
   nameFieldLabel: Product Rule Name
   nameFieldType: Text
   pluralLabel: Product Rules
+  recordPageOverrides: []
   sharingModel: ReadWrite
   visibility: Public
 sourcePath: source/main/default/objects/SBQQ__ProductRule__c/SBQQ__ProductRule__c.object-meta.xml
@@ -39,9 +41,11 @@ CPQ product rule stub (synthetic) — present so the SBQQ__ heuristic CPQ detect
 | enableHistory | `false` |
 | enableReports | `true` |
 | enableSearch | `false` |
+| externalSharingModel | `null` |
 | nameFieldLabel | `Product Rule Name` |
 | nameFieldType | `Text` |
 | pluralLabel | `Product Rules` |
+| recordPageOverrides | `` |
 | sharingModel | `ReadWrite` |
 | visibility | `Public` |
 

@@ -272,7 +272,7 @@ const derivePathParts = (
  * Extract a Node and one `parentOf` edge from a single Salesforce
  * Custom Setting record XML file.
  *
- * **v1.6 boundary**: Custom Setting records are NOT a first-class
+ * **Boundary**: Custom Setting records are NOT a first-class
  * Salesforce DX metadata file shape — they live as data in the org and
  * require `sf data tree:export` or `sf data query` to materialize. This
  * extractor handles the rare case where records ARE present in the
@@ -290,7 +290,7 @@ const derivePathParts = (
  * `customSettingType` is left `null` — the variant ('List' / 'Hierarchy')
  * is read from the parent CustomObject's `properties.customSettingsType`
  * by the skill layer at query time; per-extractor join would require
- * cross-file state that v1.6 does not introduce. `setupOwnerId` is
+ * cross-file state that it does not introduce. `setupOwnerId` is
  * passed through verbatim when present (relevant only for Hierarchy
  * records) and `null` otherwise.
  *

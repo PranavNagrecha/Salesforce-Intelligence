@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.field_access_audit` MCP tool.
  *
- * The v2.0d sub-milestone companion to `sfi.pii_inventory` — answers
+ * The sub-milestone companion to `sfi.pii_inventory` — answers
  * the SECOND half of buyer priority #5: "...and who can see/export
  * them?". Given a CustomField id, the tool enumerates every Profile
  * and PermissionSet that grants read or edit access to it, plus the
@@ -40,7 +40,7 @@
  *   only on `Profile:Standard User` may still read the field via an
  *   ApexClass their profile grants execute permission to.
  *
- * Honesty axis (per the v2.0d.0 spec):
+ * Honesty axis:
  *
  *   - Every axis below is also shipped IN THE PAYLOAD as `boundaryNote`, and
  *     that note NAMES the four sentinel keys (`summary.profilesWithUnknown`,
@@ -52,7 +52,7 @@
  *
  *   - This is the PERMISSION-GRANT-LEVEL audit. Sharing rule cross-
  *     walks (criteria-based sharing, manual sharing, account teams)
- *     are deferred to a future v2.0d.1 extension. The tool does NOT
+ *     are deferred to a future extension. The tool does NOT
  *     compute "could user X actually see this field on record Y";
  *     that is `sfi.why_cant_user_see_record`'s job.
  *
@@ -293,7 +293,7 @@ export interface UpdateGrantor {
 }
 
 /**
- * "Who can UPDATE this field" (P11-ACCESS-field-update). Updating a field value
+ * "Who can UPDATE this field". Updating a field value
  * needs THREE things: FLS edit on the field, EDIT on the parent object, and the
  * field must be type-writable. The first two are declared metadata (intersected
  * here); the field-type guard rules out formula / auto-number / rollup-summary
@@ -654,9 +654,9 @@ const probeFieldIdCase = async (
 
 /**
  * The `sfi.field_access_audit` MCP tool. Returns the permission-grant
- * cross-walk for a single CustomField — the second half of the v2.0d
+ * cross-walk for a single CustomField — the second half of the
  * priority-#5 answer. See the module JSDoc for the honesty axis
- * (sharing rules deferred to v2.0d.1).
+ * (sharing rules deferred).
  *
  * @example
  *   const r = await fieldAccessAuditHandler(ctx, {
@@ -854,7 +854,7 @@ export const fieldAccessAuditHandler = async (
     });
   }
 
-  // P11-ACCESS-field-update: "who can UPDATE this field" = FLS-edit ∩ object-edit
+  // "who can UPDATE this field" = FLS-edit ∩ object-edit
   // on the parent object, gated by whether the field is type-writable at all.
   const { fieldUpdatable, fieldUpdatableNote } = assessUpdatability(effectiveField, notModeled);
   let canUpdate: UpdateGrantor[] = [];

@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.changed_since` MCP tool.
  *
- * The v1.7 freshness headline answers the buyer-priority gap "when was
+ * The freshness headline answers the buyer-priority gap "when was
  * X modified?". Given a `since` date (ISO 8601), enumerate every vault
  * node whose `properties.lastModifiedDate` is at or after that
  * timestamp. Optional `types` filter narrows the scan to a subset of
@@ -24,12 +24,12 @@
  * {@link ChangedSinceAbsenceKind}) now types each empty site — `changed` and a
  * zero `unenrichedCount` — so the two readings cannot be confused.
  *
- * v1.7 covers the six ComponentTypes the R2 dispatch table enriches
+ * This covers the six ComponentTypes the dispatch table enriches
  * (ApexClass, ApexTrigger, Flow, Layout, CustomField, ValidationRule);
- * other types may receive freshness enrichment in v1.7+ R3 (ProfileSet,
+ * other types may receive freshness enrichment in later R3 (ProfileSet,
  * EmailTemplate, etc.). The handler does NOT enforce that constraint —
  * any node with a non-null `lastModifiedDate` participates, regardless
- * of whether it was the enricher's output or a future v1.7 pass.
+ * of whether it was the enricher's output or a future pass.
  *
  * Implementation notes:
  *   - The scan iterates the requested ComponentTypes — defaulting to the
@@ -41,7 +41,7 @@
  *     hits it is disclosed by name in `boundaries` and classified
  *     `scan-capped` in `absence`.
  *   - The `since` comparison is a string compare (ISO 8601 lex-sorts
- *     correctly for the same offset). v1.7 normalises `since` to UTC
+ *     correctly for the same offset). This normalises `since` to UTC
  *     so a caller passing a local-time date does not silently flap the
  *     boundary.
  *   - Result sort: `lastModifiedDate DESC` then `id ASC`.
@@ -148,7 +148,7 @@ export const changedSinceInputSchema = z.object({
   ),
   types: z.array(z.enum(COMPONENT_TYPES)).optional(),
   limit: z.number().int().min(1).max(CHANGED_SINCE_MAX_LIMIT).optional(),
-  // CR-22: page cursor for walking the full changed list when truncated.
+  // Page cursor for walking the full changed list when truncated.
   offset: z.number().int().min(0).optional(),
   cursor: z.string().min(1).optional(),
 });
@@ -255,13 +255,13 @@ export interface ChangedSinceOutput {
   /**
    * Honesty disclosure, present ONLY when a pathological type's full scan hit
    * FULL_SCAN_MAX_NODES (so the enumeration may be incomplete). Absent on a
-   * normal full scan, keeping that response byte-identical to pre-CR-22.
+   * normal full scan, keeping that response byte-identical to the pre-paging shape.
    */
   readonly boundaries?: readonly string[];
   /**
    * Page size applied to this response. Present ONLY on a PAGED response
    * (`truncated` or a resumed `offset > 0`); omitted on a whole-fits no-cursor
-   * call so that response stays byte-identical to the pre-CR-22 shape.
+   * call so that response stays byte-identical to the pre-paging shape.
    */
   readonly limit?: number;
   /** Zero-based offset of the first returned change. Present only when paged (see `limit`). */
@@ -269,9 +269,9 @@ export interface ChangedSinceOutput {
   /** Offset to pass on the next call to fetch the following page. Present only when `truncated`. */
   readonly nextOffset?: number;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated.
+   * Opaque continuation token, present ONLY when this page is truncated.
    * Echo it back as `cursor` to resume. Absent on a complete page so an
-   * in-budget response is byte-identical to pre-CR-22.
+   * in-budget response is byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
@@ -291,7 +291,7 @@ const normalizeSince = (raw: string): string => {
 /**
  * Comparator: lastModifiedDate DESC, then id ASC.
  *
- * This is already a STRICT TOTAL order (CR-22): `id` is the unique node
+ * This is already a STRICT TOTAL order: `id` is the unique node
  * ComponentId, so no two distinct ChangedComponents compare equal — the id-ASC
  * secondary key resolves every date tie uniquely. No further tiebreak is needed
  * for a dup-free / skip-free offset resume.
@@ -305,8 +305,8 @@ const compareByDateDescThenIdAsc = (a: ChangedComponent, b: ChangedComponent): n
 
 /**
  * Extract the `lastModifiedBy.id` / `.name` pair from a node's properties.
- * The v1.7 enricher writes `{ id, name }` under `properties.lastModifiedBy`;
- * the v0.1 baseline writes the legacy string-only `lastModifiedBy` field
+ * The enricher writes `{ id, name }` under `properties.lastModifiedBy`;
+ * the baseline writes the legacy string-only `lastModifiedBy` field
  * on the node. The tool reads BOTH so an un-enriched node with a legacy
  * string value still surfaces something useful (`{ id: legacy, name: '' }`).
  */
@@ -331,7 +331,7 @@ const extractLastModifiedBy = (
 
 /**
  * Extract the freshness `lastModifiedDate` for a node. Prefers
- * `properties.lastModifiedDate` (the v1.7 enricher's overlay) and
+ * `properties.lastModifiedDate` (the enricher's overlay) and
  * falls back to the legacy top-level `lastModifiedDate` field. Returns
  * `null` when neither source carries a value.
  */
@@ -592,7 +592,7 @@ export const changedSinceHandler = async (
   const matched: ChangedComponent[] = [];
   let unenrichedCount = 0;
 
-  // CR-22 B4: scan EVERY node of each requested type by paging the SQL OFFSET
+  // Scan EVERY node of each requested type by paging the SQL OFFSET
   // forward (window-by-window) so a type with >500 nodes (CustomField trivially)
   // no longer silently drops nodes 501+ from BOTH `changed` and `unenrichedCount`
   // — the admitted scan-tail bug. The scan completes inside this call, so the
@@ -627,7 +627,7 @@ export const changedSinceHandler = async (
 
   const sorted = [...matched].sort(compareByDateDescThenIdAsc);
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // Resolve the resume offset (echoed cursor wins over explicit offset).
   // The fingerprint covers the NARROWING args — the normalised `since` boundary
   // and `types` — so a token minted for one query can't be replayed against
   // another. (`since` is normalised so the same instant always fingerprints

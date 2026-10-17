@@ -1,5 +1,5 @@
 /**
- * `sfi stale-sweep` (P13-WATCH-sweep) — ONE drift tick against the live org,
+ * `sfi stale-sweep` — ONE drift tick against the live org,
  * persisted as `meta/staleness.json` so consumers (the P13 watch daemon and
  * the trust `orgDrift` badges) can answer "has the org moved since the vault
  * was built?" without re-querying.
@@ -67,7 +67,7 @@ const runStaleSweepBody = async (options: {
   readonly exec?: ExecCommand;
   readonly now?: string;
 }): Promise<{ readonly ok: true; readonly snapshot: StalenessSnapshot } | { readonly ok: false; readonly message: string }> => {
-  // CR-09 follow-up: each sweep is a DISCRETE drift check. Start it in a fresh
+  // Each sweep is a DISCRETE drift check. Start it in a fresh
   // live-session scope so (a) one 15-type sweep can never trip the per-session
   // live-query budget (it is a tiny fraction of the 50-unit cap), and (b) the
   // watch daemon — which runs many ticks IN ONE PROCESS — does not accumulate the

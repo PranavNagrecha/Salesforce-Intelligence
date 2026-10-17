@@ -70,12 +70,12 @@ const flowFaultScanCeiling = (): number => {
   return Number.isFinite(v) && v > 0 ? Math.floor(v) : FULL_SCAN_MAX_NODES;
 };
 
-/** Tool name the CR-22 continuation cursor is bound to. */
+/** Tool name the continuation cursor is bound to. */
 const FLOW_FAULT_AUDIT_TOOL = 'sfi.flow_fault_audit';
 
 /**
  * Per-response byte budget for the `flows` ARRAY alone — the inner bound the
- * CR-22 pager applies while slicing rows. It is NOT the binding constraint:
+ * pager applies while slicing rows. It is NOT the binding constraint:
  * see {@link flowFaultResponseBudgetBytes} for the WHOLE-response budget that
  * actually decides where the page ends.
  */
@@ -137,7 +137,7 @@ const utf8Bytes = (value: unknown): number =>
 
 export const flowFaultAuditInputSchema = z.object({
   limit: z.number().int().min(1).max(500).optional(),
-  // CR-22 resume knob. `limit` alone was a top-N truncator: the dropped tail
+  // Resume knob. `limit` alone was a top-N truncator: the dropped tail
   // was unreachable by ANY argument, and the envelope reducer trimmed rows the
   // response had already claimed were whole. `offset` / `cursor` make the tail
   // reachable and move the cut decision into the handler.
@@ -288,7 +288,7 @@ export interface FlowFaultAuditOutput {
    */
   readonly nextOffset?: number;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated.
+   * Opaque continuation token, present ONLY when this page is truncated.
    * Echo it back as `cursor` to resume.
    */
   readonly nextCursor?: string;
@@ -393,7 +393,7 @@ export const flowFaultAuditHandler = async (
   //   2. `scanTruncated` came from "the last allowed page came back full",
   //      which is TRUE for an org holding exactly the ceiling even though
   //      nothing is behind it. The shared walk settles that boundary with one
-  //      bounded probe (CR-P3) and reports `scanIncomplete` only when STRICTLY
+  //      bounded probe and reports `scanIncomplete` only when STRICTLY
   //      more nodes remain.
   const scanCeiling = flowFaultScanCeiling();
   const scan = await scanAllNodesOfTypes(ctx.graph, ['Flow'], scanCeiling);
@@ -503,7 +503,7 @@ export const flowFaultAuditHandler = async (
     return a.id < b.id ? -1 : a.id > b.id ? 1 : 0;
   });
 
-  // CR-22 paging. The object scope is the only narrowing arg, so a cursor
+  // Paging. The object scope is the only narrowing arg, so a cursor
   // minted org-wide can never be replayed against a scoped call (or vice
   // versa). `limit`/`offset`/`cursor` are excluded from the fingerprint by
   // `argsFingerprint` — asking for a different PAGE of the same query is

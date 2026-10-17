@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.call_graph` MCP tool.
  *
- * The v2.7 R2 call-graph walker. Answers the developer's "what does
+ * The call-graph walker. Answers the developer's "what does
  * this class call (or who calls it)?" question by walking `callsApex`
  * edges from a root ApexClass / ApexTrigger node out to `maxDepth`
  * hops in the requested direction.
@@ -17,10 +17,10 @@
  *     `maxDepth` independently, and the merged result deduplicates
  *     nodes/edges that one direction's walk reproduced via the other.
  *
- * **Granularity (v2.7 honesty boundary)**: this is a CLASS-level walk.
+ * **Granularity (honesty boundary)**: this is a CLASS-level walk.
  * If `ApexClass:A.foo()` calls `ApexClass:B.bar()` and `A.baz()` calls
  * `B.qux()`, the graph sees one `A -> B` edge. The TARGET methods are
- * partitioned via `methods` (B.bar + B.qux). CR-CAP-06: AST-extracted edges
+ * partitioned via `methods` (B.bar + B.qux). AST-extracted edges
  * ALSO carry `callerMethods` — the SOURCE-class method(s) holding the
  * call-site (here `A.foo` + `A.baz`), as a class-level UNION (it is NOT
  * narrowed to a specific target method even when the `method` filter is
@@ -103,9 +103,9 @@ const APEX_TRIGGER_PREFIX = 'ApexTrigger:';
 
 /**
  * Verbatim honesty-axis disclosure surfaced in every response. Frozen so the
- * test suite can assert the exact string. P4-C5: each `callsApex` edge carries
+ * test suite can assert the exact string. Each `callsApex` edge carries
  * `methods` — the target-class methods the source invokes — and the optional
- * `method` filter uses them. CR-CAP-06: AST-extracted edges ALSO carry
+ * `method` filter uses them. AST-extracted edges ALSO carry
  * `callerMethods` — the SOURCE-class method(s) that contain the call-site, as a
  * class-level UNION (the source methods that call ANY method of the target;
  * NOT partitioned to the specific target method even when `method` is set).
@@ -189,14 +189,14 @@ export interface CallGraphEdge {
   readonly source: string;
   readonly confidence: ConfidenceLevel;
   /**
-   * P4-C5: the methods of the TARGET class (`toId`) the source (`fromId`)
+   * The methods of the TARGET class (`toId`) the source (`fromId`)
    * invokes, sorted. Empty when the edge carries no method evidence (a Flow/
-   * declared caller, or a pre-P4-C5 vault with neither `methods` nor
+   * declared caller, or a legacy vault with neither `methods` nor
    * `methodName`). This is target-method granularity, not caller-method.
    */
   readonly methods: readonly string[];
   /**
-   * CR-CAP-06: the method(s) of the SOURCE class (`fromId`) that contain the
+   * The method(s) of the SOURCE class (`fromId`) that contain the
    * call-site(s) to `toId`, as a class-level UNION (the source methods that
    * call ANY method of the target — NOT partitioned to a specific target
    * method, even when the `method` filter is applied). AST-path edges
@@ -253,9 +253,9 @@ const edgeKey = (e: CallGraphEdge): string =>
   `${e.fromId}\0${e.toId}\0${e.source}`;
 
 /**
- * Read the target methods a `callsApex` edge represents (P4-C5). Prefers the
+ * Read the target methods a `callsApex` edge represents. Prefers the
  * `methods` array; falls back to the scalar `methodName` for vaults refreshed
- * before P4-C5. Returns `[]` when the edge carries no method evidence (a
+ * Returns `[]` when the edge carries no method evidence (a
  * Flow/declared caller, or an old vault with neither). Always sorted + deduped.
  */
 const edgeMethods = (edge: {
@@ -271,7 +271,7 @@ const edgeMethods = (edge: {
 };
 
 /**
- * CR-CAP-06: read the SOURCE-class caller method(s) labelled on an AST edge
+ * Read the SOURCE-class caller method(s) labelled on an AST edge
  * (`properties.callerMethods`, a class-level union). Returns `undefined` when
  * the key is absent or empty so the optional field is OMITTED — preserving the
  * "absent === unknown caller method" honesty distinction (never coerce to `[]`,
@@ -363,7 +363,7 @@ const walkOneDirection = async (
   rootId: ComponentId,
   direction: 'in' | 'out',
   maxDepth: number,
-  /** P4-C5: when set, filter the root's DIRECT edges to those calling it. */
+  /** When set, filter the root's DIRECT edges to those calling it. */
   method: string | undefined,
   /** The edge types to traverse. Defaults to `['callsApex']` at the caller. */
   edgeTypes: readonly EdgeType[],
@@ -413,7 +413,7 @@ const walkOneDirection = async (
         // real callee to surface in a call graph.
         if (isHiddenUnresolved(edge)) continue;
         const methods = edgeMethods(edge);
-        // P4-C5 method filter: narrow ONLY the root's direct edges to those
+        // Method filter: narrow ONLY the root's direct edges to those
         // whose target methods include the queried method (e.g. "who calls
         // Root.deleteRecord"). Deeper hops are unfiltered — their methods
         // belong to a different target class, so the root method is irrelevant.
@@ -439,7 +439,7 @@ const walkOneDirection = async (
           source: edge.source,
           confidence: edge.confidence,
           methods,
-          // CR-CAP-06: label the edge with the source-class caller method(s)
+          // Label the edge with the source-class caller method(s)
           // when the AST extracted them; OMIT when absent (unknown). Intrinsic
           // to the (from, to, source) edge, so correct for both directions.
           ...(callerMethods !== undefined ? { callerMethods } : {}),
@@ -598,7 +598,7 @@ export const callGraphHandler = async (
   }
 
   const sortedNodes = [...nodesRes.value.nodes].sort(compareNodes);
-  // Self-contained-slice invariant (CR-13, mirrors getSubgraph's returnedIds
+  // Self-contained-slice invariant (mirrors getSubgraph's returnedIds
   // filter in queries.ts): every emitted edge must have BOTH endpoints present
   // in `nodes`. `resolveNodes` drops ids with no real node row, so an edge
   // whose endpoint didn't resolve — a heuristic `targetMissing` phantom (the

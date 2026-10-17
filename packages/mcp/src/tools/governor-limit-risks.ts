@@ -1,10 +1,10 @@
 /**
  * Handler for the `sfi.governor_limit_risks` MCP tool.
  *
- * The v2.1 Apex-specific narrowing for governor-limit-relevant
- * patterns — the "performance / scale" subset of the v2.1 quality
+ * The Apex-specific narrowing for governor-limit-relevant
+ * patterns — the "performance / scale" subset of the quality
  * recognizer catalog. Composes over the `properties.qualityIssues[]`
- * arrays the v2.1 `code-quality-patterns` recognizer family populates
+ * arrays the `code-quality-patterns` recognizer family populates
  * for every ApexClass / ApexTrigger node at extraction time; filters
  * those findings down to the three rules in the governor-limit
  * subset, groups them by class, and (when the parent class is the
@@ -30,7 +30,7 @@
  * sorted-ASC list; classes with no trigger caller surface
  * `triggerContext: []`.
  *
- * **Honesty axis** (mirroring v2.1 R3 §4 disclosures):
+ * **Honesty axis**:
  *   - Pattern recognition is heuristic — every finding carries
  *     `confidence: 'heuristic'`. Static SOQL/DML inside a static
  *     method called from a loop is invisible to the scanner;
@@ -58,7 +58,7 @@
  *   - `qualityScanCoverage` rides on every response too, so
  *     `classes: []` reads as "N nodes were read and scanned, none
  *     matched" rather than as an unfalsifiable clean bill.
- *   - CR-22-B6: `entryPaths` is bounded (depth `ENTRY_PATH_MAX_DEPTH`=6,
+ *   - `entryPaths` is bounded (depth `ENTRY_PATH_MAX_DEPTH`=6,
  *     `ENTRY_PATH_MAX_PATHS`=12 paths) — previously JSDoc-only. A class
  *     entry now carries `entryPathsTruncated: true` (present only when
  *     true) when its real fan-in of callers exceeds what the walk
@@ -116,7 +116,7 @@ const GOVERNOR_LIMIT_MAX_LIMIT = 500;
 const GOVERNOR_LIMIT_DEFAULT_LIMIT = 100;
 
 /**
- * The three rule ids in the v2.1 governor-limit subset. A hard
+ * The three rule ids in the governor-limit subset. A hard
  * mapping inside the tool; the broader catalog access is via
  * `sfi.code_quality_audit`.
  */
@@ -132,7 +132,7 @@ const SCANNED_TYPES: readonly ComponentType[] = [
   'ApexTrigger',
 ];
 
-/** The five-tier severity scale used by the v2.1 catalog. */
+/** The five-tier severity scale used by the catalog. */
 type Severity = 'critical' | 'high' | 'medium' | 'low' | 'info';
 
 const SEVERITY_SET: ReadonlySet<string> = new Set([
@@ -170,7 +170,7 @@ export const governorLimitRisksInputSchema = z.object({
     .min(1)
     .max(GOVERNOR_LIMIT_MAX_LIMIT)
     .optional(),
-  // CR-22: class-level page cursor for walking the full audit when truncated.
+  // Class-level page cursor for walking the full audit when truncated.
   offset: z.number().int().min(0).optional(),
   cursor: z.string().min(1).optional(),
 });
@@ -209,7 +209,7 @@ export interface GovernorLimitRisksClassEntry {
    */
   readonly entryPaths: readonly (readonly ComponentId[])[];
   /**
-   * CR-22-B6: TRUE when the bounded walk (depth `ENTRY_PATH_MAX_DEPTH`=6,
+   * TRUE when the bounded walk (depth `ENTRY_PATH_MAX_DEPTH`=6,
    * `ENTRY_PATH_MAX_PATHS`=12) found MORE entry-point paths than it explored —
    * the cap was previously JSDoc-only (see `entryPaths` above), so a class
    * with a wide fan-in of callers silently read as if `entryPaths` were the
@@ -276,7 +276,7 @@ export interface GovernorLimitRisksOutput {
   /**
    * Page size applied. Present only on a PAGED response (`truncated` or a
    * resumed `offset > 0`); omitted on a whole-fits no-cursor call so that
-   * response stays byte-identical to the pre-CR-22 shape.
+   * response stays byte-identical to the pre-paging shape.
    */
   readonly limit?: number;
   /** Zero-based offset of the first returned class. Present only when paged. */
@@ -284,7 +284,7 @@ export interface GovernorLimitRisksOutput {
   /** Offset to pass on the next call to fetch the following page. Present only when `truncated`. */
   readonly nextOffset?: number;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated.
+   * Opaque continuation token, present ONLY when this page is truncated.
    * Echo it back as `cursor` to resume. Absent on a complete page.
    */
   readonly nextCursor?: string;
@@ -388,7 +388,7 @@ const ENTRY_PATH_MAX_PATHS = 12;
 interface EntryPathsResult {
   readonly paths: readonly (readonly ComponentId[])[];
   /**
-   * CR-22-B6: true when the walk hit `ENTRY_PATH_MAX_PATHS` (or `errored`)
+   * True when the walk hit `ENTRY_PATH_MAX_PATHS` (or `errored`)
    * BEFORE genuinely exhausting every caller — i.e. more real entry-point
    * paths exist than were explored. The walk's own early-exit guards cap
    * `paths` DURING collection, so a plain post-hoc `out.length > cap` check
@@ -414,7 +414,7 @@ const collectEntryPaths = async (
 ): Promise<Result<EntryPathsResult, string>> => {
   const paths: ComponentId[][] = [];
   let errored: string | null = null;
-  // CR-22-B6: set at the two spots where the ENTRY_PATH_MAX_PATHS cap
+  // Set at the two spots where the ENTRY_PATH_MAX_PATHS cap
   // actually skips unexplored work — the only reliable "more paths exist"
   // signal (see EntryPathsResult).
   let hitCap = false;
@@ -482,7 +482,7 @@ const collectEntryPaths = async (
 };
 
 /**
- * The `sfi.governor_limit_risks` MCP tool. Composes over the v2.1
+ * The `sfi.governor_limit_risks` MCP tool. Composes over the
  * `qualityIssues` property mirror for ApexClass / ApexTrigger nodes
  * and narrows to the three governor-limit-relevant rules. See the
  * module JSDoc for the rule subset, the trigger-context surface, and
@@ -514,7 +514,7 @@ export const governorLimitRisksHandler = async (
   let suppressedRiskCount = 0;
 
   // Class-scope: fetch just the one node; org-wide: scan EVERY ApexClass /
-  // ApexTrigger (CR-22 B3 — page the SQL OFFSET forward so risky classes on node
+  // ApexTrigger (page the SQL OFFSET forward so risky classes on node
   // 501+ are reachable). The output `classes` is the COMPLETE matched list, paged
   // on the output axis below.
   let nodesToProcess: readonly Node[];
@@ -615,7 +615,7 @@ export const governorLimitRisksHandler = async (
   // extra tiebreak is needed for a dup/skip-proof resume.
   const classes = [...perClass.values()].sort(compareClassById);
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // Resolve the resume offset (echoed cursor wins over explicit offset).
   // Bind the fingerprint to the class scope so a cursor minted for a scoped call
   // cannot resume against the (differently-shaped) org-wide list, and vice versa.
   const fingerprint = argsFingerprint(
@@ -701,7 +701,7 @@ export const governorLimitRisksHandler = async (
       scanTruncationNote(incompleteTypes, clampedNodeScanLimit()),
     );
   }
-  // CR-22-B6: the ENTRY_PATH_MAX_PATHS(=12)/ENTRY_PATH_MAX_DEPTH(=6) walk cap
+  // The ENTRY_PATH_MAX_PATHS(=12)/ENTRY_PATH_MAX_DEPTH(=6) walk cap
   // was previously JSDoc-only — a class with a wide fan-in of callers showed
   // exactly 12 entry paths with no signal that more existed. Reflects the
   // FULL (pre-page) `classes` list so it fires regardless of which page a
@@ -713,7 +713,7 @@ export const governorLimitRisksHandler = async (
   }
 
   // Emit paging fields ONLY on a paged response (truncated OR resumed offset>0),
-  // so a whole-fits no-cursor call stays byte-identical to pre-CR-22.
+  // so a whole-fits no-cursor call stays byte-identical to the pre-paging shape.
   const isPaged = truncated || offset > 0;
 
   return ok({

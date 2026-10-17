@@ -13,7 +13,7 @@ import {
 } from '../src/annotations.js';
 
 /**
- * P13-ANNOT-store — replay semantics of the annotations event log:
+ * replay semantics of the annotations event log:
  * last-write-wins per (componentId, key), unset removes, AI→human
  * confirmation flow, corrupt/invalid-line tolerance.
  */

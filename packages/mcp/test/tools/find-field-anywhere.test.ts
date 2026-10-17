@@ -836,7 +836,7 @@ describe('findFieldAnywhereHandler — references minted against an unresolvable
   });
 });
 
-describe('findFieldAnywhereHandler — CR-22 section cursor', () => {
+describe('findFieldAnywhereHandler — section cursor', () => {
   it('whole-fits omits cursor block (byte-identical golden)', async () => {
     const r = await findFieldAnywhereHandler(ctx, { targetId: FIELD_ID });
     expect(r.ok).toBe(true);

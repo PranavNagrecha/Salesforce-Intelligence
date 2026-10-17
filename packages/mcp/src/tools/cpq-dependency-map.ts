@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.cpq_dependency_map` MCP tool.
  *
- * The third of three v2.6a CPQ-specialist tools. Walks the values
+ * The third of three CPQ-specialist tools. Walks the values
  * mirror of every requested CPQ-typed node and surfaces every string-
  * encoded `SBQQ__`-prefixed field reference as a heuristic dependency
  * edge. When `cpqComponentId` is provided, the walker scans only that
@@ -10,7 +10,7 @@
  *
  * Honesty axis: this is a HEURISTIC dependency surface. The recognizer
  * scans string values for the `SBQQ__` prefix literally; it does NOT
- * resolve the referenced node, does NOT walk formula text via the v0.2
+ * resolve the referenced node, does NOT walk formula text via the
  * formula tokenizer, and does NOT account for references encoded in
  * non-string fields. False positives and false negatives are both
  * expected — the boundary disclosure surfaces verbatim.
@@ -48,7 +48,7 @@ const CPQ_DEPENDENCY_MAP_TOOL = 'sfi.cpq_dependency_map';
 /**
  * The five CPQ ComponentTypes the tool scans. Mirrors the recognition
  * set in `cpq.ts`. The dependency walker treats all five uniformly —
- * any v2.6a-emitted CPQ node carries a values mirror and is therefore
+ * any emitted CPQ node carries a values mirror and is therefore
  * a candidate for the SBQQ__-prefix walk.
  */
 const CPQ_NODE_TYPES: readonly ComponentType[] = [
@@ -96,7 +96,7 @@ const DEPENDENCY_MAP_DISCLOSURE =
 export const cpqDependencyMapInputSchema = z.object({
   cpqComponentId: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
-  // CR-22: page cursor for walking the full dependency list when truncated
+  // Page cursor for walking the full dependency list when truncated
   // (full-scan mode only; the single-component path is never paginated).
   offset: z.number().int().min(0).optional(),
   cursor: z.string().min(1).optional(),
@@ -138,7 +138,7 @@ export interface CpqDependencyMapOutput {
    * Page size applied to the `dependencies` list (full-scan mode only). Present
    * ONLY on a PAGED response (`truncated` or a resumed `offset > 0`); omitted on
    * a whole-fits no-cursor call so that response stays byte-identical to
-   * pre-CR-22.
+   * the pre-paging shape.
    */
   readonly limit?: number;
   /** Zero-based offset of the first returned dependency. Present only when paged (see `limit`). */
@@ -146,9 +146,9 @@ export interface CpqDependencyMapOutput {
   /** Offset to pass on the next call to fetch the following page. Present only when truncated. */
   readonly nextOffset?: number;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated.
+   * Opaque continuation token, present ONLY when this page is truncated.
    * Echo it back as `cursor` to resume. Absent on a complete page so an
-   * in-budget response is byte-identical to pre-CR-22.
+   * in-budget response is byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
@@ -165,7 +165,7 @@ export interface CpqDependencyMapOutput {
 const SBQQ_TOKEN_PATTERN = /SBQQ__[A-Za-z0-9]+(?:__c|__mdt|__r)?/g;
 
 /**
- * Decide whether `componentId` carries one of the five v2.6a CPQ
+ * Decide whether `componentId` carries one of the five CPQ
  * prefixes. Returns true on match, false otherwise.
  */
 const isCpqComponentId = (componentId: string): boolean =>
@@ -243,7 +243,7 @@ const dependencyEntriesForNode = (
  * (fromComponentId, referencedFieldToken) unique today, so the order is
  * effectively unique; occurrenceCount is a defensive final tiebreak so the
  * order stays a STRICT TOTAL order even if a future change emits two rows with
- * the same (fromComponentId, token) — a CR-22 offset resume then cannot dup or
+ * the same (fromComponentId, token) — an offset resume then cannot dup or
  * skip.
  */
 /**
@@ -328,7 +328,7 @@ export const cpqDependencyMapHandler = async (
     });
   }
 
-  // --- Full-scan path (CR-22 B4, Option A). ---
+  // --- Full-scan path (Option A). ---
   // Previously each CPQ type was scanned with a single capped
   // `listNodesByType({ limit })` and `truncated` flipped on a per-type SCAN cap
   // (nodes 51+/201+ silently dropped). Scan EVERY CPQ node window-by-window so
@@ -352,7 +352,7 @@ export const cpqDependencyMapHandler = async (
   }
   const sortedDependencies = dependencies.sort(compareDependencies);
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // Resolve the resume offset (echoed cursor wins over explicit offset).
   // The fingerprint covers `cpqComponentId` so a full-scan token can't replay
   // against a single-component call and vice versa (full-scan mints it absent;
   // single-component never mints one).

@@ -1,11 +1,11 @@
 /**
  * Handler for the `sfi.outbound_message_catalog` MCP tool.
  *
- * The v2.8 async-deep-tier surface for "what SOAP-based outbound
+ * The async-deep-tier surface for "what SOAP-based outbound
  * messages does my org send, where do they go, and which workflow
  * rule invokes them?". Walks the `OutboundMessage` node family the
- * v2.8 workflow-rule extractor promotes from dangling-by-design
- * references into real nodes (mirroring the v1.5 R1 promotion of
+ * workflow-rule extractor promotes from dangling-by-design
+ * references into real nodes (mirroring the promotion of
  * NamedCredential / RemoteSiteSetting / ExternalDataSource into the
  * integration-topology tier).
  *
@@ -28,12 +28,12 @@
  *     shape), and the parent CustomObject id.
  *   - The `invokedByWorkflowRules` array is computed by walking
  *     incoming `references` edges from WorkflowRule nodes (the
- *     v1.3 reference shape preserved by the v2.8 promotion). Each
+ *     reference shape preserved by the promotion). Each
  *     entry carries the rule's id + apiName so the renderer can
  *     show "Account.Notify_Sales_On_New_Tier1 invokes
  *     SendOrderToWarehouse" without an extra graph round-trip.
  *   - Honesty axis (verbatim in `disclosure`): the endpoint URL is
- *     captured verbatim — v2.8 does NOT probe the URL, does NOT
+ *     captured verbatim — this does NOT probe the URL, does NOT
  *     validate the destination exists, and does NOT confirm the
  *     message is actually invoked at runtime. The architect verifies
  *     destination reachability separately.
@@ -120,8 +120,8 @@ export type OutboundMessageCatalogInput = z.infer<
 
 /**
  * One WorkflowRule that invokes the outbound message. Computed from
- * the incoming `references` edge produced by the v1.3 workflow-rule
- * extractor (preserved verbatim through the v2.8 promotion).
+ * the incoming `references` edge produced by the workflow-rule
+ * extractor (preserved verbatim through the promotion).
  */
 export interface OutboundMessageInvoker {
   readonly workflowRuleId: ComponentId;
@@ -249,7 +249,7 @@ export interface OutboundMessageCatalogOutput {
 /**
  * Verbatim honesty disclosure surfaced ALWAYS in the response. The
  * endpoint URL is captured verbatim from the
- * `<outboundMessages><endpointUrl>` element; v2.8 does NOT probe
+ * `<outboundMessages><endpointUrl>` element; this does NOT probe
  * the URL, does NOT validate the destination exists, and does NOT
  * confirm the message is actually invoked at runtime.
  */
@@ -385,7 +385,7 @@ const readOptionalString = (
 
 /**
  * Read a boolean property defensively. Returns the verbatim value
- * when it's a boolean, or false otherwise. v2.8's producer (the
+ * when it's a boolean, or false otherwise. The producer (the
  * extended workflow-rule extractor) writes both flags explicitly
  * so the empty-property default is also `false`.
  */
@@ -395,7 +395,7 @@ const readBoolean = (
 ): boolean => properties[key] === true;
 
 /**
- * Read the `fields` property as a string array, defensively. v2.8's
+ * Read the `fields` property as a string array, defensively. The
  * producer writes the SOAP payload's per-field list; other shapes
  * pass through as the empty array.
  */
@@ -408,7 +408,7 @@ const readFields = (
 };
 
 /**
- * Read the `name` property as a string, defensively. The v2.8
+ * Read the `name` property as a string, defensively. The
  * producer writes the verbatim `<fullName>` value; absent or
  * non-string values fall back to the entry's apiName tail.
  */
@@ -427,7 +427,7 @@ const readName = (
  * apiName, which is shaped as `{ObjectApiName}.{Name}`. Used both
  * for `objectFilter` matching and for the `entriesByObject` group-by
  * key. Returns the empty string when the apiName has no `.` (a
- * defensive case the v2.8 producer never emits).
+ * defensive case the producer never emits).
  */
 const apiNameToObjectKey = (apiName: string): string => {
   const dot = apiName.indexOf('.');
@@ -436,7 +436,7 @@ const apiNameToObjectKey = (apiName: string): string => {
 
 /**
  * Walk every incoming `references` edge to the OutboundMessage node
- * and narrow to those originating from WorkflowRule nodes (the v1.3
+ * and narrow to those originating from WorkflowRule nodes (the
  * producer of these references). Each surviving caller is resolved
  * to its identity for the catalog entry.
  */
@@ -564,7 +564,7 @@ const compareInvokers = (
 
 /**
  * The `sfi.outbound_message_catalog` MCP tool. Returns one entry per
- * OutboundMessage node (the v2.8 promotion of the v1.3
+ * OutboundMessage node (the promotion of the
  * dangling-by-design references), with endpoint URL, payload
  * shape, integration user, and the WorkflowRules that invoke it.
  *

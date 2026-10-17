@@ -419,7 +419,7 @@ describe('whatIfMergeProfilesHandler', () => {
   });
 
   it('discloses tab-visibility as not-evaluated when neither profile extracted it', async () => {
-    // P11-UI-tabvis-consumer-bug: Same1/Same2 carry no `tabVisibilities`
+    // Same1/Same2 carry no `tabVisibilities`
     // property, so the merge must NOT imply a verified "no tab conflicts".
     const result = await whatIfMergeProfilesHandler(ctx, {
       profileIdA: PROFILE_C,
@@ -490,7 +490,7 @@ describe('whatIfMergeProfilesHandler', () => {
   });
 });
 
-describe('whatIfMergeProfilesHandler — CR-22 continuation cursor', () => {
+describe('whatIfMergeProfilesHandler — continuation cursor', () => {
   it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
     const result = await whatIfMergeProfilesHandler(ctx, {
       profileIdA: PROFILE_A,

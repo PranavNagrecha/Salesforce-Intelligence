@@ -48,6 +48,7 @@ need from me?" and it will walk you through it. See
 | [Codex](#codex) | `~/.codex/config.toml` | `[mcp_servers.<name>]` (TOML) |
 | [Cursor](#cursor) | `.cursor/mcp.json` (project) or `~/.cursor/mcp.json` | `mcpServers` |
 | [VS Code + GitHub Copilot](#vs-code--github-copilot) | `.vscode/mcp.json` | **`servers`** — not `mcpServers` |
+| [Cline](#cline-vs-code-extension) | `cline_mcp_settings.json` (Cline → MCP Servers → Configure) | `mcpServers` |
 
 > **The most common mistake:** pasting the Claude block (`"mcpServers"`) into VS
 > Code's `mcp.json`, which expects `"servers"`. The file still parses, VS Code
@@ -279,6 +280,16 @@ Two notes:
 > from Copilot in VS Code, and it currently **rejects tool names containing a
 > dot** with `400 … String should match pattern '^[a-zA-Z0-9_-]{1,128}$'`. If
 > that is your error, you are in the CLI, not VS Code agent mode.
+
+## Cline (VS Code extension)
+
+Cline keeps its servers in `cline_mcp_settings.json`, which you reach from the
+extension itself: Cline → MCP Servers → Configure MCP Servers. The format is the
+Claude Desktop one (top-level `mcpServers`), so the Claude Desktop block above
+works unchanged; use an absolute `--vault` path because Cline's working
+directory is not your project. The file is reloaded on save; the server shows
+up in the MCP Servers list with its tools once it connects. Logs: the server's
+row in that list expands to show stderr.
 
 ## Windows: refreshing while your chat is open
 

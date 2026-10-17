@@ -9,12 +9,15 @@ parentId: null
 properties:
   applicationVisibilities: []
   classGrantCount: 0
+  customPermissionGrantCount: 0
   description: null
   fieldGrantCount: 9
   flowGrantCount: 0
   hasActivationRequired: false
   license: null
   objectGrantCount: 3
+  pageGrantCount: 0
+  recordTypeVisibilities: []
   tabVisibilities: []
   userPermissions: []
 sourcePath: source/main/default/permissionsets/Finance_Team.permissionset-meta.xml
@@ -32,11 +35,14 @@ type: PermissionSet
 | --- | --- |
 | applicationVisibilities | `` |
 | classGrantCount | `0` |
+| customPermissionGrantCount | `0` |
 | fieldGrantCount | `9` |
 | flowGrantCount | `0` |
 | hasActivationRequired | `false` |
 | license | `null` |
 | objectGrantCount | `3` |
+| pageGrantCount | `0` |
+| recordTypeVisibilities | `` |
 | tabVisibilities | `` |
 | userPermissions | `` |
 

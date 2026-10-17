@@ -146,7 +146,7 @@ const seed: ExtractionResult = {
     makeEdge({ fromId: LAYOUT_ID, toId: FIELD_INDUSTRY, edgeType: 'usedInLayout' }),
     makeEdge({ fromId: TRIGGER_ID, toId: ACCOUNT_ID, edgeType: 'triggersOn' }),
     makeEdge({ fromId: FLOW_ID, toId: ACCOUNT_ID, edgeType: 'triggersOn' }),
-    // Outgoing lookupTo edges (v3.3 first-class relationship tier) —
+    // Outgoing lookupTo edges (first-class relationship tier) —
     // deliberately mirror the CustomField properties above, since that's
     // what `sfi refresh` would extract for Owner__c / Region__c.
     makeEdge({
@@ -161,7 +161,7 @@ const seed: ExtractionResult = {
       edgeType: 'lookupTo',
       properties: { relationshipType: 'MasterDetail' },
     }),
-    // R6-19: INBOUND lookupTo — a Contact.AccountId-style field on a
+    // INBOUND lookupTo — a Contact.AccountId-style field on a
     // DIFFERENT object pointing AT Account. No CustomField NODE for it is
     // seeded (real orgs frequently omit standard-object fields from the
     // vault) — the edge alone must be enough for the inbound ERD half.
@@ -398,7 +398,7 @@ describe('generateDataDictionaryHandler (seeded graph)', () => {
     expect(relSection).not.toContain('Industry__c');
   });
 
-  it('R6-19: renders an Entity Relationship Diagram section with a mermaid erDiagram fence', async () => {
+  it('renders an Entity Relationship Diagram section with a mermaid erDiagram fence', async () => {
     const result = await generateDataDictionaryHandler(ctx, {
       objectId: ACCOUNT_ID,
     });
@@ -410,7 +410,7 @@ describe('generateDataDictionaryHandler (seeded graph)', () => {
     expect(body).toContain('erDiagram');
   });
 
-  it('R6-19: renders the OUTGOING Lookup (Owner__c -> User) with the zero-or-more connector', async () => {
+  it('renders the OUTGOING Lookup (Owner__c -> User) with the zero-or-more connector', async () => {
     const result = await generateDataDictionaryHandler(ctx, {
       objectId: ACCOUNT_ID,
     });
@@ -423,7 +423,7 @@ describe('generateDataDictionaryHandler (seeded graph)', () => {
     expect(erdSection).toContain('Lookup (Owner__c)');
   });
 
-  it('R6-19: renders the OUTGOING Master-Detail (Region__c -> Territory__c) with the one-or-more connector', async () => {
+  it('renders the OUTGOING Master-Detail (Region__c -> Territory__c) with the one-or-more connector', async () => {
     const result = await generateDataDictionaryHandler(ctx, {
       objectId: ACCOUNT_ID,
     });
@@ -437,7 +437,7 @@ describe('generateDataDictionaryHandler (seeded graph)', () => {
     expect(erdSection).toContain('Territory__c');
   });
 
-  it('R6-19: renders the INBOUND lookupTo from Contact.AccountId even though no Contact CustomField node was seeded', async () => {
+  it('renders the INBOUND lookupTo from Contact.AccountId even though no Contact CustomField node was seeded', async () => {
     const result = await generateDataDictionaryHandler(ctx, {
       objectId: ACCOUNT_ID,
     });
@@ -450,7 +450,7 @@ describe('generateDataDictionaryHandler (seeded graph)', () => {
     expect(erdSection).toContain('AccountId');
   });
 
-  it('R6-19: sanitizes api names into mermaid-safe entity ids (Region__c carries __)', async () => {
+  it('sanitizes api names into mermaid-safe entity ids (Region__c carries __)', async () => {
     const result = await generateDataDictionaryHandler(ctx, {
       objectId: ACCOUNT_ID,
     });
@@ -467,7 +467,7 @@ describe('generateDataDictionaryHandler (seeded graph)', () => {
     expect(relationshipLine).toMatch(/^ {4}[A-Za-z_][A-Za-z0-9_]*\["/);
   });
 
-  it('R6-19: always surfaces the ERD scope disclosure in boundaries', async () => {
+  it('always surfaces the ERD scope disclosure in boundaries', async () => {
     const result = await generateDataDictionaryHandler(ctx, {
       objectId: ACCOUNT_ID,
     });
@@ -477,7 +477,7 @@ describe('generateDataDictionaryHandler (seeded graph)', () => {
     expect(joined).toContain('lookupTo` edges, extraction-time');
   });
 
-  it('R6-19: sectionConfidence includes Entity Relationship Diagram', async () => {
+  it('sectionConfidence includes Entity Relationship Diagram', async () => {
     const result = await generateDataDictionaryHandler(ctx, {
       objectId: ACCOUNT_ID,
     });
@@ -527,7 +527,7 @@ describe('generateDataDictionaryHandler (seeded graph)', () => {
     expect(conf['Related Triggers and Flows']).toBeDefined();
   });
 
-  it('includes the Q125 freshness disclosure in boundaries', async () => {
+  it('includes the freshness disclosure in boundaries', async () => {
     const result = await generateDataDictionaryHandler(ctx, {
       objectId: ACCOUNT_ID,
     });
@@ -540,7 +540,7 @@ describe('generateDataDictionaryHandler (seeded graph)', () => {
     expect(joined).toContain('2026-05-27T14:33:08Z');
   });
 
-  // R6-21: format: 'csv' — mirrors generate_architecture_overview's format:
+  // Format: 'csv' — mirrors generate_architecture_overview's format:
   // 'html' plumbing (the document is always returned; csv is additive).
   it('omits csv unless format is csv (default markdown)', async () => {
     const result = await generateDataDictionaryHandler(ctx, {
@@ -569,7 +569,7 @@ describe('generateDataDictionaryHandler (seeded graph)', () => {
       'objectApiName,label,apiName,dataType,formula,description,required',
     );
     // 5 fields seeded on Account: Industry__c, Owner__c, Notes__c, Score__c,
-    // and Region__c (added by the R6-19 ERD fixture on the shared graph).
+    // and Region__c (added by the ERD fixture on the shared graph).
     expect(dataLines.length).toBe(6);
     const joined = dataLines.join('\n');
     expect(joined).toContain('Industry__c');
@@ -606,12 +606,12 @@ describe('generateDataDictionaryHandler (seeded graph)', () => {
   });
 });
 
-// R6-21: an object with MANY fields must not overflow the response budget —
+// An object with MANY fields must not overflow the response budget —
 // the csv is fitted independently of `document` (rows dropped tail-first with
 // a `# truncated: …` comment), never silently corrupted by the global guard's
-// blunt slimDataStrings head-cut (the same H7-class risk CR-08/CR-P3-4 guard
+// blunt slimDataStrings head-cut (the same H7-class risk guard
 // against for markdown/html elsewhere in this tool family).
-describe('generateDataDictionaryHandler csv byte budget (R6-21)', () => {
+describe('generateDataDictionaryHandler csv byte budget', () => {
   let store: GraphStore;
   let ctx: Context;
   const prevMax = process.env['SFI_MAX_RESPONSE_BYTES'];
@@ -681,7 +681,7 @@ describe('generateDataDictionaryHandler csv byte budget (R6-21)', () => {
   });
 });
 
-describe('generateDataDictionaryHandler — R6-19 ERD cap behavior', () => {
+describe('generateDataDictionaryHandler — ERD cap behavior', () => {
   const HUB_ID = 'CustomObject:Hub__c';
   const INBOUND_COUNT = 50; // > erd-mermaid.ts's default maxRelationships (40)
 
@@ -774,10 +774,10 @@ describe('generateDataDictionaryHandler — coverage-aware absence (R1)', () => 
     );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    // Mirrors the R6-19 ERD-disclosure test above: `boundaries[]` (the
+    // Mirrors the ERD-disclosure test above: `boundaries[]` (the
     // frontmatter disclosure array) is the honesty surface these caveats are
     // asserted against — the `## Boundaries` H2 in `body` is a fixed
-    // Q125/inherited-confidence/structural footer, unrelated to this caveat.
+    // inherited-confidence/structural footer, unrelated to this caveat.
     const { boundaries } = result.value.data.document;
     expect(boundaries.some((b) => /not checked/i.test(b) && /ValidationRule|Layout|ApexTrigger|Flow/.test(b))).toBe(
       true,

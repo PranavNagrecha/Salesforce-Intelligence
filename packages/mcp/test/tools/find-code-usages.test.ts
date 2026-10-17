@@ -149,7 +149,7 @@ const mixedSeed: ExtractionResult = {
       edgeType: 'writesTo',
       properties: { line: 5 },
     }),
-    // v1.4 frontend tier referrers.
+    // Frontend tier referrers.
     makeEdge({
       fromId: LWC_L,
       toId: FIELD_ID,
@@ -497,7 +497,7 @@ describe('findCodeUsagesHandler', () => {
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
   });
 
-  it('an empty result discloses empty ≠ absent in boundaries, never a silent empty (P12-USAGE-tool-audit)', async () => {
+  it('an empty result discloses empty ≠ absent in boundaries, never a silent empty', async () => {
     const result = await findCodeUsagesHandler(ctx, { targetId: 'CustomField:Nope.Nope__c' });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -662,7 +662,7 @@ describe('findCodeUsagesInputSchema', () => {
     expect(parsed.success).toBe(true);
   });
 
-  it('accepts offset and cursor (CR-22)', () => {
+  it('accepts offset and cursor', () => {
     expect(
       findCodeUsagesInputSchema.safeParse({
         targetId: FIELD_ID,
@@ -674,13 +674,13 @@ describe('findCodeUsagesInputSchema', () => {
 });
 
 // =============================================================================
-// CR-22 B4 — output cursor. STEP-2 shape shim: find_code_usages now emits the
+// output cursor. STEP-2 shape shim: find_code_usages now emits the
 // ALWAYS-ON pagination envelope (totalCount/offset/limit/hasMore/nextOffset)
 // like its folded-in twin find_apex_usages, so the hidden alias is a pure
 // pass-through. The nextCursor/pageInfo pair stays conditional (truncation
 // only); a truncated page resumes the full set with no gaps / dupes.
 // =============================================================================
-describe('findCodeUsagesHandler — output cursor (CR-22)', () => {
+describe('findCodeUsagesHandler — output cursor', () => {
   it('whole-fits no-cursor call emits the always-on pagination envelope (no cursor)', async () => {
     const r = await findCodeUsagesHandler(ctx, { targetId: FIELD_ID });
     expect(r.ok).toBe(true);

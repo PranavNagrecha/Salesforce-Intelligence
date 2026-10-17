@@ -1,9 +1,9 @@
 /**
- * The `sfi compare-vaults` CLI subcommand (v3.1 R7).
+ * The `sfi compare-vaults` CLI subcommand.
  *
  * Produces a terminal-friendly structural diff between two registered
- * vaults. Mirrors the `sfi.compare_vaults` MCP tool's shape (PLAN-v3.1
- * §6 R7) — the CLI is a thin shim around the MCP handler:
+ * vaults. Mirrors the `sfi.compare_vaults` MCP tool's shape — the CLI is a
+ * thin shim around the MCP handler:
  *
  *   1. Resolve the registry root (same fallback chain as
  *      `sfi register-vault` and `sfi list-vaults`).
@@ -16,7 +16,7 @@
  *
  * The `boundaries[]` array carrying the volatile-property filter and
  * api-name-match correspondence disclosures is surfaced verbatim at the
- * top of the output so the operator sees the v3.1 honesty axes on the
+ * top of the output so the operator sees the honesty axes on the
  * same screen as the diff.
  */
 
@@ -229,7 +229,7 @@ const renderValueShort = (value: unknown): string => {
  * text output. Layout:
  *
  *   1. Summary line (added / removed / shape-modified / unchanged counts).
- *   2. Each `boundaries[]` entry verbatim (the v3.1 honesty disclosures).
+ *   2. Each `boundaries[]` entry verbatim (the honesty disclosures).
  *   3. `Added` table (id, type, apiName).
  *   4. `Removed` table.
  *   5. `Shape modified` table with per-property drift indentation.

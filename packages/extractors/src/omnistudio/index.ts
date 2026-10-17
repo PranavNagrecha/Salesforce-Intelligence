@@ -55,6 +55,13 @@ export {
   parseOmniProcessDataPack,
 } from './process.js';
 export {
+  buildSaveUrlPatternWrites,
+  isSaveUrlPatternFieldKey,
+  literalSaveObjectApiName,
+  type UnresolvedSaveUrlPattern,
+  type UnresolvedSaveUrlPatternReason,
+} from './save-patterns.js';
+export {
   compareCondition,
   evaluateShowRule,
   type FieldValue,

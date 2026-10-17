@@ -7,6 +7,7 @@ lastModifiedBy: null
 lastModifiedDate: null
 parentId: CustomObject:Installation__c
 properties:
+  customButtons: []
   fieldCount: 6
   sectionCount: 1
   showInheritedColumns: false
@@ -24,6 +25,7 @@ type: Layout
 
 | Key | Value |
 | --- | --- |
+| customButtons | `` |
 | fieldCount | `6` |
 | sectionCount | `1` |
 | showInheritedColumns | `false` |

@@ -1,5 +1,5 @@
 /**
- * Handler for the `sfi.object_access_audit` MCP tool (P11-ACCESS-object-crud).
+ * Handler for the `sfi.object_access_audit` MCP tool.
  *
  * Answers "who can create / read / edit / delete THIS OBJECT" — the
  * object-level CRUD counterpart to the field-level `sfi.field_access_audit`.
@@ -8,7 +8,7 @@
  * `allowEdit` / `allowDelete` / `viewAllRecords` / `modifyAllRecords` flags the
  * profile / permission-set extractor stamps on each incoming `grantedBy` edge.
  *
- * CR-CAP-04: it ALSO surfaces PermissionSetGroup-conferred access. A PSG has no
+ * It ALSO surfaces PermissionSetGroup-conferred access. A PSG has no
  * `grantedBy` edge of its own, so for each granting permission set it does a
  * REVERSE lookup of the groups that contain it and emits an additional
  * `PermissionSetGroup` row carrying the member's CRUD flags. These rows are NOT
@@ -231,7 +231,7 @@ export type ObjectAccessAuditInput = z.infer<typeof objectAccessAuditInputSchema
 export interface ObjectAccessGrant {
   readonly granterId: string;
   /**
-   * `PermissionSetGroup` rows (CR-CAP-04) are REVERSE-derived: a PSG that
+   * `PermissionSetGroup` rows are REVERSE-derived: a PSG that
    * contains a granting permission set confers that set's CRUD on this object.
    */
   readonly granterType: 'Profile' | 'PermissionSet' | 'PermissionSetGroup';
@@ -540,7 +540,7 @@ export const objectAccessAuditHandler = async (
       modifyAllRecords: flag(p, 'modifyAllRecords'),
     });
   }
-  // CR-CAP-04 — REVERSE PSG rows. A PermissionSetGroup confers its member
+  // REVERSE PSG rows. A PermissionSetGroup confers its member
   // permission sets' object grants, but a PSG has no `grantedBy` edge of its
   // own, so it is invisible to the direct walk above. For each PermissionSet
   // grant, find every PSG that contains it and emit an ADDITIONAL row attributed

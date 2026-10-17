@@ -1,7 +1,7 @@
 /// <reference types="vitest/globals" />
 
 /**
- * Tests for the R7-C6 `sfi.generate_fleet_report` MCP tool.
+ * Tests for the `sfi.generate_fleet_report` MCP tool.
  *
  * A four-vault synthetic registry (no real org names) exercises every
  * honesty path: two normal vaults with DIFFERENT product versions,

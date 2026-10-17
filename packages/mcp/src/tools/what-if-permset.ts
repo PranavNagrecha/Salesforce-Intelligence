@@ -12,8 +12,8 @@
  * permission set is NOT actually gained when you assign X, and NOT lost when
  * you revoke X (they keep it). So the delta is computed by composing the SAME
  * effective-permissions engine (`computeEffectiveGrants`, which unions
- * profile + permission sets max-wins and subtracts group-scoped muting per
- * R6-06) TWICE — once for the baseline WITH the target set and once WITHOUT —
+ * profile + permission sets max-wins and subtracts group-scoped muting via
+ * the shared kernel) TWICE — once for the baseline WITH the target set and once WITHOUT —
  * and diffing the two NET grant sets:
  *
  *   - assign GAINED = perms in effective(baseline + X) that are NOT in
@@ -37,7 +37,7 @@
  * hypothetical READ (nothing is assigned or revoked); grants are `declared`
  * metadata. Situational caveats (`disclosures`): assigning a set already in the
  * baseline is a no-op (already assigned); revoking a set NOT in the baseline is
- * a no-op (not assigned); muting that could not be applied (a pre-R6-06 muting
+ * a no-op (not assigned); muting that could not be applied (a legacy muting
  * node, or a referenced-but-absent one) means the delta may be over/understated;
  * a baseline container not found in the vault is ignored; a container lacking
  * extracted record-type data means the record-type delta is incomplete.
@@ -111,7 +111,7 @@ const whatIfPermsetInputSchema = z.object({
     .optional(),
   limit: z.number().int().min(1).max(DELTA_MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
-  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // Continuation cursor: an OPAQUE token echoed back from a prior
   // truncated page's `nextCursor`. When present it supplies the resume offset.
   cursor: z.string().min(1).optional(),
 });
@@ -251,7 +251,7 @@ export interface WhatIfPermsetOutput {
   /** True when the inlined delta is a partial page of the full list. */
   readonly truncated: boolean;
   /**
-   * CR-22 opaque continuation token, present ONLY on a truncated page. Echo it
+   * Opaque continuation token, present ONLY on a truncated page. Echo it
    * back as `cursor` to resume; absent on a whole-fits page so an in-budget
    * response stays byte-identical.
    */

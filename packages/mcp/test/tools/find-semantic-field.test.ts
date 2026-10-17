@@ -243,7 +243,7 @@ describe('findSemanticFieldHandler', () => {
     expect(hit?.score).toBeCloseTo(1 / 3, 10);
   });
 
-  it('every match carries confidence: heuristic (Q95 enforcement)', async () => {
+  it('every match carries confidence: heuristic', async () => {
     const r = await findSemanticFieldHandler(ctx, {
       description: 'customer health',
     });
@@ -254,14 +254,14 @@ describe('findSemanticFieldHandler', () => {
     }
   });
 
-  it('surfaces the verbatim Q95 disclosure on every call', async () => {
+  it('surfaces the verbatim disclosure on every call', async () => {
     const r = await findSemanticFieldHandler(ctx, {
       description: 'customer health',
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const joined = r.value.data.boundaries.join(' ');
-    // The Q95 anchor names Customer_Industry__c as the false-positive
+    // The anchor names Customer_Industry__c as the false-positive
     // example — the verbatim phrase locks the disclosure language.
     expect(joined).toContain('Customer_Industry__c');
     expect(joined).toContain('customer health');
@@ -421,7 +421,7 @@ describe('findSemanticFieldInputSchema', () => {
     ).toBe(false);
   });
 
-  it('accepts offset and cursor (CR-22)', () => {
+  it('accepts offset and cursor', () => {
     expect(
       findSemanticFieldInputSchema.safeParse({
         description: 'x',
@@ -433,12 +433,12 @@ describe('findSemanticFieldInputSchema', () => {
 });
 
 // =============================================================================
-// CR-22 B4 — output cursor over the ranked match list + full CustomField scan.
+// output cursor over the ranked match list + full CustomField scan.
 // A whole-fits no-cursor call is byte-identical; a truncated page resumes the
 // full set with no gaps / dupes across the score-tie boundary (componentId
 // tiebreak); totalCount stays the FULL count.
 // =============================================================================
-describe('findSemanticFieldHandler — output cursor (CR-22)', () => {
+describe('findSemanticFieldHandler — output cursor', () => {
   it('whole-fits no-cursor call omits all paging fields', async () => {
     const r = await findSemanticFieldHandler(ctx, {
       description: 'customer health',

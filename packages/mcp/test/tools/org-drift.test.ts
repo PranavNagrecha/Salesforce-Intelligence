@@ -17,7 +17,7 @@ import { dispatchTool } from '../../src/tools/index.js';
 import { orgDriftBadgeFor, resetOrgDriftCache } from '../../src/tools/org-drift.js';
 
 /**
- * P13-WATCH-badges — the orgDrift badge: fresh sweep + type intersection →
+ * The orgDrift badge: fresh sweep + type intersection →
  * badge; stale sweep, absent file, or non-intersecting drift → SILENT (a
  * vault without staleness.json behaves byte-identically to before). The
  * badge never touches trust/provenance (a4: drift never bleeds into live).

@@ -345,7 +345,7 @@ const extractControllingFieldInfo = (
 
 /**
  * Pull `<valueSet><valueSetName>` — the GLOBAL value-set reference a picklist
- * carries instead of an inline definition (P14-USAGE-gvs-edge, closes
+ * carries instead of an inline definition (closes
  * FINDINGS P-GVS-EDGE). Returns `null` when the value set is inline or the
  * field carries no value set at all.
  */
@@ -528,7 +528,6 @@ const buildProperties = (
     // OMIT-when-null (unlike the fixed keys above): only GlobalValueSet-driven
     // picklists carry a value-set name, and a `valueSetName: null` row on every
     // CustomField would churn every rendered markdown file in every vault
-    // (P14-USAGE-gvs-edge).
     ...(() => {
       const valueSetName = extractValueSetName(rootObj);
       return valueSetName !== null ? { valueSetName } : {};
@@ -709,7 +708,7 @@ export const extractCustomField = async (
       ? buildReferencesEdges(formulaSource, nodeId, objectApiName, FORMULA_ELEMENT_NAME)
       : [];
 
-  // v3.3 schema-relationship tier: a Lookup / Master-Detail field carries a
+  // Schema-relationship tier: a Lookup / Master-Detail field carries a
   // `referenceTo` target object. Promote it to a first-class `lookupTo` edge
   // (field -> target CustomObject) so dependency walks traverse the data model
   // (get_impact on an object can finally list inbound lookups). A polymorphic
@@ -796,10 +795,10 @@ export const extractCustomField = async (
       },
     }));
 
-  // P14-USAGE-gvs-edge (closes FINDINGS P-GVS-EDGE): a picklist driven by a
+  // edge (closes FINDINGS P-GVS-EDGE): a picklist driven by a
   // GlobalValueSet carries <valueSet><valueSetName> instead of an inline
   // definition. The usesValueSet edge type was declared in the contracts and
-  // described in docs since v1.2 but NEVER emitted — so every GlobalValueSet
+  // described in docs but NEVER emitted — so every GlobalValueSet
   // read as unused and unused_components cited an edge that did not exist.
   const valueSetName = extractValueSetName(rootObj);
   const valueSetEdges: Edge[] =

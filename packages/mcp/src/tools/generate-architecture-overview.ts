@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.generate_architecture_overview` MCP tool.
  *
- * The v2.5 documentation-generation tier architecture-overview tool.
+ * The documentation-generation tier architecture-overview tool.
  * Returns a 3-4 page architecture document composed by chaining the
  * existing `sfi.org_overview`, `sfi.domain_clusters`, and
  * `sfi.integration_map` handlers, then rendering the composed output
@@ -12,14 +12,14 @@
  * Output: `{ document: GeneratedDocument }`, plus `html` (a self-contained
  * HTML page) when `format: 'html'`. The body is structured markdown with
  * FOUR mermaid diagrams (org structure, domain clustering, integration
- * topology, and — R6-19 — an entity-relationship diagram of the top
+ * topology, and an entity-relationship diagram of the top
  * objects by Lookup/Master-Detail relationship degree) and supporting
  * tables; the HTML export renders all of it client-side and is meant to
  * be written to a `.html` file.
  *
  * Honesty axis: every "top X" ranking inherits the upstream tools'
  * heuristic provenance. The body's Boundaries section surfaces the
- * v2.5 verbatim disclosures. CR-22-B6: the two mermaid diagrams' node caps
+ * verbatim disclosures. The two mermaid diagrams' node caps
  * (Org Structure top `ORG_STRUCTURE_DIAGRAM_CAP`=5 by inbound references;
  * Integration Topology top `INTEGRATION_DIAGRAM_CAP`=20 surfaces) are now
  * reader-facing — a "showing the top N of M" / "showing the first N of M"
@@ -88,7 +88,7 @@ export interface GenerateArchitectureOverviewOutput {
 }
 
 /**
- * CR-22-B6: node caps on the two mermaid diagrams below — previously
+ * Node caps on the two mermaid diagrams below — previously
  * JSDoc-only (a `.slice(0, N)` with no reader-facing disclosure). Named so
  * both the slice and the "showing first N of M" line stay in lockstep.
  */
@@ -104,7 +104,7 @@ const safeMermaidId = (raw: string): string =>
   raw.replace(/[^A-Za-z0-9_]/g, '_');
 
 /**
- * R6-19: top-N objects by Lookup/Master-Detail RELATIONSHIP DEGREE (distinct
+ * Top-N objects by Lookup/Master-Detail RELATIONSHIP DEGREE (distinct
  * from `topObjects`'s inbound-reference-count ranking used by the Org
  * Structure diagram above). Capped so a hub object's diagram cannot balloon
  * to hundreds of entities; disclosed honestly (never implied complete).
@@ -226,7 +226,7 @@ export const generateArchitectureOverviewHandler = async (
 
   // Org Structure diagram (mermaid): the top 5 objects as nodes.
   const topObjects = overview.topObjects.slice(0, ORG_STRUCTURE_DIAGRAM_CAP);
-  // CR-22-B6: the diagram shows the top N by inbound references — disclose
+  // The diagram shows the top N by inbound references — disclose
   // against the TRUE org-wide CustomObject count (Executive Summary already
   // computed it), not just `overview.topObjects.length` (itself a separate,
   // upstream org_overview cap) — a reader cares "how many objects does this
@@ -257,7 +257,7 @@ export const generateArchitectureOverviewHandler = async (
       : []),
   ].join('\n');
 
-  // R6-19: Entity Relationship Diagram — top objects by Lookup/Master-Detail
+  // Entity Relationship Diagram — top objects by Lookup/Master-Detail
   // relationship DEGREE (in+out lookupTo edges), distinct from the Org
   // Structure diagram's inbound-reference ranking above. The rendered
   // relationships are the INDUCED subgraph on that object set — both ends
@@ -337,7 +337,7 @@ export const generateArchitectureOverviewHandler = async (
     ...integration.connectedApps,
     ...integration.networkAccesses,
   ];
-  // CR-22-B6: the diagram's NODE list (not the Type/Count table below, which
+  // The diagram's NODE list (not the Type/Count table below, which
   // is already complete) is capped at INTEGRATION_DIAGRAM_CAP.
   const integrationDiagramTruncated = allIntegrationNodes.length > INTEGRATION_DIAGRAM_CAP;
   if (allIntegrationNodes.length === 0) {
@@ -452,7 +452,7 @@ export const generateArchitectureOverviewHandler = async (
     'Domain clusters and top-object rankings are heuristic — present as suggested starting points, not authoritative groupings.',
     'Scope: this overview is a STRUCTURED TOUR composed from org_overview, domain_clusters, and integration_map — a starting map, not a deep architectural analysis. It does not trace Apex call chains, data/field lineage, or the sharing model. For those, follow up with `sfi.call_graph`, `sfi.get_subgraph`, `sfi.field_lineage`, and `sfi.generate_sharing_summary` on the components this tour surfaces.',
   ];
-  // CR-22-B6: the two mermaid diagrams' node caps were previously JSDoc-only.
+  // The two mermaid diagrams' node caps were previously JSDoc-only.
   if (orgStructureTruncated) {
     boundaries.push(
       `Org Structure diagram capped: showing the top ${topObjects.length.toString()} of ${totalCustomObjects.toString()} CustomObjects (ranked by inbound references) — the rest are NOT pictured. See \`sfi.org_overview\` for the fuller ranking.`,
@@ -489,7 +489,7 @@ export const generateArchitectureOverviewHandler = async (
     ]),
   ];
 
-  // CR-08: fit the assembled doc under the response budget BEFORE the global
+  // Fit the assembled doc under the response budget BEFORE the global
   // guard so its slimDataStrings never 1024-cuts `document.body` and strips the
   // honesty footer.
   const budget = generatedDocByteBudget();
@@ -514,7 +514,7 @@ export const generateArchitectureOverviewHandler = async (
     return ok({ data: { document }, vaultState });
   }
 
-  // CR-P3-4 / CR-RV8: html path. The saved artifact is the html string, which
+  // The html path. The saved artifact is the html string, which
   // is built FROM `document.body` — so the assembled envelope carries the body
   // TWICE (once as `document`, once embedded+JSON-escaped inside `html`). The
   // old `budget / 2` reserve double-counted the body WITHOUT measuring the real

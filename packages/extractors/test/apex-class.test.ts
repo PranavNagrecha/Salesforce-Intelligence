@@ -81,7 +81,7 @@ describe('extractApexClass', () => {
       expect(node.properties['annotations']).toEqual(['@isTest']);
       expect(node.properties['modifiers']).toEqual(['global']);
       expect(node.properties['implements']).toEqual(['HttpCalloutMock']);
-      // v0.3 wiring: every scanner-derived edge carries the heuristic
+      // Wiring: every scanner-derived edge carries the heuristic
       // label and the `apex-scanner` source. We don't byte-check edge
       // contents here (that's the golden-output test's job); the smoke
       // assertion just confirms the wiring is in place.
@@ -356,14 +356,14 @@ private class RealClass {}`;
     });
   });
 
-  // v1.5-R3: async / job / API-surface property classifiers and the
+  // async / job / API-surface property classifiers and the
   // listensTo / exposes / dispatchesAsync edge producers. All seven
   // boolean properties default to `false` and are always present so
-  // the v1.5 `sfi.list_components(propertyFilter=...)` enum can route
+  // the `sfi.list_components(propertyFilter=...)` enum can route
   // by property without distinguishing "absent" from "false". See
   // IntegrationTopologySemantics.md §"Async / job classifier
-  // patterns" and PLAN-v1.5.md §3 for the production rules.
-  describe('v1.5 async / API classifier booleans', () => {
+  // patterns".
+  describe('async / API classifier booleans', () => {
     it('emits all seven booleans as false on a plain class', async () => {
       const { dir, clsPath } = await writeTempApexClass(
         'Plain',
@@ -518,10 +518,10 @@ global class AccountResource {
     });
   });
 
-  // v1.5-R3: edge producers. listensTo for Triggerable<{Event}__e>,
+  // edge producers. listensTo for Triggerable<{Event}__e>,
   // exposes for the three API-surface annotations, dispatchesAsync for
   // the three inline-constructor dispatch shapes.
-  describe('v1.5 declared edges', () => {
+  describe('declared edges', () => {
     it('emits a listensTo edge for implements Triggerable<{Event}__e>', async () => {
       const { dir, clsPath } = await writeTempApexClass(
         'AccountChangeSubscriber',
@@ -774,8 +774,8 @@ global class AccountResource {
     it('does NOT emit dispatchesAsync for an enqueueJob shape that lives inside a string literal', async () => {
       // The dispatch site is inside a quoted string — it should be
       // blanked out by the comment/string strip pass before the
-      // regex sees it. Verifies the v0.3 string-strip discipline
-      // extends to the v1.5 dispatch detector.
+      // regex sees it. Verifies the string-strip discipline
+      // extends to the dispatch detector.
       const { dir, clsPath } = await writeTempApexClass(
         'Stringy',
         `public class Stringy {
@@ -796,10 +796,10 @@ global class AccountResource {
       }
     });
 
-    itHarness('extracts the full v1.5 surface from the synthetic AccountActions fixture', async () => {
+    itHarness('extracts the full surface from the synthetic AccountActions fixture', async () => {
       // On-disk synthetic that exercises @future, @InvocableMethod,
       // @AuraEnabled, and implements Queueable in one class. This is
-      // the canonical multi-surface fixture for the v1.5 extension.
+      // the canonical multi-surface fixture for the extension.
       const fixturePath = resolve(
         HARNESS_ROOT,
         'tests/fixtures/synthetic-v1.5/classes/AccountActions.cls',
@@ -851,7 +851,7 @@ global class AccountResource {
     });
 
     it('combines listensTo + exposes (Queueable + @InvocableMethod) into one class', async () => {
-      // A v1.5 synthetic that exercises both the Triggerable
+      // A synthetic that exercises both the Triggerable
       // listensTo and the @InvocableMethod exposes simultaneously.
       // The Queueable interface produces no edge on its own but
       // flips `isQueueable: true` so the architect's "find all
@@ -886,10 +886,10 @@ global class AccountResource {
     });
   });
 
-  // v2.1: code-quality recognizer family is wired into apex-class.ts.
+  // code-quality recognizer family is wired into apex-class.ts.
   // The property is always present so consumers can filter by
   // `qualityIssues.length > 0` without an absent-vs-empty distinction.
-  describe('v2.1 qualityIssues property', () => {
+  describe('qualityIssues property', () => {
     it('emits an empty qualityIssues array on a clean class', async () => {
       const { dir, clsPath } = await writeTempApexClass(
         'Clean',

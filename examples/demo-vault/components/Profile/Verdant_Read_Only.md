@@ -10,13 +10,16 @@ properties:
   applicationVisibilities: []
   classGrantCount: 0
   custom: true
+  customPermissionGrantCount: 0
   description: null
   fieldGrantCount: 30
   flowGrantCount: 0
   layoutAssignments: []
+  loginHours: []
   loginHoursDefined: false
   loginIpRanges: []
   objectGrantCount: 12
+  pageGrantCount: 0
   recordTypeVisibilities: []
   tabVisibilities: []
   userLicense: Salesforce
@@ -37,12 +40,15 @@ type: Profile
 | applicationVisibilities | `` |
 | classGrantCount | `0` |
 | custom | `true` |
+| customPermissionGrantCount | `0` |
 | fieldGrantCount | `30` |
 | flowGrantCount | `0` |
 | layoutAssignments | `` |
+| loginHours | `` |
 | loginHoursDefined | `false` |
 | loginIpRanges | `` |
 | objectGrantCount | `12` |
+| pageGrantCount | `0` |
 | recordTypeVisibilities | `` |
 | tabVisibilities | `` |
 | userLicense | `Salesforce` |

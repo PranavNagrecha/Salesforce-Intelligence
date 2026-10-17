@@ -7,7 +7,7 @@
  * route, it does not answer. When the question hits a gap (no good tool yet) it
  * surfaces the gap rather than fabricating a capability; the question text is
  * appended to the local backlog only when the caller explicitly passes
- * `logGap: true` (privacy-first opt-in, off by default — CR-16).
+ * `logGap: true` (privacy-first opt-in, off by default).
  *
  * Router-v2 P2 additions:
  * - REFUSAL-SHAPE GATES run FIRST, score-independent, in both router modes: a
@@ -303,7 +303,7 @@ export const routeQuestionInputSchema = z.object({
   /**
    * Opt in to appending a gap entry to the local backlog when the route has
    * one. Privacy-first default false — the question text is written to disk only
-   * when this is explicitly true (CR-16).
+   * when this is explicitly true.
    */
   logGap: z.boolean().optional(),
   /**
@@ -359,7 +359,7 @@ export const routeQuestionInputSchema = z.object({
 
 export type RouteQuestionInput = z.infer<typeof routeQuestionInputSchema>;
 
-/** One call for a routed tool (P13-GW-router-envelope). */
+/** One call for a routed tool. */
 export interface RouteInvocation {
   readonly tool: string;
   readonly args: Readonly<Record<string, unknown>>;
@@ -3729,7 +3729,7 @@ export const routeQuestionHandler = async (
 
   const executionBlocked = route.clarification?.required === true;
   // Stamp the gap with this server's vault so `feedback export` can scope to
-  // the current vault by default (P14-FEEDBACK-gaplog-scope).
+  // the current vault by default.
   const logged =
     input.logGap === true ? await logGapIfAny(route, undefined, ctx.vaultRoot) : null;
   const rawRouteToolArgs = await buildRouteToolArgsMap(route, ctx);
@@ -3795,7 +3795,7 @@ export const routeQuestionHandler = async (
         `no such object in this vault (a word from the question, not an object name) — name the object.`,
     };
   }
-  // P13-GW-router-envelope: under the core profile the client only holds 18
+  // Under the core profile the client only holds 18
   // schemas, so the route also carries calls — gateway envelopes for non-core
   // tools (run_analysis is byte-identical to a direct call); a step with
   // unbound required args says so in `missingArgs`. A

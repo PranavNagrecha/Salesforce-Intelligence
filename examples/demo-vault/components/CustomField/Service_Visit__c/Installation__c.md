@@ -9,6 +9,7 @@ parentId: CustomObject:Service_Visit__c
 properties:
   dataType: Lookup
   defaultValue: null
+  deleteConstraint: SetNull
   description: null
   externalId: false
   formula: null
@@ -38,6 +39,7 @@ type: CustomField
 | --- | --- |
 | dataType | `Lookup` |
 | defaultValue | `null` |
+| deleteConstraint | `SetNull` |
 | externalId | `false` |
 | formula | `null` |
 | inlineHelpText | `null` |

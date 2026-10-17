@@ -111,7 +111,7 @@ export const buildBaseline = (tools: readonly ToolLike[]): ConsistencyBaseline =
 };
 
 // ============================================================================
-// Phase 2 (P11-api-response-output-shape): the OUTPUT surface.
+// Phase 2: the OUTPUT surface.
 //
 // Phase 1 above is static — it reads declared INPUT schemas. Tools declare no
 // output schema, so the OUTPUT shape can only be observed by running each tool

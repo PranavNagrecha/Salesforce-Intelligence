@@ -94,7 +94,7 @@ const seed: ExtractionResult = {
         qualityIssues: [],
       },
     }),
-    // Test class without v2.1 R2 fields (no assertionCount, no qualityIssues).
+    // Test class without fields (no assertionCount, no qualityIssues).
     makeNode({
       id: 'ApexClass:LegacyTest',
       apiName: 'LegacyTest',
@@ -592,13 +592,13 @@ describe('meaningfulTestAuditHandler — nameContains scope', () => {
 });
 
 // =============================================================================
-// CR-12 — page-to-exhaustion. The ApexClass roster is walked to the end, not
+// page-to-exhaustion. The ApexClass roster is walked to the end, not
 // just the first page; a test class sorted PAST the cap by id ASC used to be
 // dropped from both the ranking and totalTestClassCount. With
 // SFI_NODE_SCAN_LIMIT=2 the loop walks multiple pages. Mirrors
 // apex-test-coverage.test.ts past-cap pattern.
 // =============================================================================
-describe('meaningfulTestAuditHandler — past-cap roster (CR-12 de-cap)', () => {
+describe('meaningfulTestAuditHandler — past-cap roster', () => {
   beforeEach(() => {
     process.env['SFI_NODE_SCAN_LIMIT'] = '2';
   });

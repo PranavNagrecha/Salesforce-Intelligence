@@ -34,12 +34,12 @@ properties:
       rule: dynamic-apex
       severity: info
     - confidence: heuristic
-      explanation: SOQL query without WITH SECURITY_ENFORCED / USER_MODE — field-level security not enforced on the result. Add the clause or check Schema.sObjectType.X.fields.Y.isAccessible() before reading.
+      explanation: "SOQL query without WITH SECURITY_ENFORCED / USER_MODE — field-level security not enforced on the result. Add the clause, sanitize the result with Security.stripInaccessible(AccessType.READABLE, …), or check Schema.sObjectType.X.fields.Y.isAccessible() before reading."
       location: line 16
       rule: missing-fls-check
       severity: high
     - confidence: heuristic
-      explanation: SOQL query without WITH SECURITY_ENFORCED / USER_MODE — field-level security not enforced on the result. Add the clause or check Schema.sObjectType.X.fields.Y.isAccessible() before reading.
+      explanation: "SOQL query without WITH SECURITY_ENFORCED / USER_MODE — field-level security not enforced on the result. Add the clause, sanitize the result with Security.stripInaccessible(AccessType.READABLE, …), or check Schema.sObjectType.X.fields.Y.isAccessible() before reading."
       location: line 28
       rule: missing-fls-check
       severity: high
@@ -170,4 +170,4 @@ public with sharing class IncentiveBatch implements Database.Batchable<SObject> 
 
 | Target | Confidence | Producer |
 | --- | --- | --- |
-| `ApexClass:Project__c` | heuristic | apex-scanner |
+| `CustomObject:Project__c` | heuristic | apex-scanner |

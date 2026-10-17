@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.explain_flow` MCP tool.
  *
- * v2.0f W1 — the first of three explainer composers (buyer-priority #6:
+ * The first of three explainer composers (buyer-priority #6:
  * "what does this Flow / Apex method / formula actually do? Explain in
  * English."). Given a Flow canonical id, return a structured narrative
  * payload Claude composes into the natural-language explanation.
@@ -20,12 +20,12 @@
  *   2. **Trigger info** — `triggerType` (e.g., `RecordAfterSave`,
  *      `Scheduled`), the `triggerObject` (the `CustomObject:{ApiName}`
  *      the Flow listens to, when one exists), and the gating
- *      `firesWhen` ConditionalContext list (v2.0a's record-trigger /
+ *      `firesWhen` ConditionalContext list (the record-trigger /
  *      decision conditions, from the Flow's outgoing `firesWhen`
  *      edges).
  *   3. **Action calls** — the Flow's outgoing `callsApex` edges
  *      (`<actionCalls>` elements with `actionType=apex`).
- *   3b. **Subflow calls** (R6-02) — the Flow's outgoing `references`
+ *   3b. **Subflow calls** — the Flow's outgoing `references`
  *      edges with `referenceKind: 'subflow'` (`<subflows>` elements).
  *      Each names the target `Flow:{flowName}` and whether it resolves
  *      in the vault (a dangling managed/uncaptured subflow surfaces
@@ -41,13 +41,13 @@
  *      same object.
  *   5. **Record writes** — the Flow's OBJECT-level outgoing `writesTo`
  *      edges (`<recordCreates>` / `<recordUpdates>` / `<recordDeletes>`,
- *      including R7-W1 whole-record `<inputReference>` DML). The
+ *      including whole-record `<inputReference>` DML). The
  *      `operation` discriminator on each edge surfaces as the per-row
  *      `'create' | 'update' | 'delete'` action. FIELD-level writes (DML
- *      `<inputAssignments>` and R7-W2 before-save `$Record.<Field>`
+ *      `<inputAssignments>` and before-save `$Record.<Field>`
  *      assignments) are excluded from this object-granular axis — they are a
  *      `field_lineage` / `field_360` concern.
- *   6. **Decisions** — the v2.0a `properties.conditions[]` mirror,
+ *   6. **Decisions** — the `properties.conditions[]` mirror,
  *      surfaced as `{ decisionName, conditions }` pairs. The
  *      `decisionName` is the firer's real element name (a Flow decision's
  *      `<name>` + rule `<name>`, from the mirror's `sourceName`), falling
@@ -74,13 +74,13 @@
  *   - One `getNodeById(flowId)` resolves the Flow. `Flow:` prefix is
  *     enforced at the handler boundary; non-`Flow:` ids surface as
  *     `invalid-query`, unknown well-formed ids surface as
- *     `component-not-found`. This mirrors the v2.0a/v2.0b prefix-axis
+ *     `component-not-found`. This mirrors the prefix-axis
  *     convention every other component-id-parameterised tool uses.
  *   - Five `listEdges` calls fan out the trigger, action, lookup,
  *     write, and condition axes. Each call narrows by `direction:
  *     'out'` and `edgeType:` so the per-axis filtering happens at the
  *     query layer rather than in memory.
- *   - The Flow's `properties.conditions` mirror (the v2.0a synthetic
+ *   - The Flow's `properties.conditions` mirror (the synthetic
  *     ConditionalContext metadata stamped onto the Flow node) is the
  *     source of truth for the `decisions` axis. The mirror entries
  *     carry `kind`, `expression`, `conditionContextId`, and (for Flow
@@ -122,9 +122,9 @@ const FLOW_PREFIX = 'Flow:';
  * The verbatim honesty-axis disclosure surfaced in every response.
  * Frozen here so the test suite can assert the exact string and a
  * caller-facing rephrasing during rendering is a code-review concern,
- * not a silent drift. The shape is identical to the v2.0e narrator's
+ * not a silent drift. The shape is identical to the narrator's
  * disclosure axis (a single load-bearing sentence) but with the
- * v2.0f explainer-tier wording.
+ * explainer-tier wording.
  */
 const DISCLOSURE = 'Structured narrative; Claude composes prose';
 
@@ -194,7 +194,7 @@ const resolveFlowRef = (input: ExplainFlowInput): Result<string, McpError> => {
 };
 
 /**
- * One condition gating the Flow. Mirrors the v2.0a synthetic
+ * One condition gating the Flow. Mirrors the synthetic
  * `ConditionalContext` axis: each entry carries the synthetic
  * conditionContextId so callers can cross-reference back to the
  * gating node, and the parsed expression text so the renderer can
@@ -211,7 +211,7 @@ export interface ExplainFlowTriggerCondition {
    * decision row is just the bare connector (`"and"`), which says nothing
    * about WHAT gates the flow. The sibling tools `order_of_execution` and
    * `what_happens_on_save` read this same node property; this keeps the
-   * trigger axis consistent with them and with the v2.0f decision axis
+   * trigger axis consistent with them and with the decision axis
    * (`ExplainFlowDecision.fieldReferences`).
    */
   readonly fieldReferences: readonly ComponentId[];
@@ -318,7 +318,7 @@ export interface ExplainFlowActionCall {
 }
 
 /**
- * One subflow this Flow invokes (R6-02). Sourced from the Flow's outgoing
+ * One subflow this Flow invokes. Sourced from the Flow's outgoing
  * `references` edges whose `properties.referenceKind === 'subflow'` — the
  * declared `<subflows>` calls. `targetFlowId` is the `Flow:{ApiName}` canonical
  * id; `targetFlowName` is the bare ApiName; `subflowElementName` is the calling
@@ -351,11 +351,11 @@ export interface ExplainFlowRecordLookup {
  * write targets; `operation` is the kind of DML the Flow performs
  * (`'create'` for `<recordCreates>`, `'update'` for `<recordUpdates>`,
  * `'delete'` for `<recordDeletes>`). A whole-record `<inputReference>` DML
- * (R7-W1) surfaces here as its object row (the fields are not enumerable;
+ * surfaces here as its object row (the fields are not enumerable;
  * that limitation lives on the underlying edge's `disclosure` property).
  *
  * This axis is object-granular: FIELD-level writes (DML `<inputAssignments>`
- * and the R7-W2 before-save `$Record.<Field>` assignment) are NOT listed here —
+ * and the before-save `$Record.<Field>` assignment) are NOT listed here —
  * see {@link collectRecordWrites}. Query `field_lineage` / `field_360` for the
  * per-field writer detail.
  */
@@ -494,7 +494,7 @@ export interface ExplainFlowOutput {
   readonly triggerInfo: ExplainFlowTriggerInfo;
   readonly actionCalls: readonly ExplainFlowActionCall[];
   /**
-   * R6-02: the subflows this Flow invokes (declared `<subflows>` calls). Empty
+   * The subflows this Flow invokes (declared `<subflows>` calls). Empty
    * when the Flow calls no subflows. A dangling target (`resolved: false`) is a
    * managed/uncaptured subflow — named, never fabricated.
    */
@@ -528,7 +528,7 @@ export interface ExplainFlowOutput {
    * roster uses, so a host renders it the same way.
    */
   readonly coverageCaveat?: CoverageCaveat;
-  /** P13-ANNOT-tools: curated annotations (provenance `annotation`); absent when none. */
+  /** Curated annotations (provenance `annotation`); absent when none. */
   readonly annotations?: AnnotationsBlock;
 }
 
@@ -1233,14 +1233,14 @@ const collectActionCalls = async (
 };
 
 /**
- * R6-02: collect the Flow's outgoing subflow calls. Walks outgoing `references`
+ * Collect the Flow's outgoing subflow calls. Walks outgoing `references`
  * edges filtered to `properties.referenceKind === 'subflow'` (the declared
  * `<subflows>` calls the flow extractor now emits) and projects each into an
  * `ExplainFlowSubflowCall`. `resolved` reflects whether the target `Flow:{name}`
  * node exists in the vault — a dangling (managed / uncaptured) subflow is
  * surfaced with `resolved: false` rather than dropped or fabricated.
  *
- * Before R6-02 subflow calls were unmodeled, so `explain_flow` could not name a
+ * Before subflow calls were unmodeled, so `explain_flow` could not name a
  * nested flow at all; this axis closes that gap. The still-invisible path is
  * Apex `Flow.Interview.start()` invocation (not a declared `<subflows>` edge) —
  * disclosed via the run-mode note, unchanged here.
@@ -1309,7 +1309,7 @@ const collectRecordLookups = async (
   const counts = new Map<string, number>();
   const order: string[] = [];
   for (const edge of edgesResult.value) {
-    // R6-11: FIELD-level dataflow-source reads (operation 'dataflowSource',
+    // FIELD-level dataflow-source reads (operation 'dataflowSource',
     // toId CustomField:...) are lineage plumbing, not record lookups —
     // folding them in here would render a field id as a bogus "object" row.
     // Any FIELD-level read (dataflowSource, a Get/Update/Delete Records filter
@@ -1352,7 +1352,7 @@ const classifyWriteOperation = (
  * list (sorted by `(toId, edgeType)` per `listEdges`'s contract).
  *
  * FIELD-level `writesTo` edges (targets prefixed `CustomField:` — the DML
- * `<inputAssignments>` field writes and the R7-W2 before-save `$Record.<Field>`
+ * `<inputAssignments>` field writes and the before-save `$Record.<Field>`
  * assignment writes) are DELIBERATELY excluded here: this axis is object-
  * granular ("does the flow create/update/delete this object?"), and folding a
  * `CustomField:Obj.Field` id into the `object` slot would misclassify a field
@@ -1382,7 +1382,7 @@ const collectRecordWrites = async (
 };
 
 /**
- * Read the v2.0a `properties.conditions[]` mirror from the Flow node
+ * Read the `properties.conditions[]` mirror from the Flow node
  * and surface each `<decisions>` entry as an `ExplainFlowDecision`. The mirror
  * is the source of truth for the decision-narrative axis — walking the
  * `firesWhen` edges would require a separate roundtrip per decision,
@@ -1448,7 +1448,7 @@ const collectDecisions = (
 /**
  * The `sfi.explain_flow` MCP tool. Returns a structured narrative
  * payload for one Flow: identity, trigger info, body sections
- * (action calls, record lookups, record writes), and the v2.0a
+ * (action calls, record lookups, record writes), and the
  * decision conditions. See the module JSDoc for the cascade and the
  * honesty-axis design.
  *

@@ -296,7 +296,7 @@ describe('restricted property (CR-GVS-RESTRICTED)', () => {
       expect(node.properties['restricted']).toBe(false);
       expect(node.properties['sorted']).toBe(false);
       expect(node.properties['valueCount']).toBe(2);
-      // CR-10b: each value is the H10 object shape, not a bare string.
+      // each value is the H10 object shape, not a bare string.
       expect(node.properties['values']).toContainEqual({
         value: 'Deferred Offer',
         isActive: true,
@@ -344,7 +344,7 @@ describe('restricted property (CR-GVS-RESTRICTED)', () => {
   });
 });
 
-describe('per-value fullNames (P14-USAGE-gvs-edge)', () => {
+describe('per-value fullNames', () => {
   it('surfaces the declared values, not just the count', async () => {
     const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <GlobalValueSet xmlns="http://soap.sforce.com/2006/04/metadata">
@@ -360,7 +360,7 @@ describe('per-value fullNames (P14-USAGE-gvs-edge)', () => {
       expect(result.ok).toBe(true);
       if (!result.ok) return;
       expect(result.value.nodes[0]?.properties['valueCount']).toBe(3);
-      // CR-10b: each value is the H10 object shape `{value, isActive, default}`
+      // each value is the H10 object shape `{value, isActive, default}`
       // — no `<isActive>` element on any of these three, so all default to
       // active; no `<label>` element, so `label` is OMITTED (not present as
       // `undefined` or `null`) per the OMIT-when-absent convention shared with
@@ -376,7 +376,7 @@ describe('per-value fullNames (P14-USAGE-gvs-edge)', () => {
   });
 });
 
-describe('per-value isActive/label/default capture (CR-10b)', () => {
+describe('per-value isActive/label/default capture', () => {
   it('retains a deactivated value with isActive:false instead of filtering it out', async () => {
     // Mirrors a real production-scale org's GlobalValueSet shape: active
     // entries carry no <isActive> element at all (Salesforce DX omits it for

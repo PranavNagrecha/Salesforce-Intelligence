@@ -3,7 +3,7 @@
  *
  * Audits every ApexClass with `properties.isTest === true` for
  * assertion meaningfulness. Computes a heuristic per-test score from
- * the v2.1 `qualityIssues[]` mirror:
+ * the `qualityIssues[]` mirror:
  *   - `assertionCount`: invocations of `System.assert*` and the modern
  *     `Assert.*` class recognised by the extraction pass (read from
  *     `properties.assertionCount` when present; 0 when absent).
@@ -47,7 +47,7 @@
  *     object scopes. An id that DOES resolve to an ApexClass but is not
  *     `isTest` is still narrowed out silently (the caller named a real,
  *     non-test class on purpose).
- *   - When `qualityIssues` is absent the v2.1 R2 recognizer pass has
+ *   - When `qualityIssues` is absent the recognizer pass has
  *     not run; the report still emits per-test entries with
  *     `fakeAssertionCount: 0` and the disclosure clarifies the gap.
  *   - Pagination: the org-wide and `nameContains` scopes scan the FULL
@@ -104,14 +104,14 @@ const APEX_CLASS_PREFIX = 'ApexClass:';
 /** Inclusive upper bound on the number of `classFilter` ids the input accepts. */
 const CLASS_FILTER_MAX = 500;
 
-/** Verbatim v2.7 honesty disclosure. */
+/** Verbatim honesty disclosure. */
 const MEANINGFUL_TEST_DISCLOSURE =
   'v2.7 meaningful_test_audit ranks test classes by the v2.1 R2 fake-assertion recognizer output and an assertions-per-KB density heuristic. assertionCount counts both System.assert* and the modern Assert.* class; the fake-assertion recognizer that flags meaningless asserts is still scoped to System.assertEquals shapes, and assertions via helper methods (MyTestHelper.assertField) and framework wrappers are invisible to both. A test class with a high fakeAssertionCount may have meaningful tests via a custom assertion helper the recognizer cannot see. When qualityIssues is absent the v2.1 R2 pass has not run for this vault; entries surface with fakeAssertionCount: 0 and the rank is driven by density alone.';
 
 /** Canonical id prefix used to coerce a bare production-class name. */
 const TARGET_CLASS_PREFIX = 'ApexClass:';
 
-/** Tool name the CR-22 continuation cursor is bound to. */
+/** Tool name the continuation cursor is bound to. */
 const MEANINGFUL_TEST_AUDIT_TOOL = 'sfi.meaningful_test_audit';
 
 /** Inclusive upper bound on `limit`. Mirrors the enumeration-style tools. */
@@ -164,7 +164,7 @@ const meaningfulTestAuditInputBaseSchema = z.object({
   classFilter: z.array(z.string().min(1)).max(CLASS_FILTER_MAX).optional(),
   targetClass: z.string().min(1).optional(),
   nameContains: z.string().min(1).optional(),
-  // CR-22 paging. Pre-emptive: today's corpus fits in one page, so a call that
+  // Paging. Pre-emptive: today's corpus fits in one page, so a call that
   // omits all three is byte-identical to the pre-paging response. The knob
   // exists so the tail is reachable BEFORE an org needs it, rather than after
   // a silent drop is discovered in production.
@@ -269,7 +269,7 @@ export interface MeaningfulTestAuditOutput {
   readonly offset?: number;
   /** Offset to pass on the next call. Present only when `truncated`. */
   readonly nextOffset?: number;
-  /** CR-22 opaque continuation token, present ONLY when this page is truncated. */
+  /** Opaque continuation token, present ONLY when this page is truncated. */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
   readonly pageInfo?: PageInfo;

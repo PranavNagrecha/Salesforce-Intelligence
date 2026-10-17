@@ -1,5 +1,5 @@
 /**
- * The `sfi list-vaults` CLI subcommand (v3.1 R7).
+ * The `sfi list-vaults` CLI subcommand.
  *
  * Enumerates every registered vault under the co-resident root and
  * surfaces the per-vault freshness metadata read from each vault's
@@ -7,9 +7,9 @@
  * freshness fields render as `(never refreshed)` — never as a
  * fabricated timestamp.
  *
- * Per PLAN-v3.1 §5, this is the surface the
+ * This is the surface the
  * `architect-cross-org-compare` skill points users at when they ask
- * "what orgs do you know about?". Per §12, it is CLI-only.
+ * "what orgs do you know about?". It is CLI-only.
  *
  * The command is a thin shim around
  * `listRegisteredVaults` in `@sf-intelligence/vault`; the registry

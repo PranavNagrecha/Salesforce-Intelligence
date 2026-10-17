@@ -1,11 +1,10 @@
 /**
  * Handler for the `sfi.datatransform_field_map` MCP tool.
  *
- * The third of five v3.2 OmniStudio composition tools (per PLAN-v3.2
- * §4): given an `OmniDataTransform:` canonical id, return the
+ * The third of five OmniStudio composition tools: given an `OmniDataTransform:` canonical id, return the
  * DataRaptor's source-object → target-object field mapping table plus
  * the operation-type metadata (Extract / Load / Transform). The
- * v3.2-R2c extractor (journal 0167) emits the OmniDataTransform node
+ * extractor (journal 0167) emits the OmniDataTransform node
  * and per-DataRaptor `references` edges to the SObjects each field
  * mapping touches; this tool composes those signals plus a fresh re-
  * parse of the source XML into a readable per-row mapping table.
@@ -15,7 +14,7 @@
  *      `getNodeById`. Refuse with `invalid-query` when the prefix is
  *      wrong, `component-not-found` when the id is unknown.
  *   2. Re-read the source XML from `node.sourcePath` (the same file the
- *      v3.2-R2c extractor parsed at refresh time). The mapping rows
+ *      extractor parsed at refresh time). The mapping rows
  *      themselves are NOT stored on the node — the extractor surfaces
  *      only top-level metadata + edges, so the per-row table comes
  *      directly from the XML. Failing to read the file surfaces as a
@@ -47,7 +46,7 @@
  * Operation-type fallback: `OmniDataTransform.md` declares
  * `<interfaceClass>` as the canonical Extract / Load / Transform
  * discriminant, but the live Globex org observed in journal 0167
- * uses `<type>` instead. The v3.2-R2c extractor surfaces both under
+ * uses `<type>` instead. The extractor surfaces both under
  * `properties.interfaceClass` (with `<type>` fallback) AND
  * `properties.operationType` (raw `<type>` element). This tool
  * surfaces both verbatim so callers can disambiguate org vintages
@@ -116,8 +115,8 @@ export type DatatransformFieldMapInput = z.infer<
 
 /**
  * One field-mapping row projected from a single
- * `<omniDataTransformItem>` element. The shape mirrors PLAN-v3.2 §4
- * with the addition of per-row `confidence` (the v3.2 honesty axis).
+ * `<omniDataTransformItem>` element. The shape mirrors the extractor's row
+ * with the addition of per-row `confidence` (the honesty axis).
  */
 export interface FieldMapping {
   /** Mapping row name (e.g., `MapId`). Designer-controlled. */
@@ -138,7 +137,7 @@ export interface FieldMapping {
    * uses the colon-separated `{ObjectAlias}:{fieldPath}` convention
    * (the alias is designer-controlled and may not resolve to a real
    * SObject API name). Mirrors the edge-level confidence split the
-   * v3.2-R2c extractor emits per journal 0167.
+   * extractor emits per journal 0167.
    */
   readonly confidence: ConfidenceLevel;
   /**
@@ -153,7 +152,7 @@ export interface FieldMapping {
 
 /**
  * Top-level metadata block. Fields mirror the OmniDataTransform-node
- * properties the v3.2-R2c extractor emits; surfaced together here so
+ * properties the extractor emits; surfaced together here so
  * callers do not need a second `sfi.get_component` round-trip.
  */
 export interface FieldMapMetadata {
@@ -215,16 +214,16 @@ export interface DatatransformFieldMapOutput {
   readonly outputSampleJson: string | null;
   /**
    * Honesty disclosures surfaced verbatim. Always populated. The
-   * Native-vs-Vlocity disclosure surfaces on every response per
-   * PLAN-v3.2 §4 honesty axis 1; the per-row-confidence disclosure
-   * surfaces verbatim per the v3.2-R2c extractor's
+   * Native-vs-Vlocity disclosure surfaces on every response as
+   * honesty axis 1; the per-row-confidence disclosure
+   * surfaces verbatim per the extractor's
    * `declared`/`parsed` axis.
    */
   readonly boundaries: readonly string[];
 }
 
 /**
- * The per-row confidence disclosure. Surfaces the v3.2-R2c
+ * The per-row confidence disclosure. Surfaces the
  * `declared`/`parsed` axis so consumers know what a mapping's
  * confidence tag means without re-reading OmniDataTransform.md.
  */
@@ -269,7 +268,7 @@ const coerceBoolean = (value: unknown): boolean => {
 };
 
 /**
- * Classify a row's confidence. The v3.2-R2c extractor emits
+ * Classify a row's confidence. The extractor emits
  * `parsed`-confidence reference edges for colon-prefix aliases (per
  * OmniDataTransform.md §"Field-name path conventions"); this tool's
  * per-row classification mirrors that split. A row whose input OR
@@ -309,7 +308,7 @@ const classifyRowConfidence = (
  *
  * The `json` / `JSON` / `Formula` / `formula` placeholders are filtered
  * because they don't correspond to real SObjects; this mirrors the
- * `NON_SOBJECT_OBJECT_NAMES` set in the v3.2-R2c extractor so the two
+ * `NON_SOBJECT_OBJECT_NAMES` set in the extractor so the two
  * surfaces stay consistent.
  */
 const pickTargetObject = (
@@ -366,7 +365,7 @@ const readDataTransformXml = async (
   }
 
   // Local trusted disk content; XXE not a concern. Cap matches the
-  // v3.2-R2c extractor (`processEntities.maxTotalExpansions: 10000`)
+  // extractor (`processEntities.maxTotalExpansions: 10000`)
   // so the two surfaces accept the same inputs.
   const parser = new XMLParser({
     ignoreAttributes: true,
@@ -411,7 +410,7 @@ const readDataTransformDataPack = async (
 
 /**
  * Project the parsed XML root into the metadata block. Mirrors the
- * v3.2-R2c extractor's property mapping so consumers see the same
+ * extractor's property mapping so consumers see the same
  * values whether they hit this tool or `sfi.get_component`.
  */
 const buildMetadata = (root: Record<string, unknown>): FieldMapMetadata => {
@@ -486,7 +485,7 @@ const buildMappings = (
 /**
  * Build the boundaries[] disclosure array. Both disclosures surface
  * unconditionally on every response — the Native-vs-Vlocity disclosure
- * is the v3.2-wide honesty anchor (Q180), and the per-row confidence
+ * is the tier-wide honesty anchor, and the per-row confidence
  * disclosure documents what the `confidence` tag on each mapping means
  * without re-reading OmniDataTransform.md.
  */
@@ -548,7 +547,7 @@ export const datatransformFieldMapHandler = async (
   }
 
   // Re-read the source XML. The mapping rows are NOT stored on the
-  // node — the v3.2-R2c extractor surfaces only top-level metadata +
+  // node — the extractor surfaces only top-level metadata +
   // references edges, so per-row data comes directly from the file.
   const sourceAbs = resolveVaultSourcePath(ctx.vaultRoot, node.sourcePath);
   const xmlResult = isDataPackSourcePath(node.sourcePath)

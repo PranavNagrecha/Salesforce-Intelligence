@@ -332,7 +332,7 @@ describe('emptyQueuesAndGroupsHandler', () => {
   });
 });
 
-describe('emptyQueuesAndGroupsHandler — CR-22 cursor', () => {
+describe('emptyQueuesAndGroupsHandler — cursor', () => {
   it('whole-fits omits cursor block + scanTruncated (byte-identical golden)', async () => {
     const r = await emptyQueuesAndGroupsHandler(ctx, {});
     expect(r.ok).toBe(true);
@@ -631,7 +631,7 @@ describe('coverage-aware-zero — Queue/Group not retrieved', () => {
 // R6 (BRIEF 084 / scan-tail-unreachable) — a single un-offset `listNodesByType`
 // page caps the SCAN axis (not just the OUTPUT axis) at 500 nodes per type. A
 // Queue/Group sorted past row 500 in id-ASC order is never fetched at all, so
-// no cursor can ever reach it — distinct from CR-22 output pagination, which
+// no cursor can ever reach it — distinct from the output pagination, which
 // only pages a list that was already built from the capped window. 500 filler
 // Queues (non-empty, so they'd never surface as "empty" even if scanned) sort
 // FIRST; one target Queue sorts LAST (row 501) and is genuinely empty.

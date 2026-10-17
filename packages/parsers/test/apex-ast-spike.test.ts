@@ -3,7 +3,7 @@
 import { parseApexSpike } from '../src/apex-ast-spike.js';
 
 /**
- * P13-AST-spike — parse-or-fallback on modern Apex syntax. The spike's
+ * parse-or-fallback on modern Apex syntax. The spike's
  * contract: clean parse on current language features, ok:false (never a
  * throw) on garbage, so a per-file scanner fallback is always possible.
  */
@@ -87,7 +87,7 @@ trigger AccountT on Account (before insert) {
   });
 });
 
-describe('unresolved dot-chain roots never emit localvar-shaped targets (P14-PHANTOM-edges)', () => {
+describe('unresolved dot-chain roots never emit localvar-shaped targets', () => {
   it('emits NO reads/writes keyed by an undeclared variable name', async () => {
     const { extractApexAstEdges } = await import('../src/apex-ast-edges.js');
     // `mystery` is never declared — the resolver cannot type it, so neither
@@ -110,7 +110,7 @@ describe('unresolved dot-chain roots never emit localvar-shaped targets (P14-PHA
   });
 });
 
-describe('innerTypes surface (P14-USAGE-scanner-fp-downgrade)', () => {
+describe('innerTypes surface', () => {
   it('returns the inner class names so the import dedupe can drop typed-receiver scanner FPs', async () => {
     const { extractApexAstEdges } = await import('../src/apex-ast-edges.js');
     const src = [
@@ -126,14 +126,14 @@ describe('innerTypes surface (P14-USAGE-scanner-fp-downgrade)', () => {
 });
 
 /**
- * CR-06 (H5/H5b) — SOQL scope-aware attribution. The buggy `soqlFrom` picked
+ * SOQL scope-aware attribution. The buggy `soqlFrom` picked
  * the textually-first FROM (a child-relationship name) as the primary object
  * and swept every FieldName under it, minting phantom parsed-confidence edges
  * (Contacts.Email, mis-keyed semi-join fields) that beat the correct regex
  * edges in dedup. Each field must attribute to its NEAREST query scope's FROM
  * object; child-subquery and TYPEOF fields drop honestly.
  */
-describe('SOQL subquery scope attribution (CR-06 / H5)', () => {
+describe('SOQL subquery scope attribution', () => {
   let extract: typeof import('../src/apex-ast-edges.js').extractApexAstEdges;
   beforeAll(async () => {
     ({ extractApexAstEdges: extract } = await import('../src/apex-ast-edges.js'));
@@ -273,13 +273,13 @@ describe('SOQL subquery scope attribution (CR-06 / H5)', () => {
 });
 
 /**
- * CR-CAP-06 — callSites: the enclosing CALLER method NAME per cross-class /
+ * callSites: the enclosing CALLER method NAME per cross-class /
  * self call-site. ADDITIVE field (callSites?), AST-path only. Attribution is
  * by the call-site's nearest enclosing MethodDeclaration; a call with NO
  * enclosing method (field/static initializer) maps to '' and is dropped
  * downstream. Original case is preserved (display names).
  */
-describe('callSites enclosing-method attribution (CR-CAP-06)', () => {
+describe('callSites enclosing-method attribution', () => {
   let extract: typeof import('../src/apex-ast-edges.js').extractApexAstEdges;
   beforeAll(async () => {
     ({ extractApexAstEdges: extract } = await import('../src/apex-ast-edges.js'));

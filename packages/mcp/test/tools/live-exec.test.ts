@@ -1,7 +1,7 @@
 /// <reference types="vitest/globals" />
 
 /**
- * RV3 / CR-01 follow-up / H8: the shared live-plane `nodeExecFile` leaf must
+ * RV3 / follow-up / H8: the shared live-plane `nodeExecFile` leaf must
  * carry a per-call timeout + SIGTERM so a hung `sf` shellout (e.g. an
  * interactive auth re-prompt waiting on stdin) cannot wedge refresh /
  * stale-sweep / the ~25 live-plane handlers that default their exec to it.
@@ -36,7 +36,7 @@ describe('nodeExecFile — un-timed live-plane sf exec backstop (RV3 / H8)', () 
     expect(Date.now() - start).toBeLessThan(5000);
   });
 
-  // CR-P3: a child that SWALLOWS SIGTERM must still be force-killed (SIGKILL)
+  // A child that SWALLOWS SIGTERM must still be force-killed (SIGKILL)
   // after the grace, so a wedged `sf` subtree cannot outlive the timeout. The
   // native execFile timeout sends ONE SIGTERM and never escalates, so such a
   // child runs forever and the promise never settles.

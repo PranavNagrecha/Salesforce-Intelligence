@@ -568,7 +568,7 @@ describe('fieldAccessAuditHandler', () => {
     rmSync(localDir, { recursive: true, force: true });
   });
 
-  // --- update axis: who can UPDATE this field (P11-ACCESS-field-update) ---
+  // --- update axis: who can UPDATE this field ---
 
   it('canUpdate = grantors with FLS-edit AND object-edit; excludes FLS-edit-only', async () => {
     const result = await fieldAccessAuditHandler(ctx, { fieldId: STATUS_FIELD });

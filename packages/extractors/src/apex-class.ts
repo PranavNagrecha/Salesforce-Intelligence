@@ -83,7 +83,7 @@ interface ApexMeta {
 
 /**
  * Parse the `<ApexClass>` companion metadata XML and return the values
- * required by the v0.1 node. Validates the root element name and the
+ * required by the node. Validates the root element name and the
  * required child elements per the vendored `ApexClass.md` spec.
  */
 const parseMetaXml = (
@@ -193,7 +193,7 @@ const readClsSource = async (
  * `status` from the metadata XML.
  *
  * Returns one `Node` of type `'ApexClass'` and zero-to-many edges
- * (`readsFrom`, `writesTo`, `callsApex`) derived from the v0.3 heuristic
+ * (`readsFrom`, `writesTo`, `callsApex`) derived from the heuristic
  * Apex scanner (see `apex-edges.ts` and `ApexSemantics.md`). All scanner
  * edges carry `confidence: 'heuristic'`. Scanner errors surface as
  * `node.properties.apexScannerWarnings: string[]` (omitted entirely on
@@ -254,7 +254,7 @@ export const extractApexClass = async (
   const ownerId = `${ROOT_ELEMENT}:${apiName}`;
   const scannerResult = buildApexScannerEdges(source, ownerId);
 
-  // v1.5 async / API surface classifier booleans. All are
+  // Async / API surface classifier booleans. All are
   // always-present (default `false`) so consumers can filter by
   // property without the renderer having to thread an "absent vs
   // false" distinction. The "isFuture / hasFutureMethod" naming
@@ -262,7 +262,7 @@ export const extractApexClass = async (
   // patterns" — `isFuture` reads "class is a future-method holder"
   // and `hasFutureMethod` reads symmetrically with the
   // `hasAuraEnabledMethod` / `hasInvocableMethod` family; both names
-  // are populated identically so the v1.5
+  // are populated identically so the
   // `sfi.list_components(propertyFilter=...)` enum can route either
   // name to the same underlying flag without two boolean fields with
   // diverging values.
@@ -281,7 +281,7 @@ export const extractApexClass = async (
   const hasAuraEnabledMethod = methodAnnotationsSet.has('AuraEnabled');
   const isRestResource = header.restUrlMapping !== null;
 
-  // v1.5 declared edges: listensTo (Triggerable<...__e>), exposes
+  // Declared edges: listensTo (Triggerable<...__e>), exposes
   // (REST/Aura/Invocable synthetic ids), dispatchesAsync (Queueable /
   // Batchable / Schedulable inline-constructor dispatches). The
   // declared edges merge with the scanner-derived heuristic edges and
@@ -318,10 +318,10 @@ export const extractApexClass = async (
   );
   const edges = mergeAndSortEdges([...declaredEdges, ...scannerEdges]);
 
-  // v2.1: code-quality recognizer family runs over the raw source.
+  // code-quality recognizer family runs over the raw source.
   // The output is always-present (empty array on the clean path) so
   // consumers can filter by `qualityIssues.length > 0` without
-  // threading an absent-vs-empty distinction. This mirrors v1.5's
+  // threading an absent-vs-empty distinction. This mirrors the
   // boolean classifier discipline (`isQueueable` etc.).
   const qualityIssues = detectCodeQualityIssues(source, {
     apiVersion: meta.apiVersion,
@@ -333,7 +333,7 @@ export const extractApexClass = async (
   // free of an empty-array prop; include it (non-empty) on scanner
   // error. The error path still emits the Node and any declared edges,
   // matching `flow.ts`'s precedent for `flowExtractionWarnings`.
-  // v1.5 properties (isQueueable etc.) are unconditionally present;
+  // Properties (isQueueable etc.) are unconditionally present;
   // restUrlMapping is included only when non-null so the absent case
   // doesn't clutter golden output with `null` slots.
   const baseProperties: Record<string, unknown> = {

@@ -154,9 +154,9 @@ describe('extractEmailTemplate', () => {
       // inline body; instead, `<contentVisualforcePage>` names the VF
       // page that holds the body. `bodyLength` is always 0 for this
       // variant, even when there is incidental `<content>` text.
-      // v3.0: visualforce templates skip the body merge scan since
+      // visualforce templates skip the body merge scan since
       // their merge tokens live in the referenced VF page (covered by
-      // the v1.4 visualforce-page extractor).
+      // the visualforce-page extractor).
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <EmailTemplate xmlns="http://soap.sforce.com/2006/04/metadata">
   <name>VF Wrapper</name>
@@ -283,7 +283,7 @@ describe('extractEmailTemplate', () => {
       // Minimal valid EmailTemplate: only the four required elements
       // plus content. Optional `description`, `encoding`, `letterhead`,
       // `style`, `uiType`, `contentVisualforcePage` all default to null.
-      // v3.0 additive defaults: `mergeFields: []`, `referencedObjects: []`,
+      // Additive defaults: `mergeFields: []`, `referencedObjects: []`,
       // `richTemplateSyntaxDetected: false` when the body holds no
       // merge envelopes.
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -329,9 +329,9 @@ describe('extractEmailTemplate', () => {
     });
   });
 
-  describe('v3.0 body merge-token extension', () => {
+  describe('body merge-token extension', () => {
     it('emits one references edge per distinct merged field for a basic body', async () => {
-      // Basic single-field merge: the Welcome variant of the v3.0 R2
+      // Basic single-field merge: the Welcome variant of the
       // emitter contract test. One `{!Account.Customer_Segment__c}`
       // token in the body produces one `references` edge with
       // `confidence: 'parsed'` and `role: 'body-merge'`.
@@ -393,7 +393,7 @@ describe('extractEmailTemplate', () => {
       // Conditional merges (`{!IF(...)}`) capture the field references
       // inside the function call but flip the rich-syntax boolean so
       // the renderer can surface the "firing logic NOT captured"
-      // disclosure per PLAN-v3.0 §4 honesty axis.
+      // disclosure.
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <EmailTemplate xmlns="http://soap.sforce.com/2006/04/metadata">
   <name>Marketing Nurture</name>

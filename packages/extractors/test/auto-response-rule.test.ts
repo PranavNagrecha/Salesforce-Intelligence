@@ -100,7 +100,7 @@ describe('extractAutoResponseRule', () => {
           active: false,
           ruleEntryCount: 0,
           templateCount: 0,
-          // v2.0a — empty mirror when the rule has no condition surface.
+          // empty mirror when the rule has no condition surface.
           conditions: [],
         });
         expect(result.value.edges).toHaveLength(1);
@@ -140,7 +140,7 @@ describe('extractAutoResponseRule', () => {
           active: true,
           ruleEntryCount: 2,
           templateCount: 1,
-          // v2.0a — neither entry carried criteria/formula, so the
+          // neither entry carried criteria/formula, so the
           // condition mirror is empty.
           conditions: [],
         });
@@ -158,7 +158,7 @@ describe('extractAutoResponseRule', () => {
     });
   });
 
-  describe('v2.0a — ConditionalContext extraction', () => {
+  describe('ConditionalContext extraction', () => {
     it('emits one ConditionalContext per <ruleEntry> carrying criteria', async () => {
       const xml = `<?xml version="1.0"?>
 <AutoResponseRules xmlns="http://soap.sforce.com/2006/04/metadata">

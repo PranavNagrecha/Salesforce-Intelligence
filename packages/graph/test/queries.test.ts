@@ -402,7 +402,7 @@ describe('listEdges', () => {
   });
 });
 
-describe('listEdgesForNodes (CR-17 batched listEdges)', () => {
+describe('listEdgesForNodes (batched listEdges)', () => {
   const sortEdges = (edges: readonly Edge[]): Edge[] =>
     [...edges].sort((a, b) =>
       a.toId !== b.toId
@@ -827,7 +827,7 @@ describe('getSubgraph caps + unresolved-edge filtering', () => {
     expect(r.value).toBeGreaterThan(500);
   });
 
-  it('countNodesByType honors a parentId narrow (CR-22 B3 filtered total)', async () => {
+  it('countNodesByType honors a parentId narrow (filtered total)', async () => {
     // All LEAF_COUNT CustomFields are children of CustomObject:Hub; a parent
     // narrow must return that exact subset total (a true per-parent total for a
     // filtered paginated enumeration), and a non-existent parent returns 0.
@@ -945,10 +945,10 @@ describe('getSubgraph caps + unresolved-edge filtering', () => {
     expect(r.value.edges.map((e) => e.toId)).toContain('ApexClass:Phantom');
   });
 
-  it('synthesizes a stub node for the phantom endpoint so no edge dangles (CR-13)', async () => {
-    // CR-13: a returned edge must never point at a node absent from the
+  it('synthesizes a stub node for the phantom endpoint so no edge dangles', async () => {
+    // a returned edge must never point at a node absent from the
     // returned node set. The phantom endpoint (ApexClass:Phantom) has no
-    // `nodes` row, so before CR-13 the includeUnresolved edge dangled. The fix
+    // `nodes` row, so previously the includeUnresolved edge dangled. The fix
     // synthesizes a stub boundary node for it so the slice is self-contained.
     const r = await getSubgraph(capStore, 'ApexClass:Caller', 1, {
       includeUnresolved: true,

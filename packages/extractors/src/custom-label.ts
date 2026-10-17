@@ -182,9 +182,9 @@ const buildLabelNode = (
  * comma-separated string per Salesforce's serialization) in its
  * `properties` map.
  *
- * Zero edges are produced in v1.2. Reference edges from Apex / Aura /
+ * Zero edges are produced. Reference edges from Apex / Aura /
  * LWC / Visualforce / Flow callers into the labels they invoke are
- * deferred to v1.4.
+ * deferred.
  *
  * Error cases (per vendored `CustomLabel.md`):
  *   - `file-not-found` if the file is missing

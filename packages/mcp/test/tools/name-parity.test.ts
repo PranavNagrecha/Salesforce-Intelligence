@@ -18,7 +18,7 @@ import { advertisedTools, V01_TOOLS } from '../../src/tools/index.js';
 // the hidden contract explicitly (dispatchable but not advertised).
 
 const here = dirname(fileURLToPath(import.meta.url));
-// R7-F2: dispatch switch now lives in tool-dispatch.ts (split from index.ts).
+// Dispatch switch now lives in tool-dispatch.ts (split from index.ts).
 const indexSource = readFileSync(
   join(here, '..', '..', 'src', 'tools', 'tool-dispatch.ts'),
   'utf8',

@@ -1,5 +1,5 @@
 /**
- * P12-FIRSTRUN-refresh-preflight — set expectations before a full refresh.
+ * Set expectations before a full refresh.
  *
  * A first user pointing `sfi refresh` at a large org gets a long `sf project
  * retrieve` and a big tree with no warning. This assesses the expected size

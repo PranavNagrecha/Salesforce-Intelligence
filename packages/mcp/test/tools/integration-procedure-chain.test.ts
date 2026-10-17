@@ -454,7 +454,7 @@ describe('integrationProcedureChainHandler', () => {
     expect(boundaries[1]).toContain('runIntegrationService');
     expect(boundaries[1]).toContain('a key built at runtime is not seen');
 
-    // OmniProcessElement record-level boundary (Q179 anchor).
+    // OmniProcessElement record-level boundary.
     expect(boundaries[2]).toContain('OmniProcessElement');
     expect(boundaries[2]).toContain('record-level data');
 

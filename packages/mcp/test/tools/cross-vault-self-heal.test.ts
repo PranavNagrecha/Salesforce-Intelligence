@@ -1,7 +1,7 @@
 /// <reference types="vitest/globals" />
 
 /**
- * CR-19 self-heal guard (amendment option (a)): the READ-ONLY cross-vault open
+ * Self-heal guard (amendment option (a)): the READ-ONLY cross-vault open
  * path (`openVaultReadOnly`) must detect schema-version drift and re-open the
  * vault READ-WRITE to run migrations, then continue — so an additive migration
  * (a new table that leaves nodes/edges queryable) still reaches RO readers
@@ -39,8 +39,8 @@ let ctxStore: GraphStore;
 let ctx: Context;
 
 /**
- * Write an OLD-schema vault to disk: base v0.1 tables and a seed row, then DROP
- * the schema_version table so the file looks like a pre-CR-19 vault (stored
+ * Write an OLD-schema vault to disk: base tables and a seed row, then DROP
+ * the schema_version table so the file looks like a legacy vault (stored
  * version reads as 0). mcp does not depend on @duckdb/node-api directly, so we
  * build via the graph package's openGraph (which creates the version table) and
  * then drop it, rather than driving DuckDB ourselves.
@@ -80,7 +80,7 @@ afterAll(async () => {
   await rm(rootDir, { recursive: true, force: true });
 });
 
-describe('openVaultReadOnly self-heals a schema-version-stale vault (CR-19)', () => {
+describe('openVaultReadOnly self-heals a schema-version-stale vault', () => {
   it('migrates the old vault forward and returns a usable handle', async () => {
     const oldRoot = join(rootDir, 'oldVault');
     const opened = await openVaultReadOnly(ctx, oldRoot);

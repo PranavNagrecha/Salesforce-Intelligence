@@ -17,7 +17,7 @@ import {
 } from '../src/commands/vault-git.js';
 
 /**
- * P13-GITHIST-enable — vault git history: enable (init + .gitignore +
+ * Vault git history: enable (init + .gitignore +
  * initial commit), refresh auto-commit on sourceTreeHashChanged, the
  * NAMED hash-stability test (.git ignored by the source-tree walk), and
  * the zero-change guarantee for non-enabled vaults.
@@ -99,7 +99,7 @@ describe('NAMED TEST: sourceTreeHash walk ignores .git', () => {
   });
 });
 
-describe('refresh auto-commit (P13-GITHIST-enable)', () => {
+describe('refresh auto-commit', () => {
   it('commits on sourceTreeHashChanged with a delta message; no commit when unchanged; resilient', async () => {
     await enableVaultGit(vaultRoot);
     const r1 = await runRefresh({ cwd, noPull: true });

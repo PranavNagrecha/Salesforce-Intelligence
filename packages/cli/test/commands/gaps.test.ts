@@ -54,7 +54,7 @@ describe('parseGapsSince', () => {
   });
 });
 
-describe('summarizeRouteGaps + buildGapsReport wiring (R8-GAPLOG-SURFACE)', () => {
+describe('summarizeRouteGaps + buildGapsReport wiring', () => {
   it('reuses summarizeRouteGaps for category counts and honors --since / --top', async () => {
     const dir = await tmp();
     try {

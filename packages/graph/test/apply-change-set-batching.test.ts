@@ -16,7 +16,7 @@ import { IMPORT_BATCH_SIZE, importExtractionResults } from '../src/import.js';
 import { initSchema } from '../src/schema.js';
 import type { GraphStore } from '../src/store.js';
 
-// Part 1 of CR-20: the four per-row write loops in applyChangeSet are batched
+// Part 1 of the write batching: the four per-row write loops in applyChangeSet are batched
 // into multi-row VALUES statements inside the SAME single transaction. These
 // tests pin (a) the chunking shape (one statement per IMPORT_BATCH_SIZE slice),
 // (b) the all-or-nothing atomicity is preserved ACROSS chunks (a mid-apply

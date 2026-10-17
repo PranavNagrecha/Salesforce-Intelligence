@@ -362,13 +362,13 @@ describe('listViewSharingHandler — sharedTo/name filter (LIST-VIEW-SHARING-SIL
 });
 
 // =============================================================================
-// CR-22 — output continuation cursor + honest scan disclosure. Object mode pages
+// output continuation cursor + honest scan disclosure. Object mode pages
 // the list-view rows via an opaque cursor (same-axis: the output offset IS the
-// SQL scan offset). The pre-CR-22 SILENT drop past the scan walk is now an
+// SQL scan offset). The pre-paging SILENT drop past the scan walk is now an
 // honest `scanTruncated` (only for a pathological object past SCAN_MAX, so not
 // reachable in a fixture). A whole-fits call is byte-identical.
 // =============================================================================
-describe('listViewSharingHandler — output cursor (CR-22)', () => {
+describe('listViewSharingHandler — output cursor', () => {
   it('a whole-fits call omits nextCursor/pageInfo/scanTruncated (byte-identical)', async () => {
     const r = await listViewSharingHandler(ctx, { componentId: 'CustomObject:Account' });
     expect(r.ok).toBe(true); if (!r.ok) return;

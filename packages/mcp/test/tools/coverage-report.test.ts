@@ -116,7 +116,7 @@ describe('coverageReportHandler', () => {
     expect(result.value.data.summary.status).toBe('complete');
   });
 
-  it('surfaces staged-build pending rows in their own bucket, not as partial (P13-STAGED-tiers)', async () => {
+  it('surfaces staged-build pending rows in their own bucket, not as partial', async () => {
     const stagedCtx: Context = {
       ...ctx,
       manifest: {
@@ -161,7 +161,7 @@ describe('coverageReportHandler', () => {
   // non-zero, intentionally-capped result (the real-vault regression: Report
   // retrieved=388, Dashboard retrieved=76, both `pending: true`) must read
   // `capped`, not `pending` — `pending` is reserved for a family this refresh
-  // never touched at all (P13-STAGED-tiers). The caveat must keep firing
+  // never touched at all. The caveat must keep firing
   // (missingCoverage still names it) — only the REASON is now legible.
   it('surfaces capped-but-retrieved rows in their own bucket, distinct from pending/partial', async () => {
     const cappedCtx: Context = {
@@ -235,7 +235,7 @@ describe('coverageReportHandler', () => {
     expect(data.trust.completeness.status).toBe('partial');
   });
 
-  it('CR-P3-3: a retrieveConfirmed-empty type lands in covered (not partial) and the summary agrees (lockstep)', async () => {
+  it('a retrieveConfirmed-empty type lands in covered (not partial) and the summary agrees (lockstep)', async () => {
     // A confirmed-clean empty retrieve (describe confirmed the org supports the
     // type AND the clean pull returned zero) is COMPLETE. partitionCoverage and
     // summarizeCoverage must stay in lockstep: the confirmed-empty type appears
@@ -266,7 +266,7 @@ describe('coverageReportHandler', () => {
   });
 
   // WORKFLOWRULE-RETRIEVED-ZERO — RM-A14 depends on the WorkflowRule plane.
-  // Pre-CR-P3-3 vaults (and describe-blind / --no-pull rebuilds) carry the
+  // Legacy vaults (and describe-blind / --no-pull rebuilds) carry the
   // byte-identical {requested:true, retrieved:0} row WITHOUT retrieveConfirmed;
   // coverage_report must classify that as partial so hosts never read "0 rules"
   // as proven absence. A post-refresh confirmed-empty org (Flow-only, no legacy
@@ -317,7 +317,7 @@ describe('coverageReportHandler', () => {
     });
   });
 
-  describe('CR-CAP-20 — topUncoveredFamilies ranking', () => {
+  describe('topUncoveredFamilies ranking', () => {
     it('ranks skipped families desc, caps at 10, labels modeled vs raw, and extends the disclosure', async () => {
       // Build a manifest with >10 skipped dirs to exercise the cap, plus a
       // SKIPPED_DIR_COVERAGE-mapped dir (compactLayouts -> CompactLayout)
@@ -544,7 +544,7 @@ describe('coverageReportHandler — shared container returned without the member
   // missing — and no type may ever sit in summary.coveredTypes while also
   // appearing in one of the non-covered buckets. Both directions are swept
   // here over every reachable CoverageEntry shape (not just the two rows the
-  // CR-P3-3 fixture above exercises) so a future edit to one predicate that
+  // fixture above exercises) so a future edit to one predicate that
   // is not mirrored in the other fails loudly instead of silently dropping
   // or double-counting a type.
   describe('R6: partitionCoverage stays in lockstep with summarizeCoverage over every entry shape', () => {

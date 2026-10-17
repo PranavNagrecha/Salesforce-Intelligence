@@ -115,7 +115,7 @@ describe('extractStaticResource', () => {
       }
     });
 
-    it('always reports fileSize as null in v1.2 (binary not read)', async () => {
+    it('always reports fileSize as null (binary not read)', async () => {
       const xml = `<?xml version="1.0"?>
 <StaticResource xmlns="http://soap.sforce.com/2006/04/metadata">
   <cacheControl>Public</cacheControl>

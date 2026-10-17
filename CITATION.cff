@@ -14,7 +14,7 @@ repository-code: "https://github.com/PranavNagrecha/Salesforce-Intelligence"
 url: "https://sfi.auditforce.cloud"
 license: MIT
 license-url: "https://github.com/PranavNagrecha/Salesforce-Intelligence/blob/main/LICENSE"
-version: 0.6.0
+version: 0.7.0
 date-released: "2026-10-16"
 keywords:
   - salesforce

@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-10-16T17:43:44.676Z",
-  "version": "0.6.0",
+  "generatedAt": "2026-10-17T16:46:21.862Z",
+  "version": "0.7.0",
   "toolCount": 231,
   "coreToolCount": 16,
   "listedToolCount": 226,
@@ -21,12 +21,12 @@
       {
         "name": "extractors",
         "files": 102,
-        "cases": 1313
+        "cases": 1320
       },
       {
         "name": "cli",
-        "files": 55,
-        "cases": 590
+        "files": 56,
+        "cases": 591
       },
       {
         "name": "graph",
@@ -64,8 +64,8 @@
         "cases": 86
       }
     ],
-    "totalCases": 11259,
-    "totalFiles": 602,
+    "totalCases": 11267,
+    "totalFiles": 603,
     "packageCount": 10,
     "approx": 11200
   },
@@ -99,13 +99,13 @@
     {
       "name": "extractors",
       "files": 102,
-      "cases": 1313,
+      "cases": 1320,
       "description": "Metadata parsing for every Salesforce component type"
     },
     {
       "name": "cli",
-      "files": 55,
-      "cases": 590,
+      "files": 56,
+      "cases": 591,
       "description": "The sfi command-line tool"
     },
     {
@@ -150,7 +150,5 @@
       "cases": 86,
       "description": "Optional Tooling-API enrichment"
     }
-  ],
-  "newInVersion": "0.5.0",
-  "demoRecordedWith": "0.5.0"
+  ]
 }

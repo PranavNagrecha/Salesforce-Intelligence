@@ -166,7 +166,7 @@ const diamondSeed: ExtractionResult = {
 };
 
 // =============================================================================
-// Seed 6 (CR-CAP-09): a caller with NO declared dispatchesAsync edge — it only
+// Seed 6: a caller with NO declared dispatchesAsync edge — it only
 // has a `callsApex` edge to a class that carries `hasFutureMethod: true`. The
 // graph-build-time mint must synthesize a class-granular `dispatchesAsync` edge
 // so async_chain_depth surfaces depth 1 instead of an empty chain.
@@ -512,7 +512,7 @@ describe('asyncChainDepthHandler', () => {
     }
   });
 
-  it('returns an honest disclosure mentioning the v0.3 scanner boundaries', async () => {
+  it('returns an honest disclosure mentioning the scanner boundaries', async () => {
     const result = await asyncChainDepthHandler(ctx, {
       rootApexClassId: LEAF_NODE,
     });
@@ -522,7 +522,7 @@ describe('asyncChainDepthHandler', () => {
     expect(result.value.data.disclosure).toContain('10 hops');
   });
 
-  it('CR-CAP-09: surfaces a minted class-granular @future dispatch as depth 1', async () => {
+  it('surfaces a minted class-granular @future dispatch as depth 1', async () => {
     // FAIL-before: the caller has NO declared dispatchesAsync edge, only a
     // callsApex to a @future-holding class — without the mint, maxDepth is 0
     // and chains is empty. PASS-after: the mint synthesizes the edge.
@@ -538,7 +538,7 @@ describe('asyncChainDepthHandler', () => {
     expect(data.chains[0]?.toId).toBe(FUTURE_TARGET);
   });
 
-  it('CR-CAP-09: the @future disclosure admits class-granular over-attribution', async () => {
+  it('the @future disclosure admits class-granular over-attribution', async () => {
     const result = await asyncChainDepthHandler(ctx, {
       rootApexClassId: FUTURE_CALLER,
     });

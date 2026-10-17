@@ -22,7 +22,7 @@ import { unassignedPermissionSetsHandler } from '../../src/tools/unassigned-perm
 import { whatIfMakeFieldRequiredHandler } from '../../src/tools/what-if-make-field-required.js';
 
 /**
- * P13-FACTS-consumers — the four tool consumers embed captured facts as a
+ * The four tool consumers embed captured facts as a
  * `data_snapshot` block with sampling disclosure and dual freshness, and the
  * ADVERSARIAL invariant holds: a destructive verdict NEVER moves toward safe
  * because of a sampled observation (the block is attached after the verdict
@@ -197,7 +197,7 @@ describe('org_overview dataShape', () => {
 });
 
 
-describe('PSA holder counts (P13-PSA-counts)', () => {
+describe('PSA holder counts', () => {
   it('unassigned_permission_sets serves explicit zero rows from a complete capture', async () => {
     const captured = new Date().toISOString();
     const w = await writeFacts(store, [

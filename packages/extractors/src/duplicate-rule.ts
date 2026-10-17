@@ -150,7 +150,7 @@ const resolveOperations = (
  * expression string. The vendored doc allows either a literal
  * `<filterExpression>` child or a serialized criteria block; either way
  * the value is preserved verbatim, untokenized — field-level edges from
- * the filter are v1.4 work.
+ * the filter are later work.
  */
 const resolveFilterExpression = (rule: Record<string, unknown>): string | null => {
   const filterRaw = unwrapSingle(rule['duplicateRuleFilter']);

@@ -99,10 +99,10 @@ const validateRoot = (
  * the XML-namespace prefix `Network` but are otherwise unrelated. The
  * Salesforce admin UI calls these "Trusted IP Ranges"; the
  * conversational name is "trusted IPs." Experience Cloud Sites are a
- * separate `Network` ComponentType (out of v1.5 scope).
+ * separate `Network` ComponentType (out of scope).
  *
  * Returns one `Node` of type `'NetworkAccess'` and zero edges. The
- * v1.5 integration map surfaces these as stand-alone trust ranges
+ * integration map surfaces these as stand-alone trust ranges
  * under the `networkAccesses[]` summary array. The extractor does
  * NOT validate IP-address syntax or that `startAddress <= endAddress`
  * — Salesforce performs both checks at deploy time, and the offline

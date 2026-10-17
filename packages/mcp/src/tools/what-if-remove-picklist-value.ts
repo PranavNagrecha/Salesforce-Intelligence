@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.what_if_remove_picklist_value` MCP tool.
  *
- * v2.3 R2a — the "I'm dropping a value from this picklist — what
+ * The "I'm dropping a value from this picklist — what
  * breaks?" surface. Given a `CustomField:{Object}.{Field}` id (which
  * must be a Picklist or MultiselectPicklist) and a value to remove,
  * walks every incoming dependency edge and surfaces the structured
@@ -12,7 +12,7 @@
  *     these will fail to compile when the value is removed.
  *   - **Apex classes / triggers** with the value in their string-literal
  *     index AND an existing `readsFrom` / `writesTo` edge to the field
- *     (per the v0.3 scanner) — the conjunction narrows the recognition
+ *     the conjunction narrows the recognition
  *     to heuristic-confident matches.
  *   - **Flow / workflow conditions** — every ConditionalContext that tests
  *     the field, matched on its structured `conditionItems` (Flow and
@@ -32,7 +32,7 @@
  *
  * **Compatibility classification.** Always `breaking` when impacts
  * exist, `review` when no static references match (the value may still
- * be touched dynamically). v2.3's posture: a picklist-value removal is
+ * be touched dynamically). The posture: a picklist-value removal is
  * structurally significant by definition, but if no static references
  * exist the recommendation is to spot-check dynamic Apex before
  * applying.
@@ -183,7 +183,7 @@ const notCheckedBoundary = (value: string): string =>
 
 /**
  * The verbatim disclosure surfaced in every response. Encodes the
- * v2.0a / v0.3 boundary: Apex code recognition is limited to static
+ * boundary: Apex code recognition is limited to static
  * string literals; dynamic Apex and variable-based comparisons are invisible.
  */
 const DISCLOSURE =
@@ -258,7 +258,7 @@ const containsAnyNeedle = (
  *   - `formula`: ValidationRule errorConditionFormula, CustomField
  *     formula source.
  *   - `errorConditionFormula`: ValidationRule alternate key.
- *   - `stringLiterals`: v0.3 apex-scanner output (array of strings).
+ *   - `stringLiterals`: apex-scanner output (array of strings).
  *   - `criteria`: WorkflowRule / AssignmentRule criteria text.
  *
  * Returns every text value coerced to string; arrays are flattened.

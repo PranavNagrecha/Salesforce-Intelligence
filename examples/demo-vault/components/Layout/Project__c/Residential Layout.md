@@ -7,7 +7,13 @@ lastModifiedBy: null
 lastModifiedDate: null
 parentId: CustomObject:Project__c
 properties:
+  customButtons: []
   fieldCount: 12
+  relatedListFieldRefs:
+    - fields:
+        - Install_Date__c
+        - Panels_Installed__c
+      relatedListApiName: Installation__c.Project__c
   sectionCount: 2
   showInheritedColumns: false
   showSubmitAndAttach: false
@@ -24,7 +30,9 @@ type: Layout
 
 | Key | Value |
 | --- | --- |
+| customButtons | `` |
 | fieldCount | `12` |
+| relatedListFieldRefs | `[object Object]` |
 | sectionCount | `2` |
 | showInheritedColumns | `false` |
 | showSubmitAndAttach | `false` |
@@ -37,10 +45,12 @@ type: Layout
 | --- | --- | --- |
 | `CustomObject:Project__c` | declared | layout-extractor |
 
-### usedInLayout (outgoing, 12)
+### usedInLayout (outgoing, 14)
 
 | Target | Confidence | Producer |
 | --- | --- | --- |
+| `CustomField:Installation__c.Install_Date__c` | parsed | relationship-resolver |
+| `CustomField:Installation__c.Panels_Installed__c` | parsed | relationship-resolver |
 | `CustomField:Project__c.Account__c` | declared | layout-extractor |
 | `CustomField:Project__c.Contract_Value__c` | declared | layout-extractor |
 | `CustomField:Project__c.Expected_Completion__c` | declared | layout-extractor |

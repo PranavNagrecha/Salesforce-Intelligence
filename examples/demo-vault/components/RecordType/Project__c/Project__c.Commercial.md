@@ -13,6 +13,7 @@ properties:
   fullName: Commercial
   label: Commercial
   picklistFieldCount: 0
+  picklists: []
 sourcePath: source/main/default/objects/Project__c/recordTypes/Commercial.recordType-meta.xml
 type: RecordType
 ---
@@ -30,6 +31,7 @@ type: RecordType
 | businessProcess | `null` |
 | fullName | `Commercial` |
 | picklistFieldCount | `0` |
+| picklists | `` |
 
 ## Incident edges
 

@@ -469,7 +469,7 @@ describe('testCoverageGapsHandler — pagination + byte budget (B25)', () => {
     expect(d.nextOffset).toBe(d.gaps.length);
   });
 
-  // CR-22: continuation cursor on the truncated page; walk it to cover all gaps.
+  // Continuation cursor on the truncated page; walk it to cover all gaps.
   it('emits a nextCursor on the truncated page and walks every gap once via cursor', async () => {
     const seen = new Set<string>();
     let cursor: string | undefined;
@@ -509,7 +509,7 @@ describe('testCoverageGapsHandler — pagination + byte budget (B25)', () => {
     if (!replay.ok) expect(replay.error.kind).toBe('invalid-query');
   });
 
-  it('CR-22: in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
+  it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
     // The non-bulk small fixture (`ctx`) fits under the default limit.
     const r = await testCoverageGapsHandler(ctx, {});
     expect(r.ok).toBe(true);

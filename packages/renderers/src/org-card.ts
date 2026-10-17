@@ -1,5 +1,5 @@
 /**
- * Org-card renderer (P13-CARD-render) — the ≤16 KB orientation document an AI
+ * Org-card renderer — the ≤16 KB orientation document an AI
  * consumer loads BEFORE its first question. Rendered at refresh time into
  * `docs/org-card.md` (+ the same data as `meta/org-card.json`), beside the P9
  * onboarding handbook.
@@ -75,7 +75,7 @@ export interface OrgCardInput {
   readonly integrations: ReadonlyArray<readonly [string, number]>;
   readonly naming: readonly OrgCardNamingObservation[];
   /**
-   * Captured record-data shape (P13-FACTS-consumers), when the vault holds
+   * Captured record-data shape, when the vault holds
    * facts: approximate counts for the top objects + the capture stamp.
    * Graph-derived state (same vault → same values), so it may appear in the
    * deterministic body — unlike the render-time stamp.
@@ -86,7 +86,7 @@ export interface OrgCardInput {
   };
 }
 
-// Render a table row. String cells are made table-safe (CR-16c): newlines
+// Render a table row. String cells are made table-safe: newlines
 // collapsed to a space and pipes backslash-escaped so a free-text value cannot
 // break the row/columns. Numbers pass through unchanged. (Most cells here are
 // closed component-type names or numbers, but `automation.type` and any future
@@ -108,7 +108,7 @@ interface Sections {
 const renderBody = (input: OrgCardInput, s: Sections): string => {
   const lines: string[] = [];
   // targetOrg is a caller-supplied SFDX alias (free text) — escape so it cannot
-  // inject a second heading / break the heading line (CR-16c).
+  // inject a second heading / break the heading line.
   lines.push(`# Org card — ${escapeMarkdownHeading(input.targetOrg)}`);
   lines.push('');
   lines.push(
@@ -192,7 +192,7 @@ const renderBody = (input: OrgCardInput, s: Sections): string => {
       // pattern is a generator-derived naming-convention string — render as a
       // fenced code span (escapeMarkdownInline now returns the fence too, sized
       // to survive any embedded backtick) so it cannot inject bullet/heading/
-      // emphasis structure into the card (CR-16c / CR-16d).
+      // emphasis structure into the card.
       lines.push(`- ${escapeMarkdownInline(n.pattern)} (${n.matching}/${n.total} fields)`);
     }
     lines.push('');
@@ -211,7 +211,7 @@ const renderBody = (input: OrgCardInput, s: Sections): string => {
       input.dataShape.counts
         // name is an object api-name (free text). escapeMarkdownInline returns
         // the full fenced code span (fence included, adaptively sized) so an
-        // embedded backtick can't close it early (CR-16c / CR-16d).
+        // embedded backtick can't close it early.
         .map(([name, count]) => `${escapeMarkdownInline(name)}: ${count}`)
         .join(' · '),
     );

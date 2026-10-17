@@ -1,7 +1,7 @@
 /// <reference types="vitest/globals" />
 
 /**
- * Tests for the v3.1 R7 `sfi compare-vaults` CLI subcommand.
+ * Tests for the `sfi compare-vaults` CLI subcommand.
  *
  * The handler is a thin shim around the `sfi.compare_vaults` MCP tool;
  * these tests verify the CLI's registry resolution, env-var forwarding,
@@ -204,7 +204,7 @@ describe('runCompareVaults', () => {
     });
     // The MCP tool returns a structured vault-not-found payload (not an
     // error envelope) — so the CLI sees `ok` with the disclosure in
-    // boundaries[]. This mirrors the Q170 honesty anchor.
+    // boundaries[]. This mirrors the honesty anchor.
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(

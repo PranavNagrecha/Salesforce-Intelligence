@@ -143,7 +143,7 @@ export interface FrontendComponentRef {
  */
 /**
  * A reference from frontend source to a platform RESOURCE the graph can
- * model as an edge (P14-USAGE-label-static-graph): a CustomLabel
+ * model as an edge: a CustomLabel
  * (`@salesforce/label/c.X` import, `$Label.c.X` / `$Label.X` token), a
  * StaticResource (`@salesforce/resourceUrl/X` import, `$Resource.X`
  * token), or — VF only — a hierarchy Custom Setting read
@@ -262,7 +262,7 @@ const LWC_FIELD_STRING = /['"]([A-Za-z_][A-Za-z_0-9]*)\.([A-Z][A-Za-z_0-9]*)['"]
 
 /**
  * LWC: `import X from '@salesforce/label/c.My_Label'` — an org
- * CustomLabel import (P14-USAGE-label-static-graph). Namespaced labels
+ * CustomLabel import. Namespaced labels
  * (`@salesforce/label/ns.X`) belong to managed packages and are
  * intentionally NOT captured (the org vault never retrieves them).
  */
@@ -359,7 +359,7 @@ const blankOut = (text: string): string => text.replace(/[^\n]/g, ' ');
 /**
  * Strip JS comments and string literals from LWC `.js` source.
  * Template literals are stripped wholesale (interpolations included)
- * — the v1.4 scanner doesn't model `${...}` substitutions.
+ * — the scanner doesn't model `${...}` substitutions.
  */
 const stripJs = (source: string): string =>
   source.replace(JS_COMMENT_OR_STRING, blankOut);
@@ -545,7 +545,7 @@ const scanLwc = (source: string): ScannerLists => {
     emitFieldAccess(fieldCtx, 'read', object, field, m.index, m[0].length, 'schema-import');
   }
 
-  // Label / static-resource imports (P14-USAGE-label-static-graph) — same
+  // Label / static-resource imports — same
   // comments-only-stripped pass, because the patterns match import paths.
   sweepResourcePattern(resourceCtx, LWC_LABEL_IMPORT, 'label', importPass);
   sweepResourcePattern(resourceCtx, LWC_RESOURCE_IMPORT, 'staticResource', importPass);
@@ -724,7 +724,7 @@ const scanVf = (stripped: string): ScannerLists => {
 /**
  * Scan a frontend source string (LWC JS, Aura markup/JS, or
  * Visualforce markup) for field accesses, Apex calls, and component
- * references. This is the v1.4 heuristic sibling of the v0.3
+ * references. This is the heuristic sibling of the
  * `scanApexSource` — pure pattern-matching, no AST, no symbol
  * resolution.
  *

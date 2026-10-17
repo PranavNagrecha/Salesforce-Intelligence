@@ -12,7 +12,7 @@
  *
  * `sfi.field_360` had exactly that drift: `SECTION_NAMES` (and therefore the
  * Zod enum, the handler, and the response) carried 12 sections, while the
- * advertised enum still listed the 10 from PLAN-v3.0 §4. The two missing ones
+ * advertised enum still listed the original 10. The two missing ones
  * were `rollups` and `listViews` — the sections added specifically so roll-up
  * summary couplings and saved-list-view referrers stop being silently dropped.
  * So the drift made two bug fixes unreachable through a strict host, and the

@@ -1,8 +1,8 @@
 /**
  * Handler for the `sfi.generate_onboarding_doc` MCP tool.
  *
- * The v2.5 documentation-generation tier onboarding-doc tool. The
- * most composite generator in v2.5 — chains:
+ * The documentation-generation tier onboarding-doc tool. The
+ * most composite generator — chains:
  *
  *   - `sfi.generate_admin_handbook` (for org-level context) — the
  *     persona drives section emphasis.
@@ -22,7 +22,7 @@
  *
  * Honesty axis: the glossary is HEURISTIC — a label that appears on
  * one CustomObject MAY be org-specific terminology OR may simply be
- * an underused standard label. Key Contacts depends on v1.7
+ * an underused standard label. Key Contacts depends on
  * enrichment and surfaces a disclosure when absent — but ONLY when the
  * scan actually succeeded and found nothing; a graph failure is
  * propagated as an `internal` error rather than rendered as a missing
@@ -195,7 +195,7 @@ const renderGlossarySection = (
 };
 
 /**
- * Render the Key Contacts section. v1.7 enrichment is required;
+ * Render the Key Contacts section. Enrichment is required;
  * surfaces a verbatim disclosure when no enrichment data is present.
  */
 const renderKeyContactsSection = (
@@ -288,7 +288,7 @@ export const generateOnboardingDocHandler = async (
   // Step 5: build Key Contacts from the lastModifiedBy axis over the FULL code
   // corpus. A single capped page named the top modifiers of an ALPHABETICAL
   // first page as the org's key people. A graph FAILURE is propagated, never
-  // folded into an empty tally: an empty tally renders the v1.7 enrichment
+  // folded into an empty tally: an empty tally renders the enrichment
   // remedy, and prescribing `sfi refresh --with-tooling-api` for a query error
   // would change nothing.
   const codeScan = await scanAllNodesOfTypes(ctx.graph, [

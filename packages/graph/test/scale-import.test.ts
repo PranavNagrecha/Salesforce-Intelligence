@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 /**
- * v4.0 R9 — scale proof: batched import of ~10k nodes stays within budget.
+ * scale proof: batched import of ~10k nodes stays within budget.
  *
  * Documents the tested ceiling for POSITIONING/README (not aspirational).
  */
@@ -16,7 +16,7 @@ import { importExtractionResults } from '../src/import.js';
 import { initSchema } from '../src/schema.js';
 import type { GraphStore } from '../src/store.js';
 
-/** Documented v4.0 import budget (ms) for 10k nodes on CI hardware. */
+/** Documented import budget (ms) for 10k nodes on CI hardware. */
 export const SCALE_IMPORT_NODE_COUNT = 10_000;
 export const SCALE_IMPORT_BUDGET_MS = Number(
   process.env.SCALE_IMPORT_BUDGET_MS ?? '90000',
@@ -45,7 +45,7 @@ afterAll(() => {
   rmSync(tempDir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 });
 });
 
-describe('scale import (v4.0 R9)', () => {
+describe('scale import', () => {
   it(
     `imports ${SCALE_IMPORT_NODE_COUNT} nodes within ${SCALE_IMPORT_BUDGET_MS}ms`,
     async () => {

@@ -1,6 +1,6 @@
 /**
  * `sfi gaps report` — first-class surface for the local route-gap log
- * (R8-GAPLOG-SURFACE). Reuses the canonical `summarizeRouteGaps()` summarizer;
+ * Reuses the canonical `summarizeRouteGaps()` summarizer;
  * category/count only — never echoes question text or vault paths.
  */
 

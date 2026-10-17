@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.what_if_split_profile` MCP tool.
  *
- * v2.3 R2c — the "what if I split this Profile into several Permission
+ * The "what if I split this Profile into several Permission
  * Sets?" surface. Given a Profile id and an ordered array of target
  * PermissionSet ids, walks every grant under the profile and attempts
  * to suggest which target the grant belongs in via a greedy heuristic:
@@ -184,7 +184,7 @@ export interface SplitAssignment {
 
 /**
  * One grant that could not be assigned. `reason` explains why
- * — the v2.3 fail-conservative posture surfaces unassignable grants
+ * — the fail-conservative posture surfaces unassignable grants
  * rather than forcing them into an inappropriate target.
  */
 export interface UnassignedSetting {
@@ -318,7 +318,7 @@ export interface WhatIfSplitProfileOutput {
   /** True when the inlined `assignments` is a partial page of the full list. */
   readonly truncated: boolean;
   /**
-   * CR-22 opaque continuation token, present ONLY when the assignments page was
+   * Opaque continuation token, present ONLY when the assignments page was
    * truncated (more assignments remain past `limit`). Echo it back as `cursor`
    * to resume. Absent on a whole-fits page so an in-budget response stays
    * byte-identical.
@@ -358,7 +358,7 @@ export const whatIfSplitProfileInputSchema = z.object({
   targetPermSets: z.array(z.string().min(1)).min(1),
   limit: z.number().int().min(1).max(SPLIT_MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
-  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // Continuation cursor: an OPAQUE token echoed back from a prior
   // truncated page's `nextCursor`. When present it supplies the resume offset;
   // omitting it = today's behavior (offset 0 / explicit `offset`).
   cursor: z.string().min(1).optional(),
@@ -706,7 +706,7 @@ const splitGrants = async (
       addResult(assignGrant('apex-class-access', settingId, true, candidates));
     }
     // Other grant types (e.g., PageAccesses) are intentionally not
-    // surfaced — they require dedicated extractor support (v0.1 does
+    // surfaced — they require dedicated extractor support (this does
     // not emit them as edges). The honesty boundary is named in the
     // disclosure.
   }
@@ -868,7 +868,7 @@ const fetchProfile = async (
  * but not unique across dupes), so the deterministic tiebreaks available on the
  * row are appended: `targetPermSetId` (a ComponentId), then `rationale` to
  * break the residual case where two identical grants also resolve to the same
- * target. This yields a deterministic total order — required so a CR-22 cursor
+ * target. This yields a deterministic total order — required so a cursor
  * resume cannot dup or skip on a page boundary — with no new field on the row.
  */
 const sortAssignments = (
@@ -1000,7 +1000,7 @@ export const whatIfSplitProfileHandler = async (
   // Paginate the per-grant detail (the bomb source on wide profiles).
   const limit = input.limit ?? SPLIT_DEFAULT_LIMIT;
 
-  // CR-22: resolve the resume offset — an echoed cursor wins over an explicit
+  // Resolve the resume offset — an echoed cursor wins over an explicit
   // `offset`; a stale/forged cursor (changed profile/targets, different tool, or
   // refreshed vault) is rejected with `invalid-query`. targetPermSets ORDER is
   // load-bearing (drives default-fallback + tie resolution); argsFingerprint's

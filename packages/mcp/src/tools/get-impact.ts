@@ -19,7 +19,7 @@
  * Implementation notes:
  *   - Each hop expands the frontier with ONE batched
  *     `listEdgesForNodes(frontier, { direction: 'in', edgeTypes })`
- *     query (CR-17 — was one `listEdges` call per node × edgeType, an
+ *     query (was one `listEdges` call per node × edgeType, an
  *     N+1 loop). The returned per-node buckets are then replayed in the
  *     SAME visit order the row-at-a-time loop used (frontier order, then
  *     `edgeTypes ?? [null]` order) so the cap/dedup/next-frontier logic
@@ -125,7 +125,7 @@ const IMPACT_MAX_EDGES = 400;
 const IMPACT_COMFORT_PAYLOAD_BYTES = 250_000;
 
 /**
- * R6-19: node cap for the `diagram` mermaid fence — deliberately much
+ * Node cap for the `diagram` mermaid fence — deliberately much
  * smaller than `IMPACT_MAX_NODES` (200). A 200-box `graph TD` is unreadable
  * in a chat UI or a rendered HTML page; above this cap the diagram is
  * OMITTED (never silently truncated to a partial, misleadingly-complete
@@ -295,7 +295,7 @@ export interface GetImpactOutput {
     readonly verdict: ApexReceiverUnresolvedReason | null;
   };
   /**
-   * R6-19: a ```` ```mermaid graph TD ``` ```` fence visualizing the impact
+   * A ```` ```mermaid graph TD ``` ```` fence visualizing the impact
    * slice — nodes labeled `{ComponentType}: {apiName}` (the root rendered as
    * a circle, everything else a box), edges labeled by `edgeType`. Present
    * ONLY when `impact.nodes.length` is at or under `IMPACT_DIAGRAM_MAX_NODES`
@@ -311,7 +311,7 @@ export interface GetImpactOutput {
    */
   readonly diagramOmittedReason?: string;
   /**
-   * R6-24 Option B / Finding #36: when the root is a `CustomField` whose
+   * When the root is a `CustomField` whose
    * refresh fold stamped capped report/dashboard name lists (`usedInReports` /
    * `usedInDashboards`), surface those names here. Report/Dashboard nodes are
    * dropped at refresh (volume), so they never appear as graph edges in
@@ -352,7 +352,7 @@ const describeId = (id: string): { readonly typePrefix: string; readonly rest: s
 };
 
 /**
- * R6-19: build the ```` ```mermaid graph TD ``` ```` fence for the (already
+ * Build the ```` ```mermaid graph TD ``` ```` fence for the (already
  * capped) impact slice. Declares every node first (root as a circle,
  * everything else a box, labeled `{ComponentType}: {apiName}`), then every
  * edge as a bare `code -->|edgeType| code` line — the same two-pass shape
@@ -445,7 +445,7 @@ const describePayloadHeavyContributors = (
 };
 
 /**
- * R6-24 Option B: prose clause naming folded report/dashboard dependents.
+ * Prose clause naming folded report/dashboard dependents.
  * Empty when the root has no folded analytics usage (or only pre-#36 booleans
  * with empty name lists — then we still disclose the boolean-only signal).
  */
@@ -666,7 +666,7 @@ const buildImpactDisclosure = (params: {
  * `fromId`s that have not yet been visited. Visited sets and edge
  * collector are mutated in place to keep the recursion cheap.
  *
- * CR-17: the per-node incoming edges are fetched in ONE batched
+ * The per-node incoming edges are fetched in ONE batched
  * `listEdgesForNodes` query for the whole frontier (was an N+1 loop of
  * `listEdges` per node × edgeType). The returned buckets are then replayed in
  * the IDENTICAL visit order the row-at-a-time loop used — outer loop over
@@ -759,7 +759,7 @@ const expandIncoming = async (
  * (an edge can reference an id that does not have a corresponding
  * node row, e.g., when only one half of a dependency was extracted).
  *
- * CR-17: batched into ONE `listNodesByIds` query (was an N+1 loop of
+ * Batched into ONE `listNodesByIds` query (was an N+1 loop of
  * `getNodeById` per id). This sub-change is PROVABLY identical to the old
  * loop: the inputs are pre-sorted + capped (`[...visitedNodes].sort().slice`),
  * the absent-id drop matches `WHERE id IN (...)` returning no row, and the
@@ -802,7 +802,7 @@ export const getImpactHandler = async (
       : null;
 
   const rootId = input.componentId as ComponentId;
-  // P14-PHANTOM-edges: an un-type-resolved Apex receiver id
+  // An un-type-resolved Apex receiver id
   // (`CustomField:app.Id`, `ApexClass:oldMap`) is a heuristic-scanner parse
   // artifact, not a component — walking "what depends on it" would dress the
   // artifact's incoming parse edges up as a real blast radius. Refuse with
@@ -1051,7 +1051,7 @@ export const getImpactHandler = async (
   const impact = { nodes: budgeted.nodes, edges: budgeted.edges };
   const estimatedPayloadBytes = estimateGraphPayloadBytes(impact);
 
-  // R6-24 Option B / Finding #36: Report/Dashboard dependents are folded onto
+  // Report/Dashboard dependents are folded onto
   // the CustomField as capped name lists (no graph edges). Read from the
   // pre-slim root so payload slimming cannot erase the identity signal.
   const rootNode = sortedNodes.find((n) => n.id === rootId);
@@ -1192,7 +1192,7 @@ export const getImpactHandler = async (
       }
     : undefined;
 
-  // R6-19: diagram gated on the FINAL (already-capped) node count — never a
+  // Diagram gated on the FINAL (already-capped) node count — never a
   // separate, uncapped query. Above the cap: OMIT + name the actual count
   // rather than silently render a partial (and misleadingly-complete-looking)
   // picture.

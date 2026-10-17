@@ -4,7 +4,7 @@ import { err, ok, type Result } from '@sf-intelligence/core';
 import type { GraphError } from './store.js';
 
 /**
- * The raw DDL strings that define the v0.1 graph schema, kept as a single
+ * The raw DDL strings that define the graph schema, kept as a single
  * frozen object so callers (tests, migrations, future tooling) can reference
  * any individual statement by name without duplicating SQL text.
  *
@@ -17,7 +17,7 @@ import type { GraphError } from './store.js';
  *     metadata component.
  *   - `edges` is keyed by `(from_id, to_id, edge_type, source)` so the same
  *     extractor re-running yields an upsert rather than a duplicate.
- *   - `facts` (P13-FACTS-store) holds record-DATA-derived observations
+ *   - `facts` holds record-DATA-derived observations
  *     (approximate counts, fill rates, fired tallies) keyed by
  *     `(subject_id, metric, source)` — OUTSIDE nodes/edges and outside the
  *     A7 refresh-integrity comparison surface, which digests nodes+edges
@@ -61,7 +61,7 @@ export const SCHEMA_DDL = {
   indexNodesParent: `CREATE INDEX IF NOT EXISTS idx_nodes_parent ON nodes(parent_id);`,
   indexEdgesFrom: `CREATE INDEX IF NOT EXISTS idx_edges_from ON edges(from_id);`,
   indexEdgesTo: `CREATE INDEX IF NOT EXISTS idx_edges_to ON edges(to_id);`,
-  // CR-19: schema-version ledger. A single-row table holds the integer
+  // schema-version ledger. A single-row table holds the integer
   // schema version the vault was last migrated to, letting `runMigrations`
   // apply only the steps newer than the stored version (and letting read
   // paths detect version drift). One row, `id = 1`, enforced by the PK so a
@@ -83,12 +83,12 @@ const SCHEMA_STATEMENTS: readonly string[] = [
   SCHEMA_DDL.indexNodesParent,
   SCHEMA_DDL.indexEdgesFrom,
   SCHEMA_DDL.indexEdgesTo,
-  // Appended last (CR-19) so the existing statements keep their order.
+  // Appended last so the existing statements keep their order.
   SCHEMA_DDL.schemaVersion,
 ];
 
 /**
- * Run the v0.1 schema DDL idempotently against an open DuckDB connection.
+ * Run the schema DDL idempotently against an open DuckDB connection.
  *
  * Safe to call multiple times on the same database — every statement is
  * `CREATE ... IF NOT EXISTS`, so a second call is a no-op. Migrations

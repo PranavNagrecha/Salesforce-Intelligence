@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.explain_formula` MCP tool.
  *
- * v2.0f W1 — the third of three explainer composers (buyer-priority
+ * The third of three explainer composers (buyer-priority
  * #6: "what does this Flow / Apex method / formula actually do?
  * Explain in English."). Given a formula expression (and optionally
  * the parent object's ApiName for relative-field-reference
@@ -18,7 +18,7 @@
  *   2. **Field references** — every CustomField id the formula
  *      mentions. When the caller passes `parentObjectApiName`,
  *      single-segment references resolve to
- *      `CustomField:{parent}.{ref}` (the same scoping the v0.2
+ *      `CustomField:{parent}.{ref}` (the same scoping the
  *      formula-references extractor applies). Cross-object dotted
  *      paths (`Owner.Email`, `Account.Industry__c`) resolve
  *      verbatim. Relationship-traversal paths (a first segment ending
@@ -37,7 +37,7 @@
  *   4. **Literals** — every numeric / string literal the tokenizer
  *      counts. Surfaced as `{ value, type }` rows where `value` is
  *      the literal as the tokenizer sees it (or `null` when the
- *      tokenizer counts but doesn't surface a value — v0.2's
+ *      tokenizer counts but doesn't surface a value — the
  *      tokenizer counts but doesn't extract). `type` is
  *      `'number' | 'string'`.
  *   5. **Conditional logic** — `hasConditionalLogic: true` when the
@@ -70,17 +70,17 @@
  *
  * Implementation notes:
  *   - The handler does NOT query the graph. Formulas are a pure
- *     string-processing axis; no node lookup is involved in v2.0f.
- *     Future v2.7+ versions may cross-reference the resolved
+ *     string-processing axis; no node lookup is involved.
+ *     Future versions may cross-reference the resolved
  *     field-ref ids against the graph to mark dangling references —
- *     v2.0f surfaces the raw ids and lets the renderer decide.
+ *     this surfaces the raw ids and lets the renderer decide.
  *   - The signature description for each function is hand-curated
  *     against `docs/vendor/salesforce-metadata/Formula.md`. Unknown
  *     functions (a non-Salesforce function the tokenizer didn't
  *     filter) wouldn't appear because the tokenizer only adds known
  *     `FORMULA_FUNCTIONS` to its output; the signature lookup defaults
  *     to a generic "Salesforce formula function" string if the lookup
- *     misses, but this branch isn't exercised in v2.0f.
+ *     misses, but this branch isn't exercised.
  *   - Every `fieldReferences[].toId` either NAMES A REAL NODE or is `null`
  *     with a `resolution` and a verbatim `note` saying why. A dotted path is
  *     joined against the refresh's relationship-resolver edges on

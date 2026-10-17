@@ -51,7 +51,7 @@ const makeNode = (overrides: Partial<Node> & Pick<Node, 'id'>): Node => ({
 });
 
 // =============================================================================
-// Seed 1: A CustomMetadataRecord with the full v1.6 R2 shape — label,
+// Seed 1: A CustomMetadataRecord with the full shape — label,
 // protected flag, parent type, valuesCount, values array. Mirrors the
 // synthetic-v1.6 `Marketo_Api_Setting__mdt.Default` fixture.
 // =============================================================================
@@ -140,7 +140,7 @@ const clinicalModule2Seed: ExtractionResult = {
         typeApiName: 'Clinical_Instruction__mdt',
         valuesCount: 3,
         values: [
-          // The masked entry — `value: null, isMasked: true` is the v1.6
+          // The masked entry — `value: null, isMasked: true` is the
           // honesty-axis shape for the managed-package `***` literal.
           {
             field: 'Weekend__c',
@@ -206,7 +206,7 @@ const emptyValuesSeed: ExtractionResult = {
 
 // =============================================================================
 // Seed 4: A CustomSettingRecord — the second of the two record-typed nodes
-// the tool accepts. Mirrors the synthetic-v1.6
+// the tool accepts. Mirrors the synthetic
 // `Marketo_Api_Settings__c.SystemDefault` shape.
 // =============================================================================
 
@@ -257,7 +257,7 @@ const customSettingSeed: ExtractionResult = {
 };
 
 // =============================================================================
-// Seed 5: A record node built by a refresh that PREDATES the v1.6 R2 values
+// Seed 5: A record node built by a refresh that PREDATES the values
 // extractor — the node carries NO `values` property at all. This is the R1
 // never-extracted case: it must NOT render identically to `emptyValuesSeed`,
 // which was checked and genuinely holds nothing.
@@ -439,7 +439,7 @@ describe('lookupRecordHandler', () => {
     expect(recordId).toBe(SETTING_RECORD_ID);
     expect(type).toBe('CustomSettingRecord');
     // Suffix is `__c` for CustomSettingRecord — the suffix is preserved
-    // verbatim per the v1.6 R2 extractor contract.
+    // verbatim per the extractor contract.
     expect(typeApiName).toBe('Marketo_Api_Settings__c');
     expect(label).toBe('SystemDefault');
     expect(values.length).toBe(2);
@@ -611,7 +611,7 @@ describe('lookupRecordHandler — scope honesty (FIX 12)', () => {
 });
 
 // =============================================================================
-// R1 — typed absence for `values`. Both v1.6 R2 extractors ALWAYS write
+// R1 — typed absence for `values`. Both extractors ALWAYS write
 // `values` (and `valuesCount`), so a node that does not CARRY the property was
 // never scanned. Deciding by `Array.isArray` collapses NEVER-EXTRACTED into
 // EXTRACTED-AND-CLEAN and tells a business user a feature-flag record is

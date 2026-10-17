@@ -260,7 +260,7 @@ export const renderOrgOverviewMarkdown = (data: OrgOverviewLike): string => {
   const cov = data.coverage;
   // Don't assert "0 workflow rules" / "0 integration surfaces" for families the
   // retrieve never pulled — say "not retrieved" so the tour can't imply absence
-  // it never checked (PLAN-v4.0 honesty axis; see org-overview.ts `boundaries`).
+  // it never checked (honesty axis; see org-overview.ts `boundaries`).
   const workflowPart =
     cov && !cov.workflowRulesRetrieved
       ? 'workflow rules not retrieved'

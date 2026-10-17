@@ -2,11 +2,11 @@
  * @sf-intelligence/parsers
  *
  * Source-string parsers that the extractors invoke to surface
- * lexical-level references. v0.2 shipped a formula tokenizer; v0.3
- * adds a heuristic Apex source scanner (regex / brace-balanced; a
- * PMD AST layer follows in v0.4). v1.4 adds the LWC/Aura/VF
+ * lexical-level references: a formula tokenizer, a heuristic Apex
+ * source scanner (regex / brace-balanced; the AST layer in
+ * `apex-ast-edges` complements it), the LWC/Aura/VF
  * heuristic frontend scanner family — sibling of the Apex scanner,
- * not a replacement. v0.3 also adds the Apex DEBUG LOG parser — an
+ * not a replacement — and the Apex DEBUG LOG parser — an
  * event-stream reader (not a name scraper) that turns pasted log text
  * into ordered, depth-tracked, entry/exit-paired frames plus the
  * per-category "was this even logged" coverage the domain hinges on.

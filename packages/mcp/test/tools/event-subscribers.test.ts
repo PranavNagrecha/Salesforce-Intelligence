@@ -74,7 +74,7 @@ const ACCOUNT_CHANGE_EVENT = 'CustomObject:Account_Change__e';
 const TRIGGER_HANDLER = 'ApexTrigger:Account_Change_Handler';
 const APEX_HANDLER = 'ApexClass:Account_Change_AsyncHandler';
 const FLOW_HANDLER = 'Flow:Account_Change_Flow';
-// CR-CAP-18: a publish-side channel routing the event, with a declared filter.
+// A publish-side channel routing the event, with a declared filter.
 const ACCOUNT_CHANNEL = 'PlatformEventChannel:Account_Change_Channel__chn';
 const ACCOUNT_MEMBER = 'PlatformEventChannelMember:Account_Change_Member__chn';
 // GROUP C: publish-side code that emits the event (writesTo edge into the event).
@@ -103,7 +103,7 @@ const mixedSubscribersSeed: ExtractionResult = {
       type: 'Flow',
       apiName: 'Account_Change_Flow',
     }),
-    // CR-CAP-18 publish-side: channel + member binding the event.
+    // Publish-side: channel + member binding the event.
     makeNode({
       id: ACCOUNT_CHANNEL,
       type: 'PlatformEventChannel',
@@ -155,7 +155,7 @@ const mixedSubscribersSeed: ExtractionResult = {
       source: 'flow-extractor',
       properties: { triggerType: 'PlatformEvent' },
     }),
-    // CR-CAP-18 publish-side topology: parentOf(channel→member) +
+    // Publish-side topology: parentOf(channel→member) +
     // references(member→event) carrying the declared filterExpression.
     makeEdge({
       fromId: ACCOUNT_CHANNEL,
@@ -520,7 +520,7 @@ describe('eventSubscribersHandler', () => {
     expect(result.value.data.eventApiName).toBe('Account_Change__e');
   });
 
-  it('CR-CAP-18: surfaces publish-side channels with the declared per-member filter (fail-before: no channels field)', async () => {
+  it('surfaces publish-side channels with the declared per-member filter (fail-before: no channels field)', async () => {
     const result = await eventSubscribersHandler(ctx, {
       eventId: ACCOUNT_CHANGE_EVENT,
     });
@@ -543,7 +543,7 @@ describe('eventSubscribersHandler', () => {
     expect(boundaryText).not.toMatch(/per-channel filter expressions.*not.*modeled/i);
   });
 
-  it('CR-CAP-18: an event with no channel member returns an empty channels array (empty≠absent)', async () => {
+  it('an event with no channel member returns an empty channels array (empty≠absent)', async () => {
     const result = await eventSubscribersHandler(ctx, {
       eventId: ORDER_EVENT,
     });
@@ -628,7 +628,7 @@ describe('eventSubscribersHandler', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const d = result.value.data;
-    // The CustomField "subscriber" must be filtered out — the v1.5
+    // The CustomField "subscriber" must be filtered out — the
     // subscriber set is restricted to ApexTrigger / ApexClass / Flow.
     expect(d.subscribers).toEqual([]);
     expect(d.eventApiName).toBe('Filtered_Event__e');
@@ -905,14 +905,14 @@ describe('eventSubscribersInputSchema', () => {
 });
 
 // =============================================================================
-// CR-10: Publisher-vs-subscriber role-disambiguation disclosure
+// Publisher-vs-subscriber role-disambiguation disclosure
 // The product previously confused a Flow that PUBLISHES an event (writesTo
 // edge) with one that SUBSCRIBES (listensTo edge). The fix adds an explicit
 // CRITICAL ROLE DISTINCTION boundary in both the non-empty and empty-subscriber
 // paths so an LLM reading the response cannot conflate the two roles.
 // =============================================================================
-describe('eventSubscribersHandler — CR-10 role-disambiguation disclosure', () => {
-  it('CR-10: single-event with subscribers includes role-disambiguation disclosure in boundaries', async () => {
+describe('eventSubscribersHandler — role-disambiguation disclosure', () => {
+  it('single-event with subscribers includes role-disambiguation disclosure in boundaries', async () => {
     // Account_Change__e has 3 subscribers AND 2 publishers in the fixture.
     // Before the fix, boundaries did NOT contain the CRITICAL ROLE DISTINCTION
     // message. After the fix, it must be present in both populated-subscribers
@@ -934,7 +934,7 @@ describe('eventSubscribersHandler — CR-10 role-disambiguation disclosure', () 
     expect(boundaryText).toContain('subscribers');
   });
 
-  it('CR-10: single-event with NO subscribers also includes role-disambiguation disclosure', async () => {
+  it('single-event with NO subscribers also includes role-disambiguation disclosure', async () => {
     // Orphan_Published__e has publishers but zero subscribers — the empty-
     // subscriber boundary path must also carry the disambiguation message.
     const result = await eventSubscribersHandler(ctx, {
@@ -949,7 +949,7 @@ describe('eventSubscribersHandler — CR-10 role-disambiguation disclosure', () 
     expect(boundaryText).toContain('RECEIVES');
   });
 
-  it('CR-10: role-disambiguation disclosure is present even when publishers list is empty', async () => {
+  it('role-disambiguation disclosure is present even when publishers list is empty', async () => {
     // Order_Placed__e has 1 subscriber and 0 publishers — both arrays are
     // opposite-empty from the orphan case. The disclosure must still be there.
     const result = await eventSubscribersHandler(ctx, {

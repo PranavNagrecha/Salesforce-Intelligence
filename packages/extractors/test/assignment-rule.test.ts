@@ -59,7 +59,7 @@ describe('extractAssignmentRule', () => {
       expect(result.value).toEqual(goldenPatched);
 
       // Spot-check the rule count and a per-entry sendsEmail edge.
-      // v2.0a — each rule's `<ruleEntry>` may add a synthetic
+      // each rule's `<ruleEntry>` may add a synthetic
       // ConditionalContext node; the per-rule count below filters
       // to `AssignmentRule` so the assertion remains stable.
       expect(
@@ -145,7 +145,7 @@ describe('extractAssignmentRule', () => {
           active: true,
           ruleEntryCount: 0,
           targetCount: 0,
-          // v2.0a — empty mirror when the rule has no condition surface.
+          // empty mirror when the rule has no condition surface.
           conditions: [],
         });
         // parentOf only — no per-entry edges.
@@ -222,7 +222,7 @@ describe('extractAssignmentRule', () => {
           active: true,
           ruleEntryCount: 2,
           targetCount: 1,
-          // v2.0a — neither entry carried criteria/formula, so the
+          // neither entry carried criteria/formula, so the
           // condition mirror is empty.
           conditions: [],
         });
@@ -238,7 +238,7 @@ describe('extractAssignmentRule', () => {
     });
   });
 
-  describe('v2.0a — ConditionalContext extraction', () => {
+  describe('ConditionalContext extraction', () => {
     it('emits one ConditionalContext per <ruleEntry> carrying criteria', async () => {
       const xml = `<?xml version="1.0"?>
 <AssignmentRules xmlns="http://soap.sforce.com/2006/04/metadata">
@@ -480,7 +480,7 @@ describe('extractAssignmentRule', () => {
         const ruleNodes = result.value.nodes.filter((n) => n.type === 'AssignmentRule');
         expect(ruleNodes).toHaveLength(1);
         expect(ruleNodes[0]?.properties?.ruleEntryCount).toBe(2);
-        // Criteria-only entry still emits ConditionalContext (v2.0a).
+        // Criteria-only entry still emits ConditionalContext.
         expect(
           result.value.nodes.filter((n) => n.type === 'ConditionalContext'),
         ).toHaveLength(1);

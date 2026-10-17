@@ -21,7 +21,7 @@ import {
 } from '../src/index.js';
 
 /**
- * P13-FACTS-store — the facts table lives OUTSIDE the metadata graph: the
+ * the facts table lives OUTSIDE the metadata graph: the
  * import path never touches it (facts survive a re-import), facts writes
  * never change nodes/edges (the A7 comparison surface), and freshness is a
  * read-side policy with an injectable clock.

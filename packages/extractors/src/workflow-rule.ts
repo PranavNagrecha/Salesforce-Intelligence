@@ -193,7 +193,7 @@ const validateRoot = (
  * without a `<template>` are included with `null` so the caller can
  * distinguish "alert exists but has no template" from "alert not found".
  *
- * Exported so `approval-process.ts` (W4.3) can reuse the SAME builder when it
+ * Exported so `approval-process.ts` can reuse the SAME builder when it
  * resolves an ApprovalProcess `Alert` hook action's EmailTemplate against the
  * sibling `workflows/{Object}.workflow-meta.xml` file's `<alerts>` collection
  * (mirroring the {@link buildFieldUpdateTargetMap} cross-file reuse). Single
@@ -223,11 +223,11 @@ export const buildAlertTemplateMap = (
 /**
  * A `<fieldUpdates>` entry's resolved target: the field it sets + the op.
  *
- * Exported so `approval-process.ts` (CR-CAP-07) can reuse the SAME shape
+ * Exported so `approval-process.ts` can reuse the SAME shape
  * + builder + well-formedness guard when it resolves an ApprovalProcess
  * FieldUpdate hook action against the sibling `workflows/{Object}.workflow-meta.xml`
  * file's `<fieldUpdates>` collection. Single source of truth — do NOT
- * copy-paste into the approval extractor (drift risk per CR-CAP-07).
+ * copy-paste into the approval extractor (drift risk).
  */
 export interface FieldUpdateTarget {
   /** The `<field>` API name the update sets (verbatim, or null if absent). */
@@ -322,8 +322,8 @@ export const buildFieldUpdateTargetMap = (
 };
 
 /**
- * v2.9 — promote each `<alerts>` child to a real `WorkflowAlert` Node.
- * Pre-v2.9 `buildAlertTemplateMap` read `<alerts>` only to build the
+ * promote each `<alerts>` child to a real `WorkflowAlert` Node.
+ * Existing `buildAlertTemplateMap` read `<alerts>` only to build the
  * name→template lookup for `sendsEmail` edge resolution; it emitted no
  * nodes, so alert-level properties (`senderType`, `description`,
  * `template`, `ccEmails`) were invisible to graph queries.
@@ -341,7 +341,7 @@ export const buildFieldUpdateTargetMap = (
  *     be empty when no `<ccEmails>` child is present).
  *
  * The parent edge is the existing `parentOf` from
- * `CustomObject:{ObjectApiName}` mirroring the OutboundMessage v2.8
+ * `CustomObject:{ObjectApiName}` mirroring the OutboundMessage
  * pattern; no new EdgeType is introduced.
  *
  * Emission happens regardless of whether the file has any `<rules>` —
@@ -404,8 +404,8 @@ const buildWorkflowAlertNodes = (
       source: EXTRACTOR_SOURCE,
       properties: {},
     });
-    // W4.3 — the alert's `<template>` names the EmailTemplate this alert
-    // sends. Pre-W4.3 the template lived ONLY on `properties.template` as a
+    // the alert's `<template>` names the EmailTemplate this alert
+    // sends. Previously the template lived ONLY on `properties.template` as a
     // string, so `get_edges` on the alert reached no EmailTemplate and
     // "safe to delete EmailTemplate X" invented no WorkflowAlert dependent
     // (the object-scoped alert node is the direct dependent even when NO
@@ -429,9 +429,9 @@ const buildWorkflowAlertNodes = (
 };
 
 /**
- * v2.8 — promote each `<outboundMessages>` child to a real
- * `OutboundMessage` Node. Pre-v2.8 these references dangled by design
- * (per `WorkflowRule.md` § "outboundMessages"); v2.8 promotes them so
+ * promote each `<outboundMessages>` child to a real
+ * `OutboundMessage` Node. Previously these references dangled by design
+ * (per `WorkflowRule.md` § "outboundMessages"); this promotes them so
  * the integration catalog tools (`sfi.outbound_message_catalog`,
  * `sfi.endpoint_catalog`) can enumerate outbound destinations
  * alongside RemoteSiteSetting and NamedCredential.
@@ -448,7 +448,7 @@ const buildWorkflowAlertNodes = (
  *   - `fields`: the per-entry `<fields>` collection as a string array.
  *
  * The parent edge is the existing `parentOf` from
- * `CustomObject:{ObjectApiName}` mirroring the v1.0 CustomField pattern;
+ * `CustomObject:{ObjectApiName}` mirroring the CustomField pattern;
  * no new EdgeType is introduced. Edges are emitted by the caller to keep
  * this helper a pure node-emitter (parallel to `buildAlertTemplateMap`).
  */
@@ -814,7 +814,7 @@ const parseCriteriaItem = (raw: unknown): CriteriaItem | null => {
 };
 
 /**
- * CR-CAP-11 — declarative shape of a single `<workflowTimeTriggers>`
+ * declarative shape of a single `<workflowTimeTriggers>`
  * child of a `<rules>` element. This is the verbatim DECLARATIVE XML
  * (confidence tier `declared`), NOT an assertion that the trigger fires:
  * `offsetFromField` is measured from a record's field value the offline
@@ -832,7 +832,7 @@ interface TimeTrigger {
 }
 
 /**
- * CR-CAP-11 — parse the per-rule `<workflowTimeTriggers>` collection.
+ * parse the per-rule `<workflowTimeTriggers>` collection.
  *
  * `<workflowTimeTriggers>` is a REPEATABLE child of each `<rules>`
  * element (NOT a top-level Workflow collection like `<fieldUpdates>`),
@@ -876,11 +876,11 @@ const timeTriggerActions = (rule: Record<string, unknown>): readonly unknown[] =
   );
 
 /**
- * Build the per-rule list of `ConditionSource` entries per the v2.0a
+ * Build the per-rule list of `ConditionSource` entries
  * spec. A WorkflowRule emits at most ONE condition surface (either
  * the `<formula>` or the `<criteriaItems>` array). When the rule has
  * NEITHER a formula NOR criteria items, the returned list is empty
- * and the v2.0a layer produces no ConditionalContext (the lifecycle
+ * and the layer produces no ConditionalContext (the lifecycle
  * narrator treats an empty `properties.conditions[]` as "always
  * fires").
  */
@@ -903,9 +903,9 @@ const collectWorkflowRuleConditionSources = (
 
 /**
  * The shape `buildRule` returns on success: the rule's primary node,
- * its outgoing/incoming edges (including the v2.0a `firesWhen` edges
+ * its outgoing/incoming edges (including the `firesWhen` edges
  * appended at the tail), and the new ConditionalContext nodes the
- * v2.0a extension emits alongside the rule. The caller (the top-level
+ * extension emits alongside the rule. The caller (the top-level
  * extractor) concatenates `conditionNodes` into the result's `nodes`
  * array.
  */
@@ -916,7 +916,7 @@ interface BuiltRule {
 }
 
 /**
- * Build a single `<rules>` child into its node + edges (plus any v2.0a
+ * Build a single `<rules>` child into its node + edges (plus any
  * ConditionalContext nodes synthesised from its condition surface).
  */
 const buildRule = (
@@ -939,7 +939,7 @@ const buildRule = (
     actions.push(resolved.value);
   }
 
-  // v2.0a — Conditional Context extraction. Build the per-rule
+  // Conditional Context extraction. Build the per-rule
   // condition surface (one formula OR one criteria block; see
   // `ConditionalContextSemantics.md` §"WorkflowRule conditions") and
   // synthesise the ConditionalContext nodes + firesWhen edges. The
@@ -954,7 +954,7 @@ const buildRule = (
       parentObjectApiName: objectApiName,
     });
 
-  // CR-CAP-11 — declarative time-trigger shape. Surfaced as node
+  // declarative time-trigger shape. Surfaced as node
   // properties only; never as a firing claim (record-level condition).
   const timeTriggers = parseTimeTriggers(rule);
 
@@ -976,7 +976,7 @@ const buildRule = (
       booleanFilter: optionalString(rule, 'booleanFilter'),
       criteriaItemCount: toArray(rule['criteriaItems']).length,
       actionCount: actions.length,
-      // CR-CAP-11b — per-rule action-type breakdown. Counts this rule's
+      // per-rule action-type breakdown. Counts this rule's
       // IMMEDIATE `<actions>` by `<type>` (the SAME array the per-action
       // edges are derived from), NOT the top-level `<fieldUpdates>` /
       // `<outboundMessages>` / `<tasks>` DEFINITION collections (which are
@@ -991,7 +991,7 @@ const buildRule = (
         .length,
       taskCreationCount: actions.filter((a) => a.type === 'Task').length,
       conditions: conditionsMirror,
-      // CR-CAP-11 — makes the pre-existing skill claim
+      // makes the pre-existing skill claim
       // (admin-legacy-automation/SKILL.md "surfaces the trigger count
       // via properties.timeTriggerCount") and the consumer read
       // (process-builder-migration-candidates.ts) TRUE; both silently
@@ -1079,7 +1079,7 @@ const buildRule = (
  * `(rule, target, edgeType)` triples within a single rule are
  * deduplicated.
  *
- * CR-CAP-11: each rule's per-rule `<workflowTimeTriggers>` collection
+ * each rule's per-rule `<workflowTimeTriggers>` collection
  * (a REPEATABLE child of `<rules>`, NOT a top-level Workflow collection)
  * is parsed into two declarative node properties: `timeTriggerCount`
  * (the number of time triggers) and `timeTriggers[]` ({timeLength,
@@ -1093,7 +1093,7 @@ const buildRule = (
  * immediate one, stamped `timeTriggered: true` (a scheduled update is still a
  * writer of its field).
  *
- * CR-CAP-11b: each rule also carries three per-rule action-type counts —
+ * each rule also carries three per-rule action-type counts —
  * `fieldUpdateCount`, `outboundMessageCount`, `taskCreationCount` —
  * computed by filtering the rule's resolved IMMEDIATE `<actions>` array by
  * `<type>` (`FieldUpdate` / `OutboundMessage` / `Task`). These count the
@@ -1101,7 +1101,7 @@ const buildRule = (
  * `<outboundMessages>` / `<tasks>` definition collections (a different,
  * larger surface) and NOT the time-trigger nested actions; the deprecated
  * `Send` and any unknown `<type>` are ignored. Confidence tier `declared`.
- * They mirror the CR-CAP-11 `timeTriggerCount` precedent: the consumer
+ * They mirror the `timeTriggerCount` precedent: the consumer
  * (`process_builder_migration_candidates`) already reads them via
  * `propertyNumber` and silently defaulted them to 0 before this emit.
  *
@@ -1182,19 +1182,19 @@ export const extractWorkflowRule = async (
     );
     if (!built.ok) return built;
     nodes.push(built.value.node);
-    // v2.0a — emit the per-rule ConditionalContext nodes alongside
+    // emit the per-rule ConditionalContext nodes alongside
     // the rule node so they're discoverable by `sfi.list_components`
     // / `sfi.get_edges`.
     nodes.push(...built.value.conditionNodes);
     edges.push(...built.value.edges);
   }
-  // v2.9 — promote `<alerts>` entries to WorkflowAlert nodes. These
+  // promote `<alerts>` entries to WorkflowAlert nodes. These
   // were dangling-by-design references (the alert name appeared only
-  // in the name→template map used for `sendsEmail` resolution); v2.9
+  // in the name→template map used for `sendsEmail` resolution)
   // captures them so alert-level properties (`senderType`,
   // `description`, `template`, `ccEmails`) are queryable via graph
   // queries (`sfi.get_component`, `sfi.find_component_usages`).
-  // W4.3 additionally emits a DECLARED `references` edge from each alert
+  // This additionally emits a DECLARED `references` edge from each alert
   // node to the `EmailTemplate:{Folder.Name}` its `<template>` names, so
   // the alert is a counted usage of the template and "safe to delete
   // EmailTemplate X?" sees the WorkflowAlert dependent.
@@ -1204,8 +1204,8 @@ export const extractWorkflowRule = async (
   const wa = buildWorkflowAlertNodes(rootObj, objectApiName, parentId, path);
   nodes.push(...wa.nodes);
   edges.push(...wa.edges);
-  // v2.8 — promote `<outboundMessages>` entries to OutboundMessage
-  // nodes. These were dangling-by-design references in v1.3; v2.8
+  // promote `<outboundMessages>` entries to OutboundMessage
+  // nodes. These were dangling-by-design references
   // captures them so the integration-catalog tools can enumerate
   // outbound destinations alongside RemoteSiteSetting and
   // NamedCredential. Emission happens regardless of whether the

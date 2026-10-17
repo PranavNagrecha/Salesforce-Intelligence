@@ -64,3 +64,9 @@ type: CustomField
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `CustomObject:Solar_Panel__c` | declared | custom-field-extractor |
+
+### references (incoming, 1)
+
+| Source | Confidence | Producer |
+| --- | --- | --- |
+| `CustomField:Equipment_Allocation__c.Line_Total__c` | parsed | relationship-resolver |

@@ -14,7 +14,7 @@ import { XMLParser, XMLValidator } from 'fast-xml-parser';
 import { deriveComponentApiName, deriveParentApiName } from './path-utils.js';
 
 /**
- * R7-C7 — Einstein Bot / Agentforce agent extraction tier. The leftover
+ * Einstein Bot / Agentforce agent extraction tier. The leftover
  * R6-13 explicitly deferred: "Bot's nested folder-per-bot layout doesn't fit
  * the flat generic pattern."
  *

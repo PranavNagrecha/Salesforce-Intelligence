@@ -1,12 +1,12 @@
 /// <reference types="vitest/globals" />
 
 /**
- * Tests for the v3.1 vault registry helpers.
+ * Tests for the vault registry helpers.
  *
- * The registry is the load-bearing primitive for the v3.1 cross-vault
+ * The registry is the load-bearing primitive for the cross-vault
  * MCP tools — every `sfi.compare_*` call resolves an alias to an
  * absolute path through these functions. The contract surface tested
- * here matches what `PLAN-v3.1.md §3` specifies: alias-to-path
+ * here is: alias-to-path
  * mapping, manifest-driven freshness enrichment, duplicate-alias
  * refusal, atomic writes.
  */
@@ -273,14 +273,14 @@ describe('resolveVault', () => {
   });
 });
 
-describe('R7-W9 — org-kb suffix normalization', () => {
+describe('org-kb suffix normalization', () => {
   // `sfi init`'s default vault directory name is `org-kb` (see
   // packages/cli/src/commands/init.ts). A registration that named the
   // PROJECT root (the `org-kb` PARENT) instead of the vault itself
   // previously resolved to a path with no `meta/manifest.json` — a
-  // pre-existing misconfiguration R6-12's real-vault verification hit and
-  // worked around by registering corrected aliases (R6-HANDOFF.md,
-  // wt2-vizdiff). These tests prove BOTH forms now resolve to the same
+  // pre-existing misconfiguration an earlier real-vault verification hit and
+  // worked around by registering corrected aliases.
+  // These tests prove BOTH forms now resolve to the same
   // working vault, without requiring re-registration.
 
   it('resolveVault: an alias registered at the org-kb PARENT resolves to {parent}/org-kb', async () => {

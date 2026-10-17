@@ -1,6 +1,5 @@
 /**
  * Handler for the `sfi.effective_permissions` MCP tool
- * (P11-USER-effective-permissions).
  *
  * "What is a user's EFFECTIVE access?" — the UNION of a profile + all
  * assigned permission sets, max-wins, with each permission attributed to
@@ -24,17 +23,17 @@
  * the target set) and diff the two net grant sets.
  *
  * Honesty axis (`disclosures`):
- *   - Permission-set GROUP membership IS expanded (CR-CAP-04): a
+ *   - Permission-set GROUP membership IS expanded: a
  *     `PermissionSetGroup:` id passed in `permissionSetIds` is unioned into
  *     its member permission sets (declared metadata). MUTING permission sets
- *     are now SUBTRACTED (R6-06): each group's grant = union(members) MINUS its
+ *     are now SUBTRACTED: each group's grant = union(members) MINUS its
  *     muting set(s), per modeled permission class (object CRUD, FLS, system/user
  *     perms, custom perms, Apex-class access), BEFORE the containers union
  *     max-wins — muting is group-scoped, never org-wide. A would-be group grant
  *     the muting set denies is dropped from that group's contribution (still
  *     granted if ANOTHER container confers it) and, where the row survives,
  *     annotated with `mutedBy`. A muting node from a vault refreshed before the
- *     R6-06 extractor (no muted-perm data), or referenced but absent, CANNOT be
+ *     extractor (no muted-perm data), or referenced but absent, CANNOT be
  *     subtracted and is DISCLOSED (re-run `/sfi-refresh`) — never treated as
  *     "mutes nothing". Record-type visibility is not mutable and is never
  *     subtracted.
@@ -45,7 +44,7 @@
  *   - Field-level detail is summarised (count); use `field_access_audit`
  *     for a specific field. Record visibility still needs OWD + sharing
  *     (`why_cant_user_see_record`); object permission ≠ record access.
- *   - Custom permissions (CR-CAP-10) are surfaced as their own list with
+ *   - Custom permissions are surfaced as their own list with
  *     per-container attribution and `targetMissing` for grants whose definition
  *     is absent (managed-package / not-retrieved). They are NOT system
  *     `<userPermissions>`, so they are never double-counted under
@@ -172,7 +171,7 @@ const effectivePermissionsInputBaseSchema = z
     objectId: z.string().min(1).optional(),
     limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
     offset: z.number().int().min(0).optional(),
-    // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+    // Continuation cursor: an OPAQUE token echoed back from a prior
     // truncated page's `nextCursor`; carries the resume offset + which list
     // (object | system) it advances. Omit = today's behavior.
     cursor: z.string().min(1).optional(),
@@ -214,7 +213,7 @@ export interface EffectiveObjectPerm {
   /** Containers that grant ≥1 (surviving) flag on this object. */
   readonly grantedBy: readonly string[];
   /**
-   * R6-06: muting permission set(s) that DENIED ≥1 flag a group member would
+   * Muting permission set(s) that DENIED ≥1 flag a group member would
    * otherwise have granted on this object. Present ONLY when non-empty (so a
    * no-muting response is byte-identical). A flag shown `true` alongside a
    * `mutedBy` means another container re-granted it after the group's mute.
@@ -273,7 +272,7 @@ export interface ImpliedSystemPermSource {
 export interface EffectiveSystemPerm {
   readonly permission: string;
   readonly grantedBy: readonly string[];
-  /** R6-06: muting set(s) that denied this perm within a group (non-empty only). */
+  /** Muting set(s) that denied this perm within a group (non-empty only). */
   readonly mutedBy?: readonly string[];
   /**
    * Present ONLY on a permission added by dependency expansion — its
@@ -336,7 +335,7 @@ export interface DependencyExpansionState {
 }
 
 /**
- * CR-CAP-10: one custom permission the union confers, attributed to the
+ * One custom permission the union confers, attributed to the
  * granting containers. `targetMissing` is true when the granted name has no
  * `CustomPermission` definition node in the vault (managed-package or
  * not-retrieved). Distinct from `systemPermissions` (those are
@@ -346,7 +345,7 @@ export interface EffectiveCustomPerm {
   readonly name: string;
   readonly targetMissing: boolean;
   readonly grantedBy: readonly string[];
-  /** R6-06: muting set(s) that denied this custom perm within a group (non-empty only). */
+  /** Muting set(s) that denied this custom perm within a group (non-empty only). */
   readonly mutedBy?: readonly string[];
 }
 
@@ -371,7 +370,7 @@ export interface EffectivePermissionsOutput {
   readonly objectPermissions: readonly EffectiveObjectPerm[];
   readonly systemPermissions: readonly EffectiveSystemPerm[];
   /**
-   * CR-CAP-10: custom permissions the union confers (sorted by name, full list).
+   * Custom permissions the union confers (sorted by name, full list).
    *
    * An EMPTY array is NOT self-describing. Read `summary.customPermissions`
    * alongside it: `null` there means the family was never extracted and this
@@ -469,10 +468,10 @@ export interface EffectivePermissionsOutput {
     readonly object?: string;
   };
   /**
-   * CR-22 opaque continuation token, present ONLY on a truncated page (the
+   * Opaque continuation token, present ONLY on a truncated page (the
    * designated list overflowed `limit` or the byte budget). Echo it back as
    * `cursor` to resume; absent on a whole-fits page so the response is
-   * byte-identical to pre-CR-22.
+   * byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata for the designated list; truncation only. */
@@ -680,7 +679,7 @@ export const heldRecordTypeVisible = (set: EffectiveGrantSet, rt: string): boole
 /**
  * The reusable effective-permissions ENGINE. Resolves the raw container ids
  * into GRANT UNITS that preserve the PermissionSetGroup boundary (muting is
- * group-scoped — R6-06), loads each unique container's declared grants ONCE,
+ * group-scoped), loads each unique container's declared grants ONCE,
  * and composes the max-wins union with group-scoped muting subtraction into a
  * single {@link EffectiveGrantSet}. Nothing here paginates or emits prose — the
  * caller formats the response (or diffs two sets).
@@ -698,7 +697,7 @@ export const computeEffectiveGrants = async (
   ctx: Context,
   rawContainers: readonly string[],
 ): Promise<Result<EffectiveGrantSet, McpError>> => {
-  // R6-06 + CR-CAP-04: resolve the raw containers into GRANT UNITS that preserve
+  // Resolve the raw containers into GRANT UNITS that preserve
   // the PermissionSetGroup boundary, because muting is GROUP-SCOPED — a group's
   // muting set subtracts only from that group's member union, never from the
   // profile or from permission sets assigned outside the group. So members are
@@ -854,7 +853,7 @@ export const computeEffectiveGrants = async (
       containersWithoutRtData.push(containerId);
     }
 
-    // CR-CAP-10 unchecked-zero: the SAME pattern for custom permissions. The
+    // Unchecked-zero: the SAME pattern for custom permissions. The
     // extractor writes `customPermissionGrantCount` on every container it
     // processes — including containers granting ZERO — so the key's ABSENCE
     // means the family was never extracted, and the empty edge set below is
@@ -896,7 +895,7 @@ export const computeEffectiveGrants = async (
       } else if (edge.toId.startsWith(PREFIX.apex)) {
         grant.apex.add(edge.toId.slice(PREFIX.apex.length));
       } else if (edge.toId.startsWith(PREFIX.customPermission)) {
-        // CR-CAP-10: declared custom-permission grant. NOT folded into system.
+        // Declared custom-permission grant. NOT folded into system.
         grant.custom.add(edge.toId.slice(PREFIX.customPermission.length));
       } else if (edge.toId.startsWith(PREFIX.page)) {
         // ADM-11: <pageAccesses enabled=true> — the extractor mints these edges.
@@ -1065,7 +1064,7 @@ export const computeEffectiveGrants = async (
     }
   }
 
-  // Muting sets that could NOT be applied (present but pre-R6-06 = no muted
+  // Muting sets that could NOT be applied (present but predating muting support = no muted
   // data, or referenced but absent) — the shown access may be OVERSTATED.
   const mutingNoData = new Set<string>();
   const mutingMissing = new Set<string>();
@@ -1264,7 +1263,7 @@ export const effectivePermissionsHandler = async (
     ...(dependencyCapturedAt !== null ? { capturedAt: dependencyCapturedAt } : {}),
   };
 
-  // CR-CAP-10: resolve each SURVIVING custom permission against its definition
+  // Resolve each SURVIVING custom permission against its definition
   // node so a managed-package grant whose definition is absent is disclosed
   // (targetMissing), not dropped and not fabricated. Fully-muted custom perms
   // are removed (empty grantedBy) and counted for the disclosure.
@@ -1356,7 +1355,7 @@ export const effectivePermissionsHandler = async (
   ).length;
   const limit = input.limit ?? DEFAULT_LIMIT;
 
-  // CR-22 section cursor: page ONE designated list (object | system) and
+  // Section cursor: page ONE designated list (object | system) and
   // disclose the other honestly. objectPermissions is the largest + already
   // paged list, so it is the default designated list; a resumed cursor's
   // token.listId is fed back as designatedListId (paginateSection does NOT
@@ -1399,7 +1398,7 @@ export const effectivePermissionsHandler = async (
   // Emit both lists: the designated list shows its page; the non-designated
   // list stays whole (today's shape). On a fresh/whole-fits call the
   // designated list is 'object', so objectPermissions = its page and
-  // systemPermissions = full — byte-identical to pre-CR-22.
+  // systemPermissions = full — byte-identical to the pre-paging shape.
   const objectPage =
     designatedListId === 'object'
       ? (paged.items as readonly EffectiveObjectPerm[])
@@ -1410,7 +1409,7 @@ export const effectivePermissionsHandler = async (
       : systemPermissions;
 
   // Back-compat scalar fields: on the default (designated='object') path these
-  // are exactly pre-CR-22 — `hasMore` tracks the object page, `truncated` is
+  // are exactly the pre-paging shape — `hasMore` tracks the object page, `truncated` is
   // `hasMore || offset>0`. When resuming INTO the system list these track the
   // system page instead (the legacy fields describe the page being advanced).
   const hasMore = paged.pageInfo.hasMore;
@@ -1557,7 +1556,7 @@ export const effectivePermissionsHandler = async (
       }),
     );
   }
-  // CR-CAP-10 unchecked-zero. UNSHIFTED, not pushed: this is an UNDERSTATEMENT
+  // Unchecked-zero. UNSHIFTED, not pushed: this is an UNDERSTATEMENT
   // of access, so it belongs at the front beside the muting-overstatement
   // warnings rather than buried under the pagination notes.
   if (g.containersWithoutCustomPermData.length > 0) {
@@ -1574,8 +1573,8 @@ export const effectivePermissionsHandler = async (
     );
   }
 
-  // R6-06 muting disclosures. The engine collected the sets that could NOT be
-  // applied (present but pre-R6-06 = no muted data, or referenced but absent) —
+  // Muting disclosures. The engine collected the sets that could NOT be
+  // applied (present but predating muting support = no muted data, or referenced but absent) —
   // these mean the shown access may be OVERSTATED for the owning group.
   // "Applied" (informational) is prepended FIRST so that "not applied" (unshifted
   // after it) lands nearest the front — the OVERSTATEMENT risk reads first.

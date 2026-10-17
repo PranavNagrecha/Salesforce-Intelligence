@@ -253,7 +253,7 @@ const resolveSharedTarget = (
 
 /**
  * The five sharing-rule families this extractor models. `criteria` and `owner`
- * are the v1.1 originals; CR-CAP-16 adds the three guest / territory families:
+ * are the originals; this adds the three guest / territory families:
  *   - `guest`          ← `<sharingGuestRules>` (Experience-Cloud guest access)
  *   - `territory`      ← `<sharingTerritoryRules>`
  *   - `territoryGroup` ← `<sharingTerritoryGroupRules>`
@@ -264,7 +264,7 @@ type RuleType = 'criteria' | 'owner' | 'guest' | 'territory' | 'territoryGroup';
 
 /**
  * Rule families whose `<sharedTo>` predicate is criteria-shaped — i.e. carries
- * `criteriaItems` / `booleanFilter` rather than an owner `sharedFrom`. CR-CAP-16
+ * `criteriaItems` / `booleanFilter` rather than an owner `sharedFrom`.
  * broadens the original criteria-only check so the guest / territory families
  * surface their predicate too (they are all criteria-shaped).
  */
@@ -328,7 +328,7 @@ const parseCriteriaItems = (rule: Record<string, unknown>): CriteriaItem[] => {
 };
 
 /**
- * CR-CAP-16 — GUEST-branch-LOCAL `<sharedTo>` resolver.
+ * GUEST-branch-LOCAL `<sharedTo>` resolver.
  *
  * A guest sharing rule's `<sharedTo>` carries a SINGLE `<guestUser>` child whose
  * INNER TEXT is the Experience-Cloud SITE NAME (e.g. `Customer_Site`) — it is
@@ -376,7 +376,7 @@ const TERRITORY_VARIANT_KEYS = new Set([
 ]);
 
 /**
- * CR-CAP-16 — TERRITORY-branch-LOCAL `<sharedTo>` resolver.
+ * TERRITORY-branch-LOCAL `<sharedTo>` resolver.
  *
  * Territory rules share to one of:
  *   - a STANDARD variant (`<group>`, `<role>`, …) — resolved by the normal
@@ -522,7 +522,7 @@ const buildRule = (
   if (!required.ok) return required;
   const { fullName, accessLevel, sharedTo, sharedFrom } = required.value;
 
-  // CR-CAP-16: dispatch `<sharedTo>` resolution by family. Guest rules use the
+  // dispatch `<sharedTo>` resolution by family. Guest rules use the
   // branch-LOCAL resolver (named site group, leaving the shared VARIANT_TABLE
   // untouched); territory / territoryGroup rules accept either a standard
   // variant or a Territory synthetic; criteria / owner keep the original table.
@@ -547,7 +547,7 @@ const buildRule = (
   const labelRaw = unwrapSingle(rule['label']);
   const label = labelRaw === undefined ? null : String(labelRaw);
 
-  // CR-CAP-16: criteria / guest / territory / territoryGroup are all
+  // criteria / guest / territory / territoryGroup are all
   // criteria-shaped, so surface `booleanFilter` + `criteriaItemCount` +
   // `criteriaItems` (the field/operation/value payload) for every family in
   // HAS_CRITERIA (owner rules stay null / 0 / empty).
@@ -564,7 +564,7 @@ const buildRule = (
     ? toArray(rule['criteriaItems']).length
     : 0;
 
-  // CR-CAP-16: a guest rule's resolved target carries the Experience-Cloud
+  // a guest rule's resolved target carries the Experience-Cloud
   // site name; surface it as a first-class `siteName` property so consumers can
   // disclose WHICH portal's guest user the rule shares with.
   const siteName =
@@ -677,9 +677,9 @@ const buildRule = (
  * do NOT set `direction`. Variant resolution follows the
  * `<sharedTo>`/`<sharedFrom>` table in `Sharing.md` — synthetic group
  * ids (`Group:AllInternalUsers`, etc.) carry `synthetic: true` in their
- * edge properties and are dangling-by-design in v1.1.
+ * edge properties and are dangling-by-design.
  *
- * CR-CAP-16: `<sharingGuestRules>`, `<sharingTerritoryRules>`, and
+ * `<sharingGuestRules>`, `<sharingTerritoryRules>`, and
  * `<sharingTerritoryGroupRules>` are now EXTRACTED into the same `SharingRule`
  * shape (one node + `parentOf` + one `sharedWith` each, `declared`
  * confidence). They are criteria-shaped, so they carry `booleanFilter` +
@@ -741,7 +741,7 @@ export const extractSharingRules = async (
   const objectApiName = deriveComponentApiName(path, SHARING_RULES_FILE_SUFFIX);
   const parentId = `CustomObject:${objectApiName}`;
 
-  // CR-CAP-16: each XML element maps to a `RuleType`. The original two families
+  // each XML element maps to a `RuleType`. The original two families
   // plus the three guest / territory families. Order is criteria → owner →
   // guest → territory → territoryGroup so node/edge output stays deterministic.
   const FAMILIES: ReadonlyArray<{ readonly element: string; readonly ruleType: RuleType }> = [

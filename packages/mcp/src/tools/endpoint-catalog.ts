@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.endpoint_catalog` MCP tool.
  *
- * The v2.8 async-deep-tier composite over every endpoint surface an
+ * The async-deep-tier composite over every endpoint surface an
  * org touches. Sibling of `sfi.integration_map` (which surfaces the
  * NODES + their wiring) and `sfi.outbound_message_catalog` (which
  * surfaces ONE category in depth); this tool surfaces the URL /
@@ -13,7 +13,7 @@
  * Composes five categories:
  *
  *   1. **Inbound APIs** — `exposes` edges from ApexClass to
- *      synthetic `ExternalApi:{kind}/{path}` targets (v1.5 R3). Only
+ *      synthetic `ExternalApi:{kind}/{path}` targets. Only
  *      `rest` is an integration entry point; `aura` / `invocable` go to
  *      `uiEntryPoints` (ARCH-08). Apex `setEndpoint` call sites are read
  *      from source into `apexCallouts` (see `apex-callouts.ts`). The
@@ -21,15 +21,15 @@
  *      `/Account/*` for `@RestResource(urlMapping='/Account/*')`).
  *
  *   2. **Outbound messages** — OutboundMessage node properties
- *      (v2.8). The `endpointUrl` is the destination the SOAP
+ *      The `endpointUrl` is the destination the SOAP
  *      message is sent to.
  *
  *   3. **ExternalDataSource endpoints** — `endpoint` property on
- *      ExternalDataSource nodes (v1.5 R2). The OData / cross-org
+ *      ExternalDataSource nodes. The OData / cross-org
  *      data binding's URL.
  *
  *   4. **NamedCredential endpoints** — `url` property on
- *      NamedCredential nodes (v0.2). The outbound HTTP callout's
+ *      NamedCredential nodes. The outbound HTTP callout's
  *      destination.
  *
  *   5. **OmniStudio REST callouts** — `restEndpoints` property on
@@ -89,7 +89,7 @@
  *   - Intentionally ORG-WIDE: an object / component argument is REFUSED
  *     (ENDPOINT-CATALOG-IGNORES-OBJECT-SCOPE) — no endpoint→object edge.
  *   - Honesty axis (verbatim in `disclosure`): URLs are captured
- *     verbatim — v2.8 does NOT probe or validate any of them.
+ *     verbatim — this does NOT probe or validate any of them.
  *     Runtime callouts whose destination is computed dynamically
  *     (e.g., a NamedCredential resolved via custom metadata) are
  *     captured at the NamedCredential level but the runtime URL
@@ -396,7 +396,7 @@ const readOptionalString = (
 
 /**
  * Recognise the `ExternalApi` synthetic-id `kind` segment from an
- * `exposes` edge's `toId`. The v1.5 R3 synthetic-id form is
+ * `exposes` edge's `toId`. The synthetic-id form is
  * `ExternalApi:{kind}/{path}`; we recover `kind` by splitting on
  * `:` and then on `/`.
  */
@@ -468,7 +468,7 @@ const collectInboundApis = async (
 
 /**
  * Collect every outbound-message endpoint by walking the
- * OutboundMessage node family the v2.8 promotion produces. Each
+ * OutboundMessage node family the promotion produces. Each
  * node's `properties.endpointUrl` is the destination URL.
  */
 const collectOutboundMessages = async (
@@ -490,7 +490,7 @@ const collectOutboundMessages = async (
 /**
  * Collect every ExternalDataSource endpoint. Each node's
  * `properties.endpoint` (or `properties.url`) is the OData / cross-
- * org binding's URL. The v1.5 R2 producer uses `endpoint`; older
+ * org binding's URL. The producer uses `endpoint`; older
  * extractor variants may use `url`. Read both and prefer
  * `endpoint`.
  */

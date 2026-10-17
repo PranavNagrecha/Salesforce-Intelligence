@@ -148,7 +148,7 @@ describe('createServer', () => {
 
 describe('dispatchTool', () => {
   // The known/unknown branches need a Context but never touch its
-  // contents in v0.1, so a bare `as Context` keeps the test free of
+  // contents, so a bare `as Context` keeps the test free of
   // filesystem setup.
   const fakeCtx = {} as Context;
 
@@ -321,7 +321,7 @@ describe('dispatchTool', () => {
     'sfi.unassigned_permission_sets',
     'sfi.empty_queues_and_groups',
     'sfi.tech_debt_score',
-    // v2.1 R3 — code-quality composer tools.
+    // Code-quality composer tools.
     'sfi.code_quality_audit',
     'sfi.governor_limit_risks',
     'sfi.nonselective_soql',
@@ -329,28 +329,28 @@ describe('dispatchTool', () => {
     'sfi.crud_fls_audit',
     'sfi.test_coverage_gaps',
     'sfi.picklist_integrity_scan',
-    // v2.3 R2a — what-if field-level tools.
+    // What-if field-level tools.
     'sfi.what_if_change_field_type',
     'sfi.what_if_remove_picklist_value',
     'sfi.what_if_make_field_required',
-    // v2.3 R2b — what-if component-level tools.
+    // What-if component-level tools.
     'sfi.what_if_deactivate_flow',
     'sfi.what_if_disable_trigger',
     'sfi.what_if_change_method_signature',
-    // v2.3 R2c — what-if profile-level tools.
+    // What-if profile-level tools.
     'sfi.what_if_merge_profiles',
     'sfi.what_if_split_profile',
-    // R7-C1 — what-if permission-set delta tools.
+    // What-if permission-set delta tools.
     'sfi.what_if_assign_permset',
     'sfi.what_if_revoke_permset',
-    // v2.5 — documentation-generation tier.
+    // Documentation-generation tier.
     'sfi.generate_data_dictionary',
     'sfi.generate_admin_handbook',
     'sfi.generate_architecture_overview',
     'sfi.generate_sharing_summary',
     'sfi.generate_compliance_report',
     'sfi.generate_onboarding_doc',
-    // v2.7 R2 — deep code understanding tier (class granularity).
+    // Deep code understanding tier (class granularity).
     'sfi.call_graph',
     'sfi.downstream_effects',
     'sfi.test_coverage_for_method',
@@ -358,9 +358,9 @@ describe('dispatchTool', () => {
     'sfi.method_reachability',
     // tests-for-change — smart test selection (test-impact analysis).
     'sfi.tests_for_change',
-    // R6-16 — pre-deploy change-review gate.
+    // Pre-deploy change-review gate.
     'sfi.review_change',
-    // v2.8 R2 — async + integration deep tier.
+    // Async + integration deep tier.
     // LANE-E: cdc_subscribers is now a HIDDEN back-compat alias (still
     // dispatchable, un-advertised); event_topology is the advertised front
     // door that replaced it, so the roster stays net-flat.
@@ -370,11 +370,11 @@ describe('dispatchTool', () => {
     'sfi.scheduled_job_catalog',
     'sfi.outbound_message_catalog',
     'sfi.endpoint_catalog',
-    // v2.9 R4 — vocabulary + semantic-disambiguation tier.
+    // Vocabulary + semantic-disambiguation tier.
     'sfi.field_meaning',
     'sfi.disambiguate_concepts',
     'sfi.field_provenance',
-    // v2.2 R2 — universal find-anywhere + discovery surface.
+    // Universal find-anywhere + discovery surface.
     'sfi.find_field_anywhere',
     'sfi.find_semantic_field',
     'sfi.find_hardcoded_values_anywhere',
@@ -382,53 +382,53 @@ describe('dispatchTool', () => {
     'sfi.find_dead_code',
     // package_impact — managed-package boundary surface.
     'sfi.package_impact',
-    // v3.0 — unified field forensics synthesis tier.
+    // Unified field forensics synthesis tier.
     'sfi.field_360',
     'sfi.field_lineage',
     // CPQ specialty tier.
     'sfi.cpq_rule_chain',
     'sfi.cpq_quote_template_breakdown',
     'sfi.cpq_dependency_map',
-    // v3.1 — cross-org / sandbox-vs-prod comparison tier.
+    // Cross-org / sandbox-vs-prod comparison tier.
     'sfi.compare_vaults',
     'sfi.promotion_readiness',
     'sfi.compare_object_across_vaults',
     'sfi.compare_profile_across_vaults',
     'sfi.field_mapping_between_objects',
-    // v3.2 — OmniStudio composition tier (DataRaptor field-mapping table).
+    // OmniStudio composition tier (DataRaptor field-mapping table).
     'sfi.datatransform_field_map',
-    // v3.2 — OmniStudio declarative-process tier (DecisionTable browse).
+    // OmniStudio declarative-process tier (DecisionTable browse).
     'sfi.decision_table_browse',
-    // v3.2 R3b — OmniStudio "walk this IP's action chain" Q177 surface.
+    // OmniStudio "walk this IP's action chain" surface.
     'sfi.integration_procedure_chain',
-    // v3.2 R3a — OmniStudio "walk this OmniScript end-to-end" surface.
+    // OmniStudio "walk this OmniScript end-to-end" surface.
     'sfi.omniscript_flow',
-    // v3.2 R3d — OmniStudio "what's inside this FlexCard" surface.
+    // OmniStudio "what's inside this FlexCard" surface.
     'sfi.omniuicard_widget_breakdown',
     // 0.1.8 — universal usage dispatcher + installed-package catalog.
     'sfi.find_component_usages',
     'sfi.installed_package_catalog',
-    // P13-ANNOT-tools — curated annotations overlay (read + AI propose).
+    // Curated annotations overlay (read + AI propose).
     'sfi.annotations',
     'sfi.propose_annotation',
-    // R8-ANNOTATION-REVIEW — MCP review/confirm/reject loop.
+    // MCP review/confirm/reject loop.
     'sfi.review_annotations',
     'sfi.confirm_annotation',
     'sfi.reject_annotation',
-    // P13-GITHIST-tools — vault git history consumers.
+    // Vault git history consumers.
     'sfi.component_history',
     'sfi.component_change_attribution',
     'sfi.component_as_of',
-    // R6-09 — error-to-source decoder.
+    // Error-to-source decoder.
     'sfi.explain_error',
     // Finding #40 — debug-log / governor-limit runtime decoder.
     'sfi.explain_debug_log',
     // LANE F — debug-log EVENT-STREAM reader (timeline / time attribution /
     // automation firing order / per-phase + per-limit consumption).
     'sfi.trace_debug_log',
-    // R7-W7 — field-history-tracking compliance-gap composer.
+    // Field-history-tracking compliance-gap composer.
     'sfi.history_tracking_gaps',
-    // R7-C6 — fleet digest across the vault registry.
+    // Fleet digest across the vault registry.
     'sfi.generate_fleet_report',
     // RM-wire — deterministic reasoning-engine surface.
     'sfi.interpret',
@@ -486,7 +486,7 @@ describe('dispatchTool', () => {
     expect(body.error.message).not.toContain('"code":');
   });
 
-  it('R6-27: sfi.live_setup_audit_trail is REGISTERED — dispatches to the real handler, not unknown-tool/not-implemented', async () => {
+  it('sfi.live_setup_audit_trail is REGISTERED — dispatches to the real handler, not unknown-tool/not-implemented', async () => {
     // Regression pin for the exact bug this task fixes: the handler + schema
     // existed in live-plane.ts but the tool was never added to the
     // tools/index.ts roster, so a live probe against a real vault returned
@@ -523,7 +523,7 @@ describe('dispatchTool', () => {
   });
 });
 
-describe('tool profiles (P13-GW-profiles)', () => {
+describe('tool profiles', () => {
   afterEach(() => {
     delete process.env['SFI_TOOL_PROFILE'];
   });
@@ -569,7 +569,7 @@ describe('tool profiles (P13-GW-profiles)', () => {
 });
 
 describe('V01_TOOLS', () => {
-  it('advertises the 10 v0.1, 2 v0.2 architect, 1 v0.3 developer, 1 v1.1 admin, 1 v1.2 admin, 2 v1.5 architect, 1 v1.4 developer, 2 v1.6 business-user, 2 v2.0b composition, 2 v2.0c snapshot/compare, 2 v2.0d compliance/privacy, 2 v2.0g org-tour, 2 v1.7 freshness, 3 v2.0e lifecycle-narrator, 3 v2.0f explainer, 5 v2.4 hygiene, 5 v2.1 R3 code-quality composer, 3 v2.3 R2a what-if field-level, 2 value-change (what_if_change_field_value, value_change_audit), 3 v2.3 R2b what-if component-level, 2 v2.3 R2c what-if profile-level, 6 v2.5 documentation-generation, 5 v2.7 R2 deep code, 1 tests-for-change selection, 1 review-change deploy gate, 5 v2.8 R2 async/integration deep, 3 v2.9 R4 vocabulary, 5 v2.2 R2 find-anywhere, 1 package-impact boundary surface, 4 v3.1 cross-org, 5 v3.2 OmniStudio composer (datatransform-field-map, decision-table-browse, integration-procedure-chain, omniscript-flow, omniuicard-widget-breakdown), 1 capabilities self-description, 1 synthesize-answer answer-layer tool, 1 guidance knowledge-plane tool, 2 fleet/pulse tools (org-pulse, fleet-find), 1 universal usage dispatcher (find-component-usages), 1 installed-package catalog (installed-package-catalog), 1 automation-collision detector (automation-collisions), 1 live setup-audit-trail tool (live_setup_audit_trail, R6-27), 1 AI-exposure audit (ai-exposure-report), 1 guest-exposure report (guest-exposure-report), and 1 history-tracking-gaps compliance audit (R7-W7), and 1 interpret reasoning-engine surface (RM-wire), and 1 limit-headroom report (limit_headroom_report, org-ops), and 1 doc-coverage report (doc_coverage_report, org-answers/documentation), 1 debug-log event-stream reader (trace_debug_log, runtime), and 1 object-tier synthesis surface (object_360)', () => {
+  it('advertises every tool the roster registers, in registration order', () => {
     const names = V01_TOOLS.map((tool) => tool.name);
     expect(names).toEqual([
       'sfi.search_components',

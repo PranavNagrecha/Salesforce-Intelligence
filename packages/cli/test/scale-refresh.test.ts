@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 /**
- * v4.1 — scale proof: full offline refresh on a large synthetic source tree.
+ * Scale proof: full offline refresh on a large synthetic source tree.
  */
 
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
@@ -64,7 +64,7 @@ const stageScaleSource = async (cwd: string, fieldCount: number): Promise<void> 
   }
 };
 
-describe('scale refresh (v4.1)', () => {
+describe('scale refresh', () => {
   it(
     `refreshes ${SCALE_REFRESH_FIELD_COUNT} custom fields within ${SCALE_REFRESH_BUDGET_MS}ms`,
     async () => {

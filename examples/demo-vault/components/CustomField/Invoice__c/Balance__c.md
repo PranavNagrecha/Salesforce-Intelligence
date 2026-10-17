@@ -13,6 +13,7 @@ properties:
   externalId: false
   formula: Amount__c - Total_Paid__c
   inlineHelpText: null
+  isFormula: true
   label: Balance
   length: null
   picklistValues: null
@@ -43,6 +44,7 @@ Outstanding balance on the invoice: amount billed minus total payments applied.
 | externalId | `false` |
 | formula | `Amount__c - Total_Paid__c` |
 | inlineHelpText | `null` |
+| isFormula | `true` |
 | length | `null` |
 | picklistValues | `null` |
 | precision | `12` |

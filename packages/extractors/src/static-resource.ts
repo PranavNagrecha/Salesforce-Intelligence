@@ -92,7 +92,7 @@ const validateRoot = (
  * Extract a Node from a single Salesforce Static Resource sidecar file.
  *
  * Reads the `.resource-meta.xml` sidecar only; the companion binary
- * asset (`.zip`, `.png`, `.js`, etc.) is intentionally NOT read in v1.2,
+ * asset (`.zip`, `.png`, `.js`, etc.) is intentionally NOT read,
  * so `properties.fileSize` is always `null`. Downstream consumers must
  * treat `null` as "size unknown," not "size zero." (Per `StaticResource.md`:
  * "an implementation may choose to default `fileSize` to `null`
@@ -107,7 +107,7 @@ const validateRoot = (
  * Returns one `Node` of type `'StaticResource'` and zero edges.
  * Reference edges from Visualforce / Lightning / Apex callers into the
  * resources they invoke (`{!$Resource.X}`, `<lightning:resource>`) are
- * deferred to v1.4.
+ * deferred.
  *
  * Error cases (per vendored `StaticResource.md`):
  *   - `file-not-found` if the sidecar file is missing

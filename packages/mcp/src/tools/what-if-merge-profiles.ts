@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.what_if_merge_profiles` MCP tool.
  *
- * v2.3 R2c — the "what if I merge Profile A into Profile B?" surface.
+ * The "what if I merge Profile A into Profile B?" surface.
  * Given two Profile canonical ids, walks both profiles' grants and
  * settings, groups them by `(settingType, settingId)`, and surfaces the
  * pairwise diff per setting type. The tool DOES NOT auto-resolve
@@ -13,7 +13,7 @@
  * **Settings gathered per profile.** For each profile node:
  *
  *   1. **User permissions** — read from
- *      `properties.userPermissions` (the v0.1 Profile extractor's
+ *      `properties.userPermissions` (the Profile extractor's
  *      sorted string array). Each name becomes a setting key.
  *   2. **Object permissions** — walked from outgoing `grantedBy` edges
  *      to `CustomObject:*` nodes. Each grant's flags (`allowRead`,
@@ -26,7 +26,7 @@
  *      `ApexClass:*` nodes. Captured as boolean per class.
  *   5. **Tab visibilities** — read from `properties.tabVisibilities`
  *      ONLY when the property was extracted. The Profile extractor emits
- *      it at every refresh (P11-UI-app-tab-visibility-extract), so the
+ *      it at every refresh, so the
  *      category is normally compared; a profile from a vault refreshed
  *      BEFORE that extraction lacks the property, and the category is
  *      then reported under `summary.notEvaluatedCategories` with a
@@ -64,7 +64,7 @@
  *
  * **Honesty axis (verbatim, in every response):** see `DISCLOSURE`
  * below. The tool surfaces recommended policies without auto-resolving
- * conflicts — that is the default posture for v2.3.
+ * conflicts — that is the default posture.
  *
  * Implementation notes:
  *   - Both profile ids must start with `Profile:`. Other prefixes
@@ -142,7 +142,7 @@ type SettingType =
  *
  * `tieBreak` is filled when the comparator is undefined but a default
  * exists (e.g., layout-assignment defaults to "A wins" per the
- * documented v2.3 posture).
+ * documented posture).
  */
 export interface MergeConflict {
   readonly settingType: SettingType;
@@ -218,7 +218,7 @@ export interface WhatIfMergeProfilesOutput {
   /** True when the inlined `conflicts` is a partial page of the full list. */
   readonly truncated: boolean;
   /**
-   * CR-22 opaque continuation token, present ONLY when the conflicts page was
+   * Opaque continuation token, present ONLY when the conflicts page was
    * truncated (more conflicts remain past `limit`). Echo it back as `cursor` to
    * resume. Absent on a whole-fits page so an in-budget response stays
    * byte-identical.
@@ -238,7 +238,7 @@ export interface WhatIfMergeProfilesOutput {
 }
 
 /**
- * The verbatim disclosure surfaced in every response. Encodes the v2.3
+ * The verbatim disclosure surfaced in every response. Encodes the
  * boundary: the tool surfaces recommended policies but does not resolve.
  */
 const DISCLOSURE =
@@ -274,7 +274,7 @@ export const whatIfMergeProfilesInputSchema = z.object({
   profileIdB: z.string().min(1),
   limit: z.number().int().min(1).max(MERGE_MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
-  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // Continuation cursor: an OPAQUE token echoed back from a prior
   // truncated page's `nextCursor`. When present it supplies the resume offset;
   // omitting it = today's behavior (offset 0 / explicit `offset`).
   cursor: z.string().min(1).optional(),
@@ -328,7 +328,7 @@ interface ProfileSettings {
 
 /**
  * Read `properties.userPermissions` (sorted string array per the
- * v0.1 Profile extractor convention) into a per-name boolean map.
+ * Profile extractor convention) into a per-name boolean map.
  * Absent/non-array values yield an empty map — the honesty boundary
  * is propagated to the conflict walk (no entries → no conflicts).
  */
@@ -348,7 +348,7 @@ const readUserPermissions = (
 /**
  * Read `properties.tabVisibilities` from a Profile node. Each entry is
  * expected to carry `{ tab: string, visibility: string }`; non-conforming
- * shapes are dropped silently (the v0.1 extractor may not populate this
+ * shapes are dropped silently (the extractor may not populate this
  * surface at all — the honesty axis covers the empty case). The
  * `visibility` string is the verbatim Salesforce enum value
  * (`'DefaultOff' | 'DefaultOn' | 'Hidden'`).
@@ -404,7 +404,7 @@ export const readLayoutAssignments = (
 /**
  * Read `properties.recordTypeVisibilities`. Each entry carries
  * `{ recordType: string, default: boolean, visible: boolean | null }`
- * per the v1.2 extractor convention.
+ * per the extractor convention.
  */
 export const readRecordTypeVisibilities = (
   profile: Node,
@@ -1201,7 +1201,7 @@ export const whatIfMergeProfilesHandler = async (
   // Paginate the per-conflict detail (the bomb source on wide profiles).
   const limit = input.limit ?? MERGE_DEFAULT_LIMIT;
 
-  // CR-22: resolve the resume offset — an echoed cursor wins over an explicit
+  // Resolve the resume offset — an echoed cursor wins over an explicit
   // `offset`; a stale/forged cursor (changed profile pair, different tool, or
   // refreshed vault) is rejected with `invalid-query`.
   const fingerprint = argsFingerprint({ profileIdA, profileIdB });

@@ -328,7 +328,7 @@ describe('findApexUsagesHandler', () => {
     ]);
   });
 
-  // CR-13: truncation honesty. A blast-radius tool that silently slices its
+  // Truncation honesty. A blast-radius tool that silently slices its
   // result at `limit` lets a refactor decision read an undisclosed-incomplete
   // usage list. The page must surface the TRUE total + a truncation note +
   // pagination cursors so the full set is reachable.
@@ -355,7 +355,7 @@ describe('findApexUsagesHandler', () => {
     expect(truncationNote).toContain('5');
   });
 
-  it('pages the full referrer set via offset (CR-13)', async () => {
+  it('pages the full referrer set via offset', async () => {
     // Page 2: offset 2, limit 2 → R03, R04, still more.
     const page2 = await findApexUsagesHandler(ctx, {
       targetId: CROWDED_FIELD,
@@ -391,10 +391,10 @@ describe('findApexUsagesHandler', () => {
     ).toBeUndefined();
   });
 
-  it('leaves the fully-contained case byte-identical: counts present, no truncation note (CR-13 guard)', async () => {
+  it('leaves the fully-contained case byte-identical: counts present, no truncation note', async () => {
     // CALLEE has exactly one referrer (< default limit). The new fields must be
     // purely additive scalars and the boundaries array must be UNCHANGED from
-    // the pre-CR-13 behaviour (heuristic disclosure only, no truncation note).
+    // the legacy behaviour (heuristic disclosure only, no truncation note).
     const result = await findApexUsagesHandler(ctx, { targetId: CALLEE });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -446,7 +446,7 @@ describe('findApexUsagesHandler', () => {
   });
 });
 
-describe('findApexUsagesHandler — CR-22 continuation cursor', () => {
+describe('findApexUsagesHandler — continuation cursor', () => {
   it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
     const result = await findApexUsagesHandler(ctx, { targetId: CALLEE });
     expect(result.ok).toBe(true);
@@ -579,7 +579,7 @@ describe('findApexUsagesInputSchema', () => {
     expect(parsed.success).toBe(true);
   });
 
-  it('accepts a non-negative offset (CR-13 pagination)', () => {
+  it('accepts a non-negative offset (pagination)', () => {
     const parsed = findApexUsagesInputSchema.safeParse({
       targetId: FIELD_ID,
       offset: 2,

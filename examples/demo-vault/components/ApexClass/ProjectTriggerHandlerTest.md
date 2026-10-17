@@ -161,7 +161,7 @@ private class ProjectTriggerHandlerTest {
 
 | Target | Confidence | Producer |
 | --- | --- | --- |
-| `ApexClass:Project__c` | heuristic | apex-scanner |
+| `CustomObject:Project__c` | heuristic | apex-scanner |
 
 ### writesTo (outgoing, 1)
 

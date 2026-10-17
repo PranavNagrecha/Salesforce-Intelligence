@@ -13,10 +13,12 @@ properties:
   enableHistory: false
   enableReports: false
   enableSearch: false
+  externalSharingModel: null
   label: Battery
   nameFieldLabel: Battery Name
   nameFieldType: Text
   pluralLabel: Batteries
+  recordPageOverrides: []
   sharingModel: ReadWrite
   visibility: Public
 sourcePath: source/main/default/objects/Battery__c/Battery__c.object-meta.xml
@@ -37,9 +39,11 @@ type: CustomObject
 | enableHistory | `false` |
 | enableReports | `false` |
 | enableSearch | `false` |
+| externalSharingModel | `null` |
 | nameFieldLabel | `Battery Name` |
 | nameFieldType | `Text` |
 | pluralLabel | `Batteries` |
+| recordPageOverrides | `` |
 | sharingModel | `ReadWrite` |
 | visibility | `Public` |
 

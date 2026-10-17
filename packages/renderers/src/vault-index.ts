@@ -60,7 +60,7 @@ const buildLinkTarget = (node: Node): string => {
 // (backtick-only `escapeMarkdownInline`) was under-escaping here: a label
 // with a pipe / `[text](url)` link / `<img>` raw-HTML / `*emphasis*` /
 // leading `#` would render live in the bullet. `escapeMarkdownHeading` also
-// collapses newlines (CR-16c) and leaves clean labels byte-identical
+// collapses newlines and leaves clean labels byte-identical
 // (parens/spaces untouched, so `Status (active)` is unchanged).
 const renderNodeDisplayLabel = (node: Node): string =>
   escapeMarkdownHeading(node.label ?? node.apiName);

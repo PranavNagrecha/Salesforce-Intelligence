@@ -1,19 +1,19 @@
 /**
  * Handler for the `sfi.find_hardcoded_values_anywhere` MCP tool.
  *
- * The v2.2 cross-component-type hardcoded-value scan — broader than
- * v2.1's `sfi.find_hardcoded_values` (which scopes to Apex recognizer
- * findings only). v2.2's tool extends the Apex `qualityIssues` surface
+ * The cross-component-type hardcoded-value scan — broader than
+ * the `sfi.find_hardcoded_values` (which scopes to Apex recognizer
+ * findings only). The tool extends the Apex `qualityIssues` surface
  * with cross-corpus scans:
  *
- *   - **Apex**: composes the existing v2.1
+ *   - **Apex**: composes the existing
  *     `properties.qualityIssues[]` array on ApexClass / ApexTrigger
  *     nodes for the four hardcoded-literal rules (`hardcoded-id`,
  *     `hardcoded-email`, `hardcoded-username`,
  *     `hardcoded-sandbox-test-data`). When `category` is `email` or
  *     `value` contains `@`, ALSO scans raw `.cls`/`.trigger` source
  *     files directly as a fallback so emails added after the vault was
- *     built are never silently missed (CR-07 honesty-gap fix).
+ *     built are never silently missed (honesty-gap fix).
  *   - **Formula** (CustomField formula expressions): scans the
  *     `properties.formula` string for ID-shape, email-shape, date-
  *     shape, and (when `value` is specified) exact-substring matches.
@@ -41,7 +41,7 @@
  *   - Combined mode: both `value` and `category` specified; the
  *     `category` filters the matches and `value` narrows further.
  *
- * **v2.2 honesty axis:** the numeric category is intentionally
+ * **Honesty axis:** the numeric category is intentionally
  * suppressed from the default search — its false-positive rate is so
  * high (loop counters, array indices, arithmetic constants all match)
  * that surfacing every match is noise. The verbatim disclosure is
@@ -49,7 +49,7 @@
  *
  * **Composition recipe:**
  *   - For Apex scope: walks ApexClass and ApexTrigger nodes,
- *     composes their existing v2.1 `qualityIssues[]` findings for the
+ *     composes their existing `qualityIssues[]` findings for the
  *     four hardcoded-literal rules. When `value` is specified, also
  *     filters the `explanation` field to substring-match the value.
  *     For `email` category or an `@`-bearing `value`, additionally
@@ -67,8 +67,8 @@
  *     catalog.
  *
  * Implementation notes:
- *   - The four hardcoded-rule names match v2.1's
- *     `find-hardcoded-values` mapping; the v2.2 tool extends NOT
+ *   - The four hardcoded-rule names match the
+ *     `find-hardcoded-values` mapping; the tool extends NOT
  *     replaces.
  *   - Per `SemanticSearchSemantics.md` § "Salesforce ID pattern", the
  *     ID regex is `\b0[0-9a-zA-Z]{14}([0-9a-zA-Z]{3})?\b`.
@@ -140,7 +140,7 @@ const DATE_REGEX =
 /** Numeric regex per § "Numeric pattern" — opt-in only. */
 const NUMERIC_REGEX = /\b\d+(\.\d+)?\b/g;
 
-/** Apex quality rules that count as hardcoded-literal findings (v2.1). */
+/** Apex quality rules that count as hardcoded-literal findings. */
 const HARDCODED_APEX_RULES: ReadonlySet<string> = new Set([
   'hardcoded-id',
   'hardcoded-email',
@@ -149,7 +149,7 @@ const HARDCODED_APEX_RULES: ReadonlySet<string> = new Set([
   'hardcoded-sandbox-test-data',
 ]);
 
-/** Apex source file suffixes for the CR-07 email fallback source scan. */
+/** Apex source file suffixes for the email fallback source scan. */
 const APEX_SOURCE_SUFFIXES = ['.cls', '.trigger'] as const;
 
 /**
@@ -181,7 +181,7 @@ const FLOW_LITERAL_ELEMENTS = [
 ] as const;
 
 /**
- * CR-07 SOURCE-SCAN-CLAIMED-WITHOUT-READING-A-FILE. What the raw-source email
+ * SOURCE-SCAN-CLAIMED-WITHOUT-READING-A-FILE. What the raw-source email
  * pass actually READ, so the disclosure can report the scan's OUTCOME rather
  * than the fact it was attempted.
  *
@@ -204,7 +204,7 @@ interface ApexSourceEmailScanCensus extends ApexSourceScanCoverage {
 }
 
 /**
- * CR-07: source-file email fallback. Scans raw `.cls`/`.trigger` files
+ * Source-file email fallback. Scans raw `.cls`/`.trigger` files
  * for email-shaped string literals. This catches emails in production
  * classes that were added AFTER the last vault refresh (so their
  * `qualityIssues` in the graph are stale / missing the `hardcoded-email`
@@ -418,7 +418,7 @@ const ID_FP_DISCLOSURE =
 const TEST_CLASS_REFUSAL_DISCLOSURE =
   'matches in `@isTest`-annotated classes may be intentional test fixtures rather than production hardcoded values; verify the context before treating as a bug.';
 /**
- * CR-07: source-scan fallback disclosure. Surfaces when the email/value-with-@
+ * Source-scan fallback disclosure. Surfaces when the email/value-with-@
  * scan also ran the raw source-file pass (supplementing the graph qualityIssues).
  * The source scan is comment-stripped but not string-isolated — it will surface
  * email-shaped tokens inside multi-line string concatenations or Javadoc-style
@@ -428,7 +428,7 @@ const APEX_SOURCE_EMAIL_SCAN_DISCLOSURE =
   'For the email category, Apex source files were also scanned directly (CR-07 fallback) to catch addresses in classes updated after the last vault refresh. Source-scan matches are comment-stripped but not string-boundary-isolated — email-shaped tokens in @param JavaDoc or string-concatenation expressions may surface as false positives. Confidence: heuristic.';
 
 /**
- * CR-07 SOURCE-SCAN-CLAIMED-WITHOUT-READING-A-FILE. Renders the disclosure from
+ * SOURCE-SCAN-CLAIMED-WITHOUT-READING-A-FILE. Renders the disclosure from
  * what the pass READ. The old code set a boolean BEFORE the walk and emitted the
  * affirmative sentence unconditionally, so a vault with no `source/` tree — the
  * normal shape of a fresh clone, where the source tree is gitignored — answered
@@ -506,7 +506,7 @@ const flowSourceScanDisclosure = (coverage: FlowSourceScanCoverage): string => {
  *   - `scope`: optional array narrowing the corpora searched. Default
  *     is `['apex', 'formula', 'validation-rule', 'workflow-rule']`
  *     (excludes layout, permission-set which are non-textual / non-
- *     useful in v2.2 R2 graph storage).
+ *     useful R2 graph storage).
  *   - `limit`: optional integer in `[1, 500]`. Defaults to 100.
  */
 const findHardcodedValuesAnywhereInputBaseSchema = z.object({
@@ -528,7 +528,7 @@ const findHardcodedValuesAnywhereInputBaseSchema = z.object({
     )
     .optional(),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
-  // CR-22: page cursor for walking the full match list when truncated.
+  // Page cursor for walking the full match list when truncated.
   offset: z.number().int().min(0).optional(),
   cursor: z.string().min(1).optional(),
 });
@@ -598,7 +598,7 @@ export interface FindHardcodedValuesAnywhereOutput {
    */
   readonly qualityScanCoverage?: readonly QualityScanTypeCoverage[];
   /**
-   * CR-07 SOURCE-SCAN-CLAIMED-WITHOUT-READING-A-FILE. What the raw Apex
+   * SOURCE-SCAN-CLAIMED-WITHOUT-READING-A-FILE. What the raw Apex
    * source-file email pass actually read. Present ONLY when that pass ran
    * (`category: 'email'`, or a `value` containing `@`); absent otherwise.
    * `filesDiscovered: 0` means the `source/` tree held no `.cls`/`.trigger`
@@ -618,7 +618,7 @@ export interface FindHardcodedValuesAnywhereOutput {
   /**
    * Page size applied to this response. Present ONLY on a PAGED response
    * (`truncated` or a resumed `offset > 0`); omitted on a whole-fits no-cursor
-   * call so that response stays byte-identical to the pre-CR-22 shape.
+   * call so that response stays byte-identical to the pre-paging shape.
    */
   readonly limit?: number;
   /** Zero-based offset of the first returned match. Present only when paged (see `limit`). */
@@ -626,9 +626,9 @@ export interface FindHardcodedValuesAnywhereOutput {
   /** Offset to pass on the next call to fetch the following page. Present only when `truncated`. */
   readonly nextOffset?: number;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * Opaque continuation token, present ONLY when this page is truncated
    * (more matches remain). Echo it back as `cursor` to resume. Absent on a
-   * complete page so an in-budget response is byte-identical to pre-CR-22.
+   * complete page so an in-budget response is byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
@@ -721,7 +721,7 @@ const scanText = (
 
   if (valueFilter !== undefined && valueFilter.length > 0) {
     // Exact substring search across the text — case-sensitive by
-    // default for v2.2 R2.
+    // default.
     const needle = valueFilter;
     let idx = 0;
     while (idx < text.length) {
@@ -769,7 +769,7 @@ const isTestClass = (node: Node): boolean =>
   node.type === 'ApexClass' && node.properties['isTest'] === true;
 
 /**
- * Comparator: componentId ASC, source ASC, location ASC, then (CR-22) category
+ * Comparator: componentId ASC, source ASC, location ASC, then category
  * ASC, matchedValue ASC, contextSnippet ASC.
  *
  * The (componentId, source, location) prefix collides for the formula / VR / WF
@@ -806,7 +806,7 @@ const matchKey = (m: HardcodedValueAnywhereMatch): string =>
  * `qualityIssues[]`, CustomField `formula`, ValidationRule
  * `errorConditionFormula`, and WorkflowRule `formula` for hardcoded
  * literals by category, by exact value, or both. Surfaces per-category
- * and per-source counts plus the v2.2 boundary disclosures.
+ * and per-source counts plus the boundary disclosures.
  *
  * @example
  *   const r = await findHardcodedValuesAnywhereHandler(ctx, {
@@ -851,11 +851,11 @@ export const findHardcodedValuesAnywhereHandler = async (
 
   const collected: HardcodedValueAnywhereMatch[] = [];
   let sawTestClass = false;
-  // CR-22 B4: track types whose full multi-window scan stopped at the pathological
+  // Track types whose full multi-window scan stopped at the pathological
   // FULL_SCAN_MAX_NODES cap so the residual incompleteness is disclosed honestly.
   const incompleteTypes: string[] = [];
 
-  // CR-07 SOURCE-SCAN-CLAIMED-WITHOUT-READING-A-FILE. Null until the email
+  // SOURCE-SCAN-CLAIMED-WITHOUT-READING-A-FILE. Null until the email
   // source-scan fallback RUNS; then it holds what that pass actually read.
   // This used to be a boolean set BEFORE the walk, so the disclosure claimed
   // coverage the walk never delivered.
@@ -869,8 +869,8 @@ export const findHardcodedValuesAnywhereHandler = async (
   // this call actually read, populated only when the `apex` scope runs.
   let apexQualityScanCoverage: readonly QualityScanTypeCoverage[] = [];
 
-  // --- Apex scope: compose v2.1 qualityIssues[] for hardcoded rules. ---
-  // CR-22 B4: scan EVERY ApexClass / ApexTrigger by paging the SQL OFFSET forward
+  // --- Apex scope: compose qualityIssues[] for hardcoded rules. ---
+  // scan EVERY ApexClass / ApexTrigger by paging the SQL OFFSET forward
   // (window-by-window) so findings on node 501+ are reachable — the old MAX_PAGES
   // (20) x PAGE_SIZE (500) loop SILENTLY broke at 10k nodes with no disclosure.
   if (scope.has('apex')) {
@@ -924,7 +924,7 @@ export const findHardcodedValuesAnywhereHandler = async (
       }
     }
 
-    // CR-07: email source-scan fallback — supplement the graph findings with a
+    // Email source-scan fallback — supplement the graph findings with a
     // direct source-file scan whenever the caller is hunting email addresses.
     // This catches hardcoded emails in production classes whose `qualityIssues`
     // were not populated by the extractor (vault built before the email recognizer
@@ -1168,7 +1168,7 @@ export const findHardcodedValuesAnywhereHandler = async (
     bySource[m.source] += 1;
   }
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // Resolve the resume offset (echoed cursor wins over explicit offset).
   // The fingerprint covers the NARROWING args — value, category, scope — so a
   // token minted for one query can't be replayed against another.
   const fingerprint = argsFingerprint({
@@ -1208,10 +1208,10 @@ export const findHardcodedValuesAnywhereHandler = async (
     if (categoryFilter === 'id') boundaries.push(ID_FP_DISCLOSURE);
     if (sawTestClass) boundaries.push(TEST_CLASS_REFUSAL_DISCLOSURE);
   }
-  // CR-07 SOURCE-SCAN-CLAIMED-WITHOUT-READING-A-FILE. Lives OUTSIDE the
+  // SOURCE-SCAN-CLAIMED-WITHOUT-READING-A-FILE. Lives OUTSIDE the
   // `sorted.length > 0` gate above for the same reason the Apex quality-scan
   // census does: the zero-match response IS the false-clean one. Under the old
-  // gate a `{value: 'someone@example.com'}` call with no hits emitted NO CR-07
+  // gate a `{value: 'someone@example.com'}` call with no hits emitted NO
   // line at all (categoryFilter is undefined there), so the silent zero came
   // back with nothing to qualify it.
   if (apexSourceScan !== null) {

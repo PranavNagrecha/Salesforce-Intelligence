@@ -124,7 +124,7 @@ const renderEdgesSection = (thisNodeId: ComponentId, edges: readonly Edge[]): st
 const buildBody = (node: Node, edges: readonly Edge[], source: string): string => {
   const blocks: string[] = [];
   // Block 1: top heading. label/apiName are free-text metadata — escape so a
-  // newline or markdown special cannot inject structure (CR-16c). node.type is
+  // newline or markdown special cannot inject structure. node.type is
   // a closed enum and is left raw.
   blocks.push(`# ${escapeMarkdownHeading(node.label ?? node.apiName)}`);
   // Block 2: API name + Type. Two trailing spaces on the API-name line

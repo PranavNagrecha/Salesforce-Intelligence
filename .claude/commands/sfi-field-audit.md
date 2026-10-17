@@ -5,13 +5,11 @@ argument-hint: <ObjectApiName> [field1,field2,...]
 
 Run a field-deletion audit on **$ARGUMENTS**.
 
-Load the `salesforce-field-audit` skill first — it carries the checklist, the trap catalogue and the reporting contract. This command is the orchestration; the skill is the method.
+**Check which plan you are on before anything else.** If the agents `salesforce-field-auditor` and `salesforce-field-refuter` are available in this session, run the parallel plan below (Phases 1 and 2). Otherwise say once, in one sentence, that you are running the audit and the refutation inline, and follow the **Inline plan** section in place of Phases 1 and 2. The agents are not part of the plugin: they ship in the repository's `.claude/agents/` folder, and copying `salesforce-field-auditor.md` and `salesforce-field-refuter.md` into your project's `.claude/agents/` enables the parallel path.
+
+Load the `salesforce-field-audit` skill — it carries the checklist, the trap catalogue and the reporting contract. This command is the orchestration; the skill is the method.
 
 If no object was given, ask for one. Do not guess.
-
-## Agents this command uses
-
-Phases 1 and 2 spawn two agents, `salesforce-field-auditor` and `salesforce-field-refuter`. They are **not part of the plugin**: they ship in the repository's `.claude/agents/` folder, so copy those two files into your project's `.claude/agents/` (or run the host from a checkout of the repository). If they are not installed, do the per-field work and the refutation pass inline in this conversation, following the `salesforce-field-audit` skill; the method is the same, only the parallelism is lost.
 
 ## Phase 0 — Scout (inline, never parallelised)
 
@@ -22,7 +20,7 @@ Do this yourself, in this conversation. The scout output is the shared evidence 
    ```
    SFI_REPORTS_CAP=10000 sfi refresh
    ```
-   (A pulling refresh — `--no-pull` never fetches reports. If `command -v sfi` prints nothing, run it as `npx -y sf-intelligence@0.6.0 refresh`.)
+   (A pulling refresh — `--no-pull` never fetches reports. If `command -v sfi` prints nothing, run it as `npx -y sf-intelligence@0.7.0 refresh`.)
 3. **Orient.** `sfi.org_overview`, then `sfi.resolve` on the object to fix its canonical id.
 4. **Enumerate** the object's custom fields, and build the **collision list** — which of those field API names also exist on other objects. Same-named fields on other objects are the norm; any number taken from the wrong object voids every conclusion drawn from it.
 5. **Calibrate.** Pick a field you can already prove is referenced, run the same tools against it, and confirm they return something. Record the control. A zero from an uncalibrated method is not a finding.
@@ -54,6 +52,16 @@ Challenge every verdict that: overturns a prior call in either direction, propos
 For each, spawn **three** `salesforce-field-refuter` agents — one per lens (`data-loss`, `hidden-dependency`, `future-need`) — in a single message. Never let a verdict's own author refute it, and never give a refuter another refuter's output. Independence is the mechanism.
 
 **Majority vote: 2 of 3 refutes overturns the overturn.** Record the vote (`3/3`, `2/3`) as the row's confidence — a 2/3 result is Medium at best, and the dissent goes into the write-up. A verdict that survived unanimously and one that squeaked through must not look identical.
+
+## Inline plan — Phases 1 and 2 without the agents
+
+Phase 0 is shared and already done. In this conversation, with the `salesforce-field-audit` skill loaded:
+
+1. **Per-field verdicts.** Take the fields in the same batches and families as Phase 1 and produce one verdict record per field — the skill's checklist, evidence and disposition set (Keep / Review / Deprecate-then-Remove / Remove) — working from the Phase 0 block and your per-batch suspicion exactly as an agent would.
+2. **Refutation, one lens at a time.** Select the verdicts to contest by the Phase 2 rule. For each, run the three lenses `data-loss`, `hidden-dependency`, `future-need` one after another as separate passes; the lens briefs are in the skill's `references/orchestration.md`. A pass argues from the evidence alone — the tool outputs, the collision list, the coverage gaps, the family map — as if it had never seen the verdict; the disposition reasoning that produced the verdict stays closed to it. Record each lens's vote with the one objection it rests on, or "none found" when the lens does not apply.
+3. **Vote as in Phase 2.** 2 of 3 refutes overturns; `3/3` or `2/3` is the row's confidence.
+
+Then continue to Phase 3.
 
 ## Phase 3 — Synthesis (single-threaded, you)
 

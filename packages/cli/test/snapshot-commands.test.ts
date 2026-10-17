@@ -125,7 +125,7 @@ describe('runSnapshotCreate', () => {
       expect(meta.componentCount).toBe(2);
       expect(meta.edgeCount).toBe(1);
       expect(meta.sourceTreeHash).toBe('sha256:fixture');
-      // R8-SECURITY-TREND. This assertion USED TO READ:
+      // TREND. This assertion USED TO READ:
       //     expect(meta.metrics?.['securityScore']).toBe(100)   // "empty fixture → A / 100"
       // which encoded the defect rather than the contract. This fixture's
       // manifest carries NO coverage at all, so Profile / PermissionSet /

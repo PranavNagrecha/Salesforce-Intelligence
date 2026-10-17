@@ -66,8 +66,9 @@ type: CustomField
 | --- | --- | --- |
 | `CustomObject:Installation__c` | declared | custom-field-extractor |
 
-### usedInLayout (incoming, 1)
+### usedInLayout (incoming, 2)
 
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `Layout:Installation__c.Installation Layout` | declared | layout-extractor |
+| `Layout:Project__c.Residential Layout` | parsed | relationship-resolver |

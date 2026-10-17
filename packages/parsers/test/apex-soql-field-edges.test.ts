@@ -22,7 +22,7 @@ import { extractApexAstEdges } from '../src/apex-ast-edges.js';
  *     `canonicalizeFieldEdgeTargets` at import time, not by the parser.
  *
  * Scope-attribution edge cases (child subqueries, semi-joins, TYPEOF) are
- * pinned separately in apex-ast-spike.test.ts (CR-06 / H5).
+ * pinned separately in apex-ast-spike.test.ts.
  */
 describe('inline-SOQL field-level reads across clauses (R6-03)', () => {
   /** Wrap an inline `[SELECT ...]` query as an Apex method body. */

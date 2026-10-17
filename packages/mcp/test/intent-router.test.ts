@@ -83,7 +83,7 @@ const CASES: readonly Case[] = [
   // Owner catalog — reports / folders / email templates
   { q: 'How many reports in the system are useless?', intent: 'reports-usage', plane: 'hybrid' },
   { q: 'What folders do people have access to for reports?', intent: 'folder-access', plane: 'live' },
-  // Folder-gated ACCESS asked without the word "folder" (P11-UI-folder-access disclosure).
+  // Folder-gated ACCESS asked without the word "folder" (disclosure).
   { q: 'Who can see this dashboard?', intent: 'folder-access', plane: 'live' },
   { q: 'Who can access the Pipeline report?', intent: 'folder-access', plane: 'live' },
   { q: 'What email templates are used?', intent: 'email-template-usage', plane: 'hybrid' },
@@ -130,14 +130,14 @@ const CASES: readonly Case[] = [
   // literal phrase "role hierarchy".
   { q: 'Which roles report up to the VP role?', intent: 'role-hierarchy-structure', plane: 'vault' },
 
-  // P12-ROUTER-disambiguation — near-miss pairs must route to DISTINCT intents.
+  // Near-miss pairs must route to DISTINCT intents.
   { q: 'who can see Account records', intent: 'who-can-access-object', plane: 'vault' },
   { q: 'who can view all Account records', intent: 'who-can-access-object', plane: 'vault' },
   { q: 'what if I change Account.Industry to a text field', intent: 'what-if-field', plane: 'vault' },
   { q: 'what breaks if I change Account.Industry', intent: 'impact-analysis', plane: 'vault' },
   { q: 'governor limit risks', intent: 'governor-risks', plane: 'vault' },
   { q: 'what are my org limits', intent: 'org-limits', plane: 'live' },
-  // P12-ROUTER-omni-cpq + extension-first: plural/spacing + extension phrasing.
+  // Omni/CPQ + extension-first: plural/spacing + extension phrasing.
   { q: 'what omniscripts do we have', intent: 'omnistudio', plane: 'vault' },
   { q: 'what data raptors exist', intent: 'omnistudio', plane: 'vault' },
   { q: 'what components extend the hed package', intent: 'package-impact', plane: 'vault' },
@@ -239,7 +239,7 @@ const CASES: readonly Case[] = [
   { q: 'When was the Status field last modified?', intent: 'last-modified', plane: 'vault' },
   { q: "What's different between UAT and prod?", intent: 'cross-org-diff', plane: 'vault' },
   { q: 'Show me the churn between snapshots', intent: 'metadata-churn', plane: 'vault' },
-  // R8-SECURITY-TREND — posture-over-time must beat generic snapshot-diff and
+  // Posture-over-time must beat generic snapshot-diff and
   // suggest metric:securityScore.
   { q: 'Is our security posture getting better or worse?', intent: 'security-posture-trend', plane: 'vault' },
 
@@ -263,7 +263,7 @@ const CASES: readonly Case[] = [
   // B21.4/5/6 — record types, validation rules, approvals
   { q: 'How do picklist values differ between record types on Case?', intent: 'record-type-picklist', plane: 'vault' },
 
-  // P14-ROUTER-picklist-values — declared values of a NAMED picklist field
+  // Declared values of a NAMED picklist field
   { q: 'What values are in the Status picklist?', intent: 'picklist-values', plane: 'vault' },
   { q: 'What are the values in the Industry picklist?', intent: 'picklist-values', plane: 'vault' },
   { q: 'Which values does the Stage picklist have?', intent: 'picklist-values', plane: 'vault' },
@@ -275,7 +275,7 @@ const CASES: readonly Case[] = [
   { q: 'Which picklist values are available for the Support record type?', intent: 'record-type-picklist', plane: 'vault' },
   { q: 'What happens if I remove the Closed Won picklist value?', intent: 'what-if-remove-picklist-value', plane: 'vault' },
 
-  // P14-ROUTER-cmdt-record-values — configured CMDT / Custom Setting RECORD values
+  // Configured CMDT / Custom Setting RECORD values
   { q: 'What is the Default record of Marketo_Api_Setting__mdt set to?', intent: 'cmdt-record-values', plane: 'vault' },
   { q: 'What values does the US record of Region_Config__mdt hold?', intent: 'cmdt-record-values', plane: 'vault' },
   { q: 'Show the values in the Region_Config__mdt records', intent: 'cmdt-record-values', plane: 'vault' },
@@ -291,7 +291,7 @@ const CASES: readonly Case[] = [
   { q: 'What custom metadata types do we have?', intent: 'custom-settings-cmdt', plane: 'vault' },
   { q: 'Show me 5 sample Account records', intent: 'sample-records', plane: 'live' },
 
-  // P14-ROUTER-object-create-access — SINGLE-verb create/delete is object-level CRUD
+  // SINGLE-verb create/delete is object-level CRUD
   { q: 'Who can create an Account record?', intent: 'object-access', plane: 'vault' },
   { q: 'Who can delete Cases?', intent: 'object-access', plane: 'vault' },
   { q: 'Which profiles can create Opportunities?', intent: 'object-access', plane: 'vault' },
@@ -302,7 +302,7 @@ const CASES: readonly Case[] = [
   { q: 'Who can see Account records?', intent: 'who-can-access-object', plane: 'vault' },
   { q: 'Who deleted the opportunity?', intent: 'runtime-audit-trail', plane: 'vault' },
 
-  // P14-ROUTER-live-count-temporal — temporal qualifier cues live data even
+  // Temporal qualifier cues live data even
   // when the object noun isn't in the record-count noun list.
   { q: 'How many open applications do we have right now?', intent: 'record-count', plane: 'live' },
   { q: 'How many active enrollments are there currently?', intent: 'record-count', plane: 'live' },
@@ -311,7 +311,7 @@ const CASES: readonly Case[] = [
   // (earlier rule), and "how many X" with no temporal/noun cue stays put.
   { q: 'How many validation rules do we have right now?', intent: 'metadata-count', plane: 'vault' },
 
-  // P14-ROUTER-community-security-compound — a long compound security ask was
+  // A long compound security ask was
   // dragged onto the LIVE email-template tool by a cross-clause "templates …
   // used" match, then onto app-access by the bare \bapp prefix ("application
   // templates"). It must land in the vault ACCESS family; the real email- and
@@ -326,7 +326,7 @@ const CASES: readonly Case[] = [
   { q: 'Which profiles can access the Sales app?', intent: 'app-access', plane: 'vault' },
   { q: 'Who can open the Service Console application?', intent: 'app-access', plane: 'vault' },
 
-  // P14-ROUTER-safe-delete-misroute — a compound delete-verdict question
+  // A compound delete-verdict question
   // enumerates nouns ("every layout, validation rule, flow, … permission
   // set"), and the first broad noun rule used to win (unassigned-permsets).
   // The product-vocabulary cues (safe-to-delete verdict / block deletion /
@@ -341,7 +341,7 @@ const CASES: readonly Case[] = [
   { q: 'Which permission sets are unassigned?', intent: 'unassigned-permsets', plane: 'vault' },
   { q: 'What breaks if I delete Account.Industry?', intent: 'impact-analysis', plane: 'vault' },
 
-  // P14-ROUTER-goldset-expand — top baseline-300 unrouted clusters + the
+  // Top baseline-300 unrouted clusters + the
   // two grandfathered tools with real phrasings.
   { q: 'When did the Status field change?', intent: 'component-history', plane: 'vault' },
   { q: 'Show the change history of the Payment flow', intent: 'component-history', plane: 'vault' },
@@ -365,7 +365,7 @@ const CASES: readonly Case[] = [
   { q: 'When was the Status field last modified?', intent: 'last-modified', plane: 'vault' },
   { q: 'What changed recently in the org?', intent: 'history-change', plane: 'vault' },
 
-  // P14-ROUTER-stress-20 — the refresh-anchored churn phrasing gets the
+  // The refresh-anchored churn phrasing gets the
   // no-arg specialist; generic churn/trend keeps the snapshot tools.
   { q: 'Churn since last vault refresh', intent: 'what-changed-since-refresh', plane: 'vault' },
   // "what changed since…" stays with the EARLIER history-change rule
@@ -373,7 +373,7 @@ const CASES: readonly Case[] = [
   { q: 'What changed since the last refresh?', intent: 'history-change', plane: 'vault' },
   { q: 'How much churn did we have over time?', intent: 'metadata-churn', plane: 'vault' },
 
-  // P14-ROUTER-method-signature-impact — the specialist simulator wins the
+  // The specialist simulator wins the
   // signature phrasings the generic blast-radius rule was swallowing.
   { q: 'What breaks if I change the signature of a method in OpportunityService?', intent: 'what-if-method-signature', plane: 'vault' },
   { q: 'What if I change the method signature of calculateTotal in PaymentService?', intent: 'what-if-method-signature', plane: 'vault' },
@@ -382,7 +382,7 @@ const CASES: readonly Case[] = [
   { q: 'What breaks if I change Account.Industry?', intent: 'impact-analysis', plane: 'vault' },
   { q: 'What is the blast radius of changing Contact.Email?', intent: 'impact-analysis', plane: 'vault' },
 
-  // P14-ROUTER-formula-vs-usage — verb-first formula/VR phrasings leave component-usage
+  // Verb-first formula/VR phrasings leave component-usage
   { q: 'What references Account.Industry in formulas or validation rules?', intent: 'formula-references', plane: 'vault' },
   { q: 'What uses Status__c in validation rules?', intent: 'formula-references', plane: 'vault' },
   // Collision guards: generic usage phrasings keep their existing routes.
@@ -579,7 +579,7 @@ describe('classifyQuestion edge cases', () => {
     }
   });
 
-  it('routes runtime audit-trail questions to an honest disclosure (P11-WHATHAPPENED-disclosure)', () => {
+  it('routes runtime audit-trail questions to an honest disclosure', () => {
     for (const q of [
       'who changed this record',
       'who deleted the opportunity',
@@ -641,7 +641,7 @@ describe('classifyQuestion edge cases', () => {
     expect(classifyQuestion('what is the trigger order of Account?').gap).toBeNull();
   });
 
-  it('routes REVERSE layout questions to layout_assignments, not the forward layout_for_user (P12-ROUTER-layout-assignments)', () => {
+  it('routes REVERSE layout questions to layout_assignments, not the forward layout_for_user', () => {
     for (const q of [
       'what is the Account Layout assigned to',
       'which profiles use the Account Layout',
@@ -687,7 +687,7 @@ describe('classifyQuestion edge cases', () => {
     expect(r.reason).toMatch(/update/);
   });
 
-  it('flow-search derives the grep query from the content words (P14-ROUTER-stress-20)', () => {
+  it('flow-search derives the grep query from the content words', () => {
     const r = classifyQuestion('Marketo applicant status sync flows');
     expect(r.intent).toBe('flow-search');
     // Routing scaffolding stripped; the named content remains as the query.
@@ -729,7 +729,7 @@ describe('classifyQuestion edge cases', () => {
     ).toBeUndefined();
   });
 
-  it('security-posture-trend suggests metric:securityScore (R8-SECURITY-TREND)', () => {
+  it('security-posture-trend suggests metric:securityScore', () => {
     const r = classifyQuestion(
       'Is our security posture getting better or worse across refreshes?',
     );
@@ -738,8 +738,8 @@ describe('classifyQuestion edge cases', () => {
     expect(r.suggestedArgs).toEqual({ metric: 'securityScore' });
   });
 
-  it('schema route suggests the list_components `type` for enumerations (P1-B14-exec)', () => {
-    // list_components REQUIRES `type` (v0.1 contract), so a discovery enumeration
+  it('schema route suggests the list_components `type` for enumerations', () => {
+    // list_components REQUIRES `type` (contract), so a discovery enumeration
     // would error "type is required" without this hint.
     const cases: ReadonlyArray<{ readonly q: string; readonly type: string }> = [
       { q: 'What validation rules exist?', type: 'ValidationRule' },
@@ -904,7 +904,7 @@ describe('classifyQuestion edge cases', () => {
     ).toEqual({ type: 'CustomField', parentId: 'CustomObject:Opportunity' });
   });
 
-  it('omnistudio discovery leads with list_components + sub-family type (P1-B14-exec)', () => {
+  it('omnistudio discovery leads with list_components + sub-family type', () => {
     // The per-component breakdown tools need a specific id the router cannot
     // derive, so a discovery ask leads with the catalog list_components call.
     const om = classifyQuestion('OmniStudio admission scripts');
@@ -922,7 +922,7 @@ describe('classifyQuestion edge cases', () => {
     });
   });
 
-  it('cpq discovery leads with the no-id org-wide dependency map (P1-B14-exec)', () => {
+  it('cpq discovery leads with the no-id org-wide dependency map', () => {
     const r = classifyQuestion('CPQ quote line dependencies');
     expect(r.intent).toBe('cpq');
     // cpq_dependency_map takes an OPTIONAL id, so it runs org-wide with no args —
@@ -1164,7 +1164,7 @@ describe('router ↔ roster contract (CI gate)', () => {
     expect(allRoutableTools().length).toBeGreaterThanOrEqual(40);
   });
 
-  // P12-ROUTER-intent-coverage (the "a tool ships without a router entry FAILS"
+  // Intent coverage (the "a tool ships without a router entry FAILS"
   // half — subsumes the legacy product-surface-gate). Every V01 tool must be
   // reachable from `route_question` OR be on this grandfathered allowlist of
   // tools that are intentionally NOT router-primary: meta/front-door tools, the
@@ -1187,21 +1187,21 @@ describe('router ↔ roster contract (CI gate)', () => {
     'sfi.route_question', 'sfi.synthesize_answer',
     'sfi.get_manifest', 'sfi.export_manifest', 'sfi.baseline_acknowledge',
     'sfi.baseline_status', 'sfi.live_consent', 'sfi.live_budget',
-    // P13-GW catalog gateway (meta-navigation; P13-GW-router-envelope wires
+    // Catalog gateway (meta-navigation; this wires
     // route_question to EMIT run_analysis envelopes under the core profile —
     // the gateway tools themselves are never a question's primary answer):
     'sfi.list_analyses', 'sfi.describe_analysis', 'sfi.run_analysis',
-    // P13-ANNOT-tools — `propose_annotation` is agent plumbing, never a
+    // `propose_annotation` is agent plumbing, never a
     // question's primary answer. sfi.annotations is now router-reachable
-    // ("who owns X" — P14-ROUTER-goldset-expand).
-    // R8-ANNOTATION-REVIEW — review/confirm/reject are host-driven review
+    // ("who owns X").
+    // Review/confirm/reject are host-driven review
     // verbs (user sign-off), not natural-language question answers.
     'sfi.propose_annotation',
     'sfi.review_annotations',
     'sfi.confirm_annotation',
     'sfi.reject_annotation',
-    // P13-GITHIST-tools — sfi.component_history is now router-reachable
-    // ("when did X change" — P14-ROUTER-goldset-expand); sfi.component_as_of
+    // sfi.component_history is now router-reachable
+    // ("when did X change"); sfi.component_as_of
     // is now router-reachable too ("show <X> as of the last snapshot" —
     // offline-router hardening).
     // Opt-in live-plane helpers the agent invokes directly inside a live flow.
@@ -1219,8 +1219,8 @@ describe('router ↔ roster contract (CI gate)', () => {
     // REACH — the find-semantic-field intent: "do we have a field for X" /
     // "where do we store <concept> data across the org"); sfi.fleet_find is
     // now router-reachable too ("find orgs in the fleet with <pkg>" — hardening).
-    // sfi.layout_assignments is now router-reachable (P12-ROUTER-layout-assignments).
-    // sfi.lookup_record is now router-reachable (P14-ROUTER-cmdt-record-values).
+    // sfi.layout_assignments is now router-reachable.
+    // sfi.lookup_record is now router-reachable.
     // sfi.org_pulse ("quick health snapshot of the org") and
     // sfi.promotion_readiness ("is the sandbox ready to promote") are now
     // router-reachable too (offline-router hardening).
@@ -1230,8 +1230,8 @@ describe('router ↔ roster contract (CI gate)', () => {
     // sfi.what_if_disable_trigger is now router-reachable (eval family C —
     // "blast radius if I disable trigger T").
     // sfi.what_if_change_method_signature is now router-reachable
-    // (P14-ROUTER-method-signature-impact); sfi.what_changed_since_refresh
-    // is now router-reachable (P14-ROUTER-stress-20).
+    // sfi.what_changed_since_refresh
+    // is now router-reachable.
     // sfi.what_if_deactivate_flow is now router-reachable (RESIDUAL 2 —
     // "what breaks if I deactivate the X flow" / "turn off FlowA and FlowB").
     // sfi.what_if_split_profile is now router-reachable too ("what if I split
@@ -1243,7 +1243,7 @@ describe('router ↔ roster contract (CI gate)', () => {
     // zombie-accounts arm), so they were removed from this list — the
     // stale-entry test below enforces that removal.
     //
-    // R7-W6 (router-v2 pass): sfi.automation_collisions, sfi.live_setup_audit_
+    // (router-v2 pass): sfi.automation_collisions, sfi.live_setup_audit_
     // trail, sfi.ai_exposure_report, sfi.explain_error, sfi.live_record_access,
     // sfi.live_record_shares, sfi.live_scheduled_jobs, sfi.live_field_history,
     // and sfi.review_change are all now router-reachable — each got a
@@ -1263,7 +1263,7 @@ describe('router ↔ roster contract (CI gate)', () => {
     // fully self-contained dispatch; that does not disqualify it from
     // "routable" here. All nine removed from this list — the stale-entry test
     // below enforces that removal.
-    // R7-W7: sfi.history_tracking_gaps (compliance audit — PII/sensitive
+    // sfi.history_tracking_gaps (compliance audit — PII/sensitive
     // CustomFields with no field-history tracking) ships without a dedicated
     // deterministic-router rule. Its phrasing space ("history tracking",
     // "audit trail", "compliance gap") overlaps the EXISTING pii/sensitive
@@ -1272,9 +1272,9 @@ describe('router ↔ roster contract (CI gate)', () => {
     // parallel-branch builder should not hand-tune in isolation. The tool IS
     // reachable via the hybrid-mode semantic funnel (see funnel-utterances.ts)
     // and via sfi.capabilities' `govern` category; grandfathered here pending
-    // the orchestrator's router-v2 pass, exactly as R6-15 (automation_collisions).
+    // the orchestrator's router-v2 pass, exactly as automation_collisions.
     'sfi.history_tracking_gaps',
-    // R7-C4: sfi.query_graph is the ADVANCED, power-user raw-graph query surface
+    // sfi.query_graph is the ADVANCED, power-user raw-graph query surface
     // (structured, allowlisted, read-only SELECT over nodes/edges). It is an
     // escape hatch for filters the purpose-built tools do not expose, NOT a
     // primary answer to any natural question — and a deterministic regex intent
@@ -1284,9 +1284,9 @@ describe('router ↔ roster contract (CI gate)', () => {
     // "query the graph for X" / "raw graph query" / "advanced: find all edges
     // where…" utterances in funnel-utterances.ts) and via sfi.capabilities'
     // `find` category; grandfathered here pending the orchestrator's router-v2
-    // pass, exactly as R6-15 (automation_collisions) / R6-16 (review_change).
+    // pass, exactly as automation_collisions / review_change.
     'sfi.query_graph',
-    // R7-C6: sfi.generate_fleet_report (the "state of my orgs" digest,
+    // sfi.generate_fleet_report (the "state of my orgs" digest,
     // composed across every registered vault) ships without a dedicated
     // deterministic-router rule. Its natural phrasing ("fleet report",
     // "state of the fleet", "which of my orgs is most out of date") heavily
@@ -1297,8 +1297,7 @@ describe('router ↔ roster contract (CI gate)', () => {
     // tool IS reachable via the hybrid-mode semantic funnel (utterances
     // added to funnel-utterances.ts, same pattern as sibling sfi.fleet_find)
     // and via sfi.capabilities' `docs` category; a deterministic regex
-    // intent is deferred to the orchestrator's router-v2 pass, exactly as
-    // R6-15/R6-16.
+    // intent is deferred to the orchestrator's router-v2 pass, as before.
     'sfi.generate_fleet_report',
     // RM-wire (step 1): sfi.interpret LEFT the grandfather list — it is now
     // router-reachable, STACKED as a reasoning COMPLEMENT after the specialist
@@ -1662,7 +1661,7 @@ describe('gap log', () => {
     expect(gapLogPath()).toBe(logPath);
   });
 
-  it('stamps the entry with the vault root when provided (P14-FEEDBACK-gaplog-scope)', async () => {
+  it('stamps the entry with the vault root when provided', async () => {
     const route = classifyQuestion('completely unanswerable gibberish zzz qqq');
     expect(route.gap).not.toBeNull();
     const entry = await logGapIfAny(route, logPath, '/work/a/org-kb');

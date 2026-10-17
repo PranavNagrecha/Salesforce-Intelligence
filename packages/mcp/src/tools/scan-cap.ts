@@ -1,5 +1,5 @@
 /**
- * P12-HONESTY-scan-cap-disclosure — `listNodesByType` caps at a fixed ceiling,
+ * `listNodesByType` caps at a fixed ceiling,
  * so a per-type scan that comes back AT the cap may have more behind it. Tools
  * that enumerate grantors / assignments (`who_can_access_object`,
  * `layout_assignments`, `app_access`, peers) must disclose that they may have
@@ -21,7 +21,7 @@ export const NODE_SCAN_HARD_CAP = 500;
  * overrides (tests / operators). NOTE: this is UNCLAMPED — an operator can set
  * it above {@link NODE_SCAN_HARD_CAP}. Callers that feed it to
  * `listNodesByType` MUST use {@link clampedNodeScanLimit} instead, or the graph
- * rejects the over-limit page (CR-RV10).
+ * rejects the over-limit page.
  */
 export const nodeScanLimit = (): number => {
   const v = Number(process.env['SFI_NODE_SCAN_LIMIT']);
@@ -31,7 +31,7 @@ export const nodeScanLimit = (): number => {
 /**
  * The per-type scan limit actually safe to pass to `listNodesByType` — the
  * configured {@link nodeScanLimit} clamped to {@link NODE_SCAN_HARD_CAP}
- * (CR-RV10). Using this everywhere a scan fetch happens means an operator who
+ * Using this everywhere a scan fetch happens means an operator who
  * sets `SFI_NODE_SCAN_LIMIT > 500` gets a 500-row scan (cursor pages the rest)
  * rather than a hard `internal` error.
  */
@@ -59,7 +59,7 @@ export const scanHitCap = (
  * `effectiveLimit` is the number of nodes ACTUALLY fetched per page — pass the
  * clamped value the tool used (`clampedNodeScanLimit()`), NOT the raw
  * `nodeScanLimit()`, so the disclosed figure matches the real fetch even when
- * an operator set `SFI_NODE_SCAN_LIMIT` above the hard cap (CR-RV10 honesty).
+ * an operator set `SFI_NODE_SCAN_LIMIT` above the hard cap.
  * Defaults to `clampedNodeScanLimit()` for callers that fetched at the clamp.
  */
 export const scanTruncationNote = (
@@ -76,7 +76,7 @@ export const scanTruncationNote = (
  * {@link clampedNodeScanLimit} (≤500). The note therefore quotes the real
  * effective cap and does NOT recommend `SFI_NODE_SCAN_LIMIT`: that knob is
  * clamped to ≤500 and only sets the per-window page size, so raising it cannot
- * lift the full-scan ceiling — a dead-end remedy (CR-P3 scan-cap honesty). The
+ * lift the full-scan ceiling — a dead-end remedy (scan-cap honesty). The
  * honest remedies are to narrow the query or page the output cursor.
  */
 export const fullScanTruncationNote = (

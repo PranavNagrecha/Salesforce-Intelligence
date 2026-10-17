@@ -55,7 +55,7 @@ export const deriveComponentApiName = (filePath: string, suffix: string): string
  *
  * The variant determines which elements are required by the
  * `CustomObject` extractor. `StandardObject` is documented for
- * completeness; the extractor never runs on standard objects in v0.1
+ * completeness; the extractor never runs on standard objects
  * (they appear only as edge targets).
  *
  * The canonical ID prefix is always `CustomObject:` regardless of

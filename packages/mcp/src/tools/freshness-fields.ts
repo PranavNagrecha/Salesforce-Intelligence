@@ -2,9 +2,9 @@
  * Shared accessors for a node's freshness fields — `lastModifiedDate`,
  * `lastModifiedBy`, and `apiVersion`.
  *
- * **Why this exists.** The v0.1-v1.6 baseline writes these as legacy
+ * **Why this exists.** The baseline writes these as legacy
  * top-level fields on the node (`lastModifiedDate: string | null`,
- * `lastModifiedBy: string | null`, `apiVersion: number | null`). v1.7's
+ * `lastModifiedBy: string | null`, `apiVersion: number | null`). The
  * Tooling API enricher writes a structured overlay under
  * `properties.lastModifiedDate`, `properties.lastModifiedBy: { id, name }`,
  * and `properties.apiVersion`. Every freshness-facing tool must read BOTH
@@ -29,7 +29,7 @@
 
 /**
  * Extract the freshness `lastModifiedDate` for a node. Prefers
- * `properties.lastModifiedDate` (the v1.7 enricher's overlay) and falls
+ * `properties.lastModifiedDate` (the enricher's overlay) and falls
  * back to the legacy top-level `lastModifiedDate` field. Returns `null`
  * when neither source carries a value.
  */
@@ -49,7 +49,7 @@ export const extractLastModifiedDate = (
 
 /**
  * Extract the `lastModifiedBy.id` / `.name` pair from a node. Prefers
- * the v1.7 enricher's `properties.lastModifiedBy: { id, name }` overlay
+ * the enricher's `properties.lastModifiedBy: { id, name }` overlay
  * and falls back to the legacy string-only top-level `lastModifiedBy`
  * field (treated as the id with an empty name). Returns `null` when
  * neither source carries a value.
@@ -75,7 +75,7 @@ export const extractLastModifiedBy = (
 
 /**
  * Extract the API version for a node. Prefers `properties.apiVersion`
- * (the v1.7 enricher's overlay) and falls back to the legacy top-level
+ * (the enricher's overlay) and falls back to the legacy top-level
  * `apiVersion: number | null` field on the Node interface. Returns
  * `null` when neither source carries a value.
  */

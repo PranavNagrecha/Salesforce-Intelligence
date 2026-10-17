@@ -7,7 +7,7 @@ import { err, ok, type Result } from '@sf-intelligence/core';
  * `a.b_c@d-e.org`). Everything else — spaces, quotes, semicolons, backticks,
  * `$()`, pipes, redirects, ampersands, newlines — is rejected.
  *
- * This is the defense-in-depth gate behind the exec hardening (CR-01 / C1): the
+ * This is the defense-in-depth gate behind the exec hardening: the
  * `targetOrg` value is read from `--target-org` and the vault `config.json` and
  * was previously string-interpolated into shell `exec()` calls. The exec sites
  * are now `execFile('sf', argv)` (no shell), so a metacharacter alias is an

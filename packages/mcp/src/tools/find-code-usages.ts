@@ -1,9 +1,9 @@
 /**
  * Handler for the `sfi.find_code_usages` MCP tool.
  *
- * The v1.4 broadening of `sfi.find_apex_usages`: same incoming-edge
+ * The broadening of `sfi.find_apex_usages`: same incoming-edge
  * shape, same per-edge metadata, but the set of node types that count
- * as "code" is expanded to include the v1.4 frontend tier
+ * as "code" is expanded to include the frontend tier
  * (`LightningComponentBundle`, `AuraDefinitionBundle`,
  * `VisualforcePage`, `VisualforceComponent`) alongside the original
  * `ApexClass` and `ApexTrigger`. The tool also accepts the
@@ -44,7 +44,7 @@
  *   - Empty `edgeTypes: []` and empty `nodeTypes: []` are both allowed
  *     by the schema (filter to nothing → empty result). This keeps the
  *     boundary predictable: omit for default-all, supply for explicit
- *     subset. Matches the v0.3 `find-apex-usages` design choice.
+ *     subset. Matches the `find-apex-usages` design choice.
  *   - Unknown `targetId` and "target exists but has no code referrers"
  *     both resolve to an empty list; the graph cannot distinguish them
  *     and neither is an error.
@@ -98,7 +98,7 @@ const CODE_USAGES_DEFAULT_LIMIT = 50;
  * subset; preserving it keeps the JSON-Schema enum diffable against
  * the contracts union.
  *
- * v1.4 broadens beyond `find-apex-usages`'s triad to include
+ * This broadens beyond `find-apex-usages`'s triad to include
  * `references`. LWC bundles emit `references` from the bundle to other
  * components (e.g., `<c-child-component>` tag usage); Aura bundles
  * emit `references` from the bundle to other Aura/LWC components in
@@ -115,9 +115,9 @@ const CODE_EDGE_TYPES = [
 ] as const satisfies readonly EdgeType[];
 
 /**
- * The set of node types that count as "code source" for the v1.4
- * code-persona view. The original `ApexClass`/`ApexTrigger` pair from
- * v0.3 is extended with the v1.4 frontend tier:
+ * The set of node types that count as "code source" for the
+ * code-persona view. The original `ApexClass`/`ApexTrigger` pair
+ * is extended with the frontend tier:
  * `LightningComponentBundle`, `AuraDefinitionBundle`,
  * `VisualforcePage`, and `VisualforceComponent`.
  *
@@ -172,7 +172,7 @@ const CODE_NODE_TYPES: ReadonlySet<ComponentType> = new Set(
 export const findCodeUsagesInputSchema = z.object({
   targetId: z.string().min(1),
   limit: z.number().int().min(1).max(CODE_USAGES_MAX_LIMIT).optional(),
-  // CR-22: page offset + continuation cursor for walking the full usage set
+  // Page offset + continuation cursor for walking the full usage set
   // when the result is truncated. Omit for today's behavior.
   offset: z.number().int().nonnegative().optional(),
   cursor: z.string().min(1).optional(),
@@ -234,9 +234,9 @@ export interface FindCodeUsagesOutput {
   /** Next offset to fetch the following page, or `null` when the list is exhausted. */
   readonly nextOffset: number | null;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated.
+   * Opaque continuation token, present ONLY when this page is truncated.
    * Echo it back as `cursor` to resume. Absent on a complete page so an
-   * in-budget response is byte-identical to pre-CR-22.
+   * in-budget response is byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
@@ -253,7 +253,7 @@ const CODE_USAGE_EMPTY_DISCLOSURE =
  * `source` ASC. The `(id, edgeType)` keys handle a single code referrer with
  * multiple incoming edge types to the same target (e.g., an LWC bundle with both
  * a `references` edge from an `@salesforce/apex` import and a `readsFrom` from a
- * static field reference in a `getRecord` wire). The `source` tiebreak (CR-22)
+ * static field reference in a `getRecord` wire). The `source` tiebreak
  * makes the order UNIQUE: the edge PK is `(from_id, to_id, edge_type, source)`,
  * and here `from_id` = `id`, `to_id` = the fixed `targetId`, `edge_type` =
  * `edgeType`, so within a fixed `(id, edgeType)` only `source` can differ (the
@@ -457,7 +457,7 @@ export const findCodeUsagesHandler = async (
 
   const ordered = usages.sort(compareUsages);
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
+  // Resolve the resume offset (echoed cursor wins over explicit offset);
   // a stale/forged cursor (changed targetId/edgeTypes/nodeTypes, different tool,
   // or refreshed vault) is rejected with invalid-query. nodeTypes MUST be in the
   // fingerprint — it narrows the result set, so a token minted for one nodeTypes

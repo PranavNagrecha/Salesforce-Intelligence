@@ -52,6 +52,28 @@ If you commit the vault, commit the refreshed `org-kb/components/` plus
 `org-kb/meta/manifest.json`, `meta/config.json` and `meta/version.txt`, as
 in [first-refresh.md](./first-refresh.md).
 
+## Coming from 0.6.x: what changed in 0.7.0
+
+No new tools and no envelope change. Two things to know:
+
+- **OmniScript save-for-later patterns now count as field writes.** An
+  OmniScript whose settings declare `saveURLPatterns` and a save object gets a
+  `writesTo` reference to each pattern's field, so where-used and
+  safe-to-delete answers for those fields name the script. A script that
+  declares patterns but no save object is not guessed at: the patterns are
+  listed on the script as unresolved. **This needs a refresh** on orgs that
+  use OmniStudio; nothing changes elsewhere.
+- **`/sfi-field-audit` works without its two agents.** The command checks
+  whether `salesforce-field-auditor` and `salesforce-field-refuter` are
+  installed; if not, it runs the per-field audit and the three refutation
+  lenses inline and says so once. Nothing to configure. Copying the two agent
+  files from the repository into your project's `.claude/agents/` restores the
+  parallel path.
+
+Also in this release: the public docs are link-checked in the build, every
+nested `sfi <command> <subcommand> --help` is pinned by a test, the demo org
+shows the reference families 0.6.0 added, and the host guide covers Cline.
+
 ## Coming from 0.5.x: what changed in 0.6.0
 
 No new tools. The changes are in what existing verdicts can see and how

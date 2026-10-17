@@ -106,7 +106,7 @@ describe('findComponentUsagesHandler', () => {
     expect(r.value.data.boundaries.join(' ')).toMatch(/PHANTOM/);
   });
 
-  // P14-USAGE-grep-frontend: the grep tier covers LWC/Aura/VF bundle source,
+  // The grep tier covers LWC/Aura/VF bundle source,
   // bounded to the bundle directories — an unzipped static resource's own
   // payload must never flood the matches.
   describe('frontend grep tier', () => {
@@ -427,7 +427,7 @@ describe('findComponentUsagesHandler', () => {
   });
 });
 
-// P14-USAGE-flow-object-boundaries: the four families the §C3 audit flagged
+// The four families the §C3 audit flagged
 // get a UNIFORM type-specific blind-spot note on an empty result — the
 // generic empty≠absent line alone doesn't name the family's known hole.
 describe('type-specific empty boundaries', () => {

@@ -7,21 +7,21 @@ import type {
 import { tokenizeFormula } from '@sf-intelligence/parsers';
 
 /**
- * v2.0a — Conditional Context extraction helper. Per
+ * Conditional Context extraction helper. Per
  * `docs/vendor/salesforce-metadata/ConditionalContextSemantics.md`.
  *
  * The helper turns a parent firer + one-or-more raw condition surfaces
- * into the synthetic `ConditionalContext` graph entities the v2.0a
+ * into the synthetic `ConditionalContext` graph entities the
  * milestone introduces. Each condition surface produces ONE
  * `ConditionalContext` node and ONE `firesWhen` edge from the firer to
  * the node. The node carries the parsed expression, the field refs the
- * expression mentions, and a discriminator (`kind`) the v2.0e lifecycle
+ * expression mentions, and a discriminator (`kind`) the lifecycle
  * narrator reads to pick a rendering strategy.
  *
- * v2.0a deliberately handles the seven DECLARATIVE firers; the
- * heuristic Apex if-guard surface is deferred to v2.0a.1's apex-scanner
+ * This deliberately handles the seven DECLARATIVE firers; the
+ * heuristic Apex if-guard surface is deferred to the apex-scanner
  * extension. The helper's `kind` discriminator deliberately does NOT
- * include the `apex-guard` value yet — the type is reserved for v2.0a.1.
+ * include the `apex-guard` value yet — the type is reserved.
  */
 
 const EXTRACTOR_SOURCE = 'condition-extractor';
@@ -149,7 +149,7 @@ export type ConditionSource =
  * array -> object -> inner scalar array) so the canonical shape
  * round-trips through the renderer unmodified — the earlier
  * `fieldRefCount: number` workaround that this revert replaces is
- * preserved in the v2.0a worker report for context.
+ * preserved in the worker report for context.
  */
 export interface ConditionMirror {
   readonly kind: 'criteria' | 'formula' | 'flow-decision' | 'flow-recordtrigger';
@@ -338,7 +338,7 @@ const resolveFieldRefFromCriteria = (
     return `CustomField:${trimmed}`;
   }
   if (defaultObjectApiName === null) {
-    // No object context to attach — return the bare path. v2.0e's
+    // No object context to attach — return the bare path. The
     // dangling-edge resolution can decide what to do.
     return `CustomField:${trimmed}`;
   }
@@ -347,7 +347,7 @@ const resolveFieldRefFromCriteria = (
 
 /**
  * Tokenize a formula expression and return the resolved CustomField
- * ids. Reuses the v0.2 formula tokenizer to share the field-resolution
+ * ids. Reuses the formula tokenizer to share the field-resolution
  * semantics with the existing `formula-references` extractor helper.
  * Returns an empty array when the tokenizer errors (a broken formula
  * in one rule must not tank the whole extraction; the calling
@@ -366,7 +366,7 @@ const resolveFieldRefsFromFormula = (
     // preserved verbatim, single-segment field names are scoped by
     // the parent object. When the parent object is null (e.g.,
     // top-level Flow without a record context), the bare path is
-    // emitted; v2.0e's narrator decides how to resolve.
+    // emitted; the narrator decides how to resolve.
     let toId: ComponentId;
     if (ref.path.startsWith('$')) {
       // `$Record.<field>` resolves to the flow's start object (see
@@ -773,7 +773,7 @@ export interface ExtractConditionsOptions {
 }
 
 /**
- * v2.0a — Convert a list of per-firer condition surfaces into the
+ * Convert a list of per-firer condition surfaces into the
  * synthetic ConditionalContext graph entities.
  *
  * Each entry in `sources` produces exactly one ConditionalContext
@@ -785,7 +785,7 @@ export interface ExtractConditionsOptions {
  *
  * For the `criteria` and `flow-*` kinds, the field-ref resolution
  * uses the criteria-item `field` text directly; for `formula` kinds
- * the v0.2 formula tokenizer resolves field refs (silently swallowing
+ * the formula tokenizer resolves field refs (silently swallowing
  * tokenizer errors — see `formula-references.ts` for the
  * fail-tolerant rationale). The XML-extracted criteria carry
  * `declared` confidence; the formula-based ones carry `parsed`

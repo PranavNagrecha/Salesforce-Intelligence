@@ -247,14 +247,14 @@ describe('codeQualityAuditHandler', () => {
 });
 
 // =============================================================================
-// CR-22 B3 — the scan now WINDOWS past the per-type cap (was: drop the tail).
+// the scan now WINDOWS past the per-type cap (was: drop the tail).
 // The FULL issue set is scanned then sorted (severity-first) BEFORE paging, so
 // the sort is a true total order over a fixed set even though it is not scan
 // order. A low cap no longer makes the verdict INCOMPLETE — it just scans in
 // smaller windows and still reaches every finding. `scanTruncated` fires only
 // for a pathological residual cap (FULL_SCAN_MAX_NODES).
 // =============================================================================
-describe('codeQualityAuditHandler — full multi-window scan (CR-22 B3)', () => {
+describe('codeQualityAuditHandler — full multi-window scan', () => {
   it('does NOT emit a Scan-capped boundary under the default cap (byte-identical happy path)', async () => {
     const r = await codeQualityAuditHandler(ctx, {});
     expect(r.ok).toBe(true);
@@ -300,10 +300,10 @@ describe('codeQualityAuditHandler — full multi-window scan (CR-22 B3)', () => 
 });
 
 // =============================================================================
-// CR-22 — output-axis cursor. A truncated page emits an opaque nextCursor that
+// output-axis cursor. A truncated page emits an opaque nextCursor that
 // resumes with no gaps / no dupes; a whole-fits no-cursor call is byte-identical.
 // =============================================================================
-describe('codeQualityAuditHandler — output cursor (CR-22)', () => {
+describe('codeQualityAuditHandler — output cursor', () => {
   it('whole-fits no-cursor call omits all paging fields (byte-identical)', async () => {
     const r = await codeQualityAuditHandler(ctx, {});
     expect(r.ok).toBe(true);

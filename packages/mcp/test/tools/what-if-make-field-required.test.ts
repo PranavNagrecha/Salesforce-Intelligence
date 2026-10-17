@@ -60,7 +60,7 @@ const FIXTURE_MANIFEST: VaultManifest = {
     'VisualforcePage',
     'VisualforceComponent',
     'FlexiPage',
-    // CR-CAP-01: declarative-populator families now in MAKE_REQUIRED_COVERAGE.
+    // Declarative-populator families now in MAKE_REQUIRED_COVERAGE.
     'WorkflowRule',
     'ApprovalProcess',
   ]),
@@ -105,9 +105,9 @@ const FLOW_CREATE_WITH_FIELD = 'Flow:FullCreateAccount';
 // pre-fix consumer missed — it must still be flagged blocking for TARGET_FIELD.
 const FLOW_CREATE_BARE = 'Flow:BareCreateAccount';
 const EXT_SVC_ID = 'ExternalService:LegacyCRMSync';
-// CR-CAP-01: declarative populators of TARGET_FIELD discovered via inbound
-// writesTo edges. A WorkflowRule field-update (CR-05) and an ApprovalProcess
-// field-update (CR-CAP-07) — both conditional writers that must be credited as
+// Declarative populators of TARGET_FIELD discovered via inbound
+// writesTo edges. A WorkflowRule field-update and an ApprovalProcess
+// field-update — both conditional writers that must be credited as
 // informational `configuration-only` findings WITHOUT making the verdict safe.
 const WF_RULE_STAMP = 'WorkflowRule:Account.Stamp';
 const APPROVAL_STAMP = 'ApprovalProcess:Account.Credit_Review';
@@ -197,7 +197,7 @@ const seed: ExtractionResult = {
       type: 'ListView',
       apiName: 'Account.By_Industry',
     }),
-    // CR-CAP-01: a WorkflowRule + an ApprovalProcess that each set TARGET_FIELD
+    // A WorkflowRule + an ApprovalProcess that each set TARGET_FIELD
     // via a (conditional) field-update.
     makeNode({
       id: WF_RULE_STAMP,
@@ -300,7 +300,7 @@ const seed: ExtractionResult = {
       toId: ACCOUNT_OBJ,
       edgeType: 'references',
     }),
-    // CR-CAP-01: WorkflowRule field-update writesTo TARGET_FIELD (CR-05 shape).
+    // WorkflowRule field-update writesTo TARGET_FIELD.
     makeEdge({
       fromId: WF_RULE_STAMP,
       toId: TARGET_FIELD,
@@ -309,7 +309,7 @@ const seed: ExtractionResult = {
       confidence: 'parsed',
       properties: { operation: 'Literal' },
     }),
-    // CR-CAP-01: ApprovalProcess field-update writesTo TARGET_FIELD (CR-CAP-07 shape).
+    // ApprovalProcess field-update writesTo TARGET_FIELD.
     makeEdge({
       fromId: APPROVAL_STAMP,
       toId: TARGET_FIELD,
@@ -551,8 +551,8 @@ describe('whatIfMakeFieldRequiredHandler', () => {
     expect(result.value.data.coverageCaveat?.missingCoverage).toContain('FlexiPage');
   });
 
-  // === CR-CAP-01: declarative populator coverage ===
-  describe('CR-CAP-01 — declarative populator coverage', () => {
+  // === declarative populator coverage ===
+  describe('declarative populator coverage', () => {
     it('credits a WorkflowRule field-update writer as a configuration-only populator (FAIL-BEFORE: zero impacts)', async () => {
       // FAIL-BEFORE: the tool never walked the field's inbound writesTo edges,
       // so a field written ONLY by a WorkflowRule/ApprovalProcess produced ZERO
@@ -778,13 +778,13 @@ describe('whatIfMakeFieldRequiredHandler — live null-rate (P6-required-field-w
 });
 
 // =============================================================================
-// CR-12 — page-to-exhaustion (destructive SAFETY verdict). The Flow scan is
+// page-to-exhaustion (destructive SAFETY verdict). The Flow scan is
 // walked to exhaustion, not just the first page; a non-writing create-path Flow
 // sorted PAST the cap by id ASC used to be silently skipped → a false 'safe'
 // verdict (a SAFETY false-negative, the worst class for a what-if tool). With
 // SFI_NODE_SCAN_LIMIT=2 the loadAllNodes offset loop walks multiple Flow pages.
 // =============================================================================
-describe('whatIfMakeFieldRequiredHandler — past-cap Flow SAFETY (CR-12 de-cap)', () => {
+describe('whatIfMakeFieldRequiredHandler — past-cap Flow SAFETY', () => {
   let dir: string;
   let s: GraphStore;
   let pagedCtx: Context;

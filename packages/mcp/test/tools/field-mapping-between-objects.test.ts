@@ -1,10 +1,10 @@
 /// <reference types="vitest/globals" />
 
 /**
- * Tests for the v3.1 `sfi.field_mapping_between_objects` MCP tool.
+ * Tests for the `sfi.field_mapping_between_objects` MCP tool.
  *
- * The Q173 / Q174 anchor — Lead vs Contact field mapping for the
- * conversion. Q174 locks the verbatim heuristic-mapping disclosure:
+ * The anchor case — Lead vs Contact field mapping for the
+ * conversion. It locks the verbatim heuristic-mapping disclosure:
  * "field-mapping suggestions are heuristic — labels are matched by
  * token overlap and types by compatibility table. Verify each
  * suggested pair against your business rules before relying on the
@@ -164,7 +164,7 @@ describe('fieldMappingBetweenObjectsHandler', () => {
     expect(parsed.success).toBe(true);
   });
 
-  it('Q173 — suggests Lead.Lead_Score__c ↔ Contact.Contact_Score__c (Score token overlap)', async () => {
+  it('suggests Lead.Lead_Score__c ↔ Contact.Contact_Score__c (Score token overlap)', async () => {
     const r = await fieldMappingBetweenObjectsHandler(ctx, {
       vault: 'acme-prod',
       objectA: 'Lead',
@@ -182,7 +182,7 @@ describe('fieldMappingBetweenObjectsHandler', () => {
     expect(scorePair?.confidence).toBe('heuristic');
   });
 
-  it('Q173 — suggests Lead.Industry_Vertical__c ↔ Contact.Vertical__c (Vertical token overlap)', async () => {
+  it('suggests Lead.Industry_Vertical__c ↔ Contact.Vertical__c (Vertical token overlap)', async () => {
     const r = await fieldMappingBetweenObjectsHandler(ctx, {
       vault: 'acme-prod',
       objectA: 'Lead',
@@ -236,7 +236,7 @@ describe('fieldMappingBetweenObjectsHandler', () => {
     }
   });
 
-  it('Q174 — ALWAYS surfaces the verbatim heuristic-mapping disclosure', async () => {
+  it('ALWAYS surfaces the verbatim heuristic-mapping disclosure', async () => {
     const r = await fieldMappingBetweenObjectsHandler(ctx, {
       vault: 'acme-prod',
       objectA: 'Lead',
@@ -262,7 +262,7 @@ describe('fieldMappingBetweenObjectsHandler', () => {
     }
   });
 
-  it('returns vault-not-found refusal for unknown alias (Q174 disclosure still surfaces)', async () => {
+  it('returns vault-not-found refusal for unknown alias (disclosure still surfaces)', async () => {
     const r = await fieldMappingBetweenObjectsHandler(ctx, {
       vault: 'no-such-vault',
       objectA: 'Lead',
@@ -275,7 +275,7 @@ describe('fieldMappingBetweenObjectsHandler', () => {
         s.includes("'no-such-vault' is not registered"),
       ),
     ).toBe(true);
-    // The Q174 verbatim phrase is still surfaced even on refusal — the
+    // The verbatim phrase is still surfaced even on refusal — the
     // honesty discipline is unconditional.
     expect(
       r.value.data.boundaries.some((s) =>
@@ -401,7 +401,7 @@ describe('fieldMappingBetweenObjectsHandler (single-vault, no registry)', () => 
     expect(totalPair?.typeCompatible).toBe(true);
     // The served-vault ref points at the vault this session serves.
     expect(r.value.data.vault.path).toBe(soloCtx.vaultRoot);
-    // The Q174 verbatim phrase is unconditional.
+    // The verbatim phrase is unconditional.
     expect(
       r.value.data.boundaries.some((s) =>
         s.includes('field-mapping suggestions are heuristic'),

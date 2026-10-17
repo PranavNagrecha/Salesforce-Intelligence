@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.what_happens_on_save` MCP tool.
  *
- * v2.0e W1 — the lifecycle-narrator headline. Produces an ordered list
+ * The lifecycle-narrator headline. Produces an ordered list
  * of every automation step that fires when a record of a given object
  * is saved (for a specific DML event: insert | update | upsert | delete
  * | undelete) — the Salesforce documented Order Of Execution (SOE)
@@ -53,7 +53,7 @@
  *   10. **post-save-rollup-recalc** — parent Summary (roll-up summary)
  *      CustomFields that aggregate this object, found by matching this
  *      object's api name against the child-object prefix of every
- *      Summary field's `summaryForeignKey` property (R6-07; there is no
+ *      Summary field's `summaryForeignKey` property (there is no
  *      edge for this — see `soe-rollup-recalc.ts`). Fires on EVERY DML
  *      event (insert/update/delete/undelete all change the child record
  *      set a rollup aggregates), capped to ONE level (a grandparent's own
@@ -74,16 +74,16 @@
  *   - Roll-up recalculation is capped to one level and does not expand
  *     the recalculated parent's own automation (no re-entrancy).
  *   - Entitlement-process/milestone-type METADATA is modeled elsewhere
- *     in the vault (R6-18), but this composition does NOT simulate
+ *     in the vault, but this composition does NOT simulate
  *     entitlement milestones as an order-of-execution phase — target
  *     minutes and live on-track/breached status are NOT modeled. When
  *     the target object has an active `EntitlementProcess`, the
- *     response carries an `entitlementProcessNotes` entry (R6-23)
+ *     response carries an `entitlementProcessNotes` entry
  *     naming it — a disclosure-plus-pointer, not a simulated phase.
  *   - Criteria-based sharing recalculation — the FINAL step in
  *     Salesforce's documented order-of-execution, evaluated after
  *     every phase modeled here (including post-save-async) — is
- *     also NOT modeled (R6-23).
+ *     also NOT modeled.
  *   - Manual sharing, sharing sets, account teams, and Apex callouts
  *     after save are out of scope.
  *   - Pre-save validation includes only ValidationRules; system
@@ -108,11 +108,11 @@
  *     condition firers (Flow with multiple decisions) surface their
  *     first condition only — callers wanting the full list resolve via
  *     `sfi.get_edges`.
- *   - `recordTypeId` is accepted for the input axis but the v2.0e
+ *   - `recordTypeId` is accepted for the input axis but the
  *     scope does not narrow automation by record type — the cascade
  *     surfaces every potential automation regardless. The field is
  *     surfaced verbatim in the response so callers can pass it through
- *     to a future v2.0e.1 record-type-scoped narrowing.
+ *     to a future record-type-scoped narrowing.
  */
 
 import type {
@@ -250,8 +250,8 @@ type DmlEvent = (typeof ALLOWED_EVENTS)[number];
  *     phrasings ("after update", "before insert") and any casing are
  *     accepted — the timing prefix is stripped to the bare DML event.
  *   - `recordTypeId`: optional. Carried through to the response
- *     verbatim; v2.0e does NOT narrow automation by record type
- *     (deferred to v2.0e.1).
+ *     verbatim; this does NOT narrow automation by record type
+ *     (deferred).
  */
 const WHAT_HAPPENS_ON_SAVE_ACCEPTED_KEYS = [
   'objectApiName',
@@ -491,7 +491,7 @@ export interface SoeStep {
 }
 
 /**
- * R6-23: cap on the number of entitlement-process informational notes
+ * Cap on the number of entitlement-process informational notes
  * surfaced per response. An object realistically carries a handful of
  * distinct entitlement processes at most (e.g. Gold/Silver/Bronze SLA
  * tiers on Case); this defends against a pathological org without
@@ -500,13 +500,13 @@ export interface SoeStep {
 const ENTITLEMENT_PROCESS_NOTE_CAP = 20;
 
 /**
- * R6-23: one active `EntitlementProcess` targeting this object — a
+ * One active `EntitlementProcess` targeting this object — a
  * disclosure-PLUS-pointer, deliberately NOT a simulated order-of-execution
  * phase. Live milestone EVALUATION (whether a specific record is currently
  * on-track or breached) stays unmodeled per `DISCLOSURE`; this only tells
  * the caller WHERE to look (`sfi.get_component` / `sfi.get_edges` on
- * `componentId` surfaces the referenced `MilestoneType`s AND — as of R7-C7
- * — each milestone's declared target `minutesToComplete`, on the
+ * `componentId` surfaces the referenced `MilestoneType`s AND
+ * each milestone's declared target `minutesToComplete`, on the
  * EntitlementProcess node's own `properties.milestones`). `confidence` is
  * always `'declared'` — the match is a direct read of the EntitlementProcess
  * node's own `SObjectType` / `active` properties, not an inference.
@@ -649,7 +649,7 @@ export interface WhatHappensOnSaveOutput {
    */
   readonly truncated?: boolean;
   /**
-   * R6-23: active `EntitlementProcess`(es) targeting this object — an
+   * Active `EntitlementProcess`(es) targeting this object — an
    * informational pointer, NOT a simulated order-of-execution phase (see
    * {@link EntitlementProcessNote}). Omitted when the object carries no
    * active EntitlementProcess. Capped at {@link ENTITLEMENT_PROCESS_NOTE_CAP};
@@ -1776,7 +1776,7 @@ export const whatHappensOnSaveHandler = async (
   // CustomFields that aggregate THIS object recalculate on every DML event —
   // insert/update/delete/undelete all change the child record set a rollup
   // aggregates, unlike duplicate rules/validation which evaluate on
-  // insert/update only. Found by scanning `summaryForeignKey` (R6-07; there
+  // insert/update only. Found by scanning `summaryForeignKey` (there
   // is no edge for this walk — see `soe-rollup-recalc.ts`), capped to ONE
   // level (a grandparent's own rollup is NOT walked) and does not expand the
   // parent's own automation (no re-entrancy).
@@ -1891,12 +1891,12 @@ export const whatHappensOnSaveHandler = async (
   const visibleSoe: readonly SoeStep[] =
     input.phase !== undefined ? soe.filter((s) => s.phase === input.phase) : soe;
 
-  // R6-23: informational rider — active EntitlementProcess(es) targeting
+  // Informational rider — active EntitlementProcess(es) targeting
   // this object. Disclosure-PLUS-pointer only: milestone evaluation itself
   // is NOT simulated as an order-of-execution phase (see DISCLOSURE above)
   // — this just tells the caller an active process exists and where to
   // read its milestones from. `SObjectType`/`active` are read directly off
-  // the EntitlementProcess node's own properties (R6-18), so the match is
+  // the EntitlementProcess node's own properties, so the match is
   // `declared` confidence, not inferred. Fetch one past the cap to detect
   // truncation honestly rather than silently dropping the tail.
   const entitlementResult = await listNodesByType(ctx.graph, 'EntitlementProcess', {

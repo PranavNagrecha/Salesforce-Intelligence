@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.unused_components` MCP tool.
  *
- * The v2.0b headline tool — the buyer-facing answer to admin #7 on the
+ * The headline tool — the buyer-facing answer to admin #7 on the
  * top-10 questions list: "what's unused in this org?". Composes one
  * per-type `listNodesByType` call followed by a single batched
  * `listEdgesForNodes(... { direction: 'in' })` fetch of every scanned
@@ -53,7 +53,7 @@
  * `coverage-unknown`). This is the SCANNED axis; `coverageCaveat` below is the
  * REFERRER axis, and its wording does not vary with what you scanned.
  *
- * **Honesty axis** (per the v2.0b spec): the tool never claims
+ * **Honesty axis**: the tool never claims
  * components are "definitively unused". Each entry carries a per-type
  * `invisibleReferencesNote` that names the categories of reference
  * the v1.x extractors cannot see — dynamic SOQL (`SELECT
@@ -238,7 +238,7 @@ export const unusedComponentsInputSchema = z.object({
   object: z.string().min(1).optional(),
   objectApiName: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(UNUSED_MAX_LIMIT).optional(),
-  // CR-22: page cursor for walking the full unused list when truncated.
+  // Page cursor for walking the full unused list when truncated.
   offset: z.number().int().min(0).optional(),
   cursor: z.string().min(1).optional(),
 });
@@ -336,7 +336,7 @@ export interface UnusedComponentsOutput {
   /**
    * Page size applied to this response. Present ONLY on a PAGED response
    * (`truncated` or a resumed `offset > 0`); omitted on a whole-fits no-cursor
-   * call so that response stays byte-identical to the pre-CR-22 shape.
+   * call so that response stays byte-identical to the pre-paging shape.
    */
   readonly limit?: number;
   /** Zero-based offset of the first returned component. Present only when paged (see `limit`). */
@@ -344,9 +344,9 @@ export interface UnusedComponentsOutput {
   /** Offset to pass on the next call to fetch the following page. Present only when `truncated`. */
   readonly nextOffset?: number;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated.
+   * Opaque continuation token, present ONLY when this page is truncated.
    * Echo it back as `cursor` to resume. Absent on a complete page so an
-   * in-budget response is byte-identical to pre-CR-22.
+   * in-budget response is byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
@@ -754,7 +754,7 @@ const isUnusedFromEdges = (incoming: readonly Edge[]): boolean => {
 
 /**
  * Apex-class test-class predicate. `properties.isTest === true`
- * indicates the v1.4 test-mapping extractor flagged the class as a
+ * indicates the test-mapping extractor flagged the class as a
  * test class; uncalled tests are independently valuable and must NOT
  * be classified as unused.
  */
@@ -773,7 +773,7 @@ const compareById = (a: UnusedComponent, b: UnusedComponent): number =>
  * ASC. Keeps a consistent per-type grouping in the global output so
  * callers can render the response without an extra group-by pass.
  *
- * This is already a STRICT TOTAL order (CR-22): `id` is the globally-unique
+ * This is already a STRICT TOTAL order: `id` is the globally-unique
  * ComponentId (e.g. `CustomField:Account.Industry__c`) and each id belongs to
  * exactly one type, so (type ASC, id ASC) never ties two distinct rows. No
  * additional tiebreak is needed for a dup-free / skip-free offset resume.
@@ -873,7 +873,7 @@ const scanType = async (
   const out: UnusedComponent[] = [];
   let analyticsExcluded = 0;
   for (const node of nodes) {
-    // Test-class exemption per the v2.0b spec.
+    // Test-class exemption per the spec.
     if (type === 'ApexClass' && isTestApexClass(node.properties)) {
       continue;
     }
@@ -1124,7 +1124,7 @@ export const unusedComponentsHandler = async (
 
   const sorted = [...allUnused].sort(compareGlobally);
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset).
+  // Resolve the resume offset (echoed cursor wins over explicit offset).
   // Bind the token to the RESOLVED scope (types + object) so a token minted for
   // one scope can't be replayed against another.
   const fingerprint = argsFingerprint({ types: [...types], object });
@@ -1147,7 +1147,7 @@ export const unusedComponentsHandler = async (
   //   - RETRIEVE axis — incomplete referrer coverage (errored retrieve, scoped
   //     refresh, mid-staged-build pending tiers) qualifies the answer, exactly as
   //     before (fireOnUnknownCoverage: a pre-coverage vault is not-provably-clean).
-  //     P13-STAGED-absence-battery red without this.
+  //     The absence battery goes red without this.
   //   - EXTRACTOR-BLIND axis (residual) — a SCANNED type whose referrers include a
   //     KNOWN-BLIND plane (e.g. a StaticResource reached only via a dynamically
   //     built LWC/Aura resourceUrl) carries a structured `extractor-blind`

@@ -1,7 +1,7 @@
 /// <reference types="vitest/globals" />
 
 /**
- * Tests for the v3.1 R7 `sfi list-vaults` CLI subcommand.
+ * Tests for the `sfi list-vaults` CLI subcommand.
  *
  * The handler is a thin shim around `listRegisteredVaults` in
  * `@sf-intelligence/vault`; these tests verify the CLI's table

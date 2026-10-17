@@ -87,7 +87,7 @@ describe('extractAuthProvider', () => {
   describe('edges', () => {
     itHarness('emits zero edges per AuthProvider.md (Auth Providers are referenced, not referencing)', async () => {
       // Per AuthProvider.md §Edges: the registrationHandler property
-      // names an ApexClass and executionUser names a User but v1.5
+      // names an ApexClass and executionUser names a User but
       // does NOT emit `references` edges for either — both are
       // string bindings surfaced as plain properties.
       const fixtureAbsPath = resolve(HARNESS_ROOT, FULL_FIXTURE_PATH_REL);

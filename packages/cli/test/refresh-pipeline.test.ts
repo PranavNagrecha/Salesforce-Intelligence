@@ -1023,7 +1023,7 @@ describe('walkAndExtract skip-counter (architectural-bug-fix observability)', ()
     }
   });
 
-  it('dispatches a top-level CustomPermission definition file to a node (CR-CAP-15)', async () => {
+  it('dispatches a top-level CustomPermission definition file to a node', async () => {
     const root = await makeTempRoot();
     try {
       // customPermissions/{Name}.customPermission-meta.xml is a flat top-level
@@ -1045,7 +1045,7 @@ describe('walkAndExtract skip-counter (architectural-bug-fix observability)', ()
     }
   });
 
-  it('dispatches PlatformEventChannel + PlatformEventChannelMember files, wiring channel→member→event (CR-CAP-18)', async () => {
+  it('dispatches PlatformEventChannel + PlatformEventChannelMember files, wiring channel→member→event', async () => {
     const root = await makeTempRoot();
     try {
       // Flat top-level dispatches. Fail-before: no dispatch branch -> the two
@@ -1322,7 +1322,7 @@ describe('walkAndExtract skip-counter (architectural-bug-fix observability)', ()
     }
   });
 
-  it('dispatches a nested Bot definition + two BotVersions, wiring Bot->BotVersion parentOf (R7-C7)', async () => {
+  it('dispatches a nested Bot definition + two BotVersions, wiring Bot->BotVersion parentOf', async () => {
     const root = await makeTempRoot();
     try {
       // Bot's own file basename embeds the bot name (nesting transparent,
@@ -1381,7 +1381,7 @@ describe('walkAndExtract skip-counter (architectural-bug-fix observability)', ()
     }
   });
 
-  it('dispatches a top-level PresenceUserConfig file, wiring a Profile references edge (R7-C7)', async () => {
+  it('dispatches a top-level PresenceUserConfig file, wiring a Profile references edge', async () => {
     const root = await makeTempRoot();
     try {
       // Flat top-level dispatch under its own DX directory — folder/suffix
@@ -1628,11 +1628,11 @@ describe('walkAndExtract skip-counter (architectural-bug-fix observability)', ()
   });
 });
 
-describe('renderVault pagination (v3.2 R2 OmniUiCard regression)', () => {
+describe('renderVault pagination (OmniUiCard regression)', () => {
   // Why this test exists. The graph layer's `listNodesByType` caps a
-  // single query at 500 rows (`LIST_MAX_LIMIT`). Before v3.2 R2 the
+  // single query at 500 rows (`LIST_MAX_LIMIT`). Previously the
   // renderer called it with `{ limit: 500 }` and stopped — fine while
-  // no metadata type exceeded 500 nodes. The v3.2 R2 wave landed
+  // no metadata type exceeded 500 nodes. The wave landed
   // OmniUiCard at 678 nodes in Globex, silently truncating the
   // rendered Markdown vault at 500. The fix paginates with `offset`
   // inside `renderVault`. This test guards against future regressions
@@ -1702,7 +1702,7 @@ describe('renderVault pagination (v3.2 R2 OmniUiCard regression)', () => {
   }, 30_000);
 });
 
-describe('renderVault edge batching (CR-17 N+1 elimination)', () => {
+describe('renderVault edge batching (N+1 elimination)', () => {
   const mkNode = (overrides: Partial<Node> & Pick<Node, 'id' | 'type' | 'apiName'>): Node => ({
     label: overrides.apiName,
     parentId: null,
@@ -1736,7 +1736,7 @@ describe('renderVault edge batching (CR-17 N+1 elimination)', () => {
     return { store, vaultRoot, tempDir };
   };
 
-  it('issues O(pages) edge queries, not O(nodes) (CR-17)', async () => {
+  it('issues O(pages) edge queries, not O(nodes)', async () => {
     // 5 CustomObjects, each with one outgoing edge. The old path issued one
     // `listEdges` per node (5 queries); the batched path issues one
     // `listEdgesForNodes` per page (1 query, all 5 < RENDER_PAGE_SIZE).
@@ -1766,7 +1766,7 @@ describe('renderVault edge batching (CR-17 N+1 elimination)', () => {
     }
   }, 30_000);
 
-  it('renders byte-identical Markdown for same-endpoint differing-source edges (CR-17)', async () => {
+  it('renders byte-identical Markdown for same-endpoint differing-source edges', async () => {
     // Two incoming `references` edges to Widget__c, BOTH from the same source
     // node (identical endpointId) but different `source` producers — the exact
     // same-endpoint tiebreak gap the plan-check flagged. The renderer sorts

@@ -5,7 +5,7 @@ import { err, ok } from '@sf-intelligence/core';
  * Structured result of parsing the header of a Salesforce `.trigger` source
  * file.
  *
- * Captures the three pieces of information v0.1 needs: the trigger's own
+ * Captures the three pieces of information the node needs: the trigger's own
  * name, the SObject it fires on, and the lifecycle events it listens to.
  */
 export interface TriggerHeader {

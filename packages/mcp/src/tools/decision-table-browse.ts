@@ -1,15 +1,15 @@
 /**
  * Handler for the `sfi.decision_table_browse` MCP tool.
  *
- * The fifth of the v3.2 OmniStudio MCP-tool wave. Given a DecisionTable
+ * The fifth of the OmniStudio MCP-tool wave. Given a DecisionTable
  * canonical id (`DecisionTable:{SetupName}`), returns the table's
  * parameter shape — its data-source discriminator, its runtime engine,
  * and the per-parameter input / output declarations — but explicitly
  * REFUSES to enumerate row content. Row data lives in CSV uploads,
- * SObject records, or the OmniStudio designer's row-editor UI; v3.2's
+ * SObject records, or the OmniStudio designer's row-editor UI; the
  * extraction surface scopes to the metadata XML only.
  *
- * Q179 honesty anchor (the load-bearing v3.2 row-data refusal). The
+ * Honesty anchor (the load-bearing row-data refusal). The
  * verbatim disclosure from `DecisionTable.md` surfaces on EVERY
  * response in `boundaries[]`, and the tool returns `rows: null`. The
  * `dataSourceType`-specific refusal hint surfaces additionally in
@@ -40,11 +40,11 @@
  *     shape is forward-compatible with a future XML extension without
  *     a v3.x contract bump.
  *
- * Composition recipe (PLAN-v3.2 §4 `sfi.decision_table_browse`): load
+ * Composition recipe: load
  * the DecisionTable node by id → read its metadata properties verbatim
  * → re-parse `<decisionTableParameters>` from the source XML → classify
  * each by `<usage>` into input / output lists ordered by `<sequence>` →
- * emit the Q179 row-data boundary verbatim. Row data is NOT read.
+ * emit the row-data boundary verbatim. Row data is NOT read.
  */
 
 import { readFile } from 'node:fs/promises';
@@ -73,9 +73,9 @@ const INPUT_USAGE = 'INPUT';
 const OUTPUT_USAGE = 'OUTPUT';
 
 /**
- * Verbatim Q179 row-data boundary disclosure per `DecisionTable.md`
- * §"Honesty boundaries" and PLAN-v3.2 §4 `sfi.decision_table_browse`.
- * The phrasing is contract-locked by Q179; any drift is a v3.2 contract
+ * Verbatim row-data boundary disclosure per `DecisionTable.md`
+ * §"Honesty boundaries".
+ * The phrasing is contract-locked; any drift is a contract
  * violation regardless of test-suite green.
  */
 const ROW_DATA_BOUNDARY =
@@ -86,9 +86,9 @@ const ROW_DATA_BOUNDARY =
 
 /**
  * dataSourceType-specific row-store hint. The verbatim disclosure
- * above tells the caller v3.2 does NOT enumerate rows; this hint
+ * above tells the caller does NOT enumerate rows; this hint
  * tells them WHERE the rows live so the caller's next step is
- * obvious. Surfaced in `boundaries[]` immediately after the Q179
+ * obvious. Surfaced in `boundaries[]` immediately after the
  * disclosure.
  */
 const rowStoreHint = (
@@ -143,7 +143,7 @@ export type DecisionTableBrowseInput = z.infer<
  * One input parameter declaration. The XML field name (the lookup
  * column) carries `dataType`; the `defaultValue` field is reserved
  * for forward-compatibility — DecisionTable XML has no
- * `<defaultValue>` element in the v3.2 vendored doc, so every entry
+ * `<defaultValue>` element in the vendored doc, so every entry
  * carries `defaultValue: null`. The shape is contract-locked by the
  * task spec.
  */
@@ -177,7 +177,7 @@ export interface DecisionTableBrowseOutput {
 
 /**
  * Pull a typed scalar out of the DecisionTable node's properties.
- * Mirrors the defensive read pattern from other v3.2 tools — non-string
+ * Mirrors the defensive read pattern from other tools — non-string
  * values fall back to null so the response shape stays JSON-stable.
  */
 const readStringProperty = (node: Node, key: string): string | null => {
@@ -341,7 +341,7 @@ const readParametersFromSource = async (
         type: p.dataType,
         // DecisionTable XML has no <defaultValue> element in the
         // vendored doc; the field exists for forward-compatibility
-        // and surfaces as null in v3.2.
+        // and surfaces as null.
         defaultValue: null,
       });
     } else {
@@ -353,8 +353,8 @@ const readParametersFromSource = async (
 
 /**
  * The `sfi.decision_table_browse` MCP tool. Returns the table's
- * parameter shape plus the verbatim Q179 row-data refusal in
- * `boundaries[]`. `rows` is unconditionally `null` — v3.2 will not
+ * parameter shape plus the verbatim row-data refusal in
+ * `boundaries[]`. `rows` is unconditionally `null` — this will not
  * fabricate row content.
  *
  * @example
@@ -409,11 +409,11 @@ export const decisionTableBrowseHandler = async (
       resolveVaultSourcePath(ctx.vaultRoot, node.sourcePath),
     );
 
-  // Q179 first, then the dataSourceType-specific hint, then the
+  // The row-data refusal first, then the dataSourceType-specific hint, then the
   // Native-vs-Vlocity disclosure (axis 1). Order matters: the
   // refusal anchor is the load-bearing one; the hint immediately
   // tells the caller what to do next; the Native disclosure
-  // surfaces for discipline consistency across the v3.2 tool
+  // surfaces for discipline consistency across the tool
   // surface. If we couldn't read the source XML, append the
   // documented read-failure boundary so the caller sees the partial-
   // answer signal verbatim.
@@ -434,9 +434,9 @@ export const decisionTableBrowseHandler = async (
       executionType: executionTypeRaw,
       inputParams,
       outputParams,
-      // Q179 honesty anchor: the row payload is unconditionally
+      // Honesty anchor: the row payload is unconditionally
       // null. The boundaries[] array carries the verbatim refusal
-      // phrase the caller will surface. v3.2 will not fabricate row
+      // phrase the caller will surface. This will not fabricate row
       // content even when the metadata XML hints at the row store.
       rows: null,
       boundaries,

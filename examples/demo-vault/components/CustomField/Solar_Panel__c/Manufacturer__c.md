@@ -32,6 +32,7 @@ properties:
   referenceTo: null
   relationshipName: null
   required: false
+  restricted: false
   scale: null
   trackHistory: false
   unique: false
@@ -59,6 +60,7 @@ type: CustomField
 | referenceTo | `null` |
 | relationshipName | `null` |
 | required | `false` |
+| restricted | `false` |
 | scale | `null` |
 | trackHistory | `false` |
 | unique | `false` |

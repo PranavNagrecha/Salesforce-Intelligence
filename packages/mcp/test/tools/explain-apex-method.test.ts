@@ -113,7 +113,7 @@ const allClassifiersSeed: ExtractionResult = {
         isRestResource: true,
         lineCount: 250,
         sourceBytes: 5120,
-        // The v2.1 R2 quality-issue enricher hasn't run on this
+        // The quality-issue enricher hasn't run on this
         // fixture; the test verifies the empty-array fallback below.
       },
     }),
@@ -586,7 +586,7 @@ afterAll(async () => {
 });
 
 describe('explainApexMethodHandler', () => {
-  it('surfaces every v1.5 classifier flag for an all-classifiers class', async () => {
+  it('surfaces every classifier flag for an all-classifiers class', async () => {
     const result = await explainApexMethodHandler(ctx, {
       classApiName: ALL_CLASSIFIERS_ID,
     });
@@ -844,7 +844,7 @@ describe('explainApexMethodHandler', () => {
     expect(isUnresolvedFieldReceiver('CustomField:hed__Course__c.hed__Name__c')).toBe(false);
   });
 
-  it('surfaces empty qualityIssues for a class without the v2.1 mirror', async () => {
+  it('surfaces empty qualityIssues for a class without the mirror', async () => {
     const result = await explainApexMethodHandler(ctx, {
       classApiName: ALL_CLASSIFIERS_ID,
     });
@@ -876,7 +876,7 @@ describe('explainApexMethodHandler', () => {
     expect(result.value.data.disclosure).not.toContain('NOT CHECKED, not clean');
   });
 
-  it('surfaces qualityIssues as objects when the v2.1 mirror is populated (F8: was always [])', async () => {
+  it('surfaces qualityIssues as objects when the mirror is populated (F8: was always [])', async () => {
     const result = await explainApexMethodHandler(ctx, {
       classApiName: TEST_CLASS_ID,
     });

@@ -334,7 +334,7 @@ describe('detectCodeQualityIssues — missing-crud-check', () => {
     );
   });
 
-  // CR-04 #2: WITH SECURITY_ENFORCED is a SOQL READ/FLS-enforcement clause; it
+  // WITH SECURITY_ENFORCED is a SOQL READ/FLS-enforcement clause; it
   // NEVER authorizes a DML write. A class that queries with it then writes is
   // UNGATED for the write and MUST be flagged. (This FLIPS the prior, incorrect
   // expectation that the read-only clause cleared the write.)
@@ -348,7 +348,7 @@ describe('detectCodeQualityIssues — missing-crud-check', () => {
     expect(rulesOf(run(src))).toContain('missing-crud-check');
   });
 
-  // CR-04 #2: WITH USER_MODE on a SOQL is read-enforcement only and must NOT
+  // WITH USER_MODE on a SOQL is read-enforcement only and must NOT
   // clear a later write.
   it('FLAGS a write after a SOQL WITH USER_MODE (read clause does not gate a write)', () => {
     const src = `public class Svc {
@@ -360,7 +360,7 @@ describe('detectCodeQualityIssues — missing-crud-check', () => {
     expect(rulesOf(run(src))).toContain('missing-crud-check');
   });
 
-  // CR-04 #2: user-mode DML (`as user`) DOES enforce CRUD/FLS for the write and
+  // user-mode DML (`as user`) DOES enforce CRUD/FLS for the write and
   // is a legitimate gate. (Before the fix this form did not even MATCH the DML
   // pattern — a silent false negative; now it matches and is cleared.)
   it('does not flag `insert x as user` (user-mode DML enforces CRUD/FLS)', () => {
@@ -387,7 +387,7 @@ describe('detectCodeQualityIssues — missing-crud-check', () => {
     expect(rulesOf(run(src))).not.toContain('missing-crud-check');
   });
 
-  // W7.3 — Explicit `AccessLevel.SYSTEM_MODE` is a DELIBERATE system-context
+  // Explicit `AccessLevel.SYSTEM_MODE` is a DELIBERATE system-context
   // bypass, NOT a missing-crud omission. It must NOT be a high `missing-crud-check`:
   // a developer who consciously chose SYSTEM_MODE has not "forgotten" a check, and
   // a high alarm gets remediated by adding the isUpdateable() guard the bypass
@@ -439,7 +439,7 @@ describe('detectCodeQualityIssues — missing-crud-check', () => {
     expect(rulesOf(run(src))).toContain('missing-crud-check');
   });
 
-  // CR-04 #2: isAccessible() is a READ FLS check and must NOT clear a write.
+  // isAccessible() is a READ FLS check and must NOT clear a write.
   it('FLAGS a write gated only by isAccessible() (read check does not gate a write)', () => {
     const src = `public class Svc {
       public static void run(Account a) {
@@ -458,7 +458,7 @@ describe('detectCodeQualityIssues — missing-crud-check', () => {
     expect(rulesOf(run(src))).not.toContain('missing-crud-check');
   });
 
-  // CR-04 #1: the hint scan is method/block-scoped — a CRUD check in method A
+  // the hint scan is method/block-scoped — a CRUD check in method A
   // must NOT clear an ungated DML in method B.
   it('FLAGS an ungated DML in method B even when method A has a CRUD check (cross-method scoping)', () => {
     const src = `public class Svc {
@@ -475,7 +475,7 @@ describe('detectCodeQualityIssues — missing-crud-check', () => {
     expect(issues.filter((i) => i.rule === 'missing-crud-check')).toHaveLength(1);
   });
 
-  // CR-04 #1: the dominant early-return/throw guard idiom (check at method top,
+  // the dominant early-return/throw guard idiom (check at method top,
   // not in the DML's block) still clears when it matches the resolved sObject.
   it('does not flag a DML gated by an early-throw write-CRUD check at method top', () => {
     const src = `public class Svc {
@@ -488,7 +488,7 @@ describe('detectCodeQualityIssues — missing-crud-check', () => {
     expect(rulesOf(run(src))).not.toContain('missing-crud-check');
   });
 
-  // CR-04 #1b: the in-scope CRUD check is for the WRONG sObject → still flagged.
+  // the in-scope CRUD check is for the WRONG sObject → still flagged.
   it('FLAGS a DML whose in-scope CRUD check is for a DIFFERENT sObject', () => {
     const src = `public class Svc {
       public static void run() {
@@ -499,7 +499,7 @@ describe('detectCodeQualityIssues — missing-crud-check', () => {
     expect(rulesOf(run(src))).toContain('missing-crud-check');
   });
 
-  // CR-04 #1b: matching-sObject variant clears.
+  // matching-sObject variant clears.
   it('does not flag a DML whose in-scope CRUD check matches the resolved sObject', () => {
     const src = `public class Svc {
       public static void run() {

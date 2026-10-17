@@ -236,7 +236,7 @@ describe('getEdgesHandler', () => {
   });
 });
 
-describe('getEdgesHandler — pagination (P10-A2)', () => {
+describe('getEdgesHandler — pagination', () => {
   it('carries paging metadata on an unfiltered call (small node: all returned)', async () => {
     const result = await getEdgesHandler(ctx, { nodeId: 'CustomObject:A' });
     expect(result.ok).toBe(true);
@@ -281,13 +281,13 @@ describe('getEdgesHandler — pagination (P10-A2)', () => {
   });
 });
 
-describe('getEdgesHandler — CR-22 continuation cursor', () => {
+describe('getEdgesHandler — continuation cursor', () => {
   it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
     const result = await getEdgesHandler(ctx, { nodeId: 'CustomObject:A' });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const d = result.value.data;
-    // The pre-CR-22 shape: no nextCursor, no pageInfo, no note keys at all.
+    // The pre-paging shape: no nextCursor, no pageInfo, no note keys at all.
     expect('nextCursor' in d).toBe(false);
     expect('pageInfo' in d).toBe(false);
     expect('note' in d).toBe(false);
@@ -382,7 +382,7 @@ describe('getEdgesInputSchema', () => {
     expect(parsed.success).toBe(false);
   });
 
-  it('accepts dispatchesOmniAction (the v3.2 OmniStudio edge) as an edgeType', () => {
+  it('accepts dispatchesOmniAction (the OmniStudio edge) as an edgeType', () => {
     // Regression: this edge type (the dominant edge in an OmniStudio org) was
     // missing from the hand-listed enum, so the filter was rejected even though
     // the graph returns the edge. The enum now derives from contracts EDGE_TYPES.

@@ -333,7 +333,7 @@ describe('diffSnapshotsHandler — limit + truncated', () => {
   });
 });
 
-describe('diffSnapshotsHandler — CR-22 section cursor', () => {
+describe('diffSnapshotsHandler — section cursor', () => {
   beforeAll(async () => {
     const fromSnap = buildSnapshot('cur-from', [], []);
     const toSnap = buildSnapshot(
@@ -406,9 +406,9 @@ describe('diffSnapshotsHandler — CR-22 section cursor', () => {
   });
 });
 
-describe('canonicalJson — R7-W9 crash-class sweep regression', () => {
+describe('canonicalJson — crash-class sweep regression', () => {
   // The identical `canonicalJson` implementation in `compare-vaults.ts`
-  // crashed for real under R6-12: `JSON.stringify(undefined)` returns the
+  // crashed for real: `JSON.stringify(undefined)` returns the
   // JS value `undefined` (not a string), and a downstream `.length` call
   // threw. This module's two `hashRecord` call sites never pass `undefined`
   // through any reachable public path (every hash-input record here is a

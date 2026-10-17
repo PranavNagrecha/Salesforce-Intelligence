@@ -129,7 +129,7 @@ const PERMSET_ID = 'PermissionSet:Support';
 // Computed fields — their type is derived, so a field-type change is invalid.
 const FORMULA_TYPE_FIELD = 'CustomField:Account.ComputedLabel';
 const ROLLUP_FIELD = 'CustomField:Account.TotalAmount';
-// CR-05 — a field written by a WorkflowRule field-update, and the rule itself.
+// A field written by a WorkflowRule field-update, and the rule itself.
 const WF_WRITTEN_FIELD = 'CustomField:Account.Region';
 const WF_RULE_ID = 'WorkflowRule:Account.Set_Region';
 
@@ -224,7 +224,7 @@ const seed: ExtractionResult = {
       parentId: ACCOUNT_OBJ,
       properties: { dataType: 'Summary' },
     }),
-    // CR-05 — a field a WorkflowRule field-update WRITES TO, plus the rule
+    // A field a WorkflowRule field-update WRITES TO, plus the rule
     // that writes it. Exercises the previously-dead WorkflowRule branch in
     // classifyCategory now that the extractor emits a field-level
     // `writesTo` from the rule to this field.
@@ -300,7 +300,7 @@ const seed: ExtractionResult = {
       source: 'permission-set-extractor',
       properties: { readable: true, editable: false },
     }),
-    // CR-05 — the new field-level `writesTo` the WorkflowRule extractor
+    // The new field-level `writesTo` the WorkflowRule extractor
     // emits for a FieldUpdate action. Source + confidence match the
     // extractor (workflow-rule-extractor / parsed).
     makeEdge({ fromId: ACCOUNT_OBJ, toId: WF_WRITTEN_FIELD, edgeType: 'parentOf' }),
@@ -535,8 +535,8 @@ describe('whatIfChangeFieldTypeHandler', () => {
     expect(byId.get(APEX_ID)?.confidence).toBe('heuristic');
   });
 
-  it('CR-05 — surfaces a WorkflowRule field-update as a metadata-blocker (dead-branch wiring)', async () => {
-    // Before CR-05 the WorkflowRule -> writesTo -> CustomField edge was
+  it('surfaces a WorkflowRule field-update as a metadata-blocker (dead-branch wiring)', async () => {
+    // Previously the WorkflowRule -> writesTo -> CustomField edge was
     // never emitted, so the `t === 'WorkflowRule'` branch in
     // classifyCategory was unreachable. Now the extractor emits that edge,
     // a breaking type change on the field the rule writes must surface the

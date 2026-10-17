@@ -22,7 +22,7 @@ import {
 } from '../src/data-shape-capture.js';
 
 /**
- * P13-FACTS-capture — budgeted, consent-gated, injectable-executor capture:
+ * Budgeted, consent-gated, injectable-executor capture:
  * consent/auth failures skip honestly (zero API calls, never an error);
  * record counts attach only to graph-known objects; fill rates come from a
  * recent sample with the exact/recent method distinction; the budget is a

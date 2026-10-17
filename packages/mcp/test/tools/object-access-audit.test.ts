@@ -471,7 +471,7 @@ describe('objectAccessAuditHandler — system permissions this tool cannot see',
 // page with no OFFSET, capped at `clampedNodeScanLimit()`. On a vault with
 // more granters than the per-window cap, every holder past the cap is
 // invisible and NEVER reachable by any later call — this is the single-page
-// corpus scan `scanAllNodesOfTypes` (CR-22 B3 / commit 8e547076) exists to
+// corpus scan `scanAllNodesOfTypes` (commit 8e547076) exists to
 // close. Force the cap down to 1 window-slot via `SFI_NODE_SCAN_LIMIT` so 3
 // seeded Profiles prove the scan reaches node 2 and node 3, not just node 1.
 // ---------------------------------------------------------------------------

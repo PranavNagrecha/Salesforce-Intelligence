@@ -9,7 +9,7 @@
  * cannot disagree about what "used" means.
  *
  * **D-1 — usage is a DENY-list, never an allow-list.** `['callsApex']` was
- * written before `dispatchesAsync` (v1.5) and before the Apex scanner's
+ * written before `dispatchesAsync` and before the Apex scanner's
  * `references` edge existed, and an allow-list cannot learn about an edge type
  * added after it. A deny-list is wrong-by-default in the SAFE direction — a new
  * edge type counts as usage until someone argues it should not — whereas an

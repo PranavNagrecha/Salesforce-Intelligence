@@ -1,8 +1,8 @@
 /**
  * Handler for the `sfi.layout_for_user` MCP tool.
  *
- * The v1.2 headline tool — the analogous layout-routing twin of
- * v1.1's `sfi.why_cant_user_see_record`. Answers the admin-facing
+ * The headline tool — the analogous layout-routing twin of
+ * the `sfi.why_cant_user_see_record`. Answers the admin-facing
  * question "what page layout does this user see for object X record
  * type Y?". Walks the Profile -> layoutAssignments -> Layout chain in
  * the order Salesforce itself resolves it and returns a structured
@@ -18,7 +18,7 @@
  *     is used.
  *   - If the profile has no matching assignment, the org's default
  *     layout for that object applies — but org defaults are out of
- *     v1.2 scope and surface as `verdict: 'unknown'`.
+ *     scope and surface as `verdict: 'unknown'`.
  *
  * The cascade, in this exact order:
  *
@@ -28,7 +28,7 @@
  *
  *   2. **LayoutAssignment** — read the profile's
  *      `properties.layoutAssignments` array. If the property is
- *      absent (the v0.1 Profile extractor does not yet extract this
+ *      absent (the Profile extractor does not yet extract this
  *      element — production orgs often have profile XML in the
  *      multi-megabyte range and the extractor may also skip elements
  *      under file-size pressure), the cascade short-circuits with a
@@ -50,7 +50,7 @@
  *
  * **Honesty axis**: the tool never fabricates. If the Profile node
  * does not carry an extracted `layoutAssignments` array — either
- * because the v0.1 Profile extractor predates the v1.2 element
+ * because the Profile extractor predates the element
  * coverage, or because the production profile XML is too large for
  * the extractor's parser to fully cover — the cascade reports
  * `unknown` with a reason that points the admin at the missing
@@ -60,7 +60,7 @@
  *
  * Implementation notes:
  *   - `properties.layoutAssignments` is the contract surface the
- *     v0.1 Profile extractor will eventually populate (see
+ *     Profile extractor will eventually populate (see
  *     `packages/extractors/src/profile.ts`'s `<layoutAssignments>`
  *     parsing). Each entry has the shape
  *     `{ layout: string, recordType?: string | null }`. The XML uses
@@ -173,7 +173,7 @@ const resolveProfileId = (input: LayoutForUserInput): Result<string, McpError> =
  *   - `stage`: which step of the cascade this entry comes from.
  *   - `verdict`: `matched` if the stage resolved cleanly,
  *     `fallback` if a default was chosen (e.g., the profile's
- *     default record type for the object), `unknown` if the v1.2
+ *     default record type for the object), `unknown` if the
  *     metadata model cannot decide, `not-found` if the named
  *     component is missing from the vault.
  *   - `reason`: a plain-English explanation citing the metadata the
@@ -236,7 +236,7 @@ export interface LayoutForUserOutput {
 
 /**
  * One entry in a Profile's `properties.layoutAssignments` array, as
- * the v0.1 Profile extractor will eventually emit it. The shape
+ * the Profile extractor will eventually emit it. The shape
  * mirrors the `<layoutAssignments>` XML element verbatim — `layout`
  * is the assignment's target layout, `recordType` is the record-
  * type axis (null/undefined means "default for object").

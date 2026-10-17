@@ -772,7 +772,7 @@ const triggerSeed: ExtractionResult = {
 };
 
 // =============================================================================
-// Seed (R6-02): a parent Flow that invokes two subflows — one resolvable (the
+// Seed: a parent Flow that invokes two subflows — one resolvable (the
 // target Flow node exists) and one dangling-by-design (a managed / uncaptured
 // subflow with no vault node). Verifies the subflowCalls axis surfaces both,
 // with `resolved` distinguishing them, and never fabricates the missing target.
@@ -835,8 +835,8 @@ let tempDir: string;
 let store: GraphStore;
 // =============================================================================
 // Seed R7: a before-save flow that both (a) inserts a whole record VARIABLE via
-// <inputReference> — an OBJECT-level writesTo (R7-W1) — and (b) sets
-// $Record.<Field> via an assignment — a FIELD-level writesTo (R7-W2). The
+// <inputReference> — an OBJECT-level writesTo — and (b) sets
+// $Record.<Field> via an assignment — a FIELD-level writesTo. The
 // object-level write must surface in recordWrites; the field-level write must
 // NOT (that axis is object-granular).
 // =============================================================================
@@ -885,7 +885,7 @@ const r7FlowSeed: ExtractionResult = {
     }),
   ],
   edges: [
-    // R7-W1: object-level whole-record insert of a Case variable.
+    // Object-level whole-record insert of a Case variable.
     makeEdge({
       fromId: R7_FLOW_ID,
       toId: R7_CASE_ID,
@@ -901,7 +901,7 @@ const r7FlowSeed: ExtractionResult = {
           'whole-record write; individual fields not enumerable from a record-variable DML',
       },
     }),
-    // R7-W2: field-level before-save assignment write.
+    // Field-level before-save assignment write.
     makeEdge({
       fromId: R7_FLOW_ID,
       toId: R7_FIELD_ID,
@@ -1281,7 +1281,7 @@ describe('explainFlowHandler', () => {
     expect(operations).toEqual(['create', 'delete']);
   });
 
-  it('lists an R7-W1 object-level record-variable write but excludes the R7-W2 field-level $Record write', async () => {
+  it('lists an object-level record-variable write but excludes the field-level $Record write', async () => {
     // recordWrites is object-granular: the whole-record inputReference insert
     // (CustomObject:Case) surfaces as a create; the before-save
     // $Record.Rank_Value__c field write (CustomField:Lead.Rank_Value__c) must NOT appear
@@ -1404,7 +1404,7 @@ describe('explainFlowHandler', () => {
     expect(data.decisions).toEqual([]);
   });
 
-  it('surfaces subflow calls (R6-02), distinguishing resolvable from dangling targets', async () => {
+  it('surfaces subflow calls, distinguishing resolvable from dangling targets', async () => {
     const result = await explainFlowHandler(ctx, { flowId: SUBFLOW_PARENT_ID });
     expect(result.ok).toBe(true);
     if (!result.ok) return;

@@ -1,5 +1,5 @@
 /**
- * Handlers for the vault git-history tools (P13-GITHIST-tools):
+ * Handlers for the vault git-history tools:
  *
  *   - `sfi.component_history` — the component's change timeline from the
  *     vault's OWN git repo (`sfi vault git enable`): `git log --follow` over

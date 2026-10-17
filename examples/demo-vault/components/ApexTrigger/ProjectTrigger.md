@@ -13,6 +13,12 @@ properties:
     - after update
   isPlatformEventSubscriber: false
   lineCount: 8
+  qualityIssues:
+    - confidence: heuristic
+      explanation: "Trigger 'ProjectTrigger' has no recognizable recursion guard — risks the 16-trigger-execution-per-transaction governor limit on recursive saves. Add a static Boolean / Set<Id> guard or use a TriggerHandler framework."
+      location: trigger
+      rule: trigger-no-recursion-guard
+      severity: medium
   sourceBytes: 312
   status: Active
   triggerObject: Project__c
@@ -32,6 +38,7 @@ type: ApexTrigger
 | events | `before insert,before update,after update` |
 | isPlatformEventSubscriber | `false` |
 | lineCount | `8` |
+| qualityIssues | `[object Object]` |
 | sourceBytes | `312` |
 | status | `Active` |
 | triggerObject | `Project__c` |

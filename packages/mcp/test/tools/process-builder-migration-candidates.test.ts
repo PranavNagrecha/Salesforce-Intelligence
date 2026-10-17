@@ -286,7 +286,7 @@ describe('processBuilderMigrationCandidatesHandler', () => {
     expect(result.value.data.approvalProcesses.length).toBe(0);
   });
 
-  // ---- CR-22 cursor ----------------------------------------------------
+  // ---- cursor ----------------------------------------------------
 
   it('whole-fits omits cursor block + scanTruncated (byte-identical golden)', async () => {
     const result = await processBuilderMigrationCandidatesHandler(ctx, {});
@@ -491,11 +491,11 @@ describe('processBuilderMigrationCandidatesInputSchema', () => {
   });
 });
 
-// CR-CAP-11b — the three per-rule action-type counts now feed totalActions
+// The three per-rule action-type counts now feed totalActions
 // directly (the producer emits them; before, propertyNumber silently read 0).
 // Self-contained graph so it does not perturb the shared seed's pagination
 // counts above.
-describe('CR-CAP-11b — action-type counts drive WorkflowRule complexity', () => {
+describe('action-type counts drive WorkflowRule complexity', () => {
   const WR_ACTIONS = 'WorkflowRule:Opportunity.Three_Action_Rule';
   const WR_EMAIL_ONLY = 'WorkflowRule:Account.Email_Only_Rule';
   const seed11b: ExtractionResult = {

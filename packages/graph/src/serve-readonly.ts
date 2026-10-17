@@ -16,7 +16,7 @@ import {
 
 /**
  * Open a vault for READ-ONLY serving with a best-effort, lock-tolerant
- * self-heal (CR-19 amended).
+ * self-heal.
  *
  * This is the SINGLE source of truth for the read-only open ladder consumed by
  * BOTH the MCP server (`server.ts#openServerGraph`) and the cross-vault read
@@ -38,7 +38,7 @@ import {
  *          held RO handle fully usable). On RW success, close RO and serve the
  *          migrated RW store. On RW failure that is a LOCK CONFLICT
  *          (`kind === 'locked'`), DEFER the migration: keep serving the still-
- *          open read-only handle un-migrated (the pre-CR-19 behavior) and emit a
+ *          open read-only handle un-migrated (the legacy behavior) and emit a
  *          one-line stderr notice. On any OTHER RW failure (open-failed /
  *          schema-error — a genuinely broken upgrade, a poison step, a corrupt
  *          file), close RO and surface the RW error: a non-lock failure must NOT

@@ -245,7 +245,7 @@ const buildPageEdges = (
  * the flows (autolaunched / screen) this profile/permission set may RUN. The
  * `flowAccess: true` marker on the edge distinguishes a run grant from a code
  * (`enabled`) grant. Answers "what flows can this user launch" + (reverse) "who
- * can run this flow". (P11-USER-ability-run)
+ * can run this flow".
  */
 const buildFlowEdges = (
   rootObj: Record<string, unknown>,
@@ -262,14 +262,14 @@ const buildFlowEdges = (
 };
 
 /**
- * CR-CAP-10: emit one `grantedBy` edge per `<customPermissions>` entry with
+ * emit one `grantedBy` edge per `<customPermissions>` entry with
  * `<enabled>` true — the custom permissions this profile CONFERS. Element shape
  * `<customPermissions><name>X</name><enabled>true|false</enabled>` (VERIFIED
  * against real source; the `<enabled>` gate is mandatory — `enabled=false`
  * confers nothing). Symmetric with the permission-set extractor; this vault has
  * 0 profiles using the element, but the Salesforce schema is identical so the
  * parse is forward-looking. The target id is the flat `CustomPermission:{name}`
- * (CR-CAP-15's definition node); a name with no definition becomes a
+ * (the definition node); a name with no definition becomes a
  * `targetMissing` edge the consumer discloses (no fabricated node).
  */
 const buildCustomPermissionEdges = (
@@ -365,7 +365,7 @@ const collectLoginRestrictions = (
 /**
  * Return enabled `<userPermissions>` names, sorted alphabetically. Surfaced
  * on `Node.properties.userPermissions` rather than as edges because system
- * permissions don't correspond to graph nodes in v0.1.
+ * permissions don't correspond to graph nodes.
  */
 const collectEnabledUserPermissions = (
   rootObj: Record<string, unknown>,
@@ -536,17 +536,17 @@ const buildProperties = (
 /**
  * Extract a Node and edges from a `*.profile-meta.xml` file.
  *
- * Profiles are treated as permission containers in v0.1 (login hours, IP
+ * Profiles are treated as permission containers (login hours, IP
  * ranges, UI defaults, and other non-permission aspects are out of scope).
  * Walks four permission collections under `<Profile>` to emit `grantedBy`
  * edges (sorted by `toId`): `objectPermissions` -> `CustomObject:{object}`
  * (all-false skipped); `fieldPermissions` -> `CustomField:{Object.Field}`
  * (both-false skipped); `classAccesses` -> `ApexClass:{apexClass}`
  * (disabled skipped); `flowAccesses` -> `Flow:{flow}` (disabled skipped);
- * `customPermissions` -> `CustomPermission:{name}` (`enabled=false` skipped,
- * CR-CAP-10). Enabled `userPermissions` names are collected onto
+ * `customPermissions` -> `CustomPermission:{name}` (`enabled=false` skipped).
+ * Enabled `userPermissions` names are collected onto
  * `Node.properties.userPermissions` (sorted) rather than as edges, since
- * system permissions don't correspond to graph nodes in v0.1.
+ * system permissions don't correspond to graph nodes.
  *
  * Two non-permission collections surface on `Node.properties` for the
  * `sfi.layout_for_user` MCP tool:

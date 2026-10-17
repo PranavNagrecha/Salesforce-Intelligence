@@ -66,7 +66,7 @@ const seed: ExtractionResult = {
     makeEdge({ fromId: 'ApexClass:Service1', toId: 'CustomObject:Account', edgeType: 'references' }),
     makeEdge({ fromId: 'ApexClass:Service2', toId: 'CustomObject:Account', edgeType: 'references' }),
     makeEdge({ fromId: 'ApexClass:Service2', toId: 'ApexClass:Service1', edgeType: 'callsApex' }),
-    // R6-19: a Master-Detail lookupTo edge (Contact.AccountId -> Account),
+    // A Master-Detail lookupTo edge (Contact.AccountId -> Account),
     // no CustomField node required for the from-side.
     makeEdge({
       fromId: 'CustomField:Contact.AccountId',
@@ -235,7 +235,7 @@ describe('generateArchitectureOverviewHandler (seeded graph)', () => {
     expect(conf['Integration Topology']).toBeDefined();
   });
 
-  it('R6-19: renders an Entity Relationship Diagram section from lookupTo edges', async () => {
+  it('renders an Entity Relationship Diagram section from lookupTo edges', async () => {
     const result = await generateArchitectureOverviewHandler(ctx, {});
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -250,7 +250,7 @@ describe('generateArchitectureOverviewHandler (seeded graph)', () => {
     expect(erdSection).toContain('Contact');
   });
 
-  it('R6-19: the ERD mermaid fence survives into the HTML export (html-document.ts renders every ```mermaid fence generically)', async () => {
+  it('the ERD mermaid fence survives into the HTML export (html-document.ts renders every ```mermaid fence generically)', async () => {
     const result = await generateArchitectureOverviewHandler(ctx, { format: 'html' });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -261,7 +261,7 @@ describe('generateArchitectureOverviewHandler (seeded graph)', () => {
     expect(html).toContain('MasterDetail (AccountId)');
   });
 
-  it('R6-19: sectionConfidence and boundaries carry the ERD entries', async () => {
+  it('sectionConfidence and boundaries carry the ERD entries', async () => {
     const result = await generateArchitectureOverviewHandler(ctx, {});
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -281,7 +281,7 @@ describe('generateArchitectureOverviewHandler (seeded graph)', () => {
   });
 });
 
-// CR-P3-4 / CR-RV8: a LARGE arch overview rendered as html must not become a
+// A LARGE arch overview rendered as html must not become a
 // silently-chopped artifact. The old `budget / 2` reserve double-counted the
 // body (the html is built FROM document.body, so the envelope carries it twice)
 // without measuring the ACTUAL assembled envelope, so the global guard's
@@ -324,7 +324,7 @@ const seedLargeIntegrationGraph = async (
   if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
 };
 
-describe('generateArchitectureOverviewHandler (large html artifact fits, CR-P3-4)', () => {
+describe('generateArchitectureOverviewHandler (large html artifact fits)', () => {
   let store: GraphStore;
   let ctx: Context;
   const prevMax = process.env['SFI_MAX_RESPONSE_BYTES'];
@@ -379,7 +379,7 @@ describe('generateArchitectureOverviewHandler (large html artifact fits, CR-P3-4
   });
 });
 
-describe('generateArchitectureOverviewHandler (irreducible html → oversize error, CR-P3-4)', () => {
+describe('generateArchitectureOverviewHandler (irreducible html → oversize error)', () => {
   let store: GraphStore;
   let ctx: Context;
   const prevMax = process.env['SFI_MAX_RESPONSE_BYTES'];
@@ -413,7 +413,7 @@ describe('generateArchitectureOverviewHandler (irreducible html → oversize err
   });
 });
 
-describe('generateArchitectureOverviewHandler — R6-19 ERD object cap', () => {
+describe('generateArchitectureOverviewHandler — ERD object cap', () => {
   let store: GraphStore;
   let ctx: Context;
   const OBJECT_COUNT = 15; // > ARCHITECTURE_ERD_MAX_OBJECTS (12)
@@ -469,7 +469,7 @@ describe('generateArchitectureOverviewHandler — R6-19 ERD object cap', () => {
 
 
 // =============================================================================
-// CR-22-B6 — the top-5 (Org Structure) / top-20 (Integration Topology) mermaid
+// the top-5 (Org Structure) / top-20 (Integration Topology) mermaid
 // diagram node caps, and the `sfi.governor_limit_risks` ENTRY_PATH_MAX_PATHS
 // walk cap (see governor-limit-risks.test.ts), were previously JSDoc-only. A
 // fixture exceeding EACH cap here asserts the "showing first N of M" line
@@ -522,7 +522,7 @@ const seedCapExceedingGraph = async (store: GraphStore): Promise<void> => {
   if (!imported.ok) throw new Error(`cap-exceeding seed import failed: ${imported.error.message}`);
 };
 
-describe('generateArchitectureOverviewHandler (diagram cap disclosures — CR-22-B6)', () => {
+describe('generateArchitectureOverviewHandler (diagram cap disclosures)', () => {
   let store: GraphStore;
   let ctx: Context;
 
@@ -572,7 +572,7 @@ describe('generateArchitectureOverviewHandler (diagram cap disclosures — CR-22
   });
 });
 
-describe('generateArchitectureOverviewHandler (under-cap graph stays byte-identical — CR-22-B6)', () => {
+describe('generateArchitectureOverviewHandler (under-cap graph stays byte-identical)', () => {
   let store: GraphStore;
   let ctx: Context;
 

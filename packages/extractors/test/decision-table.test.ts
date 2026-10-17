@@ -39,7 +39,7 @@ describe('extractDecisionTable', () => {
       if (!result.ok) return;
 
       expect(result.value.nodes).toHaveLength(1);
-      // Q179 leaf-of-the-chain: DecisionTables emit zero edges in v3.2.
+      // Leaf-of-the-chain: DecisionTables emit zero edges.
       // The Apex-to-DT and IP-to-DT coupling families stay unmodeled;
       // see decision-table.ts JSDoc.
       expect(result.value.edges).toEqual([]);
@@ -66,7 +66,7 @@ describe('extractDecisionTable', () => {
         conditionCriteria: '1 AND 2',
         doesConsiderNullValue: false,
         filterResultBy: 'OutputOrder',
-        // Parameter-shape counts only; row data is the Q179 boundary
+        // Parameter-shape counts only; row data is the boundary
         // and is NEVER fabricated.
         inputParamCount: 2,
         outputParamCount: 1,
@@ -74,7 +74,7 @@ describe('extractDecisionTable', () => {
     });
   });
 
-  describe('Q179 row-data refusal — parameter shape only', () => {
+  describe('row-data refusal — parameter shape only', () => {
     it('counts inputParamCount and outputParamCount without enumerating row content', async () => {
       // The DT below has 3 INPUTs and 2 OUTPUTs. The extractor MUST NOT
       // attach any row-content fields to `properties` — only the
@@ -223,7 +223,7 @@ describe('extractDecisionTable', () => {
       // fixtures (e.g., IEETestOutputOrder.decisionTable-meta.xml in
       // Globex) carry status=Inactive. The extractor must
       // surface verbatim, never normalise. Salesforce extends enums
-      // over time; the v3.2 contract is "verbatim plus disclosure."
+      // over time; the contract is "verbatim plus disclosure."
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <DecisionTable xmlns="http://soap.sforce.com/2006/04/metadata">
   <setupName>Inactive</setupName>

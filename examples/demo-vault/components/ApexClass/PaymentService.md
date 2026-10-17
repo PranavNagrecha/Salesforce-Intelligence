@@ -23,7 +23,7 @@ properties:
     - public
   qualityIssues:
     - confidence: heuristic
-      explanation: SOQL query without WITH SECURITY_ENFORCED / USER_MODE — field-level security not enforced on the result. Add the clause or check Schema.sObjectType.X.fields.Y.isAccessible() before reading.
+      explanation: "SOQL query without WITH SECURITY_ENFORCED / USER_MODE — field-level security not enforced on the result. Add the clause, sanitize the result with Security.stripInaccessible(AccessType.READABLE, …), or check Schema.sObjectType.X.fields.Y.isAccessible() before reading."
       location: line 17
       rule: missing-fls-check
       severity: high
@@ -144,7 +144,7 @@ public with sharing class PaymentService {
 
 | Target | Confidence | Producer |
 | --- | --- | --- |
-| `ApexClass:Payment__c` | heuristic | apex-scanner |
+| `CustomObject:Payment__c` | heuristic | apex-scanner |
 
 ### writesTo (outgoing, 1)
 

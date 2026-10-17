@@ -54,7 +54,7 @@ const seed: ExtractionResult = {
     node({ id: 'PermissionSet:Reader', type: 'PermissionSet', apiName: 'Reader' }),
     node({ id: 'Profile:God', type: 'Profile', apiName: 'God', properties: { userPermissions: ['ModifyAllData'] } }),
     node({ id: 'Profile:Viewer', type: 'Profile', apiName: 'Viewer', properties: { userPermissions: ['ViewAllData'] } }),
-    // CR-04: a grantor with object Delete and one with object Create — both
+    // A grantor with object Delete and one with object Create — both
     // dropped by the old exclusive else-if chain (Delete was NEVER read).
     node({ id: 'Profile:Deleter', type: 'Profile', apiName: 'Deleter' }),
     node({ id: 'PermissionSet:Creator', type: 'PermissionSet', apiName: 'Creator' }),
@@ -64,11 +64,11 @@ const seed: ExtractionResult = {
     // sharing-rule granter (sibling of the false-empty sharing-summary bug).
     node({ id: 'SharingRule:Deal__c.Share_To_Sales', type: 'SharingRule', apiName: 'Deal__c.Share_To_Sales', parentId: OBJ, properties: { ruleType: 'owner', accessLevel: 'Edit' } }),
     node({ id: 'Group:Sales_Public', type: 'Group', apiName: 'Sales_Public' }),
-    // CR-CAP-12: Sales_Public contains a User, a nested Group, and a dangling
+    // Sales_Public contains a User, a nested Group, and a dangling
     // Territory; the nested group contains a Role. who_can must list each as its
     // own granter row, transitively through the nested group.
     node({ id: 'Group:Sales_Inner', type: 'Group', apiName: 'Sales_Inner' }),
-    // CR-CAP-05b: a roleAndSubordinates owner rule shares to Role:VP_Sales; the
+    // A roleAndSubordinates owner rule shares to Role:VP_Sales; the
     // descend must enumerate Role:Sales_Mgr (direct child) and Role:Sales_Rep_R
     // (grandchild). A separate plain-role rule shares to Role:Audit with NO
     // inheritance marker — it must NOT expand. Role:Parent_VP is VP_Sales's
@@ -92,7 +92,7 @@ const seed: ExtractionResult = {
     edge({ fromId: 'Group:Sales_Public', toId: 'Group:Sales_Inner', edgeType: 'hasMember', source: 'group-extractor', properties: { memberType: 'Group' } }),
     edge({ fromId: 'Group:Sales_Public', toId: 'Territory:West', edgeType: 'hasMember', source: 'group-extractor', properties: { memberType: 'Territory', resolvable: false } }),
     edge({ fromId: 'Group:Sales_Inner', toId: 'Role:Sales_Rep', edgeType: 'hasMember', source: 'group-extractor', properties: { memberType: 'Role' } }),
-    // CR-CAP-05b: role subtree (inheritsFrom oriented child->parent).
+    // Role subtree (inheritsFrom oriented child->parent).
     edge({ fromId: 'SharingRule:Deal__c.Share_Subs', toId: 'Role:VP_Sales', edgeType: 'sharedWith', properties: { inheritance: 'subordinates' } }),
     edge({ fromId: 'SharingRule:Deal__c.Share_Audit', toId: 'Role:Audit', edgeType: 'sharedWith' }),
     edge({ fromId: 'Role:Sales_Mgr', toId: 'Role:VP_Sales', edgeType: 'inheritsFrom', source: 'role-extractor' }),
@@ -120,7 +120,7 @@ const restrictedSeed: ExtractionResult = {
   edges: [],
 };
 
-// CR-CAP-05b: an incomplete role subtree — Role:Top is shared with
+// An incomplete role subtree — Role:Top is shared with
 // subordinates, has a child Role:Mid whose NODE was NOT retrieved (an inbound
 // inheritsFrom edge references it but no node), so the descend must set
 // truncated + a blindSpot, NEVER fabricate Mid's own subtree.
@@ -138,7 +138,7 @@ const incompleteSeed: ExtractionResult = {
   ],
 };
 
-// CR-CAP-05b: roleAndSubordinatesInternal — same descend, but the internal-vs-
+// roleAndSubordinatesInternal — same descend, but the internal-vs-
 // portal exclusion cannot be applied offline; must be disclosed.
 const INTERNAL_OBJ = 'CustomObject:Intl__c';
 const internalSeed: ExtractionResult = {
@@ -154,7 +154,7 @@ const internalSeed: ExtractionResult = {
   ],
 };
 
-// CR-CAP-05b: a malformed back-edge cycle (Role:CycA inheritsFrom Role:CycB AND
+// A malformed back-edge cycle (Role:CycA inheritsFrom Role:CycB AND
 // Role:CycB inheritsFrom Role:CycA) must terminate via the visited-set.
 const CYCLE_OBJ = 'CustomObject:Cyc__c';
 const cycleSeed: ExtractionResult = {
@@ -282,7 +282,7 @@ describe('whoCanAccessObjectHandler', () => {
     expect(group?.access).toBe('edit');
   });
 
-  it('CR-CAP-12: expands a shared group into its (transitive) members as granter rows', async () => {
+  it('expands a shared group into its (transitive) members as granter rows', async () => {
     const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: OBJ, limit: 250 });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -306,9 +306,9 @@ describe('whoCanAccessObjectHandler', () => {
     expect(territory?.detail).toMatch(/dangling member/i);
   });
 
-  // CR-CAP-05b: a roleAndSubordinates owner rule shares to Role:VP_Sales; the
+  // A roleAndSubordinates owner rule shares to Role:VP_Sales; the
   // descend must enumerate the named role AND every subordinate role below it.
-  it('CR-CAP-05b: expands a roleAndSubordinates rule into the role subtree', async () => {
+  it('expands a roleAndSubordinates rule into the role subtree', async () => {
     const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: OBJ, limit: 250 });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -327,9 +327,9 @@ describe('whoCanAccessObjectHandler', () => {
     expect(rep?.access).toBe('read');
   });
 
-  // CR-CAP-05b OVER-GRANT GATE: the MANAGER (parent) of the shared role must
+  // OVER-GRANT GATE: the MANAGER (parent) of the shared role must
   // NEVER be listed — that would be an over-grant to the wrong principals.
-  it('CR-CAP-05b: never lists a role ABOVE the shared role (managers)', async () => {
+  it('never lists a role ABOVE the shared role (managers)', async () => {
     const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: OBJ, limit: 250 });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -337,9 +337,9 @@ describe('whoCanAccessObjectHandler', () => {
     expect(ids.has('Role:Parent_VP')).toBe(false);
   });
 
-  // CR-CAP-05b GATE: a plain-role target with NO inheritance marker emits ONLY
+  // GATE: a plain-role target with NO inheritance marker emits ONLY
   // the verbatim role row, zero descendants (proves the expansion is gated).
-  it('CR-CAP-05b: a plain-role rule (no inheritance marker) does NOT expand', async () => {
+  it('a plain-role rule (no inheritance marker) does NOT expand', async () => {
     const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: OBJ, limit: 250 });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -351,9 +351,9 @@ describe('whoCanAccessObjectHandler', () => {
     expect(auditRows.length).toBe(1);
   });
 
-  // CR-04: Delete and Create capabilities are enumerated independently — the
+  // Delete and Create capabilities are enumerated independently — the
   // old exclusive else-if chain NEVER read allowDelete and subsumed allowCreate.
-  it('emits independent object-permission-delete and -create rows (CR-04)', async () => {
+  it('emits independent object-permission-delete and -create rows', async () => {
     const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: OBJ });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -367,10 +367,10 @@ describe('whoCanAccessObjectHandler', () => {
     expect(byId.get('PermissionSet:Creator|object-permission-create')?.access).toBe('create');
   });
 
-  // CR-04: a grantor with several capabilities (Admin: Read+Edit+Modify-All)
+  // A grantor with several capabilities (Admin: Read+Edit+Modify-All)
   // emits MULTIPLE independently-addressable rows — the old chain hid the lower
   // capabilities behind Modify-All.
-  it('emits independent read/edit rows for a grantor that also has Modify-All (CR-04)', async () => {
+  it('emits independent read/edit rows for a grantor that also has Modify-All', async () => {
     const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: OBJ });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -476,10 +476,10 @@ describe('whoCanAccessObjectHandler', () => {
     ).toBe(false);
   });
 
-  // CR-CAP-05b INCOMPLETE-TREE: a subordinate child node was not retrieved →
+  // INCOMPLETE-TREE: a subordinate child node was not retrieved →
   // the reached roles are still listed, a blindSpot discloses the incomplete
   // subtree + /sfi-refresh, and NO fabricated role row is emitted.
-  it('CR-CAP-05b: discloses an incomplete role subtree without over-granting', async () => {
+  it('discloses an incomplete role subtree without over-granting', async () => {
     const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: INCOMPLETE_OBJ, limit: 250 });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -494,9 +494,9 @@ describe('whoCanAccessObjectHandler', () => {
     ).toBe(true);
   });
 
-  // CR-CAP-05b INTERNAL: the internal-vs-portal exclusion cannot be applied
+  // INTERNAL: the internal-vs-portal exclusion cannot be applied
   // offline; the subtree is enumerated AND a disclosure says so.
-  it('CR-CAP-05b: discloses that the internal-subordinates filter is not applied offline', async () => {
+  it('discloses that the internal-subordinates filter is not applied offline', async () => {
     const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: INTERNAL_OBJ, limit: 250 });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -508,8 +508,8 @@ describe('whoCanAccessObjectHandler', () => {
     ).toBe(true);
   });
 
-  // CR-CAP-05b CYCLE: a malformed back-edge must terminate (no infinite loop).
-  it('CR-CAP-05b: a back-edge cycle terminates via the visited-set', async () => {
+  // CYCLE: a malformed back-edge must terminate (no infinite loop).
+  it('a back-edge cycle terminates via the visited-set', async () => {
     const r = await whoCanAccessObjectHandler(ctx, { view: 'paths', componentId: CYCLE_OBJ, limit: 250 });
     expect(r.ok).toBe(true);
     if (!r.ok) return;

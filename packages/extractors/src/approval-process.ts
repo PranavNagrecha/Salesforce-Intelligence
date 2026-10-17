@@ -29,7 +29,7 @@ const APPROVAL_PROCESS_FILE_SUFFIX = '.approvalProcess-meta.xml';
 const ROOT_ELEMENT = 'ApprovalProcess';
 const EXTRACTOR_SOURCE = 'approval-process-extractor';
 /**
- * CR-CAP-07: an ApprovalProcess FieldUpdate hook action carries only the
+ * an ApprovalProcess FieldUpdate hook action carries only the
  * field-update NAME (`<action><name>`); the actual target `<field>` lives in
  * the OBJECT's sibling `workflows/{Object}.workflow-meta.xml` file's
  * `<fieldUpdates>` collection — NOT in the .approvalProcess file. This suffix
@@ -627,8 +627,8 @@ const summarizeApprovalStep = (
 
 /**
  * The two name→target maps the sibling workflow file resolves for an
- * ApprovalProcess: the `<fieldUpdates>` field-update targets (CR-CAP-07) and
- * the `<alerts>` template map (W4.3). Both keys are the action `<name>` an
+ * ApprovalProcess: the `<fieldUpdates>` field-update targets and
+ * the `<alerts>` template map. Both keys are the action `<name>` an
  * ApprovalProcess hook `<action>` carries.
  */
 interface ObjectWorkflowMaps {
@@ -637,7 +637,7 @@ interface ObjectWorkflowMaps {
 }
 
 /**
- * CR-CAP-07 / W4.3 — load the OBJECT's `<fieldUpdates>` name→target map AND its
+ * load the OBJECT's `<fieldUpdates>` name→target map AND its
  * `<alerts>` name→template map from the SIBLING
  * `workflows/{Object}.workflow-meta.xml` file. This is a cross-file load for an
  * extractor: the `Extractor` type hands each extractor ONLY its own `path`, so
@@ -650,7 +650,7 @@ interface ObjectWorkflowMaps {
  * alert's `<template>` (which names the EmailTemplate) lives in this sibling
  * workflow file's `<alerts>` collection — exactly the same cross-file shape as
  * the FieldUpdate case. Resolving it here lets each Alert hook emit a DIRECT
- * `references` edge to the EmailTemplate (W4.3), so the template's delete
+ * `references` edge to the EmailTemplate, so the template's delete
  * blast-radius sees the ApprovalProcess dependent (the alert node is 2 hops
  * away; `find_component_usages` / delete verdicts count only 1-hop referrers).
  *
@@ -706,13 +706,13 @@ const loadObjectWorkflowMaps = async (
  * Walk one hook list, validating each `<action>` and emitting the
  * variant-table edges with `hookType` in properties.
  *
- * CR-CAP-07: a `FieldUpdate` hook action additionally emits a FIELD-level
+ * a `FieldUpdate` hook action additionally emits a FIELD-level
  * `writesTo` edge to the `CustomField` the update SETS, resolved against the
  * `fieldUpdateMap` loaded from the sibling workflow file. This is
  * KEEP-the-`references`-ADD-the-`writesTo`, mirroring workflow-rule.ts: the
  * `references` edge still points at the `WorkflowFieldUpdate:{Object}.{name}`
  * scaffolding node; the new `writesTo` points at the real `CustomField` so
- * field-change-impact tools (CR-CAP-01) see the ApprovalProcess as a writer.
+ * field-change-impact tools see the ApprovalProcess as a writer.
  */
 const hookListEdges = (
   rootObj: Record<string, unknown>,
@@ -765,11 +765,11 @@ const hookListEdges = (
       });
     }
 
-    // W4.3: an `Alert` hook action names a WorkflowAlert whose `<template>`
+    // an `Alert` hook action names a WorkflowAlert whose `<template>`
     // (resolved from the sibling workflow file's `<alerts>` collection) names
     // the EmailTemplate the approval sends. The `references` above points at
     // the `WorkflowAlert:{Object}.{name}` scaffolding node (which is itself 1
-    // hop from the EmailTemplate via the alert-node edge W4.3 adds in
+    // hop from the EmailTemplate via the alert-node edge adds in
     // workflow-rule.ts) — but `find_component_usages` / delete verdicts count
     // only DIRECT (1-hop) referrers, so without a DIRECT edge the template's
     // delete blast-radius would miss this ApprovalProcess dependent. Emit the
@@ -797,7 +797,7 @@ const hookListEdges = (
       }
     }
 
-    // CR-CAP-07: FieldUpdate hook actions additionally emit a FIELD-level
+    // FieldUpdate hook actions additionally emit a FIELD-level
     // `writesTo` to the CustomField the update SETS — mirroring
     // workflow-rule.ts's `edgesForAction` exactly. The target field is NOT on
     // the `<action>` child (it carries only `<name>` == the field-update's
@@ -811,7 +811,7 @@ const hookListEdges = (
     // rather than mint a relationship-scoped `CustomField:{rel}.{field}` phantom.
     // The `references` edge to the scaffolding node above STILL emits, so the
     // action is never silently dropped. Confidence is `parsed` (the field name
-    // is read straight out of the workflow XML), matching workflow-rule.ts CR-05
+    // is read straight out of the workflow XML), matching workflow-rule.ts
     // and flow.ts — NOT `declared` (that tier is for the scaffolding ref).
     if (type === 'FieldUpdate') {
       const target = fieldUpdateMap.get(name);
@@ -865,7 +865,7 @@ const hookListEdges = (
  * `<action>` children to the edge set with `hookType` set to the
  * originating hook name and the WorkflowRule variant-table edge
  * shapes (`callsApex` for `Apex`, `references` for everything else;
- * `Send` and unknown types silently skipped). W4.3: an `Alert` hook
+ * `Send` and unknown types silently skipped). An `Alert` hook
  * action additionally emits a DIRECT `references` edge to the
  * `EmailTemplate:{Folder.Name}` its WorkflowAlert sends — the alert's
  * `<template>` is resolved from the sibling
@@ -876,9 +876,9 @@ const hookListEdges = (
  * fail-soft when the sibling file or the alert `<template>` is absent).
  *
  * Approver references are dangling-by-design for `user` (User nodes
- * are not extracted in v1.3) and `userHierarchyField` /
+ * are not extracted) and `userHierarchyField` /
  * `relatedUserField` when the named field is outside the extracted
- * set; `role` / `group` / `queue` typically resolve to v1.1 nodes.
+ * set; `role` / `group` / `queue` typically resolve to the nodes.
  * D7: a name-less `userHierarchyField` approver carries no `<name>` in
  * its step block — the field it routes through is designated ONCE at the
  * process root in `<nextAutomatedApprover><userHierarchyField>`. A CUSTOM
@@ -946,7 +946,7 @@ export const extractApprovalProcess = async (
   if (!rootResult.ok) return rootResult;
   const rootObj = rootResult.value;
 
-  // CR-CAP-07 / W4.3 — resolve the sibling object's workflow `<fieldUpdates>`
+  // resolve the sibling object's workflow `<fieldUpdates>`
   // AND `<alerts>` maps ONCE (single file read) so each FieldUpdate hook action
   // can emit a field-level `writesTo` and each Alert hook action can emit a
   // DIRECT `references` to the EmailTemplate its alert sends. Fail-soft: a
@@ -956,7 +956,7 @@ export const extractApprovalProcess = async (
     path,
     objectApiName,
   );
-  // W4.3 — dedup EmailTemplate `references` across the four hook lists so an
+  // dedup EmailTemplate `references` across the four hook lists so an
   // alert reused in several hooks emits ONE template edge per (process, template).
   const seenEmailTemplates = new Set<string>();
 
@@ -992,11 +992,11 @@ export const extractApprovalProcess = async (
   // instead of dropped as the implicit Manager.
   const automatedApproverField = readAutomatedApproverField(rootObj);
 
-  // v2.0a — A top-level `<entryCriteria>` block is the firing
+  // A top-level `<entryCriteria>` block is the firing
   // condition for the process as a whole. Per
   // `ConditionalContextSemantics.md` §"ApprovalProcess conditions",
   // we extract ONLY the top-level entry (per-step entry criteria are
-  // deferred to a future v2.0a+ extension). The shape mirrors
+  // deferred to a future extension). The shape mirrors
   // WorkflowRule — either a `<formula>` OR a `<criteriaItems>` block,
   // mutually exclusive in practice. When neither is present, no
   // ConditionalContext is emitted.
@@ -1244,7 +1244,7 @@ export const extractApprovalProcess = async (
     });
   }
 
-  // v2.0a — Append the firesWhen edges and the synthetic
+  // Append the firesWhen edges and the synthetic
   // ConditionalContext nodes (if any).
   edges.push(...firesWhenEdges, ...conditionFieldEdges);
 

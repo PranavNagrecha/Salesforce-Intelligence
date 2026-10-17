@@ -113,7 +113,7 @@ const seed: ExtractionResult = {
         booleanFilter: 'Account.Industry = "Banking"',
       },
     }),
-    // CR-CAP-05b: an owner rule shared with Role:Executive AND its subordinates.
+    // An owner rule shared with Role:Executive AND its subordinates.
     // Role:Manager inheritsFrom Role:Executive, so the summary must name the
     // recipient AND mark "(and its subordinate roles)".
     makeNode({
@@ -148,7 +148,7 @@ const seed: ExtractionResult = {
       toId: 'CustomField:Account.Industry__c',
       edgeType: 'parentOf',
     }),
-    // CR-CAP-05b: the criteria rule names a Group recipient verbatim; the owner
+    // The criteria rule names a Group recipient verbatim; the owner
     // rule shares with Role:Executive carrying the subordinates marker.
     makeEdge({
       fromId: 'SharingRule:Account.AccountRule',
@@ -173,7 +173,7 @@ const seed: ExtractionResult = {
       toId: 'CustomField:Contact.Title__c',
       edgeType: 'parentOf',
     }),
-    // CR-04: OBJECT-level CRUD grants — Profile:Admin reads, PermissionSet:Bonus
+    // OBJECT-level CRUD grants — Profile:Admin reads, PermissionSet:Bonus
     // edits — count toward the object tally. (Previously these pointed at a
     // CustomField, conflating the FLS plane with object access.)
     makeEdge({
@@ -188,7 +188,7 @@ const seed: ExtractionResult = {
       edgeType: 'grantedBy',
       properties: { allowEdit: true },
     }),
-    // CR-04 negative: a grantor with ONLY a field-level (FLS) grant and NO
+    // Negative: a grantor with ONLY a field-level (FLS) grant and NO
     // object-CRUD edge must contribute 0 to the OBJECT tally. Profile:FlsOnly
     // is FLS-only on a field — it should NOT be counted as an object grantor.
     makeEdge({
@@ -334,22 +334,22 @@ describe('generateSharingSummaryHandler (seeded graph)', () => {
     expect(body).not.toContain('_(no sharing rules)_');
   });
 
-  it('surfaces a criteria-based rule type and its predicate (P11-G5)', async () => {
+  it('surfaces a criteria-based rule type and its predicate', async () => {
     const result = await generateSharingSummaryHandler(ctx, {});
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const body = result.value.data.document.body;
     // The rules table now carries Type + Shared With + Criteria columns, so both
-    // the recipient AND a criteria-based predicate are visible (CR-CAP-05b adds
+    // the recipient AND a criteria-based predicate are visible (this adds
     // the Shared With column to surface recipients that were previously omitted).
     expect(body).toContain('| Rule | Type | Shared With | Access Level | Criteria |');
     expect(body).toContain('criteria');
     expect(body).toContain('Account.Industry = "Banking"');
   });
 
-  // CR-CAP-05b: the summary previously named NO recipient (4-column table). It
+  // The summary previously named NO recipient (4-column table). It
   // must now surface the rule's sharedWith recipient verbatim.
-  it('CR-CAP-05b: surfaces each rule\'s sharedWith recipient (was omitted)', async () => {
+  it('surfaces each rule\'s sharedWith recipient (was omitted)', async () => {
     const result = await generateSharingSummaryHandler(ctx, { objectFilter: 'Account' });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -360,9 +360,9 @@ describe('generateSharingSummaryHandler (seeded graph)', () => {
     expect(body).toContain('Executive');
   });
 
-  // CR-CAP-05b: a roleAndSubordinates recipient is marked "(and its subordinate
+  // A roleAndSubordinates recipient is marked "(and its subordinate
   // roles)" — consuming the SAME expandRoleSubordinates helper as who_can.
-  it('CR-CAP-05b: marks a subordinate-role recipient with the subordinate note', async () => {
+  it('marks a subordinate-role recipient with the subordinate note', async () => {
     const result = await generateSharingSummaryHandler(ctx, { objectFilter: 'Account' });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -370,7 +370,7 @@ describe('generateSharingSummaryHandler (seeded graph)', () => {
     expect(body).toMatch(/and its subordinate roles/i);
   });
 
-  it('tallies OBJECT-level CRUD grants and EXCLUDES FLS-only grantors (CR-04)', async () => {
+  it('tallies OBJECT-level CRUD grants and EXCLUDES FLS-only grantors', async () => {
     const result = await generateSharingSummaryHandler(ctx, { objectFilter: 'Account' });
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -444,7 +444,7 @@ describe('generateSharingSummaryHandler (seeded graph)', () => {
     expect(body).not.toContain('_(no objectFilter applied)_');
   });
 
-  it('always surfaces the Q125 freshness disclosure in boundaries', async () => {
+  it('always surfaces the freshness disclosure in boundaries', async () => {
     const result = await generateSharingSummaryHandler(ctx, {});
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -452,7 +452,7 @@ describe('generateSharingSummaryHandler (seeded graph)', () => {
     expect(boundaries.join('\n')).toContain('offline vault');
   });
 
-  it('discloses the UNMODELED G5 sharing dimensions (territory / guest / sharing-set / teams) — absence ≠ none (P12-TEST-sharing-summary-boundary)', async () => {
+  it('discloses the UNMODELED G5 sharing dimensions (territory / guest / sharing-set / teams) — absence ≠ none', async () => {
     const result = await generateSharingSummaryHandler(ctx, {});
     expect(result.ok).toBe(true);
     if (!result.ok) return;
@@ -465,7 +465,7 @@ describe('generateSharingSummaryHandler (seeded graph)', () => {
   });
 });
 
-// B29 (P1-B29-complete): a filtered object that is referenced (inbound edges)
+// B29: a filtered object that is referenced (inbound edges)
 // but whose own CustomObject definition was never retrieved is a PHANTOM. The
 // answer must be an honest `targetMissing` ("not retrieved"), never a silent
 // "_(no objects matched)_" that a security review would read as "no sharing".
@@ -678,11 +678,11 @@ describe('generateSharingSummaryHandler (legacy manifest, no coverage array)', (
   });
 });
 
-// CR-RV12: the OBJECT_SCAN_CAP=50 slice had NO reader-facing disclosure — on a
+// The OBJECT_SCAN_CAP=50 slice had NO reader-facing disclosure — on a
 // >50-object org the summary silently read as complete. A 60-CustomObject
 // fixture (past the cap) asserts the scanTruncated field, the "showing first
 // N of M" boundary, and the Overview line all disclose the true count.
-describe('generateSharingSummaryHandler (OBJECT_SCAN_CAP truncation — CR-RV12)', () => {
+describe('generateSharingSummaryHandler (OBJECT_SCAN_CAP truncation)', () => {
   let store: GraphStore;
   let ctx: Context;
 

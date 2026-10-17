@@ -45,7 +45,7 @@ export interface FieldAccess {
 /**
  * One `ClassName.methodName(` call site detected by the heuristic
  * scanner. Bare self-references (`doStuff(...)` with no leading
- * class) are NOT extracted in v0.3.
+ * class) are NOT extracted.
  */
 export interface MethodCallSite {
   readonly className: string;
@@ -152,7 +152,7 @@ export interface OmniStudioApexCall {
  * `methodBodyCount` is a smoke-test signal: it counts only the
  * top-level brace-balanced regions *inside* the outer class/trigger
  * body (method bodies, accessor blocks, static initializers, inner
- * classes). Since v0.3-R3.5 the scanner also sweeps the outer body
+ * classes). The scanner also sweeps the outer body
  * itself (catching single-statement triggers and class field
  * initializers), so a `methodBodyCount: 0` no longer implies that
  * scanning produced no edges. Use the lengths of `fieldAccesses`,
@@ -961,8 +961,8 @@ const scanOmniStudioCalls = (
 
 /**
  * Scan Apex source for field accesses and method calls using a pure
- * regex / brace-balanced heuristic. Suitable for the v0.3 release —
- * v0.4 will add a PMD AST layer alongside this for the cases regex
+ * regex / brace-balanced heuristic. The AST layer (`apex-ast-edges`) sits
+ * alongside this for the cases regex
  * cannot handle (SOQL strings, dynamic field access, etc.).
  *
  * Returns `empty-source` for whitespace-only input,

@@ -14,7 +14,7 @@
  * one directory per snapshot, four flat JSON files inside (`meta.json`,
  * `manifest.json`, `nodes.json`, `edges.json`). Markdown vault contents
  * are NOT copied — the structured graph plus the manifest is sufficient
- * for the v2.0c diff use cases.
+ * for the diff use cases.
  *
  * This module owns:
  *   - The graph-capture step (raw `SELECT *` over `store.connection`)
@@ -186,7 +186,7 @@ export const captureSnapshotGraph = async (
       // The hash input includes the structural fields the diff tool
       // cares about (type, apiName, label) alongside the properties
       // blob. A change to any of them flips the hash and lights up
-      // `modified` in the v2.0c diff.
+      // `modified` in the diff.
       const hashInput: Readonly<Record<string, unknown>> = {
         type: row.type,
         apiName: row.api_name,
@@ -325,7 +325,7 @@ export const runSnapshotCreate = async (
     if (!captured.ok) return captured;
     const { nodes, edges } = captured.value;
 
-    // R8-SECURITY-TREND: persist a graded securityScore at capture time.
+    // Persist a graded securityScore at capture time.
     // Best-effort — a posture failure must not block the snapshot. Reuses the
     // already-open graph (do NOT shutdown this context).
     let metrics: Readonly<Record<string, number>> | undefined;

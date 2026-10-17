@@ -114,7 +114,7 @@ export const instrumentDispatch = async (
 ): Promise<CallToolResult> => {
   if (!observabilityEnabled()) return dispatch();
   const start = Date.now();
-  // CR-14 / CR-P3: a THROWN dispatch must STILL emit a metric (ok:false) and
+  // A THROWN dispatch must STILL emit a metric (ok:false) and
   // then re-throw — without the try/finally a throw skipped the metric entirely,
   // skewing the ok/error ratio toward false-success (errors silently absent).
   let result: CallToolResult | undefined;

@@ -42,7 +42,7 @@ vi.mock('../../src/tools/synthesis-reports.js', async (importOriginal) => {
   };
 });
 
-describe('security-posture-metric (R8-SECURITY-TREND)', () => {
+describe('security-posture-metric', () => {
   it('grades finding counts like the retired org_scorecard Security dimension', () => {
     expect(gradeFromFindingCount(0)).toBe('A');
     expect(gradeFromFindingCount(1)).toBe('B');

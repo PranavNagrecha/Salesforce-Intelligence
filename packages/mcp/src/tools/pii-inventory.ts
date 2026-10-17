@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.pii_inventory` MCP tool.
  *
- * The v2.0d sub-milestone headline tool — the buyer-facing answer to
+ * The sub-milestone headline tool — the buyer-facing answer to
  * compliance/privacy priority #5 on the top-10 questions list: "which
  * fields contain PII and who can see/export them?". This tool answers
  * the first half ("which fields contain PII"); the field-access cross-
@@ -33,7 +33,7 @@
  *     the full count even when truncated so the caller knows how much
  *     is hidden.
  *
- *   - `format` (R6-21, `'json' | 'csv'`, default `'json'`): `'csv'`
+ *   - `format` (`'json' | 'csv'`, default `'json'`): `'csv'`
  *     returns `csv` instead of `fields` (`fields` is `[]` on that page —
  *     the row data lives in `csv`, not duplicated in both encodings) —
  *     one row per matched field, with the heuristic-recognizer and
@@ -41,7 +41,7 @@
  *     they survive even if only the `.csv` text is saved. `summary` /
  *     `truncated` / `nextOffset` / pagination fields are unchanged.
  *
- * Honesty axis (per the v2.0d spec): the recognizer is heuristic.
+ * Honesty axis: the recognizer is heuristic.
  *
  *   - A field name without any PII token classifies as `public` —
  *     even if the field is, in fact, holding PII at runtime. The
@@ -164,10 +164,10 @@ const piiInventoryInputBaseSchema = z.object({
   category: z.enum(CATEGORY_FILTER_VALUES).optional(),
   limit: z.number().int().min(1).max(PII_INVENTORY_MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
-  // CR-22 continuation cursor: opaque token from a prior truncated page's
+  // Continuation cursor: opaque token from a prior truncated page's
   // nextCursor; supplies the resume offset. Omit for today's behavior.
   cursor: z.string().min(1).optional(),
-  // R6-21: 'csv' returns `csv` (rows serialized as CSV) instead of `fields`.
+  // 'csv' returns `csv` (rows serialized as CSV) instead of `fields`.
   format: z.enum(['json', 'csv']).optional(),
 });
 
@@ -275,10 +275,10 @@ export interface PiiInventoryOutput {
    */
   readonly nextOffset?: number;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * Opaque continuation token, present ONLY when this page is truncated
    * (more matching fields remain — over `limit` OR byte-trimmed). Echo it back
    * as `cursor` to resume. Absent on a complete page so an in-budget response
-   * is byte-identical to the pre-CR-22 shape.
+   * is byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
@@ -559,7 +559,7 @@ const readDescription = (
   return typeof d === 'string' && d.length > 0 ? d : null;
 };
 
-/** CSV header for the R6-21 `format: 'csv'` export. Column order matches `PiiField`'s field order. */
+/** CSV header for the `format: 'csv'` export. Column order matches `PiiField`'s field order. */
 const PII_CSV_HEADER: readonly string[] = [
   'id',
   'apiName',
@@ -865,7 +865,7 @@ export const piiInventoryHandler = async (
       'utf8',
     ) + 800;
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
+  // Resolve the resume offset (echoed cursor wins over explicit offset);
   // a stale/forged cursor (changed objectId/classification/category, different
   // tool, or refreshed vault) is rejected with invalid-query.
   const fingerprint = argsFingerprint({
@@ -947,7 +947,7 @@ export const piiInventoryHandler = async (
     return ok({ data: dataWithoutCsv, vaultState });
   }
 
-  // R6-21: 'csv' carries this page's rows in `csv` instead of `fields` — the
+  // 'csv' carries this page's rows in `csv` instead of `fields` — the
   // pagination/byte-budget decisions above (kept/truncated/note) are already
   // final, so the csv is an alternate encoding of the SAME `kept` rows, not a
   // second independent row-selection pass. `fitCsvRowsToBudget` bounds the RAW

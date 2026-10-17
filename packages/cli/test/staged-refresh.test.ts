@@ -24,7 +24,7 @@ import {
 import { SUPPORTED_TYPES } from '../src/refresh-pipeline.js';
 
 /**
- * P13-STAGED-tiers — planner, driver sequencing/resumability, T0 skeleton
+ * Planner, driver sequencing/resumability, T0 skeleton
  * honesty, mid-T2 failure injection (T1 state stays servable), and the
  * convergence oracle: staged final graph ≡ monolithic refresh, byte-identical.
  */

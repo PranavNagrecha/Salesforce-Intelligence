@@ -133,7 +133,7 @@ describe('recordtypeAvailabilityHandler', () => {
     expect(r.error.kind).toBe('invalid-query');
   });
 
-  // GUARD (W3.3 misbind fix / ADMIN-SURFACE-ALIAS-SKEW-CLUSTER): pre-fix a
+  // GUARD (misbind fix / ADMIN-SURFACE-ALIAS-SKEW-CLUSTER): pre-fix a
   // `CustomObject:` componentId was coerced into a phantom
   // `Profile:CustomObject:Case` (component-NOT-found, not invalid-query), and
   // `objectApiName` / `object` / `objectId` were Zod-STRIPPED (componentId
@@ -185,7 +185,7 @@ describe('recordtypeAvailabilityHandler', () => {
     expect(r.error.kind).toBe('component-not-found');
   });
 
-  it('discloses "not modeled" when recordTypeVisibilities is absent, not a verified empty (P12-HONESTY-recordtype-not-modeled)', async () => {
+  it('discloses "not modeled" when recordTypeVisibilities is absent, not a verified empty', async () => {
     const r = await recordtypeAvailabilityHandler(ctx, { componentId: 'Profile:Bare' });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
@@ -220,7 +220,7 @@ describe('recordtypeAvailabilityHandler', () => {
 });
 
 // =============================================================================
-// GUARD (RECORDTYPE-AVAILABILITY-REJECTS-PROFILEAPINAME, W3.5 residual): a
+// GUARD (RECORDTYPE-AVAILABILITY-REJECTS-PROFILEAPINAME, residual): a
 // natural "record types on Case for {profile}?" passes an OBJECT key alongside a
 // PROFILE key. Pre-fix the object was consumed into the container slot and
 // `profileApiName` was stripped entirely, so the call hard-failed as a

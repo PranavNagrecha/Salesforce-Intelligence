@@ -17,7 +17,7 @@ import { soeBudgetBytes } from '../../src/tools/soe-payload-bounds.js';
 
 /**
  * Unit tests for the GLOBAL escalating response budget in `jsonResult`
- * (P13-GUARD-global-size) — the single serialization seam every tool response
+ * the single serialization seam every tool response
  * flows through. An MCP client rejects a tool result above its token limit
  * OUTRIGHT (~55 KB observed live), so every oversized envelope is rescued
  * in escalating passes (array truncation → string slimming → structured
@@ -337,7 +337,7 @@ describe('jsonResult global response budget', () => {
 
 /**
  * SOE-omission honesty at the GLOBAL budget seam
- * (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES / W5.1 GLOBAL residual).
+ * (WHAT-HAPPENS-ON-SAVE-TRUNCATION-DROPS-LATER-PHASES / GLOBAL residual).
  *
  * When `jsonResult` tail-truncates a composed-SOE `data.soe` to fit the byte
  * budget, it must recompute + stamp `phasesOmitted` (via the ONE shared
@@ -572,7 +572,7 @@ describe('jsonResult SOE phase-omission at the global budget seam', () => {
 });
 
 /**
- * Unit tests for `runTool`'s defensive try/catch (CR-14, Systemic #5). The
+ * Unit tests for `runTool`'s defensive try/catch (Systemic #5). The
  * sole tool-handler call site previously had NO try/catch: a thrown handler
  * (a renderer that throws by design, a `JSON.stringify` TypeError on a
  * BigInt/circular value, any unexpected error) escaped the

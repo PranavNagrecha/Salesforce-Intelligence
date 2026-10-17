@@ -26,7 +26,7 @@
  *      `DownstreamEffect` entry categorised by edgeType.
  *   3. Categorisation: `field-write` for `writesTo`, `async-dispatch`
  *      for `dispatchesAsync`, `email` for `sendsEmail`. Callouts are
- *      NOT a separate v2.7 edge type (no `Apex.Http.send` extractor
+ *      NOT a separate edge type (no `Apex.Http.send` extractor
  *      yet); the disclosure surfaces this gap explicitly.
  *
  * **CustomObject root (RTG-04)**:
@@ -43,9 +43,9 @@
  *   The `automationNodes` list and flattened `effects` slice together
  *   answer "what automation runs on this object and what does it do".
  *
- * **Granularity (v2.7 honesty boundary)**: the underlying call walk
+ * **Granularity (honesty boundary)**: the underlying call walk
  * operates at CLASS granularity. The disclosure carries the verbatim
- * promise of method-level edge resolution in v2.7.1.
+ * promise of method-level edge resolution.
  *
  * Implementation notes:
  *   - `getNodeById` resolves each effect's `targetId` for `apiName` /
@@ -105,13 +105,13 @@ const TRIGGERS_ON_AUTOMATION_TYPES = new Set<ComponentType>([
 const PARENTED_AUTOMATION_TYPES = new Set<ComponentType>(['ApprovalProcess']);
 
 /**
- * Verbatim v2.7 honesty disclosure. Method-level call resolution is
- * deferred to v2.7.1; callouts are out of scope until v2.7.x ships an
+ * Verbatim honesty disclosure. Method-level call resolution is
+ * deferred; callouts are out of scope until a later version ships an
  * `Apex.Http.send` recognizer.
  */
 /**
  * Appended to the disclosure when the effects list is EMPTY
- * (P14-USAGE-downstream-effects-honesty): with Apex email, HTTP callouts,
+ * with Apex email, HTTP callouts,
  * and record deletes invisible to the three modeled effect edges, an empty
  * list is "no MODELED effects" — never "this code has no side effects".
  */
@@ -459,7 +459,7 @@ const collectEffectsForClasses = async (
       const category = categoryOf(edge.edgeType);
       if (category === null) continue;
       const target = targetById.get(edge.toId);
-      // Sparse-graph / unresolved-target case: the v0.3 apex-scanner emits
+      // Sparse-graph / unresolved-target case: the apex-scanner emits
       // heuristic `writesTo` / `readsFrom` edges to `CustomField:<localVar>.*`
       // when it cannot resolve the receiver's object; the importer stamps
       // `targetMissing: true` on such an edge and no node exists for the id.

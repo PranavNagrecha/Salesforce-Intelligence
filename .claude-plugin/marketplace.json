@@ -6,14 +6,14 @@
   },
   "metadata": {
     "description": "sf-intelligence marketplace — an offline-first, MCP-first knowledge base for one Salesforce org.",
-    "version": "0.6.0"
+    "version": "0.7.0"
   },
   "plugins": [
     {
       "name": "sf-intelligence",
       "source": ".",
       "description": "Answers questions about one Salesforce org from a local, read-only metadata snapshot: what a field is used by, what breaks if you delete or change something, why a user cannot see a record, what runs on save, and whether a deployment is safe. Works offline; never writes to the org. FIRST RUN: this plugin cannot know where your vault lives, so set SFI_VAULT to the absolute path of your org-kb folder, or launch the host from the folder that holds it. If answers come back empty, ask \"is the server set up?\" (sfi.setup_status) for where it looked and the commands to build a vault. Ask \"what can you do?\" for the live tool map.",
-      "version": "0.6.0",
+      "version": "0.7.0",
       "category": "salesforce",
       "homepage": "https://github.com/PranavNagrecha/Salesforce-Intelligence",
       "license": "MIT"

@@ -20,7 +20,7 @@ import {
 } from '../../src/tools/component-history.js';
 
 /**
- * P13-GITHIST-tools — fixture repo ×3 commits: history timeline, capped
+ * Fixture repo ×3 commits: history timeline, capped
  * diff, properties-as-of via the REAL extractor on historical bytes, and
  * the non-git `available:false` + hint path.
  */

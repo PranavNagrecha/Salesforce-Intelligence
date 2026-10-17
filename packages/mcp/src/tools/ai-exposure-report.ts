@@ -1,10 +1,10 @@
 /**
  * Handler for the `sfi.ai_exposure_report` MCP tool.
  *
- * The R6-13 flagship: "what data can my org's AI see?" — the audit the product's
+ * The flagship: "what data can my org's AI see?" — the audit the product's
  * "the backend your Salesforce AI can trust" positioning always implied but
  * could not answer, because the org's OWN generative-AI surface was unmodeled
- * until the R6-13 extraction tier.
+ * until the extraction tier.
  *
  * It COMPOSES two existing planes:
  *
@@ -29,7 +29,7 @@
  * FAIL-CLOSED: when the vault carries ZERO GenAI nodes, the disposition is
  * `no-ai-surface-modeled` with a message that names BOTH possibilities — the
  * org genuinely has no Agentforce/GenAI config, OR the vault predates the
- * R6-13 extraction tier (re-run /sfi-refresh). It NEVER implies an empty org.
+ * extraction tier (re-run /sfi-refresh). It NEVER implies an empty org.
  *
  * Honesty axis (load-bearing, see `STATIC_BOUNDARIES`):
  *   - The AI-surface wiring is DECLARED metadata (a prompt grounds on a field,
@@ -287,7 +287,7 @@ export const aiExposureReportHandler = async (
   const scope: AiExposureReportOutput['scope'] =
     objectFilter !== undefined ? { mode: 'object', objectApiName: objectFilter } : { mode: 'org-wide' };
 
-  // --- Enumerate the GenAI surface families + Bot (R7-C7 composition). ---
+  // --- Enumerate the GenAI surface families + Bot (composition). ---
   const [promptTemplatesR, functionsR, pluginsR, plannerBundlesR, botsR] = await Promise.all([
     fetchAllOfType(ctx, 'GenAiPromptTemplate'),
     fetchAllOfType(ctx, 'GenAiFunction'),

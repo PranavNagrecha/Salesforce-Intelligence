@@ -88,13 +88,13 @@ export const findFormulaReferencesInputSchema = z.object({
   fieldApiName: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(FORMULA_REFS_MAX_LIMIT).optional(),
   /**
-   * Zero-based page offset (CR-13). Defaults to 0. Paired with `limit` so the
+   * Zero-based page offset. Defaults to 0. Paired with `limit` so the
    * caller can walk the FULL referencer set when the result is truncated — a
    * blast-radius tool must never silently drop referencers.
    */
   offset: z.number().int().nonnegative().optional(),
   /**
-   * CR-22 continuation cursor: opaque token from a prior truncated page's
+   * Continuation cursor: opaque token from a prior truncated page's
    * `nextCursor`; supplies the resume offset. Omit for today's behavior.
    */
   cursor: z.string().min(1).optional(),
@@ -195,7 +195,7 @@ export interface FindFormulaReferencesOutput {
   /** The requested page of referencers (after sort + `offset`/`limit`). */
   readonly referencers: readonly FormulaReferencer[];
   /**
-   * CR-13 truncation honesty: the TRUE total number of referencers BEFORE
+   * Truncation honesty: the TRUE total number of referencers BEFORE
    * `offset`/`limit` paging (post sparse-graph-miss filtering — every
    * returnable referencer, not a raw edge count). Greater than
    * `referencers.length` means the page is a partial slice; `note` discloses it.
@@ -210,9 +210,9 @@ export interface FindFormulaReferencesOutput {
   /** Approximate next offset (legacy), or `null` when the list is exhausted. */
   readonly nextOffset?: number | null;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page is truncated
+   * Opaque continuation token, present ONLY when this page is truncated
    * (more referencers remain). Echo it back as `cursor` to resume. Absent on a
-   * complete page so an in-budget response is byte-identical to pre-CR-22.
+   * complete page so an in-budget response is byte-identical to the pre-paging shape.
    */
   readonly nextCursor?: string;
   /** Cursor-aware pagination metadata, present ONLY on a truncated page. */
@@ -264,7 +264,7 @@ const resolveReferencer = async (
  * `offset`/`limit` (default limit 50, max 500) with
  * `totalCount`/`hasMore`/`nextOffset` so a heavily-referenced field's
  * full set is reachable rather than silently clipped — when the page is
- * partial a truncation `note` is added (CR-13).
+ * partial a truncation `note` is added.
  *
  * @example
  *   const r = await findFormulaReferencesHandler(ctx, {
@@ -348,20 +348,20 @@ export const findFormulaReferencesHandler = async (
     }
   }
 
-  // CR-13: page after sorting so truncation is stable AND disclosed. `total`
+  // Page after sorting so truncation is stable AND disclosed. `total`
   // is the full pre-slice count of returnable referencers; the `note` (omitted
   // when the page is complete, mirroring get_edges) discloses an incomplete page.
   // TOTAL ORDER: `id` ASC then `source` ASC — a single `fromId` (= `id`) can
   // hold more than one `references` edge to the same field, differing only by
   // `source` (edge PK is (from_id,to_id,edge_type,source) with to_id/edge_type
-  // fixed here), so `source` is the unique final tiebreak CR-22 resume needs.
+  // fixed here), so `source` is the unique final tiebreak resume needs.
   const ordered = referencers.sort((a, b) => {
     if (a.id !== b.id) return a.id < b.id ? -1 : 1;
     if (a.source !== b.source) return a.source < b.source ? -1 : 1;
     return 0;
   });
 
-  // CR-22: resolve the resume offset (echoed cursor wins over explicit offset);
+  // Resolve the resume offset (echoed cursor wins over explicit offset);
   // a stale/forged cursor (changed fieldId, different tool, refreshed vault) is
   // rejected with invalid-query.
   const fingerprint = argsFingerprint({ fieldId });

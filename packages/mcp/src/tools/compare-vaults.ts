@@ -1,8 +1,8 @@
 /**
  * Handler for the `sfi.compare_vaults` MCP tool.
  *
- * The v3.1 headline tool for the "compare sandbox vs prod" surface
- * (PLAN-v3.1 §4). Given two registered vault aliases, returns a
+ * The headline tool for the "compare sandbox vs prod" surface
+ * Given two registered vault aliases, returns a
  * structured diff of every component:
  *
  *   - `added`: present in vaultB, absent from vaultA.
@@ -12,11 +12,11 @@
  *   - `summary`: per-bucket counts plus the unchanged count.
  *
  * The tool opens both vaults' graph stores in parallel, walks the
- * union of component ids, and pairs by api-name match (the v3.1
+ * union of component ids, and pairs by api-name match (the
  * correspondence axis — renamed components appear as remove+add, NOT
  * as modified; the disclosure surfaces this verbatim).
  *
- * **R6-12 — `edgeDrift` axis.** Node-hash comparison alone is blind to
+ * **`edgeDrift` axis.** Node-hash comparison alone is blind to
  * DEPENDENCY drift: a Flow that starts referencing a new field, or a
  * validation rule that drops a reference, changes NOTHING in the
  * node's own `properties`, so it never showed up as `shapeModified`.
@@ -40,7 +40,7 @@
  *      api-name; rename appears as remove+add, not as modified.
  *   3. Vault-not-found refusal — when either alias is missing the
  *      tool returns the register-vault directive verbatim per the
- *      Q170 honesty anchor.
+ *      honesty anchor.
  *   4. Edge-drift scope — only OUTGOING edges of components present in
  *      BOTH vaults are compared; a component's edges are not diffed
  *      against nothing when the component itself was added/removed.
@@ -50,7 +50,7 @@
  *      difference between differently-extracted vaults can reflect an
  *      EXTRACTOR change, not a real change in the org.
  *
- * **R7-W10.** The `edgeDrift` / `extractorVersionCaveat` primitives
+ * The `edgeDrift` / `extractorVersionCaveat` primitives
  * (types, caps, `loadEdgesByFrom`, `buildEdgeDrift`,
  * `buildExtractorVersionCaveat`) live in the shared
  * `./cross-vault-edge-drift.js` module — `compare-object-across-vaults.ts`
@@ -95,8 +95,8 @@ import { toolLocalPayloadBudgetBytes } from './response-budget.js';
 export type { ComponentEdgeDrift, EdgeDiffEntry, EdgeDriftOutput } from './cross-vault-edge-drift.js';
 
 /**
- * Volatile-property name allowlist that v3.1 inherits VERBATIM from
- * v2.0c's `SnapshotSemantics.md`. Properties whose path ends with one
+ * Volatile-property name allowlist that inherits VERBATIM from
+ * the `SnapshotSemantics.md`. Properties whose path ends with one
  * of these tokens are suppressed from the shape-drift detection by
  * default. Callers force-include them with
  * `includeVolatileProperties: true`.
@@ -121,7 +121,7 @@ const COMPARE_VAULTS_MAX_LIMIT = 500;
  * Zod schema for `sfi.compare_vaults`. Both aliases are required; the
  * optional `objectFilter` / `typeFilter` flags narrow the diff. The
  * `includeVolatileProperties` flag (default false) controls the
- * v2.0c-inherited noise filter.
+ * inherited noise filter.
  */
 export const compareVaultsInputSchema = z.object({
   vaultA: z.string().min(1),
@@ -159,7 +159,7 @@ export interface ComponentDiff {
   readonly drift?: readonly PropertyDrift[];
 }
 
-// R7-W10: EdgeDiffEntry / ComponentEdgeDrift / EdgeDriftOutput (the R6-12
+// EdgeDiffEntry / ComponentEdgeDrift / EdgeDriftOutput (the
 // edgeDrift axis types) moved to the shared `cross-vault-edge-drift.ts`
 // module so `compare-object-across-vaults.ts` can reuse them without
 // duplication — re-exported above for callers that imported them from here.
@@ -175,7 +175,7 @@ export interface CompareVaultsOutput {
   readonly added: readonly ComponentDiff[];
   readonly removed: readonly ComponentDiff[];
   readonly shapeModified: readonly ComponentDiff[];
-  /** R6-12: outgoing-edge drift for components present in both vaults (independent of node-hash drift). */
+  /** Outgoing-edge drift for components present in both vaults (independent of node-hash drift). */
   readonly edgeDrift: EdgeDriftOutput;
   readonly summary: {
     readonly addedCount: number;
@@ -220,7 +220,7 @@ export interface CompareVaultsOutput {
     readonly byteTrimmed: boolean;
   };
   /**
-   * R6-12: present ONLY when vaultA's and vaultB's manifests report different
+   * Present ONLY when vaultA's and vaultB's manifests report different
    * sf-intelligence product versions — an edge-set (or node) difference between
    * differently-extracted vaults can reflect an EXTRACTOR change, not a real
    * change in the org. Absent when both versions match or either manifest could
@@ -355,8 +355,8 @@ const loadNodes = async (
 };
 
 /**
- * Pre-existing bug fixed while adding R6-12 (surfaced by real-vault
- * verification — see R6-HANDOFF.md): `JSON.stringify(undefined)` returns
+ * Pre-existing bug fixed while adding edge drift (surfaced by real-vault
+ * verification): `JSON.stringify(undefined)` returns
  * the JS value `undefined`, NOT the string `"undefined"`, so a naive
  * `typeof value !== 'object'` fall-through returned `undefined` for an
  * absent property. `collectDrift` legitimately produces `undefined` inputs
@@ -488,13 +488,13 @@ const VOLATILE_FILTER_DISCLOSURE =
 const API_NAME_MATCH_DISCLOSURE =
   'components correspond by api-name match; renamed components appear as removed-from-A + added-to-B, not as modified — review apparent add/remove pairs for renames before treating as actual creations / deletions.';
 
-// R7-W10: EDGE_DRIFT_SCOPE_DISCLOSURE / loadEdgesByFrom / buildEdgeDrift /
-// buildExtractorVersionCaveat (the R6-12 edge-drift block) moved to the
+// EDGE_DRIFT_SCOPE_DISCLOSURE / loadEdgesByFrom / buildEdgeDrift /
+// buildExtractorVersionCaveat (the edge-drift block) moved to the
 // shared ./cross-vault-edge-drift.js module — imported above.
 
 /**
  * Build the structured "vault not found" payload the skill surfaces
- * verbatim. The Q170 honesty anchor specifies the language; we match
+ * verbatim. The honesty anchor specifies the language; we match
  * it character-for-character so the skill's response surface assertion
  * passes.
  */
@@ -557,7 +557,7 @@ export const compareVaultsHandler = async (
   const registryRoot = findRegistryRoot(ctx.vaultRoot);
   const includeVolatile = input.includeVolatileProperties === true;
 
-  // Refuse same-alias (the Q170-adjacent honesty rule: cross-vault
+  // Refuse same-alias (the adjacent honesty rule: cross-vault
   // tools require two distinct aliases). Surface as a structured
   // `invalid-query` refusal so callers cannot silently treat the
   // empty-diff result as a real comparison.
@@ -643,7 +643,7 @@ export const compareVaultsHandler = async (
     const added: ComponentDiff[] = [];
     const removed: ComponentDiff[] = [];
     const shapeModified: ComponentDiff[] = [];
-    // R6-12: every id present in BOTH vaults (post typeFilter/objectFilter),
+    // Every id present in BOTH vaults (post typeFilter/objectFilter),
     // regardless of node-hash drift — the edgeDrift axis needs the FULL
     // intersection, not just the shape-modified subset, since an edge can
     // change while every node property stays byte-identical.

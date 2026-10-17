@@ -39,7 +39,7 @@ const TOOLS_DIR = join(
   'src',
   'tools',
 );
-// R7-F2: handler imports and dispatchTool switch now live in tool-dispatch.ts.
+// Handler imports and dispatchTool switch now live in tool-dispatch.ts.
 // The parity checks (import coverage + dispatch switch body) point there.
 const INDEX_PATH = join(TOOLS_DIR, 'tool-dispatch.ts');
 

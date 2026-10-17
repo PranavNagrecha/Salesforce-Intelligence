@@ -1,28 +1,28 @@
 /**
  * Handler for the `sfi.field_meaning` MCP tool.
  *
- * v2.9 R4 — the "what does this field actually mean in our org?"
- * surface (PLAN-v2.9 §4). Given a CustomField canonical id, returns
+ * The "what does this field actually mean in our org?"
+ * surface. Given a CustomField canonical id, returns
  * the field's declared shape (apiName, label, description, type,
- * picklist values, parent object), its v2.9 vocabulary classifications
+ * picklist values, parent object), its vocabulary classifications
  * (`sourceOfTruth`, `semanticCategory`), usage frequency (asymmetric
  * read/write incoming counts to reveal scratch-field patterns), and
  * top-3 similar fields by label/apiName token overlap.
  *
- * Composition (PLAN-v2.9 §14):
+ * Composition:
  *   - Reads the CustomField node and its `properties.sourceOfTruth` +
- *     `properties.semanticCategory` (populated by v2.9 R3 at extraction
- *     time; absent on pre-v2.9 vaults → tool reports `unknown` and
+ *     `properties.semanticCategory` (populated at extraction
+ *     time; absent on legacy vaults → tool reports `unknown` and
  *     surfaces a boundary).
  *   - Walks incoming `readsFrom` / `writesTo` edges to count usage.
  *   - For similar-fields: best-effort label/apiName token overlap.
- *     v2.2's full TF-IDF index is the canonical similarity source per
- *     PLAN-v2.9 §3; the token-overlap fallback ships here so the tool
- *     produces non-trivial output regardless of whether v2.2 search
+ *     The full TF-IDF index is the canonical similarity source;
+ *     the token-overlap fallback ships here so the tool
+ *     produces non-trivial output regardless of whether search
  *     infrastructure is present in the vault. The skill surfaces the
  *     boundary verbatim.
  *
- * Honesty axis (PLAN-v2.9 §4):
+ * Honesty axis:
  *   - `vocabulary is org-specific` — always surfaced.
  *   - `classification is heuristic on writes-fabric inference` —
  *     surfaced when classification confidence is `'heuristic'`.
@@ -39,7 +39,7 @@
  *     and scores by shared tokens; the top 3 are returned, ranked by
  *     score DESC then id ASC. Token extraction strips `__c` / `__r`
  *     suffixes and splits on underscores / camelCase boundaries.
- *   - sourceOfTruth / semanticCategory may be absent on pre-v2.9
+ *   - sourceOfTruth / semanticCategory may be absent on pre
  *     vaults: tool returns `{ value: 'unknown', confidence: 'heuristic' }`
  *     in both cases. The boundary list mentions classification when
  *     this fallback fires.
@@ -74,13 +74,13 @@ import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 /** Canonical id prefix for the CustomField node type. */
 const CUSTOM_FIELD_PREFIX = 'CustomField:';
 
-/** Maximum similarFields returned. PLAN-v2.9 §4 specifies "top-3". */
+/** Maximum similarFields returned (top-3). */
 const SIMILAR_FIELDS_LIMIT = 3;
 
 /**
  * Verbatim boundaries surfaced in every response. The skill may add
- * additional axis-specific boundaries; the four below are the v2.9-wide
- * anchor (PLAN-v2.9 §4 "Honesty axis").
+ * additional axis-specific boundaries; the four below are the tier-wide
+ * anchor.
  */
 const BOUNDARY_VOCABULARY_ORG_SPECIFIC =
   "Vocabulary is org-specific — one org's term is another org's; the tool reports what THIS org's metadata declares, not industry convention.";
@@ -139,7 +139,7 @@ export const fieldMeaningInputSchema = z.object({
 export type FieldMeaningInput = z.infer<typeof fieldMeaningInputSchema>;
 
 /**
- * The five-value sourceOfTruth classification per PLAN-v2.9 §3.
+ * The five-value sourceOfTruth classification.
  * `manual` (no writers, no formula), `derived` (declared via formula
  * or auto-number), `integration-synced` (all writers integration-
  * tagged), `manual-and-coded` (mixed writers), `unknown` (cascade
@@ -153,7 +153,7 @@ export type SourceOfTruthClassification =
   | 'unknown';
 
 /**
- * The seven-value semanticCategory classification per PLAN-v2.9 §3.
+ * The seven-value semanticCategory classification.
  * Name-pattern + type matching; every emission is `'heuristic'`
  * confidence because patterns are conventions, not declarations.
  */
@@ -166,7 +166,7 @@ export type SemanticCategoryClassification =
   | 'descriptor'
   | 'unknown';
 
-/** One classification with its confidence label per PLAN-v2.9 §3. */
+/** One classification with its confidence label. */
 export interface FieldMeaningClassification<T extends string> {
   readonly value: T;
   readonly confidence: 'declared' | 'heuristic';
@@ -186,7 +186,7 @@ export interface FieldMeaningPicklistValue {
 }
 
 /**
- * Asymmetric incoming-edge counts per PLAN-v2.9 §4 output schema.
+ * Asymmetric incoming-edge counts.
  *
  * `incomingReads` counts EVERY inbound edge that consumes the field's value —
  * not only `readsFrom`. It previously counted `readsFrom` alone, so a field
@@ -220,9 +220,9 @@ export interface FieldMeaningUsageFrequency {
 
 /**
  * One similar-field entry. `similarityScore` is the shared-token count
- * over the union of tokens (Jaccard-like). v2.2's TF-IDF cosine is the
- * canonical source per PLAN-v2.9 §3; the token-overlap fallback ships
- * here so the tool produces output regardless of v2.2 presence.
+ * over the union of tokens (Jaccard-like). The TF-IDF cosine is the
+ * canonical source; the token-overlap fallback ships
+ * here so the tool produces output regardless of presence.
  */
 export interface FieldMeaningSimilarField {
   readonly fieldId: ComponentId;
@@ -332,7 +332,7 @@ const readPicklistValues = (
  * Pull the sourceOfTruth classification from `properties.sourceOfTruth`.
  * Expects `{ value, confidence }`. Returns `{ value: 'unknown',
  * confidence: 'heuristic' }` when the property is absent or malformed —
- * the v2.9 R3 classifier may not have run; the boundary list surfaces
+ * the classifier may not have run; the boundary list surfaces
  * this fallback.
  */
 const readSourceOfTruth = (
@@ -404,9 +404,9 @@ const readSemanticCategory = (
 /**
  * Tokenize an apiName or label into lowercase tokens for similarity.
  * Strips `__c` / `__r` suffixes, splits on underscores, splits on
- * camelCase boundaries. v2.2's tokenizer is the canonical version
- * per PLAN-v2.9 §3; this lightweight fallback ships so similarFields
- * produces output without the v2.2 dependency.
+ * camelCase boundaries. The search tokenizer is the canonical version;
+ * this lightweight fallback ships so similarFields
+ * produces output without the dependency.
  */
 const tokenize = (raw: string): Set<string> => {
   const stripped = raw.replace(/__[cr]$/i, '');
@@ -549,7 +549,7 @@ const countUsage = async (
 
 /**
  * The `sfi.field_meaning` MCP tool. Returns the field's declared
- * shape + v2.9 vocabulary classifications + usage frequency + top-3
+ * shape + vocabulary classifications + usage frequency + top-3
  * similar fields + boundary disclosures. See module JSDoc for the
  * composition seams and the honesty axis.
  *

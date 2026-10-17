@@ -10,6 +10,7 @@ import type {
 import { edgeLiteralValues, edgeReferenceValues, err, ok } from '@sf-intelligence/core';
 import { XMLParser, XMLValidator } from 'fast-xml-parser';
 
+import { bundleId, isLocalComponentRef } from './bundle-id.js';
 import {
   extractConditions,
   type ConditionSource,
@@ -394,7 +395,7 @@ const buildStartEdge = (
 };
 
 /**
- * Build a v1.5 `listensTo` edge for a Platform-Event-triggered Flow.
+ * Build a `listensTo` edge for a Platform-Event-triggered Flow.
  *
  * Emits one edge from the Flow to its `<start><object>` when:
  *   - `<start><triggerType>` is `PlatformEvent`.
@@ -403,7 +404,7 @@ const buildStartEdge = (
  * Returns `null` for record-triggered / autolaunched / screen / scheduled
  * flows, or when the object is missing.
  *
- * The Flow's pre-v1.5 `triggersOn` production (above) is unchanged;
+ * The Flow's existing `triggersOn` production (above) is unchanged;
  * this `listensTo` production is **additive** — see
  * `IntegrationTopologySemantics.md` §"Rule 3: Flow with PlatformEvent
  * start". The `triggersOn` builder above filters on
@@ -589,9 +590,10 @@ const splitObjectFieldReference = (
 
 /** Map a screen `ComponentInstance` `<extensionName>` to a component canonical id. */
 const screenExtensionTargetId = (extensionName: string): string =>
-  extensionName.startsWith('c:')
-    ? `LightningComponentBundle:${extensionName}`
-    : `AuraDefinitionBundle:${extensionName}`;
+  bundleId(
+    isLocalComponentRef(extensionName) ? 'LightningComponentBundle' : 'AuraDefinitionBundle',
+    extensionName,
+  );
 
 /**
  * Resolve the PREFIX of a screen field's `<objectFieldReference>` to an SObject.
@@ -1005,7 +1007,7 @@ type DataflowSourceCollector = Map<
  * `dataflowCollector` (so {@link buildDataflowReadEdges} can emit the
  * symmetric field-level `readsFrom` edges). Shared by the DML
  * `<inputAssignments>` writes ({@link buildInputAssignmentEdges}) and the
- * R7-W2 before-save `$Record.<Field>` assignment writes
+ * before-save `$Record.<Field>` assignment writes
  * ({@link buildBeforeSaveFieldAssignmentEdges}).
  *
  * `targetField` is the `{Object}.{Field}` the value flows INTO. `demote` marks
@@ -1152,7 +1154,7 @@ const buildDataflowReadEdges = (
  * what record-creation / impact consumers query, the field-level edges record
  * which fields the create actually sets.
  *
- * R7-W1: a create that inserts a whole record VARIABLE carries an
+ * a create that inserts a whole record VARIABLE carries an
  * `<inputReference>` instead of `<object>` + `<inputAssignments>`. We resolve
  * the variable to its declared objectType and emit the OBJECT-level edge at
  * `declared` confidence with the whole-record disclosure — the inserted fields
@@ -1221,7 +1223,7 @@ const buildRecordCreateEdges = (
 
 /**
  * The verbatim disclosure a record-VARIABLE `<inputReference>` DML carries
- * (R7-W1). A `recordCreate`/`recordUpdate`/`recordDelete` that names a whole
+ * A `recordCreate`/`recordUpdate`/`recordDelete` that names a whole
  * record variable writes ALL of that record's field values — the metadata does
  * not enumerate them (there are no `<inputAssignments>`), so we emit only the
  * OBJECT-level edge and disclose that the fields are not knowable offline
@@ -1239,7 +1241,7 @@ const WHOLE_RECORD_DISCLOSURE =
  *     from the `<start><object>` (via the trigger type), so confidence is
  *     `heuristic` and the DML's `<inputAssignments>` still enumerate the fields
  *     it sets (a `$Record` update names specific fields).
- *   - `recordVariable` (R7-W1): the reference is a record VARIABLE declared in
+ *   - `recordVariable`: the reference is a record VARIABLE declared in
  *     `<variables>` with an `<objectType>`. The DML writes the WHOLE record; the
  *     individual fields are NOT enumerable (no `<inputAssignments>`). Confidence
  *     is `declared` (the variable's declared objectType IS the write target),
@@ -1268,7 +1270,7 @@ export interface InputReferenceResolution {
  *   - `$Record` / `$Record__Prior` → the triggering record of a record-scoped
  *     flow, typed by `<start><object>` (`kind: 'triggerRecord'`, `heuristic`).
  *   - Otherwise, a record VARIABLE declared in `<variables>` with an
- *     `<objectType>` (R7-W1) → that objectType (`kind: 'recordVariable'`,
+ *     `<objectType>` → that objectType (`kind: 'recordVariable'`,
  *     `declared`), with object-level lookup provenance when available.
  *
  * Returns `null` when the reference is neither the trigger record nor a typed
@@ -1300,7 +1302,7 @@ export const resolveInputReferenceObject = (
       sourceObject: null,
     };
   }
-  // R7-W1: a record VARIABLE — resolve its DECLARED objectType. A collection
+  // a record VARIABLE — resolve its DECLARED objectType. A collection
   // variable is still a single object type per element, so `isCollection` does
   // not block the object-level edge (the DML writes rows of that object).
   const variable = dataflowIndex.variables.get(inputRef);
@@ -1327,7 +1329,7 @@ export const resolveInputReferenceObject = (
 
 /**
  * Build the OBJECT-level DML edge `properties` for a `writesTo` / `readsFrom`
- * edge, adding the R7-W1 whole-record disclosure markers when the DML target
+ * edge, adding the whole-record disclosure markers when the DML target
  * was a record VARIABLE `<inputReference>`. For a normal `<object>` DML or a
  * `$Record` trigger-record reference the result is just `{ operation }` —
  * byte-identical to the pre-R7 edges (so existing goldens are unaffected).
@@ -1370,7 +1372,7 @@ const buildObjectDmlProps = (
  * edges as an `<object>`-typed update, at `heuristic` confidence (the object
  * is inferred from the trigger type, not parsed from the element).
  *
- * R7-W1: a `<inputReference>` naming a whole record VARIABLE ("use all field
+ * a `<inputReference>` naming a whole record VARIABLE ("use all field
  * values from this record / record collection") resolves to the variable's
  * declared objectType at `declared` confidence, and the edges carry the
  * whole-record disclosure — the individual fields are NOT enumerable (no
@@ -1455,7 +1457,7 @@ const buildRecordUpdateEdges = (
  *
  * Like `<recordUpdates>`, a delete can use `<inputReference>` instead of
  * `<object>`: `$Record` resolves to the trigger object (`heuristic`), a whole
- * record VARIABLE (R7-W1) to its declared objectType (`declared`, with the
+ * record VARIABLE to its declared objectType (`declared`, with the
  * whole-record disclosure). A delete has no fields to enumerate, so it emits
  * only the OBJECT-level edge either way. An `<inputReference>` that is neither
  * is skipped with a warning.
@@ -1555,7 +1557,7 @@ interface RecordFieldAssignment {
 }
 
 /**
- * R7-W2 — emit FIELD-level `writesTo` edges for a before-save
+ * emit FIELD-level `writesTo` edges for a before-save
  * record-triggered flow's `<assignments>` items that set `$Record.<Field>`.
  *
  * In a RecordBeforeSave flow, assigning to `$Record.<Field>` mutates the
@@ -1862,7 +1864,7 @@ export const readEntryRequiresRecordChange = (
 };
 
 /**
- * Build the list of v2.0a `ConditionSource` entries for a Flow.
+ * Build the list of `ConditionSource` entries for a Flow.
  * Walks the two condition-bearing XML surfaces per
  * `ConditionalContextSemantics.md` §"Flow conditions":
  *
@@ -2245,7 +2247,7 @@ const dedupeAndSortEdges = (edges: readonly Edge[]): Edge[] => {
  *     plus one FIELD-level `writesTo` edge per `<inputAssignments><field>`.
  *   - `<recordUpdates>` → one `readsFrom` + one OBJECT-level `writesTo`
  *     per update, plus one FIELD-level `writesTo` per `<inputAssignments>`.
- *   - R7-W1: a create/update/delete that names a whole record VARIABLE via
+ *   - a create/update/delete that names a whole record VARIABLE via
  *     `<inputReference>` (no `<object>`, no `<inputAssignments>`) resolves the
  *     variable to its declared `<objectType>` and emits ONLY the OBJECT-level
  *     edge, at `declared` confidence, carrying `wholeRecord: true` +
@@ -2259,7 +2261,7 @@ const dedupeAndSortEdges = (edges: readonly Edge[]): Edge[] => {
  *     plus `sourceTraceDepthCapped` when the chain was cut at the trace
  *     cap) — see `flow-dataflow.ts` for the trace rules and the honesty
  *     contract (declared vs heuristic vs disclosed-unresolved).
- *   - R7-W2: a before-save (`RecordBeforeSave`) flow's `<assignments>` item
+ *   - a before-save (`RecordBeforeSave`) flow's `<assignments>` item
  *     that sets `$Record.<Field>` emits a FIELD-level `writesTo` edge to
  *     `CustomField:{TriggerObject}.{Field}` (confidence `declared`,
  *     `operation: 'beforeSaveFieldAssignment'`) — the classic "before-save flow
@@ -2269,7 +2271,7 @@ const dedupeAndSortEdges = (edges: readonly Edge[]): Edge[] => {
  *     field (`properties.operation: 'dataflowSource'`,
  *     `properties.targetFields` naming the fields it feeds), so downstream
  *     lineage walks cross the flow from the source side — the same shape
- *     the apex-scanner emits for Apex field reads. (The R7-W2 before-save
+ *     the apex-scanner emits for Apex field reads. (The before-save
  *     assignment feeds this the same way DML input assignments do.)
  *   - `<recordDeletes>` → one `writesTo` edge per delete.
  *   - `<subflows>` → one `references` edge per subflow call to the
@@ -2298,9 +2300,9 @@ const dedupeAndSortEdges = (edges: readonly Edge[]): Edge[] => {
  * `<assignments>`, `<variables>`,
  * `<formulas>`, and `<loops>` are PARSED (R6-11) — not as elements, but as
  * the dataflow plumbing that maps DML input assignments back to their
- * record-field sources; R7-W2 additionally reads `<assignments>` items that
+ * record-field sources; this additionally reads `<assignments>` items that
  * write `$Record.<Field>` in a before-save flow as first-class field writes,
- * and R7-W1 reads `<variables>` objectTypes to resolve whole-record
+ * and reads `<variables>` objectTypes to resolve whole-record
  * `<inputReference>` DML. Subflow calls (`<subflows>`) ARE modeled as of R6-02
  * (see the `<subflows>` bullet above).
  *
@@ -2485,7 +2487,7 @@ export const extractFlow = async (
     ...buildRecordUpdateEdges(flowId, rootObj, warnings, dataflowIndex, dataflowCollector),
   );
   rawEdges.push(...buildRecordDeleteEdges(flowId, rootObj, warnings, dataflowIndex));
-  // R7-W2: before-save $Record.<Field> assignment writes. Runs BEFORE
+  // before-save $Record.<Field> assignment writes. Runs BEFORE
   // buildDataflowReadEdges so its traced source fields are in the collector.
   rawEdges.push(
     ...buildBeforeSaveFieldAssignmentEdges(
@@ -2509,7 +2511,7 @@ export const extractFlow = async (
   rawEdges.push(...buildLabelReferenceEdges(flowId, xmlResult.value));
   const edges = dedupeAndSortEdges(rawEdges);
 
-  // v2.0a — Build the per-Flow ConditionalContext nodes. The Flow's
+  // Build the per-Flow ConditionalContext nodes. The Flow's
   // `parentObjectApiName` is the record-trigger's target object (the
   // `<start><object>` value), so field references like `Industry__c`
   // resolve to that object's CustomField. For non-record-triggered

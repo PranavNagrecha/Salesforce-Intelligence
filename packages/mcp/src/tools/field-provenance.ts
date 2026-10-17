@@ -1,12 +1,12 @@
 /**
  * Handler for the `sfi.field_provenance` MCP tool.
  *
- * v2.9 R4 — the "is this field manually entered or automated?"
- * surface (PLAN-v2.9 §4). Given a CustomField canonical id, returns:
- *   - the v2.9 sourceOfTruth classification + confidence,
+ * The "is this field manually entered or automated?"
+ * surface. Given a CustomField canonical id, returns:
+ *   - the sourceOfTruth classification + confidence,
  *   - declared-as-formula trace (formula expression when present),
  *   - declared-as-auto-number trace (displayFormat when present),
- *   - ALL ApexClass writers (with `isIntegrationTagged` from v2.0a
+ *   - ALL ApexClass writers (with `isIntegrationTagged` from
  *     `references` edges to NamedCredential / ExternalDataSource),
  *   - ALL Flow writers,
  *   - ALL ApexTrigger writers,
@@ -18,17 +18,17 @@
  *
  * The tool lists EVERY writer, not just the ones used in the
  * classification cascade — callers can verify the classification's
- * basis (PLAN-v2.9 §4).
+ * basis.
  *
- * Composition (PLAN-v2.9 §14):
+ * Composition:
  *   - Reads CustomField + `properties.sourceOfTruth`.
  *   - Walks incoming `writesTo` edges, partitioned by source-node type,
  *     with no type discarded.
  *   - For each ApexClass writer, walks outgoing `references` edges to
- *     check v2.0a integration tagging (NamedCredential /
+ *     check integration tagging (NamedCredential /
  *     ExternalDataSource targets).
  *
- * Honesty axis (PLAN-v2.9 §4):
+ * Honesty axis:
  *   - "dynamic SOQL, reflective field access, and managed-package
  *     writers may be invisible" — always surfaced. It does NOT cover
  *     the non-canonical writer families, which are modeled and
@@ -58,7 +58,7 @@
  *     asserted a writer.
  *   - `noWritersDetected` is true when ALL FOUR writer arrays are empty,
  *     `unresolvedWriterCount` is 0, AND the field has no formula / no
- *     auto-number. PLAN-v2.9 Q151
+ *     auto-number.
  *     specifies false for formula fields (the formula IS the source —
  *     not absent).
  */
@@ -84,7 +84,7 @@ import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
 /** Canonical id prefix for the CustomField node type. */
 const CUSTOM_FIELD_PREFIX = 'CustomField:';
 
-/** Verbatim honesty boundaries (PLAN-v2.9 §4). */
+/** Verbatim honesty boundaries. */
 const BOUNDARY_WRITES_INVISIBLE =
   'Dynamic SOQL, reflective field access (e.g., put()/get() with runtime keys), and managed-package writers may be invisible to the trace — a writer not listed here may still exist at runtime.';
 const BOUNDARY_CLASSIFICATION_HEURISTIC =
@@ -148,7 +148,7 @@ const otherWritersBoundary = (
 };
 
 /**
- * The five-value sourceOfTruth classification per PLAN-v2.9 §3.
+ * The five-value sourceOfTruth classification.
  * Duplicated from `field-meaning.ts` so the two tools' output unions
  * stay independent — the contract surfaces (R1b) will hoist the
  * shared type to `@sf-intelligence/contracts`.
@@ -166,20 +166,20 @@ export interface FieldProvenanceClassification {
   readonly confidence: 'declared' | 'heuristic';
 }
 
-/** Declared-as-formula trace entry per PLAN-v2.9 §4. */
+/** Declared-as-formula trace entry. */
 export interface FieldProvenanceDeclaredFormula {
   readonly formula: string;
 }
 
-/** Declared-as-auto-number trace entry per PLAN-v2.9 §4. */
+/** Declared-as-auto-number trace entry. */
 export interface FieldProvenanceDeclaredAutoNumber {
   readonly displayFormat: string;
 }
 
 /**
- * One ApexClass writer entry. `isIntegrationTagged` derives from v2.0a
+ * One ApexClass writer entry. `isIntegrationTagged` derives from
  * `references` edges from the class to a NamedCredential or
- * ExternalDataSource — the v2.9 integration-synced classifier signal.
+ * ExternalDataSource — the integration-synced classifier signal.
  */
 export interface FieldProvenanceApexWriter {
   readonly componentId: ComponentId;
@@ -213,7 +213,7 @@ export interface FieldProvenanceOtherWriter {
   readonly confidence: ConfidenceLevel;
 }
 
-/** The provenance trace block per PLAN-v2.9 §4 output schema. */
+/** The provenance trace block. */
 export interface FieldProvenanceTrace {
   readonly declaredAsFormula: FieldProvenanceDeclaredFormula | null;
   readonly declaredAsAutoNumber: FieldProvenanceDeclaredAutoNumber | null;
@@ -357,8 +357,8 @@ const readAutoNumber = (
 /**
  * Decide whether an ApexClass writer is integration-tagged: walk its
  * outgoing `references` edges and check whether any target is a
- * NamedCredential or ExternalDataSource. The v2.0a integration-
- * adjacency signal (PLAN-v2.9 §3 rule 3).
+ * NamedCredential or ExternalDataSource. The integration-
+ * adjacency signal.
  */
 const isApexWriterIntegrationTagged = async (
   ctx: Context,
@@ -486,7 +486,7 @@ const collectWriters = async (
 /**
  * The `sfi.field_provenance` MCP tool. Returns the field's
  * sourceOfTruth classification + the structural trace listing every
- * writer with v2.0a integration tagging for Apex writers. See module
+ * writer with the integration tagging for Apex writers. See module
  * JSDoc for the trace shape and the honesty axis.
  *
  * @example
@@ -560,7 +560,7 @@ export const fieldProvenanceHandler = async (
     ...new Set(otherWriters.map((w) => w.componentType)),
   ].sort();
 
-  // PLAN-v2.9 Q151: formula fields are NOT noWritersDetected — the
+  // Formula fields are NOT noWritersDetected — the
   // formula IS the source. Same for auto-number.
   //
   // `otherWriters` is part of this predicate BY CONSTRUCTION: the answer is

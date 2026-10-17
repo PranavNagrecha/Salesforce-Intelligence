@@ -57,7 +57,7 @@ const seed: ExtractionResult = {
     } }),
     node({ id: 'PermissionSet:FlowRunner', type: 'PermissionSet', apiName: 'FlowRunner', properties: { userPermissions: [], customPermissionGrantCount: 0, flowGrantCount: 1 } }),
     node({ id: 'Flow:Onboard_Contact', type: 'Flow', apiName: 'Onboard_Contact' }),
-    // CR-CAP-10: a defined CustomPermission (resolves) and a permset granting
+    // A defined CustomPermission (resolves) and a permset granting
     // both it and a managed-package perm with no definition (targetMissing).
     node({ id: 'CustomPermission:SkipValidation', type: 'CustomPermission', apiName: 'SkipValidation' }),
     node({ id: 'PermissionSet:CustomPerms', type: 'PermissionSet', apiName: 'CustomPerms', properties: { userPermissions: [], customPermissionGrantCount: 2, flowGrantCount: 0 } }),
@@ -70,7 +70,7 @@ const seed: ExtractionResult = {
     // importer stamps `targetMissing` on the edge automatically.
     node({ id: 'PermissionSet:PhantomFlowRunner', type: 'PermissionSet', apiName: 'PhantomFlowRunner', properties: { userPermissions: [], customPermissionGrantCount: 0, flowGrantCount: 2 } }),
     // A profile that grants run access to THREE flows — used to exercise the
-    // CR-22 cursor over the paged runnableFlows list.
+    // cursor over the paged runnableFlows list.
     node({ id: 'Profile:MultiFlow', type: 'Profile', apiName: 'MultiFlow', properties: { userPermissions: [], customPermissionGrantCount: 0, flowGrantCount: 3, loginIpRanges: [], loginHoursDefined: false, loginHours: [] } }),
     node({ id: 'Flow:Alpha', type: 'Flow', apiName: 'Alpha' }),
     node({ id: 'Flow:Beta', type: 'Flow', apiName: 'Beta' }),
@@ -161,7 +161,7 @@ describe('userAbilityHandler', () => {
     expect(r.ok).toBe(false); if (r.ok) return; expect(r.error.kind).toBe('component-not-found');
   });
 
-  // CR-CAP-10: user_ability now surfaces granted custom permissions, marking a
+  // user_ability now surfaces granted custom permissions, marking a
   // managed-package grant whose definition is not in the vault as targetMissing.
   it('surfaces granted custom permissions, flagging the one with no definition as targetMissing', async () => {
     const r = await userAbilityHandler(ctx, { componentId: 'PermissionSet:CustomPerms' });
@@ -550,7 +550,7 @@ describe('userAbilityInputSchema — profileApiName / permissionSetApiName selec
   });
 });
 
-describe('userAbilityHandler — CR-22 continuation cursor', () => {
+describe('userAbilityHandler — continuation cursor', () => {
   it('in-budget whole-fits call emits NO cursor/pageInfo (byte-identical)', async () => {
     const r = await userAbilityHandler(ctx, { componentId: 'Profile:MultiFlow' });
     expect(r.ok).toBe(true); if (!r.ok) return;
@@ -562,7 +562,7 @@ describe('userAbilityHandler — CR-22 continuation cursor', () => {
     expect(d.hasMore).toBe(false);
     // The golden shape: runnableFlows is a TOTAL-ORDERED list keyed on `flowId`.
     //
-    // This pin was written as a CR-22 cursor-shape guard — it exists to catch
+    // This pin was written as a cursor-shape guard — it exists to catch
     // accidental drift in the paginated element, and every invariant it guards
     // is preserved verbatim above and below (3 rows, sorted, no cursor on a
     // whole-fits page). The element gained a `targetMissing` marker so a grant

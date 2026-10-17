@@ -1,14 +1,13 @@
 /**
  * Handler for the `sfi.lookup_record` MCP tool.
  *
- * The first of two v1.6 business-user-tier headline tools (per
- * PLAN-v1.6 §4): given a CustomMetadataRecord or CustomSettingRecord
+ * The first of two business-user-tier headline tools: given a CustomMetadataRecord or CustomSettingRecord
  * canonical id, return the record's label, protected flag, and the
- * full per-field value list the v1.6 R2 extractors materialized into
+ * full per-field value list the extractors materialized into
  * the node's `properties.values` array.
  *
  * The business-user's question this tool answers: "what does this
- * configuration record actually contain?". A v1.6 admin viewing a
+ * configuration record actually contain?". A admin viewing a
  * record-driven feature (an Apex retry policy, a feature-flag matrix,
  * a tenant-specific email template) gets the literal field/value
  * tuples in one call rather than having to open the metadata XML by
@@ -23,14 +22,14 @@
  *     `CustomMetadataRecord:` or `CustomSettingRecord:` prefix. Any
  *     other prefix surfaces as `invalid-query` from the handler (not
  *     a Zod-level rejection — Zod cannot express the prefix
- *     constraint here). This mirrors the v1.5
+ *     constraint here). This mirrors the
  *     `sfi.event_subscribers` convention of pinning input-axis
  *     prefixes at the handler boundary.
  *   - Unknown ids resolve to `component-not-found`. The graph cannot
  *     distinguish "record file never existed" from "record was
  *     deleted between refresh and lookup"; both share the same
  *     diagnostic.
- *   - **Honesty axis** (per PLAN-v1.6 §3): the v1.6 R2 extractors
+ *   - **Honesty axis**: the extractors
  *     collapse Salesforce's managed-package `***` literal to
  *     `{ value: null, isMasked: true }`. The handler passes that
  *     shape through verbatim — it MUST NOT fabricate the underlying
@@ -41,7 +40,7 @@
  *     response also carries `valuesState` (`read` / `not-extracted` /
  *     `unreadable`), the extractor's own `valuesCount`, and a `disclosures`
  *     array. A node that does not CARRY the `values` property was built by a
- *     refresh predating the v1.6 R2 extractors — never scanned — and must
+ *     refresh predating the extractors — never scanned — and must
  *     never render as a record that was scanned and declares nothing.
  *   - The `typeApiName` field on the output carries the parent type's
  *     ApiName with its suffix preserved (`__mdt` for
@@ -72,7 +71,7 @@ import {
 import { firstNonEmpty } from './input-aliases.js';
 
 /**
- * The two record-typed ComponentTypes the tool accepts as input. v1.6
+ * The two record-typed ComponentTypes the tool accepts as input.
  * R2 introduced these two extractors together; the tool is the unified
  * query surface that maps to both.
  */
@@ -86,7 +85,7 @@ const CUSTOM_METADATA_RECORD_PREFIX = 'CustomMetadataRecord:';
 const CUSTOM_SETTING_RECORD_PREFIX = 'CustomSettingRecord:';
 
 /**
- * The node property BOTH v1.6 R2 extractors ALWAYS write when they read a
+ * The node property BOTH extractors ALWAYS write when they read a
  * record's `<values>` elements — `[]` for a record that declares none
  * (`custom-metadata-record.ts` / `custom-setting-record.ts` both push
  * `values` and `valuesCount` unconditionally). So a node that does not CARRY
@@ -155,7 +154,7 @@ export const lookupRecordInputSchema = z
 export type LookupRecordInput = z.infer<typeof lookupRecordInputSchema>;
 
 /**
- * One field/value tuple in the record. Mirrors the shape both v1.6 R2
+ * One field/value tuple in the record. Mirrors the shape both
  * extractors emit into `properties.values`. `isMasked: true` indicates
  * Salesforce serialized the value as the three-character literal `***`
  * (managed-package masked value); the underlying string/number/boolean
@@ -183,7 +182,7 @@ export interface LookupRecordOutput {
    *   - `read` — the extractor scanned this record. `values` is the answer,
    *     and `values: []` is a VERIFIED "this record declares no fields".
    *   - `not-extracted` — the node carries no `values` property at all, so
-   *     this vault's refresh predates the v1.6 R2 record-values extractors.
+   *     this vault's refresh predates the record-values extractors.
    *     `values: []` here is "not modeled", NEVER "no fields".
    *   - `unreadable` — the property is present but is not an array: a corrupt
    *     or partially written vault entry. A blind spot, never a verified zero.
@@ -282,10 +281,10 @@ interface RecordValuesRead {
  * WHY it is unusable when it is.
  *
  * The decision is made by {@link familyWasExtracted} — whether the node
- * CARRIES the property at all — never by whether an array is empty. Both v1.6
+ * CARRIES the property at all — never by whether an array is empty. Both
  * R2 extractors write `values` unconditionally (`[]` for a record with no
  * `<values>` elements), so `Array.isArray(raw) ? ... : []` collapsed
- * NEVER-SCANNED into SCANNED-AND-CLEAN: a record from a pre-v1.6 vault and a
+ * NEVER-SCANNED into SCANNED-AND-CLEAN: a record from a legacy vault and a
  * record that genuinely declares nothing both rendered as `values: []`, and a
  * business user asking what a feature-flag record contains was told it was
  * empty.
@@ -347,7 +346,7 @@ const recordValuesDisclosures = (
 
 /**
  * Read the record's `typeApiName` property — the parent type's
- * ApiName with its suffix (`__mdt` / `__c`) preserved. The v1.6 R2
+ * ApiName with its suffix (`__mdt` / `__c`) preserved. The
  * extractors always write this property; the fallback to the parent
  * id's tail handles the unlikely case where a node has been imported
  * from an older extractor schema that lacked the property.

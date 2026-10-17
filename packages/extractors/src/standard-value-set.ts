@@ -82,7 +82,7 @@ interface StandardValueEntry {
  * field reference (`fullName`, `groupingString`, `default`, `isActive` — only
  * `fullName` is unconditional). `<isActive>` defaults to `true` when absent
  * (Salesforce omits it for the common case: an active value); `<default>` is
- * read but not surfaced (v0.1 scope is "what values exist and are they
+ * read but not surfaced (scope is "what values exist and are they
  * active", not "which one is the field's default").
  */
 const validateAndReadStandardValues = (

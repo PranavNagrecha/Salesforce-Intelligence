@@ -10,7 +10,7 @@ import {
   scanTruncationNote,
 } from '../../src/tools/scan-cap.js';
 
-describe('scan-cap (P12-HONESTY-scan-cap-disclosure)', () => {
+describe('scan-cap', () => {
   afterEach(() => {
     delete process.env['SFI_NODE_SCAN_LIMIT'];
   });
@@ -28,10 +28,10 @@ describe('scan-cap (P12-HONESTY-scan-cap-disclosure)', () => {
     expect(nodeScanLimit()).toBe(500);
   });
 
-  // CR-RV10: nodeScanLimit is UNCLAMPED (an operator can set it > 500);
+  // nodeScanLimit is UNCLAMPED (an operator can set it > 500);
   // clampedNodeScanLimit is what every scan FETCH must use so the graph's
   // LIST_MAX_LIMIT(500) is never exceeded (which would hard-error the tool).
-  it('clampedNodeScanLimit caps at the graph hard cap (CR-RV10)', () => {
+  it('clampedNodeScanLimit caps at the graph hard cap', () => {
     expect(NODE_SCAN_HARD_CAP).toBe(500);
     expect(clampedNodeScanLimit()).toBe(500);
     process.env['SFI_NODE_SCAN_LIMIT'] = '600';
@@ -55,7 +55,7 @@ describe('scan-cap (P12-HONESTY-scan-cap-disclosure)', () => {
     expect(note).toMatch(/scanTruncated/);
   });
 
-  // CR-RV10 honesty (design-check BLOCKER #3): once a tool clamps its fetch, the
+  // Honesty (design-check BLOCKER #3): once a tool clamps its fetch, the
   // note must quote the EFFECTIVE clamped limit, NOT the raw nodeScanLimit().
   it('the truncation note quotes the EFFECTIVE clamped limit, not the raw env value', () => {
     process.env['SFI_NODE_SCAN_LIMIT'] = '10000';
@@ -65,7 +65,7 @@ describe('scan-cap (P12-HONESTY-scan-cap-disclosure)', () => {
     expect(note).not.toMatch(/10000/);
   });
 
-  // CR-P3 (scan-cap honesty): a FULL multi-window scan hits FULL_SCAN_MAX_NODES
+  // Scan-cap honesty: a FULL multi-window scan hits FULL_SCAN_MAX_NODES
   // (e.g. 20000), NOT the per-window 500. The note must quote that real cap and
   // must NOT recommend SFI_NODE_SCAN_LIMIT — that knob is clamped to ≤500 and
   // cannot lift the full-scan ceiling (a dead-end remedy).

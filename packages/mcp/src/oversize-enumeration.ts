@@ -1,5 +1,5 @@
 /**
- * High-fanout graph enumeration guard (P15-GRAPH-oversize-roster-audit).
+ * High-fanout graph enumeration guard.
  *
  * MCP tools that walk hub nodes (standard-object layouts, Account grantedBy
  * edges, Contact list views, Admin profiles) can exceed the ~45 KB transport
@@ -36,10 +36,10 @@ export interface HighFanoutInventoryEntry {
 export const HIGH_FANOUT_INVENTORY: Readonly<
   Record<string, HighFanoutInventoryEntry>
 > = Object.freeze({
-  // --- Truly paginated: a `limit` page PLUS a resume knob (offset or CR-22
+  // --- Truly paginated: a `limit` page PLUS a resume knob (offset or
   //     cursor) so the dropped tail is reachable. The strengthened `paginated`
   //     audit requires this; a top-N truncator with no resume is classified
-  //     `handler-capped` below instead. CR-22 added an opaque `cursor` to the
+  //     `handler-capped` below instead. This added an opaque `cursor` to the
   //     B1 batch (get_edges, find_apex_usages, find_formula_references,
   //     pii_inventory, crud_fls_audit, test_coverage_gaps). ---
   // Was `handler-capped`, "limit caps but no resume". Both halves went stale in
@@ -66,7 +66,7 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   'sfi.history_tracking_gaps': { bound: 'paginated', note: 'offset + byte trim + CR-22 cursor (R7-W7, mirrors pii_inventory)' },
   'sfi.test_coverage_gaps': { bound: 'paginated', note: 'offset + byte trim + CR-22 cursor' },
   // FIX 4: flow_fault_audit was a limit-capped truncator with no resume; it now
-  // pages with limit + offset + a CR-22 cursor bound to its object scope, and
+  // pages with limit + offset + a cursor bound to its object scope, and
   // the handler (not the envelope reducer) makes the byte cut. Promoted out of
   // `handler-capped` in the SAME change that added the knob.
   'sfi.flow_fault_audit': { bound: 'paginated', note: 'limit + offset + byte trim + CR-22 cursor; full counts stay whole-set, scanTruncated stays a separate flag' },
@@ -84,11 +84,11 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   //     (no offset/cursor to fetch the dropped tail). Tagged `handler-capped`
   //     so the strengthened `paginated` audit (which requires a resume knob)
   //     does not falsely pass them. Convert to a real cursor to promote back.
-  //     CR-22: the B0 audit-strengthening surfaced these as mislabeled (they
+  //     The B0 audit-strengthening surfaced these as mislabeled (they
   //     were tagged `paginated` but expose only `limit`); reclassified here so
   //     the real-schema gate passes truthfully. ---
   // OmniStudio model tools: findings stay complete; the row / node / step lists
-  // page with limit + byte trim + CR-22 cursor (bound to the component scope).
+  // page with limit + byte trim + cursor (bound to the component scope).
   'sfi.omni_model': { bound: 'paginated', note: 'nodes or edges of one component; limit + byte trim + CR-22 cursor' },
   'sfi.omni_save_trace': { bound: 'paginated', note: 'rows per answer; limit + byte trim + CR-22 cursor; findings and statusCounts stay whole-set' },
   'sfi.omni_dead_references': { bound: 'paginated', note: 'findings; limit + byte trim + CR-22 cursor; counts stay whole-set' },
@@ -159,7 +159,7 @@ export const HIGH_FANOUT_INVENTORY: Readonly<
   'sfi.object_access_audit': { bound: 'global-response-budget' },
   'sfi.field_access_audit': { bound: 'global-response-budget' },
   'sfi.recordtype_availability': { bound: 'global-response-budget' },
-  // Per-event pagination (limit/offset PER EVENT + a CR-22 cursor) is now
+  // Per-event pagination (limit/offset PER EVENT + a cursor) is now
   // advertised, so this is no longer merely budget-bound.
   'sfi.order_of_execution': { bound: 'paginated', note: 'limit/offset apply PER EVENT + CR-22 cursor; summary.totalSteps stays whole-composition' },
   'sfi.what_happens_on_save': { bound: 'global-response-budget' },
@@ -216,7 +216,7 @@ export const LIMIT_TOOL_EXCLUSIONS: ReadonlySet<string> = new Set([
   'sfi.automation_risk_report',
   'sfi.permission_risk_report',
   'sfi.release_readiness_report',
-  // CR-22 B5: value_change_audit gained a limit+cursor; it is a per-field
+  // value_change_audit gained a limit+cursor; it is a per-field
   // impact/what-if report (bounded value-coupling rows, capped at MAX_ROWS),
   // not a raw node-type enumeration — excluded from the high-fanout probe
   // requirement like code_quality_audit / the risk-report family.
@@ -234,7 +234,7 @@ export const LIMIT_TOOL_EXCLUSIONS: ReadonlySet<string> = new Set([
   'sfi.live_sample',
   'sfi.live_stale_records',
   'sfi.live_storage_by_object',
-  // R7-C6: `limit` caps how many registered vaults get the graph-opening
+  // `limit` caps how many registered vaults get the graph-opening
   // pulse digest (a report-generation fan-out bound, mirroring org_pulse's
   // list-size cap above) — not a raw graph-derived row/edge enumeration.
   'sfi.generate_fleet_report',
@@ -260,7 +260,7 @@ const hasLimitProperty = (tool: ToolLike): boolean =>
 /**
  * A `paginated` tool must let the caller fetch the DROPPED tail — a `limit`
  * alone is a top-N truncator, not real pagination. The resume knob is either
- * classic `offset` or a CR-22 continuation `cursor`. A tool with `limit` but no
+ * classic `offset` or a continuation `cursor`. A tool with `limit` but no
  * resume knob belongs under `handler-capped`, not `paginated`.
  */
 const hasResumeKnob = (tool: ToolLike): boolean =>
@@ -298,7 +298,7 @@ export const analyzeOversizeEnumeration = (
           `${name} is inventoried as paginated but its inputSchema lacks a \`limit\` property.`,
       });
     }
-    // Strengthened CR-22 audit: `paginated` MUST also expose a resume knob
+    // Strengthened audit: `paginated` MUST also expose a resume knob
     // (`offset` or `cursor`), else it is a top-N truncator and should be
     // tagged `handler-capped` (so the dropped tail isn't silently unreachable).
     if (

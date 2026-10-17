@@ -42,7 +42,7 @@ describe('escapeWindowsArg — cross-spawn cmd.exe quoting', () => {
   });
 
   it('neutralizes a shell-injection-shaped alias into one inert quoted token', () => {
-    // The exact CR-01 attack shape: a metachar-laden org alias must NOT break
+    // The exact attack shape: a metachar-laden org alias must NOT break
     // out of its argument. Every metachar is caret-escaped inside the quotes.
     const escaped = escapeWindowsArg('x" ; rm -rf ~ ; "');
     // The interior quotes are backslash+caret escaped; nothing is left bare to

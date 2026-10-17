@@ -64,3 +64,9 @@ type: CustomField
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `CustomObject:Payment__c` | declared | custom-field-extractor |
+
+### references (incoming, 1)
+
+| Source | Confidence | Producer |
+| --- | --- | --- |
+| `CustomField:Invoice__c.Total_Paid__c` | declared | rollup-summary |

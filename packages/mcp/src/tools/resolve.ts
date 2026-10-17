@@ -51,7 +51,7 @@ const RESOLVE_MAX_LIMIT = 50;
 
 /**
  * Verbatim honesty disclosure. Surfaced on every response so the caller can
- * relay it to the user. Mirrors the `find_semantic_field` Q95 convention:
+ * relay it to the user. Mirrors the `find_semantic_field` convention:
  * resolution is similarity, not proof.
  */
 const RESOLVE_DISCLOSURE =
@@ -98,7 +98,7 @@ export interface ResolveToolCandidate {
   /** Pre-weight token-overlap score in [0,1] — the confidence signal. */
   readonly base: number;
   /**
-   * `glossary-alias` (P13-ANNOT-glossary-resolve) marks a candidate reached
+   * `glossary-alias` marks a candidate reached
    * through a CURATED synonym (a confirmed `glossary` annotation), not
    * string similarity. Alias candidates only ever surface when the base
    * resolver found no exact api-name match — an alias never shadows one.
@@ -147,7 +147,7 @@ export interface ResolveOutput {
 const normalizeAlias = (s: string): string => s.toLowerCase().replace(/[^a-z0-9]+/g, '');
 
 /**
- * P13-ANNOT-glossary-resolve: candidates reached through CONFIRMED curated
+ * Candidates reached through CONFIRMED curated
  * glossary synonyms whose normalized value equals the normalized query.
  * Unconfirmed AI proposals never resolve; aliases pointing at ids no longer
  * in the graph are silently skipped (the orphan report owns that surface).
@@ -236,7 +236,7 @@ export const resolveHandler = async (
       }),
   );
 
-  // P13-ANNOT-glossary-resolve: curated glossary synonyms feed resolution —
+  // Curated glossary synonyms feed resolution —
   // ONLY when the base resolver did not land an exact api-name match (an
   // alias NEVER shadows one, structurally), and ONLY from CONFIRMED
   // annotations (an unconfirmed AI proposal is not a fact). A multi-target

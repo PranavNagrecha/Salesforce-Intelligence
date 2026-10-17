@@ -126,7 +126,7 @@ describe('extractApexTrigger', () => {
       }
     });
 
-    it('captures method-level trigger → handler dispatch on the callsApex edge (P4-C5)', async () => {
+    it('captures method-level trigger → handler dispatch on the callsApex edge', async () => {
       // The canonical trigger-handler pattern: the trigger dispatches to two
       // handler methods. The callsApex edge to the handler must carry BOTH on
       // methods[] — the "trigger → handler method" dispatch edge.
@@ -383,13 +383,13 @@ describe('extractApexTrigger', () => {
     });
   });
 
-  // v1.5-R3: Platform Event subscriber recognition. A trigger on an
-  // `__e`-suffixed object is a Platform Event subscriber; v1.5 emits
+  // Platform Event subscriber recognition. A trigger on an
+  // `__e`-suffixed object is a Platform Event subscriber; this emits
   // a `listensTo` edge in addition to the existing `triggersOn`. The
-  // `isPlatformEventSubscriber` property flips to true so the v1.5
+  // `isPlatformEventSubscriber` property flips to true so the
   // `sfi.list_components` propertyFilter can route to subscribers
   // without walking edges. See IntegrationTopologySemantics.md Rule 1.
-  describe('v1.5 Platform Event subscriber recognition', () => {
+  describe('Platform Event subscriber recognition', () => {
     it('emits listensTo alongside triggersOn for an __e-suffixed object', async () => {
       const { dir, triggerPath } = await writeTempApexTrigger(
         'AccountChangeSubscriber',
@@ -427,10 +427,10 @@ describe('extractApexTrigger', () => {
       }
     });
 
-    itHarness('extracts the full v1.5 surface from the synthetic AccountChangeTrigger fixture', async () => {
+    itHarness('extracts the full surface from the synthetic AccountChangeTrigger fixture', async () => {
       // On-disk synthetic trigger on Account_Change__e. Validates the
       // listensTo edge produced from real fixtures, mirroring the
-      // ContactTrigger golden coverage but for the v1.5 case.
+      // ContactTrigger golden coverage but for the Platform Event case.
       const fixturePath = resolve(
         HARNESS_ROOT,
         'tests/fixtures/synthetic-v1.5/triggers/AccountChangeTrigger.trigger',

@@ -13,6 +13,7 @@ properties:
   fullName: Residential
   label: Residential
   picklistFieldCount: 0
+  picklists: []
 sourcePath: source/main/default/objects/Project__c/recordTypes/Residential.recordType-meta.xml
 type: RecordType
 ---
@@ -30,6 +31,7 @@ type: RecordType
 | businessProcess | `null` |
 | fullName | `Residential` |
 | picklistFieldCount | `0` |
+| picklists | `` |
 
 ## Incident edges
 

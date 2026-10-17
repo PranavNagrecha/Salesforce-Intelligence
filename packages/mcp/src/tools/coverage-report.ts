@@ -40,7 +40,7 @@ import {
 } from './referenced-but-absent.js';
 import { ASSIGNMENT_DATA_LIVE_TOOLS } from './vault-assignment-disclosure.js';
 
-/** CR-CAP-20 — cap on the ranked uncovered-families list. */
+/** Cap on the ranked uncovered-families list. */
 const TOP_UNCOVERED_FAMILIES_CAP = 10;
 
 /**
@@ -158,7 +158,7 @@ export interface CoverageReportOutput {
   readonly partial: readonly CoverageEntry[];
   readonly notModeled: readonly CoverageEntry[];
   /**
-   * P13-STAGED-tiers: types queued by an in-progress staged refresh — "not
+   * Types queued by an in-progress staged refresh — "not
    * retrieved YET (build in progress)", distinct from `partial` ("requested
    * but came back empty/errored") and from `capped` ("was retrieved, just
    * not completely"). Empty outside a staged build.
@@ -205,7 +205,7 @@ export interface CoverageReportOutput {
    */
   readonly referencedButAbsent?: readonly ReferencedButAbsentCoverageEntry[];
   /**
-   * R6-DRIFT: types present in the manifest but NOT requested by this
+   * Types present in the manifest but NOT requested by this
    * refresh — a scoped `--types` run that pulled only part of the metadata
    * surface (mirrors `summarizeCoverage`'s `notRequestedTypes` in
    * manifest.ts). Genuinely absent from the vault, not merely never
@@ -221,7 +221,7 @@ export interface CoverageReportOutput {
   };
   readonly summary: ReturnType<typeof summarizeCoverage>;
   /**
-   * CR-CAP-20: top families (capped at 10) that were RETRIEVED but not
+   * Top families (capped at 10) that were RETRIEVED but not
    * modeled by an extractor, ranked by skipped-file volume desc. Each
    * row carries the canonical `family` label (a `ComponentType` when the
    * raw dir maps to one, else the raw dir name), `rawDir`, `skippedFiles`,
@@ -254,7 +254,7 @@ export interface AssignmentDataCoverage {
   readonly liveTools: readonly string[];
   /** Whether the live plane may run for this org right now (consent/env). */
   readonly liveConsent: boolean;
-  /** The P13-FACTS counts-only snapshot (`sfi refresh --with-data-shape`). */
+  /** The counts-only snapshot (`sfi refresh --with-data-shape`). */
   readonly factsCounts: {
     readonly present: boolean;
     readonly capturedAt: string | null;
@@ -311,7 +311,7 @@ export const buildAssignmentDataCoverage = async (
   };
 };
 
-// CR-P3-3: kept in deliberate lockstep with `summarizeCoverage`'s tri-state
+// Kept in deliberate lockstep with `summarizeCoverage`'s tri-state
 // (manifest.ts). A confirmed-clean empty type (`retrieved === 0` AND
 // `retrieveConfirmed === true`) moves from `partial` to `covered`; an
 // unconfirmed empty type (no signal / dropped / --no-pull) stays in `partial`.
@@ -396,7 +396,7 @@ const partitionCoverage = (
       (entry) => entry.capped === true && entry.pending !== true && !entry.neverModeled,
     ),
     retrievedNotParsed: entries.filter(isRetrievedNotParsed),
-    // R6-DRIFT: mirrors summarizeCoverage's `notRequestedTypes` filter
+    // Mirrors summarizeCoverage's `notRequestedTypes` filter
     // (manifest.ts) exactly — `!requested && !neverModeled`. Without this
     // bucket a scoped-refresh type that summarizeCoverage correctly folds
     // into `missingCoverage` had no home in ANY of the buckets above (they
@@ -456,7 +456,7 @@ export const coverageReportHandler = async (
   const completenessStatus =
     referencedButAbsentTypes.length === 0 ? summary.status : ('partial' as const);
   const staged = ctx.manifest.staged;
-  // CR-CAP-20: rank retrieved-but-not-modeled families and cap the list.
+  // Rank retrieved-but-not-modeled families and cap the list.
   // Inert ([]) when `skippedDirectories` is empty/absent (clean vault).
   const topUncoveredFamilies = rankUncoveredFamilies(ctx.manifest).slice(
     0,

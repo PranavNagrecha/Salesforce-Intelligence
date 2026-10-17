@@ -5,7 +5,7 @@
  * It recursively walks `{vaultRoot}/source/` for `*.flow-meta.xml`
  * files (flat or DX-nested) and grep-searches each file line by line.
  *
- * CR-06 additions:
+ * Later additions:
  *   - **Status-summary mode** (`summarize: true`, no `query` required):
  *     walks every flow file and tallies `<status>` values, returning a
  *     `statusSummary` record (Active / Obsolete / Draft / InvalidDraft /
@@ -105,7 +105,7 @@ export const searchFlowMetadataInputSchema = z.object({
     .max(SEARCH_FLOW_METADATA_MAX_LIMIT)
     .optional(),
   /**
-   * CR-06: when true, return a `statusSummary` tally of all flow statuses
+   * When true, return a `statusSummary` tally of all flow statuses
    * (Active / Obsolete / Draft / InvalidDraft / other). May be combined with
    * `triggerObject` to count flows by status on a specific SObject.
    * `query` is optional in this mode; when both are present the line matches
@@ -113,7 +113,7 @@ export const searchFlowMetadataInputSchema = z.object({
    */
   summarize: z.boolean().optional(),
   /**
-   * CR-06: when set, restrict results (and summary) to flow files that
+   * When set, restrict results (and summary) to flow files that
    * declare `<object>THIS_API_NAME</object>` in their XML — i.e. record-
    * triggered flows on the given SObject. Example: `ns__Widget__c`.
    */
@@ -134,7 +134,7 @@ export interface SearchFlowMetadataMatch {
 }
 
 /**
- * CR-06: status tally returned when `summarize: true`.
+ * Status tally returned when `summarize: true`.
  * Keys are the raw `<status>` values found in the flow XML plus `total`.
  */
 export interface FlowStatusSummary {
@@ -192,7 +192,7 @@ export interface SearchFlowMetadataOutput {
   /** Verbatim disclosure, present ONLY when `filesUnreadable > 0`. */
   readonly coverageNote?: string;
   /**
-   * CR-06: present when `summarize: true`. Tally of flow `<status>` values
+   * Present when `summarize: true`. Tally of flow `<status>` values
    * across all files that were successfully READ (optionally filtered to
    * `triggerObject`). Read `total` against `filesFound` / `filesUnreadable`.
    */
@@ -237,7 +237,7 @@ export const searchFlowMetadataHandler = async (
   const matches: SearchFlowMetadataMatch[] = [];
   let truncated = false;
 
-  // CR-06: status summary accumulator.
+  // Status summary accumulator.
   let statusSummary: FlowStatusSummary | undefined;
   const statusCounts = { Active: 0, Obsolete: 0, Draft: 0, InvalidDraft: 0, other: 0, total: 0 };
 
@@ -269,14 +269,14 @@ export const searchFlowMetadataHandler = async (
       continue;
     }
 
-    // CR-06: apply triggerObject filter at the file level (skip files that
+    // Apply triggerObject filter at the file level (skip files that
     // don't declare the object) — avoids matching flows on other objects. The
     // name matched is the vault-canonical one the resolver returned above.
     if (scopedObject !== null) {
       if (!flowMatchesTriggerObject(raw, scopedObject)) continue;
     }
 
-    // CR-06: accumulate status summary.
+    // Accumulate status summary.
     if (input.summarize === true) {
       const status = extractFirstTag(raw, 'status');
       statusCounts.total += 1;

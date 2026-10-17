@@ -85,14 +85,14 @@ describe('expandWeighted — weighted synonym expansion (Quartermaster backport)
       // (decision 5) added a tool whose OWN vocabulary IS record creation/insertion
       // ("how do records get created", "Apex DML inserts are NOT modeled"), so an
       // insert-flavored query is now a genuine two-tool tie, not order_of_execution's
-      // exclusive vocabulary. Per the R7-W7 precedent above, rephrase to an equally
+      // exclusive vocabulary. Per the precedent above, rephrase to an equally
       // natural DML-qualified query on an event the create-only tool has zero affinity
       // for ('updates'), keeping order_of_execution the exact-vocabulary #1 with a
       // healthy margin — not loosening the assertion.
       { q: 'order of execution for Account updates', top1: 'sfi.order_of_execution' },
       { q: 'effective permissions for the Sales profile', top1: 'sfi.effective_permissions' },
       { q: 'find dependency cycles in this org', top1: 'sfi.find_dependency_cycles' },
-      // R7-W7: was 'pii inventory for this org' — at the pre-R7 186-tool corpus
+      // Was 'pii inventory for this org' — at the pre-R7 186-tool corpus
       // size that phrase's margin over sfi.generate_compliance_report (which
       // ITSELF composes pii_inventory and echoes "PII Inventory" in its own
       // description) was ~0.007, already razor-thin. Adding the 187th tool

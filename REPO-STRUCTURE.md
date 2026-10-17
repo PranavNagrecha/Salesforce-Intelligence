@@ -29,7 +29,7 @@ So: edit code in `packages/*/src`; the user installs one npm package.
 ```
 sf-intelligence/
 ├── packages/          # the 11-package monorepo — all TypeScript source (see below)
-├── .claude/           # Claude Code plugin layer: skills/ + commands/ (+ agents/, not shipped)
+├── .claude/           # Claude Code plugin layer: skills/ + commands/ (+ agents/, optional, not shipped)
 ├── .claude-plugin/    # plugin.json + marketplace.json (Claude Code manifests)
 ├── org-kb/            # the generated per-org vault (gitignored — each user builds their own)
 ├── scripts/           # maintainer scripts: release checks, privacy scan, manifest + doc-sync checks
@@ -111,8 +111,8 @@ contracts          shared types — no deps
 │   └── using-sf-intelligence/  ← the entry skill: teaches the resolve-first tool cascade
 ├── commands/          # 5 slash commands: sfi-onboard, sfi-init, sfi-refresh,
 │                      #   sfi-status, sfi-field-audit
-└── agents/            # not shipped by the plugin: two maintainer agents (component
-                       #   reviewer and QA) and the two that /sfi-field-audit spawns
+└── agents/            # not shipped by the plugin: the two optional agents /sfi-field-audit
+    └── maintainer/    #   spawns when present; maintainer agents (component reviewer and QA)
 ```
 
 The slash commands wrap the `sfi` CLI; the skills are the agent's instructions

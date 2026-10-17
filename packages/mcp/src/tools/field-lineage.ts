@@ -1,15 +1,15 @@
 /**
  * Handler for the `sfi.field_lineage` MCP tool.
  *
- * The v3.0 provenance + downstream-effects walker — the sibling
+ * The provenance + downstream-effects walker — the sibling
  * synthesis tool to `sfi.field_360`. Given a CustomField id, returns
  * either an upstream walk (provenance: where does this field's data
  * come FROM?), a downstream walk (effects: what fires when this field
  * changes?), or both.
  *
- * Per PLAN-v3.0 §4 `sfi.field_lineage`, the walks inherit v2.7's
- * cycle-detection + depth-bound discipline and v2.9's source-of-truth
- * classification (when the v2.9 marker `properties.isSourceOfTruth` is
+ * The walks inherit the call graph's
+ * cycle-detection + depth-bound discipline and the source-of-truth
+ * classification (when the marker `properties.isSourceOfTruth` is
  * set on the upstream-reached field, the walk terminates with the
  * `source-of-truth-field` sourceKind so the renderer can call out the
  * trace endpoint).
@@ -17,12 +17,12 @@
  * Upstream walk: starting from `fieldId`, query incoming `writesTo`
  * edges; each writer is a source. Recurse into each writer for "where
  * does THIS writer get its value FROM?" — formula upstream / WorkflowRule
- * criteriaItems / integration-inbound external system (terminal) / v2.9
+ * criteriaItems / integration-inbound external system (terminal) /
  * source-of-truth field (terminal). The walk depth is bounded by
  * `maxDepth` (default 3, max 5); cycles are detected by
  * `(fromId, toId, edgeType)` keying.
  *
- * R6-11 flow dataflow: a FLOW writer no longer dead-ends the walk. The
+ * Flow dataflow: a FLOW writer no longer dead-ends the walk. The
  * flow extractor traces each DML input assignment back through the
  * flow's internal assignment chain and stamps the resolved source
  * fields on the field-level `writesTo` edge
@@ -40,15 +40,15 @@
  * `flowDataflow.untracedFlowWriteEdges` and disclosed.
  *
  * Downstream walk: starting from `fieldId`, walk incoming `firesWhen`
- * (v2.0a) + `triggersOn` + `callsApex` from automation surfaces
+ * + `triggersOn` + `callsApex` from automation surfaces
  * reading the field. Surfaces flow-decision-branch /
  * apex-if-clause / workflow-fire / validation-fire /
  * integration-outbound / email-fire / formula-recompute. Each effect
- * carries `firesWhen` string for review. Inherits v2.7 depth-bound +
+ * carries `firesWhen` string for review. Inherits depth-bound +
  * cycle discipline.
  *
- * Honesty axis (per PLAN-v3.0 §4): the lineage payload's `boundaries[]`
- * carries the verbatim Q165 disclosure plus per-walk-specific notes.
+ * Honesty axis: the lineage payload's `boundaries[]`
+ * carries the verbatim disclosure plus per-walk-specific notes.
  * The walk does NOT semantically evaluate conditions — `firesWhen`
  * surfaces conditional context literals but does NOT model whether the
  * runtime record satisfies them.
@@ -93,16 +93,16 @@ import { resolveToFieldOrSuggest } from './resolve-field-or-suggest.js';
 /** Canonical id prefix for the CustomField node type. */
 const CUSTOM_FIELD_PREFIX = 'CustomField:';
 
-/** Default `maxDepth` per PLAN-v3.0 §4. */
+/** Default `maxDepth`. */
 const DEFAULT_MAX_DEPTH = 3;
-/** Hard cap on `maxDepth` — mirrors v2.7's call-graph cap. */
+/** Hard cap on `maxDepth` — mirrors the call-graph cap. */
 const HARD_CAP_MAX_DEPTH = 5;
 
 /** The direction the caller can request. */
 const DIRECTION_VALUES = ['upstream', 'downstream', 'both'] as const;
 
 /**
- * Zod schema for the `sfi.field_lineage` tool input. Per PLAN-v3.0 §4:
+ * Zod schema for the `sfi.field_lineage` tool input:
  *
  *   - `fieldId`: required non-empty string; canonical CustomField id
  *     or short `Object.Field` form.
@@ -156,7 +156,7 @@ export interface UpstreamSource {
     | 'apex-write'
     | 'process-builder-assignment'
     | 'formula-source'
-    // R6-11: a record field a FLOW writer reads to produce the written
+    // A record field a FLOW writer reads to produce the written
     // value — the flow's INPUT, surfaced one hop past the flow from the
     // extractor's `sourceFields` trace on the writesTo edge. `confidence`
     // is the per-field trace label (declared | heuristic).
@@ -181,7 +181,7 @@ export interface DownstreamEffect {
     | 'integration-outbound'
     | 'email-fire'
     | 'formula-recompute'
-    // R6-11: a Flow READS this field as a dataflow source and writes its
+    // A Flow READS this field as a dataflow source and writes its
     // value onward into `targetFields` — the downstream mirror of the
     // upstream `flow-input-field` hop. The walk continues INTO each
     // target field at depth + 1.
@@ -193,7 +193,7 @@ export interface DownstreamEffect {
   readonly conditionId: ComponentId | null;
   readonly firesWhen: string | null;
   /**
-   * R6-11: present ONLY on `flow-field-write` effects — the
+   * Present ONLY on `flow-field-write` effects — the
    * `{Object}.{Field}` short forms this flow writes the read value into
    * (from the dataflow edge's `targetFields` property).
    */
@@ -226,7 +226,7 @@ export interface UpstreamPayload {
     readonly crossesObject: boolean;
   };
   /**
-   * R6-11: the flow-dataflow trace summary for this walk.
+   * The flow-dataflow trace summary for this walk.
    * `inputFieldsTraced` counts the `flow-input-field` sources surfaced;
    * `unresolvedInputCount` totals the flow input references the EXTRACTOR
    * could not statically resolve (ambiguous variables, relationship
@@ -278,7 +278,7 @@ export interface FieldLineageOutput {
 
 /**
  * The not-retrieved baseline for `dataNotAvailable` — same shape as
- * `field_360`. CR-CAP-03 makes the emitted array DYNAMIC (see handler): this
+ * `field_360`. This makes the emitted array DYNAMIC (see handler): this
  * full list surfaces only when Report/Dashboard were NOT retrieved and the
  * field has no folded usage. Exported so tests assert the baseline.
  */
@@ -319,7 +319,7 @@ const classifyUpstreamWriter = (node: Node): UpstreamSource['sourceKind'] => {
 
 /**
  * Classify a ConditionalContext source's parent-firer type by reading
- * its synthetic id prefix. v2.0a emits ConditionalContext ids of the
+ * its synthetic id prefix. This emits ConditionalContext ids of the
  * form `ConditionalContext:{ParentType}:{ParentApiName}.condition-{i}`;
  * the ParentType is what governs the effectKind.
  */
@@ -327,7 +327,7 @@ const classifyConditionalContextParent = (
   source: Node,
 ): DownstreamEffect['effectKind'] | null => {
   // The synthetic id pattern preserves the parent type as a substring;
-  // the v2.0a convention is `ConditionalContext:Flow:Foo.condition-0`,
+  // the convention is `ConditionalContext:Flow:Foo.condition-0`,
   // so we look for the parent type after the leading
   // `ConditionalContext:` prefix.
   const id = source.id;
@@ -386,18 +386,18 @@ const classifyDownstreamEffect = (
 };
 
 /**
- * Read an edge's condition expression for the `firesWhen` literal. v2.0a
+ * Read an edge's condition expression for the `firesWhen` literal.
  * `firesWhen` edges target a `ConditionalContext:` node whose
- * `properties.expression` carries the raw condition string. v3.0 reads
+ * `properties.expression` carries the raw condition string. This reads
  * the source-side fallback `properties.condition` when the edge
- * predates the v2.0a primitive.
+ * predates the primitive.
  */
 const extractFiresWhen = (edge: Edge): string | null => {
   const c = edge.properties['condition'] ?? edge.properties['expression'];
   return typeof c === 'string' ? c : null;
 };
 
-/** Determine whether a field carries the v2.9 source-of-truth marker. */
+/** Determine whether a field carries the source-of-truth marker. */
 const isSourceOfTruthField = (node: Node): boolean =>
   node.properties['isSourceOfTruth'] === true;
 
@@ -430,7 +430,7 @@ const walkUpstream = async (
   const visited = new Set<ComponentId>([fieldId]);
   let truncated = false;
   let cycles = false;
-  // R6-11 flow-dataflow accumulators (see UpstreamPayload.flowDataflow).
+  // Flow-dataflow accumulators (see UpstreamPayload.flowDataflow).
   let inputFieldsTraced = 0;
   let unresolvedInputCount = 0;
   let untracedFlowWriteEdges = 0;
@@ -489,12 +489,12 @@ const walkUpstream = async (
         reachableVia: [...path, targetId],
       });
 
-      // v2.9 source-of-truth fields are terminal — stop the walk.
+      // Source-of-truth fields are terminal — stop the walk.
       if (isSoT && includeSoT) continue;
-      // R6-11: a FLOW writer's next hop is its traced INPUT fields (the
+      // A FLOW writer's next hop is its traced INPUT fields (the
       // extractor's `sourceFields` on this very edge) — a Flow node has no
       // incoming `writesTo` edges, so recursing into the flow itself (the
-      // pre-R6-11 behavior) always dead-ended.
+      // legacy behavior) always dead-ended.
       if (sourceNode.type === 'Flow') {
         const next = await followFlowInputs(edge, sourceNode, depth, [
           ...path,
@@ -580,7 +580,7 @@ const walkUpstream = async (
   };
 
   /**
-   * R6-11: follow a FLOW writer's traced input fields. The extractor
+   * Follow a FLOW writer's traced input fields. The extractor
    * stamped the flow's resolvable inputs on the field-level `writesTo`
    * edge itself (`sourceFields` + parallel `sourceFieldConfidence`,
    * `unresolvedSourceCount`); each resolved field becomes a
@@ -605,7 +605,7 @@ const walkUpstream = async (
     if (!Array.isArray(rawFields)) {
       // No trace on this edge. Only a LITERAL write provably has zero field
       // inputs; anything else — a reference-kind write extracted before the
-      // tracer existed, or an edge with no assignedValue at all (pre-R2-1
+      // tracer existed, or an edge with no assignedValue at all (pre
       // vault, verified live on a production-scale gate vault) — has UNKNOWN
       // inputs and is disclosed as untraced, never silently read as "the
       // flow has no inputs".
@@ -735,7 +735,7 @@ const walkDownstream = async (
       if (sr.value === null) continue;
       const sourceNode = sr.value;
 
-      // R6-11: a flow-dataflow READ edge means this field's value is
+      // A flow-dataflow READ edge means this field's value is
       // carried by the flow into `targetFields`. Surface the flow as a
       // `flow-field-write` effect and continue the walk INTO each written
       // field, so downstream chains cross flows symmetrically with the
@@ -805,7 +805,7 @@ const walkDownstream = async (
 /**
  * The `sfi.field_lineage` handler. Performs the requested walk(s) and
  * assembles the structured response. See module JSDoc for the walk
- * semantics, the v2.7-inherited cycle/depth discipline, and the v2.9
+ * semantics, the inherited cycle/depth discipline, and the
  * source-of-truth termination.
  *
  * @example
@@ -858,7 +858,7 @@ export const fieldLineageHandler = async (
       ),
     );
   }
-  // CR-CAP-03: the field node carries the folded report/dashboard usage flags
+  // The field node carries the folded report/dashboard usage flags
   // (the reports pull DROPS the report/dashboard nodes + edges and stamps
   // `usedInReport` / `usedInDashboard` booleans). field_lineage previously
   // discarded this node; capturing it brings the tool to field_360 parity.
@@ -910,11 +910,11 @@ export const fieldLineageHandler = async (
     };
   }
 
-  // CR-CAP-03: read the folded report/dashboard usage + coverage so the
+  // Read the folded report/dashboard usage + coverage so the
   // report/dashboard boundary line is coverage-aware (parity with field_360,
   // which lineage previously lacked entirely). list-view column refs are NOT
   // composed into lineage sections (lineage has no listViews section — out of
-  // CR-CAP-03 scope), so that line stays accurate.
+  // scope), so that line stays accurate.
   const analytics = reportDashboardUsage(fieldNode);
   const analyticsCoverage = summarizeCoverage(ctx.manifest, [
     'Report',
@@ -946,7 +946,7 @@ export const fieldLineageHandler = async (
       'cycle detected in the lineage walk; back-edges were short-circuited',
     );
   }
-  // R6-11: disclose the flow-dataflow trace semantics whenever the upstream
+  // Disclose the flow-dataflow trace semantics whenever the upstream
   // walk crossed (or failed to cross) a flow writer. Absence of trace data
   // is disclosed, never silently treated as "the flow has no inputs".
   if (upstreamPayload !== undefined) {
@@ -968,7 +968,7 @@ export const fieldLineageHandler = async (
     }
   }
 
-  // CR-CAP-03: DYNAMIC dataNotAvailable (same retrieved-vs-not logic as
+  // DYNAMIC dataNotAvailable (same retrieved-vs-not logic as
   // field_360). `list-view-filters` always; `reports`/`dashboards` only when
   // NOT retrieved AND no folded usage.
   const dataNotAvailable: string[] = ['list-view-filters'];

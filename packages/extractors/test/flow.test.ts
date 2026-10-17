@@ -1,10 +1,12 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 
+import { extractAuraDefinitionBundle } from '../src/aura-definition-bundle.js';
 import { extractFlow } from '../src/flow.js';
+import { extractLightningComponentBundle } from '../src/lightning-component-bundle.js';
 
 import { findHarnessRoot, itHarness } from './harness-root.js';
 
@@ -66,7 +68,7 @@ describe('extractFlow', () => {
     });
   });
 
-  describe('v2.0a — ConditionalContext extraction', () => {
+  describe('ConditionalContext extraction', () => {
     it('emits a flow-decision ConditionalContext per <decisions><rules>', async () => {
       const xml = `<?xml version="1.0"?>
 <Flow xmlns="http://soap.sforce.com/2006/04/metadata">
@@ -1624,7 +1626,7 @@ describe('extractFlow', () => {
           },
           {
             fromId: flowId,
-            toId: 'LightningComponentBundle:c:demoRatingWidget',
+            toId: 'LightningComponentBundle:demoRatingWidget',
             edgeType: 'references',
             confidence: 'declared',
             source: 'flow-extractor',
@@ -1646,17 +1648,91 @@ describe('extractFlow', () => {
         await rm(dir, { recursive: true, force: true });
       }
     });
+    it('references the bundle id the bundle extractors mint for a screen component', async () => {
+      const xml = `<?xml version="1.0" encoding="UTF-8"?>
+<Flow xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <label>Demo Card Flow</label>
+    <processType>Flow</processType>
+    <status>Active</status>
+    <screens>
+        <name>Demo_Screen</name>
+        <label>Demo</label>
+        <fields>
+            <fieldType>ComponentInstance</fieldType>
+            <name>Demo_Local_Card</name>
+            <extensionName>c:Demo_Card</extensionName>
+        </fields>
+        <fields>
+            <fieldType>ComponentInstance</fieldType>
+            <name>Demo_Packaged_Card</name>
+            <extensionName>demo_ns:Demo_Card</extensionName>
+        </fields>
+    </screens>
+</Flow>`;
+      const { dir, path } = await writeTempXml('Demo_Card_Flow.flow-meta.xml', xml);
+      const lwcDir = join(dir, 'lwc', 'Demo_Card');
+      const auraDir = join(dir, 'aura', 'Demo_Card');
+      await mkdir(lwcDir, { recursive: true });
+      await mkdir(auraDir, { recursive: true });
+      await writeFile(
+        join(lwcDir, 'Demo_Card.js-meta.xml'),
+        `<?xml version="1.0" encoding="UTF-8"?>
+<LightningComponentBundle xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+    <isExposed>true</isExposed>
+</LightningComponentBundle>`,
+        'utf-8',
+      );
+      await writeFile(join(lwcDir, 'Demo_Card.js'), 'export default class DemoCard {}\n', 'utf-8');
+      await writeFile(
+        join(auraDir, 'Demo_Card-meta.xml'),
+        `<?xml version="1.0" encoding="UTF-8"?>
+<AuraDefinitionBundle xmlns="http://soap.sforce.com/2006/04/metadata">
+    <apiVersion>59.0</apiVersion>
+</AuraDefinitionBundle>`,
+        'utf-8',
+      );
+      await writeFile(join(auraDir, 'Demo_Card.cmp'), '<aura:component></aura:component>\n', 'utf-8');
+      try {
+        const lwc = await extractLightningComponentBundle(lwcDir);
+        const aura = await extractAuraDefinitionBundle(auraDir);
+        const flow = await extractFlow(path);
+        expect(lwc.ok && aura.ok && flow.ok).toBe(true);
+        if (!lwc.ok || !aura.ok || !flow.ok) return;
+        const lwcId = lwc.value.nodes[0]!.id;
+        const auraId = aura.value.nodes[0]!.id;
+        expect(lwcId).toBe('LightningComponentBundle:Demo_Card');
+        expect(auraId).toBe('AuraDefinitionBundle:Demo_Card');
+        const targets = Object.fromEntries(
+          flow.value.edges
+            .filter((e) => e.properties?.['referenceKind'] === 'flowScreenComponent')
+            .map((e) => [e.properties?.['extensionName'], e.toId]),
+        );
+        // `c:` is the org's own namespace: the edge must land on the node the
+        // bundle extractor read from `lwc/Demo_Card/`. Any other namespace names
+        // a component outside this source tree, so its id keeps the namespace
+        // and never claims the local `Demo_Card` bundle.
+        expect(targets).toEqual({
+          'c:Demo_Card': lwcId,
+          'demo_ns:Demo_Card': 'AuraDefinitionBundle:demo_ns:Demo_Card',
+        });
+        expect(targets['demo_ns:Demo_Card']).not.toBe(auraId);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
   });
 
-  // v1.5-R3: Flow PlatformEvent subscriber recognition. A Flow whose
+  // Flow PlatformEvent subscriber recognition. A Flow whose
   // `<start>` element has `<triggerType>PlatformEvent</triggerType>`
-  // is an event subscriber. v1.5 emits a `listensTo` edge in addition
-  // to (NOT instead of) any pre-v1.5 record-triggered behavior. The
+  // is an event subscriber. This emits a `listensTo` edge in addition
+  // to (NOT instead of) any legacy record-triggered behavior. The
   // record-trigger types `RecordAfterSave` etc. continue to produce
-  // `triggersOn`; the v1.5 `listensTo` production is additive and
+  // `triggersOn`; the `listensTo` production is additive and
   // scoped to the `PlatformEvent` triggerType only. See
   // IntegrationTopologySemantics.md Rule 3.
-  describe('v1.5 Flow PlatformEvent listensTo', () => {
+  describe('Flow PlatformEvent listensTo', () => {
     it('emits a listensTo edge for a PlatformEvent-triggered Flow', async () => {
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Flow xmlns="http://soap.sforce.com/2006/04/metadata">
@@ -1676,7 +1752,7 @@ describe('extractFlow', () => {
         if (!result.ok) return;
         // listensTo emitted; triggersOn is NOT (PlatformEvent is not in
         // RECORD_TRIGGER_TYPES — that filter is the precondition for
-        // the pre-v1.5 triggersOn builder).
+        // the existing triggersOn builder).
         const edges = result.value.edges;
         expect(edges).toHaveLength(1);
         expect(edges[0]?.edgeType).toBe('listensTo');
@@ -1723,7 +1799,7 @@ describe('extractFlow', () => {
       // On-disk synthetic flow with a PlatformEvent start. Verifies
       // the listensTo production runs against a real .flow-meta.xml
       // file, mirroring the canonical golden flow's coverage but for
-      // the v1.5 case.
+      // the case.
       const fixturePath = resolve(
         HARNESS_ROOT,
         'tests/fixtures/synthetic-v1.5/flows/AccountChangeEventFlow.flow-meta.xml',
@@ -1738,8 +1814,8 @@ describe('extractFlow', () => {
     });
 
     it('does NOT emit listensTo for a record-triggered Flow (RecordAfterSave)', async () => {
-      // Confirms the v1.5 production is scoped to PlatformEvent only;
-      // a record-triggered Flow still emits its pre-v1.5 triggersOn
+      // Confirms the production is scoped to PlatformEvent only;
+      // a record-triggered Flow still emits its existing triggersOn
       // edge and no listensTo. This is the additive boundary —
       // `listensTo` does NOT subsume `triggersOn`.
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -1986,10 +2062,10 @@ describe('extractFlow', () => {
     });
   });
 
-  describe('R7-W1 — record-variable <inputReference> DML', () => {
+  describe('record-variable <inputReference> DML', () => {
     it('emits an OBJECT-level declared writesTo with the whole-record disclosure for a recordCreate that inserts a record variable', async () => {
       // "Create Records → use a record/collection variable" carries an
-      // <inputReference> (no <object>, no <inputAssignments>). Before R7-W1 this
+      // <inputReference> (no <object>, no <inputAssignments>). Previously this
       // emitted NO edge — a false-safe. Now the variable's declared objectType
       // is the write target; the fields are NOT enumerable, so we emit only the
       // object-level edge and disclose that.
@@ -2170,7 +2246,7 @@ describe('extractFlow', () => {
 
     it('leaves the $Record trigger-record inputReference path unchanged (heuristic, no whole-record props)', async () => {
       // Regression guard: the existing $Record update path (bug 17) must NOT
-      // gain any R7-W1 whole-record props — that would break the golden.
+      // gain any whole-record props — that would break the golden.
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Flow xmlns="http://soap.sforce.com/2006/04/metadata">
     <apiVersion>59.0</apiVersion>
@@ -2221,7 +2297,7 @@ describe('extractFlow', () => {
     });
   });
 
-  describe('R7-W2 — before-save $Record.<Field> assignment writes', () => {
+  describe('before-save $Record.<Field> assignment writes', () => {
     it('emits a declared FIELD-level writesTo for a before-save $Record.<Field> literal assignment', async () => {
       const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <Flow xmlns="http://soap.sforce.com/2006/04/metadata">

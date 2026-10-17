@@ -131,7 +131,7 @@ const validateRoot = (
 /**
  * Convert an `<assignedTo>` + `<assignedToType>` pair to a canonical
  * target id per the variant table in `AssignmentRule.md`. The `User`
- * variant dangles by design in v1.3 (no User extractor); the edge is
+ * variant dangles by design (no User extractor); the edge is
  * still emitted so downstream consumers know about the dependency.
  */
 const resolveAssignedTo = (
@@ -163,11 +163,11 @@ const templateToEmailTemplateId = (template: string): string => {
  * `<template>` value. Used to build both the per-entry `references`
  * edge and the optional `sendsEmail` edge in lock-step.
  *
- * v2.0a additionally captures the raw criteria items (or the formula
+ * This additionally captures the raw criteria items (or the formula
  * string) so the calling `buildRule` can hand them to the shared
  * `extractConditions` helper. Per
  * `ConditionalContextSemantics.md` §"AutoResponseRule / AssignmentRule /
- * EscalationRule conditions", the v2.0a layer emits ONE
+ * EscalationRule conditions", the layer emits ONE
  * ConditionalContext per `<ruleEntry>`.
  */
 interface ResolvedRuleEntry {
@@ -179,7 +179,7 @@ interface ResolvedRuleEntry {
   readonly overrideExistingAssignment: boolean;
   readonly notifyAssignee: boolean;
   readonly template: string | null;
-  /** v2.0a — the per-entry condition source for `extractConditions`. */
+  /** the per-entry condition source for `extractConditions`. */
   readonly conditionSource: ConditionSource | null;
   /**
    * ASSIGNMENT-RULE-OMITS-RECORDTYPE-VALUE-EDGE — the RecordTypes this
@@ -312,7 +312,7 @@ const collectRecordTypeRefs = (
 };
 
 /**
- * Build the per-entry `ConditionSource` per the v2.0a spec. A
+ * Build the per-entry `ConditionSource` per the spec. A
  * `<ruleEntry>` carries either `<formula>` or `<criteriaItems>` (or
  * neither, in which case no ConditionalContext is emitted).
  */
@@ -495,7 +495,7 @@ const buildRule = (
     resolvedEntries.map((e) => e.targetId).filter((id): id is string => id !== null),
   ).size;
 
-  // v2.0a — Per the spec, emit ONE ConditionalContext per
+  // Per the spec, emit ONE ConditionalContext per
   // `<ruleEntry>`. Entries lacking a `<formula>` / `<criteriaItems>`
   // produce a `null` `conditionSource` and are NOT counted toward the
   // condition list (silently dropped). The index used in the
@@ -604,7 +604,7 @@ const buildRule = (
     }
   }
 
-  // v2.0a — Append the firesWhen edges at the tail. The synthetic
+  // Append the firesWhen edges at the tail. The synthetic
   // ConditionalContext nodes are returned alongside the rule node.
   edges.push(...firesWhenEdges, ...conditionFieldEdges);
 
@@ -698,7 +698,7 @@ export const extractAssignmentRule = async (
     const built = buildRule(rule, objectApiName, parentId, path);
     if (!built.ok) return built;
     nodes.push(built.value.node);
-    // v2.0a — Append the synthetic ConditionalContext nodes per rule.
+    // Append the synthetic ConditionalContext nodes per rule.
     nodes.push(...built.value.conditionNodes);
     edges.push(...built.value.edges);
   }

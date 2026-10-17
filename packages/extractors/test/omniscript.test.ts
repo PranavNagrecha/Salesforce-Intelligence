@@ -407,10 +407,145 @@ describe('extractOmniScript', () => {
     });
   });
 
+  describe('saveURLPatterns field writes (V7-1)', () => {
+    const baseOmniScript = (
+      apiName: string,
+      topPsc: Record<string, unknown>,
+      extraElements = '',
+    ): string => `<?xml version="1.0" encoding="UTF-8"?>
+<OmniScript xmlns="http://soap.sforce.com/2006/04/metadata">
+  <isActive>true</isActive>
+  <isIntegrationProcedure>false</isIntegrationProcedure>
+  <language>English</language>
+  <name>${apiName}</name>
+  ${extraElements}
+  <omniProcessType>OmniScript</omniProcessType>
+  <propertySetConfig>${JSON.stringify(topPsc).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}</propertySetConfig>
+  <subType>SavePatterns</subType>
+  <type>Demo</type>
+  <uniqueName>${apiName}</uniqueName>
+  <versionNumber>1.0</versionNumber>
+</OmniScript>`;
+
+    it('emits writesTo for each saveURLPatterns key when saveObject is declared', async () => {
+      const xml = baseOmniScript('Demo_SavePatterns_Resolved_English_1', {
+        allowSaveForLater: true,
+        saveObject: 'Demo_Obj__c',
+        saveURLPatterns: {
+          Demo_Resume__c: '/s/resume?id={0}',
+          Demo_Token__c: '/s/token/{0}',
+        },
+      });
+      const { dir, path } = await writeTempXml('Demo_SavePatterns_Resolved_English_1.os-meta.xml', xml);
+      try {
+        const result = await extractOmniScript(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const writes = result.value.edges.filter((e) => e.edgeType === 'writesTo');
+        expect(writes).toEqual([
+          {
+            fromId: 'OmniScript:Demo_SavePatterns_Resolved_English_1',
+            toId: 'CustomField:Demo_Obj__c.Demo_Resume__c',
+            edgeType: 'writesTo',
+            confidence: 'parsed',
+            source: 'omniscript-extractor',
+            properties: {
+              mechanism: 'saveURLPatterns',
+              field: 'Demo_Resume__c',
+              saveObject: 'Demo_Obj__c',
+            },
+          },
+          {
+            fromId: 'OmniScript:Demo_SavePatterns_Resolved_English_1',
+            toId: 'CustomField:Demo_Obj__c.Demo_Token__c',
+            edgeType: 'writesTo',
+            confidence: 'parsed',
+            source: 'omniscript-extractor',
+            properties: {
+              mechanism: 'saveURLPatterns',
+              field: 'Demo_Token__c',
+              saveObject: 'Demo_Obj__c',
+            },
+          },
+        ]);
+        expect(result.value.nodes[0]!.properties.unresolvedSavePatterns).toBeUndefined();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('records unresolvedSavePatterns when the save object is not declared', async () => {
+      const xml = baseOmniScript('Demo_SavePatterns_Unresolved_English_1', {
+        allowSaveForLater: true,
+        saveURLPatterns: { Demo_Resume__c: '/s/resume?id={0}' },
+      });
+      const { dir, path } = await writeTempXml('Demo_SavePatterns_Unresolved_English_1.os-meta.xml', xml);
+      try {
+        const result = await extractOmniScript(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.edges.filter((e) => e.edgeType === 'writesTo')).toEqual([]);
+        expect(result.value.nodes[0]!.properties.unresolvedSavePatterns).toEqual([
+          { field: 'Demo_Resume__c', reason: 'no-declared-save-object' },
+        ]);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('emits no saveURLPatterns edges when the map is absent or empty', async () => {
+      const xml = baseOmniScript('Demo_SavePatterns_None_English_1', {
+        allowSaveForLater: true,
+      });
+      const { dir, path } = await writeTempXml('Demo_SavePatterns_None_English_1.os-meta.xml', xml);
+      try {
+        const result = await extractOmniScript(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.edges.filter((e) => e.edgeType === 'writesTo')).toEqual([]);
+        expect(result.value.nodes[0]!.properties.unresolvedSavePatterns).toBeUndefined();
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('resolves saveObject from a DataRaptor Post Action additionalInput objectApiName', async () => {
+      const postStep = `<omniProcessElements>
+    <isActive>true</isActive>
+    <level>0.0</level>
+    <name>saveCase</name>
+    <propertySetConfig>${JSON.stringify({
+      bundle: 'Demo_LoadMapper',
+      additionalInput: { objectApiName: 'Demo_Case__c' },
+    }).replace(/&/g, '&amp;').replace(/"/g, '&quot;')}</propertySetConfig>
+    <sequenceNumber>0.0</sequenceNumber>
+    <type>DataRaptor Post Action</type>
+  </omniProcessElements>`;
+      const xml = baseOmniScript(
+        'Demo_SavePatterns_DrPost_English_1',
+        {
+          allowSaveForLater: true,
+          saveURLPatterns: { Subject: '/s/resume?id={0}' },
+        },
+        postStep,
+      );
+      const { dir, path } = await writeTempXml('Demo_SavePatterns_DrPost_English_1.os-meta.xml', xml);
+      try {
+        const result = await extractOmniScript(path);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const write = result.value.edges.find((e) => e.edgeType === 'writesTo');
+        expect(write?.toId).toBe('CustomField:Demo_Case__c.Subject');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('warning collection for malformed propertySetConfig blobs', () => {
     it('captures a warning when an element\'s propertySetConfig is not valid JSON', async () => {
       // The XML's propertySetConfig is literally not JSON — collect a
-      // warning rather than crash the whole extraction (v3.2 honesty
+      // warning rather than crash the whole extraction (honesty
       // axis: best-effort JSON parsing).
       const xml = `<?xml version="1.0"?>
 <OmniScript xmlns="http://soap.sforce.com/2006/04/metadata">

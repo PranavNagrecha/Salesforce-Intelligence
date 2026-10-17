@@ -1,7 +1,7 @@
 /**
  * Handler for the `sfi.cdc_subscribers` MCP tool.
  *
- * The v2.8 async-deep-tier companion to `sfi.event_subscribers`. Where
+ * The async-deep-tier companion to `sfi.event_subscribers`. Where
  * `event_subscribers` enumerates Platform Event subscribers (objects
  * ending in `__e`), this tool enumerates Change Data Capture (CDC)
  * subscribers — Apex triggers, Apex classes, and Flows that listen to
@@ -43,8 +43,8 @@
  *   - Subscribers are restricted to the same three node types as
  *     `event_subscribers`: ApexTrigger, ApexClass, Flow. Other node
  *     types (e.g., a hypothetical custom subscriber) are filtered out
- *     so the v2.8 contract pins the subscriber surface to the three
- *     v1.5 R3 producers.
+ *     so the contract pins the subscriber surface to the three
+ *     producers.
  *   - The output's `source` is the EDGE's `source` field (the
  *     extractor name); the subscriber's identity comes from the
  *     resolved node. Sort is `(subscriberId ASC, changeEventName ASC)`
@@ -55,7 +55,7 @@
  *     Platform Event (`__e`) is modeled as `listensTo`; a subscription
  *     whose channel names a Change Event is parsed by the scanner but
  *     not yet minted as an edge — so CDC EventBus subscribers stay
- *     invisible here. (CR-CAP-18: the DECLARED per-member filter
+ *     invisible here. (the DECLARED per-member filter
  *     expressions in `*.platformEventChannelMember-meta.xml` ARE now
  *     extracted — surfaced on the publish-side `references` edge — but
  *     that is the declared XML text, NOT runtime filter evaluation of
@@ -86,8 +86,8 @@ import { resolveExistingObjectScope } from './input-aliases.js';
 
 /**
  * The set of node types that count as valid CDC subscribers — the same
- * three v1.5 R3 producers `event_subscribers` accepts. Other node
- * types are filtered out so the v2.8 contract is stable.
+ * three producers `event_subscribers` accepts. Other node
+ * types are filtered out so the contract is stable.
  */
 const SUBSCRIBER_NODE_TYPES: ReadonlySet<ComponentType> = new Set([
   'ApexTrigger',
@@ -96,7 +96,7 @@ const SUBSCRIBER_NODE_TYPES: ReadonlySet<ComponentType> = new Set([
 ]);
 
 /**
- * The CDC event id prefix. v2.8 recognizes CDC by name pattern on the
+ * The CDC event id prefix. This recognizes CDC by name pattern on the
  * `listensTo` edge's `toId`; the target node is a `CustomObject:` —
  * the same prefix used for `__e` Platform Events.
  */
@@ -198,7 +198,7 @@ export interface CdcSubscriber {
  * `totalSubscribers: 0` with no membership section, so "0" read as
  * "CDC not used" — the false-empty this closes.
  *
- * `filterExpression` is the DECLARED per-member XML text (CR-CAP-18),
+ * `filterExpression` is the DECLARED per-member XML text,
  * NOT runtime filter evaluation of which records flow.
  */
 export interface CdcChannelMember {
@@ -256,11 +256,11 @@ export interface CdcSubscribersOutput {
 
 /**
  * Verbatim honesty disclosure surfaced ALWAYS in the response. The
- * heuristic v2.8 CDC detection sees `listensTo` / `triggersOn` edges and
+ * heuristic CDC detection sees `listensTo` / `triggersOn` edges and
  * matches on the target apiName's CDC pattern. `EventBus.subscribe(...)`
  * to a Platform Event (`__e`) is modeled as `listensTo`; a subscription
  * to a Change Event is parsed by the scanner but not yet minted as an
- * edge. CR-CAP-18: the DECLARED per-member filter expressions in
+ * edge. The DECLARED per-member filter expressions in
  * `*.platformEventChannelMember-meta.xml` ARE now extracted (publish-side
  * `references` edge), but that is the declared XML text, NOT runtime
  * filter EVALUATION of which records flow through the channel.

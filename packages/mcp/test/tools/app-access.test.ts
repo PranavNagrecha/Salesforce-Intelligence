@@ -71,7 +71,7 @@ describe('appAccessHandler', () => {
     expect(r.ok).toBe(false); if (r.ok) return; expect(r.error.kind).toBe('invalid-query');
   });
 
-  // P14-APP-default-reverse — the INVERSE direction.
+  // The INVERSE direction.
   it('answers a Profile id with its openable apps and default app', async () => {
     const r = await appAccessHandler(ctx, { componentId: 'Profile:Admin' });
     expect(r.ok).toBe(true); if (!r.ok) return;
@@ -123,14 +123,14 @@ describe('appAccessHandler', () => {
     expect(d.summary.tabs).toBe(2);
   });
 
-  it('does NOT flag scanTruncated when the scan fits under the cap (P12-HONESTY-scan-cap-disclosure)', async () => {
+  it('does NOT flag scanTruncated when the scan fits under the cap', async () => {
     const r = await appAccessHandler(ctx, { componentId: APP });
     expect(r.ok).toBe(true); if (!r.ok) return;
     expect((r.value.data as AppAccessOutput).scanTruncated).toBe(false);
     expect(r.value.data.boundaryNote).not.toMatch(/Scan capped/);
   });
 
-  // CR-22 B3: a low cap no longer drops the scan tail — it windows the scan and
+  // A low cap no longer drops the scan tail — it windows the scan and
   // still reaches every grantor, including ones in the SECOND scanned type.
   it('FAIL-BEFORE/PASS-AFTER: a cap of 1 still reaches a grantor in the SECOND scanned type', async () => {
     const prev = process.env['SFI_NODE_SCAN_LIMIT'];
@@ -167,7 +167,7 @@ describe('appAccessHandler', () => {
     }
   });
 
-  // CR-22 output cursor.
+  // Output cursor.
   it('whole-fits no-cursor call omits nextCursor/pageInfo (byte-identical)', async () => {
     const r = await appAccessHandler(ctx, { componentId: APP });
     expect(r.ok).toBe(true); if (!r.ok) return;

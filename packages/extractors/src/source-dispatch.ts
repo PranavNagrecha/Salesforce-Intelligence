@@ -14,7 +14,7 @@ import * as omnistudio from './omnistudio/index.js';
 /**
  * Names whose direct child directories are dispatched as bundle units
  * (their basename becomes the bundle's API name; their children are NOT
- * walked further). LWC and Aura are the two v1.4 bundle types.
+ * walked further). LWC and Aura are the two bundle types.
  *
  * Listed here rather than baked into a free-standing `if` inside
  * `walkDir` so a future bundle-shaped metadata type can be added by
@@ -53,12 +53,12 @@ export const CONTAINER_FILE_TYPES: ReadonlySet<ComponentType> = new Set<Componen
  * object-nested `quickActions/`) are tested before the parent
  * `objects/` matcher.
  *
- * v1.1 adds the sharing & visibility tier (`roles/`, `groups/`,
+ * This adds the sharing & visibility tier (`roles/`, `groups/`,
  * `queues/`, `sharingRules/`); the `SharingRules` Salesforce metadata
  * type maps to the `SharingRule` ComponentType (singular, per the
  * contracts union).
  *
- * v1.2 adds the record-types + UI-surfaces tier:
+ * This adds the record-types + UI-surfaces tier:
  *   - Nested under `objects/{Obj}/`: `recordTypes/`,
  *     `businessProcesses/`, and `quickActions/` (DX-nested QuickActions
  *     live alongside their parent CustomObject).
@@ -69,7 +69,7 @@ export const CONTAINER_FILE_TYPES: ReadonlySet<ComponentType> = new Set<Componen
  *     `staticresources/` (the `.resource-meta.xml` sidecar; the binary
  *     payload itself is not extracted).
  *
- * v1.3 adds the legacy-automation + communications tier (all top-level
+ * This adds the legacy-automation + communications tier (all top-level
  * Salesforce DX directories):
  *   - `workflows/` -> `WorkflowRule` (file suffix `.workflow-meta.xml`,
  *     one file per parent SObject; each file is fanned out into one
@@ -91,7 +91,7 @@ export const CONTAINER_FILE_TYPES: ReadonlySet<ComponentType> = new Set<Componen
  *     live in folder subdirectories under `email/{Folder}/`).
  *   - `letterhead/` -> `Letterhead` (suffix `.letter-meta.xml`).
  *
- * v1.4 adds the frontend code tier, which mixes file-based and
+ * This adds the frontend code tier, which mixes file-based and
  * directory-based shapes:
  *   - `pages/` -> `VisualforcePage` (file suffix `.page`, not
  *     `.page-meta.xml`; the extractor reads the companion meta-xml
@@ -114,10 +114,10 @@ export const CONTAINER_FILE_TYPES: ReadonlySet<ComponentType> = new Set<Componen
  *     any of the markup variants (`.cmp` / `.app` / `.evt` /
  *     `.intf` / `.tokens`) inside the bundle.
  *
- * v1.5 adds the integration topology + event/async/API surface tier.
- * All six v1.5 metadata types are file-based and live at the DX top
+ * This adds the integration topology + event/async/API surface tier.
+ * All six metadata types are file-based and live at the DX top
  * level — none nest under `objects/` and none share a directory with a
- * v0.1-v1.4 metadata type, so the dispatch rules are flat suffix
+ * metadata type, so the dispatch rules are flat suffix
  * matches against a single segment:
  *   - `authproviders/` -> `AuthProvider` (file suffix
  *     `.authprovider-meta.xml`; one SSO / OAuth provider per file).
@@ -135,7 +135,7 @@ export const CONTAINER_FILE_TYPES: ReadonlySet<ComponentType> = new Set<Componen
  *   - `networkAccesses/` -> `NetworkAccess` (file suffix
  *     `.networkAccess-meta.xml`; one IP-range trust-list entry per file).
  *
- * v1.6 adds the business-user record-value tier (file-based, no new
+ * This adds the business-user record-value tier (file-based, no new
  * EdgeType — both attach via the existing `parentOf` edge to their
  * CustomObject parent):
  *   - `customMetadata/` -> `CustomMetadataRecord` (file suffix
@@ -157,7 +157,7 @@ export const dispatchSourceFile = (
   fileName: string,
   isDirectory: boolean,
 ): ComponentType | null => {
-  // v1.4 bundle directories. The unit of dispatch is the bundle dir
+  // Bundle directories. The unit of dispatch is the bundle dir
   // itself; `fileName` here is the bundle's basename (the LWC / Aura
   // API name). Short-circuit before the file-based dispatch matrix
   // because bundles can't match any file suffix.
@@ -226,9 +226,9 @@ export const dispatchSourceFile = (
   if (segments.includes('labels') && fileName.endsWith('.labels-meta.xml')) return 'CustomLabel';
   if (segments.includes('staticresources') && fileName.endsWith('.resource-meta.xml')) return 'StaticResource';
   if (segments.includes('installedPackages') && fileName.endsWith('.installedPackage-meta.xml')) return 'InstalledPackage';
-  // CR-CAP-15: CustomPermission definitions live flat under
+  // CustomPermission definitions live flat under
   // `customPermissions/{DeveloperName}.customPermission-meta.xml` — the grant
-  // target a PermissionSet/Profile `<customPermissions>` block names (CR-CAP-10).
+  // target a PermissionSet/Profile `<customPermissions>` block names.
   if (segments.includes('customPermissions') && fileName.endsWith('.customPermission-meta.xml')) return 'CustomPermission';
   // Org security-settings tier. Salesforce delivers these under the generic
   // `settings/` container (shared by every `*Settings` metadata type), so the
@@ -256,7 +256,7 @@ export const dispatchSourceFile = (
   // singleton; the extractor emits the fixed `FieldServiceSettings:default`
   // node.
   if (segments.includes('settings') && fileName === 'FieldService.settings-meta.xml') return 'FieldServiceSettings';
-  // CR-CAP-18: platform-event publish/stream-routing topology. Both are flat
+  // platform-event publish/stream-routing topology. Both are flat
   // top-level dispatches under their own DX directory (singular Metadata-API
   // xmlName, no object-nested counterpart). The channel is the stream
   // container; the member binds one entity onto it with a declared filter.
@@ -271,16 +271,16 @@ export const dispatchSourceFile = (
   if (segments.includes('matchingRules') && fileName.endsWith('.matchingRule-meta.xml')) return 'MatchingRule';
   if (segments.includes('email') && fileName.endsWith('.email-meta.xml')) return 'EmailTemplate';
   if (segments.includes('letterhead') && fileName.endsWith('.letter-meta.xml')) return 'Letterhead';
-  // v1.4 file-based: VisualforcePage (`pages/{Name}.page`) +
+  // File-based: VisualforcePage (`pages/{Name}.page`) +
   // VisualforceComponent (`components/{Name}.component`). The markup
   // file is the dispatch target; the extractor reads the companion
   // `-meta.xml` sibling itself. Excluding `-meta.xml` keeps the sidecar
   // from triggering a second (no-op) extraction.
   if (segments.includes('pages') && fileName.endsWith('.page') && !fileName.endsWith('.page-meta.xml')) return 'VisualforcePage';
   if (segments.includes('components') && fileName.endsWith('.component') && !fileName.endsWith('.component-meta.xml')) return 'VisualforceComponent';
-  // v1.5 integration topology tier. All six metadata types are flat
+  // Integration topology tier. All six metadata types are flat
   // file-based dispatches under their own DX directory; no
-  // object-nested counterpart and no shared directory with any v0.1-v1.4
+  // object-nested counterpart and no shared directory with any
   // metadata type, so the segment + suffix check is unambiguous.
   if (segments.includes('authproviders') && fileName.endsWith('.authprovider-meta.xml')) return 'AuthProvider';
   if (segments.includes('remoteSiteSettings') && fileName.endsWith('.remoteSite-meta.xml')) return 'RemoteSiteSetting';
@@ -323,19 +323,19 @@ export const dispatchSourceFile = (
   // Monitoring and was unavailable ("not available in this organization",
   // per the retrieve warning) in the gate-vault fleet's accessible sandboxes).
   if (segments.includes('transactionSecurityPolicies') && fileName.endsWith('.transactionSecurityPolicy-meta.xml')) return 'TransactionSecurityPolicy';
-  // v1.6 business-user record-value tier. CustomMetadataRecord files
+  // Business-user record-value tier. CustomMetadataRecord files
   // live flat under `customMetadata/` with shape
   // `{TypeApiName}.{RecordName}.md-meta.xml`; CustomSettingRecord
   // files live nested under `customSettings/{TypeApiName}/` with
   // shape `{RecordName}.dataset-meta.xml`. Neither nests under any
-  // other v1.x dispatch branch, so the order relative to v1.4 is not
-  // semantically important — appended at the end to keep the v1.6
+  // other dispatch branch, so the order relative to the frontend tier is not
+  // semantically important — appended at the end to keep the record-value
   // additions visually grouped.
   if (segments.includes('customMetadata') && fileName.endsWith('.md-meta.xml')) return 'CustomMetadataRecord';
   if (segments.includes('customSettings') && fileName.endsWith('.dataset-meta.xml')) return 'CustomSettingRecord';
-  // v3.2 OmniStudio declarative-process tier. All five metadata types
+  // OmniStudio declarative-process tier. All five metadata types
   // are flat file-based dispatches under their own DX directory; no
-  // object-nested counterpart and no shared directory with any v0.1-v1.6
+  // object-nested counterpart and no shared directory with any
   // metadata type, so the segment + suffix check is unambiguous.
   // The five sibling extractors (R2a-R2e) each add one line here.
   if (segments.includes('omniScripts') && fileName.endsWith('.os-meta.xml')) return 'OmniScript';
@@ -367,7 +367,7 @@ export const dispatchSourceFile = (
   if (segments.includes('milestoneTypes') && fileName.endsWith('.milestoneType-meta.xml')) return 'MilestoneType';
   if (segments.includes('serviceChannels') && fileName.endsWith('.serviceChannel-meta.xml')) return 'ServiceChannel';
   if (segments.includes('queueRoutingConfigs') && fileName.endsWith('.queueRoutingConfig-meta.xml')) return 'QueueRoutingConfig';
-  // R7-C7: Omni-Channel presence configuration — the R6-18 leftover. Flat
+  // Omni-Channel presence configuration — the R6-18 leftover. Flat
   // top-level dispatch under its own DX directory; folder/suffix verified
   // via real scoped retrieves (`sf project retrieve start --metadata
   // PresenceUserConfig`) from two live orgs.
@@ -384,7 +384,7 @@ export const dispatchSourceFile = (
   if (segments.includes('genAiPlugins') && fileName.endsWith('.genAiPlugin-meta.xml')) return 'GenAiPlugin';
   if (segments.includes('genAiPlannerBundles') && fileName.endsWith('.genAiPlannerBundle-meta.xml')) return 'GenAiPlannerBundle';
   if (segments.includes('genAiPromptTemplates') && fileName.endsWith('.genAiPromptTemplate-meta.xml')) return 'GenAiPromptTemplate';
-  // R7-C7: legacy Einstein Bot / Agentforce agent tier — the R6-13 leftover
+  // legacy Einstein Bot / Agentforce agent tier — the R6-13 leftover
   // ("Bot's nested folder-per-bot layout doesn't fit the flat generic
   // pattern"). Folder/suffixes verified against a real scoped retrieve
   // (`sf project retrieve start --metadata Bot`) from a production-scale

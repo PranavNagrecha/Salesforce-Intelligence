@@ -394,7 +394,7 @@ describe('orgOverviewHandler (empty graph)', () => {
     // Vault state is copied from the manifest.
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
 
-    // v4.0 honesty axis: an empty vault retrieved NONE of these families, so the
+    // Honesty axis: an empty vault retrieved NONE of these families, so the
     // tour must disclose that the 0-tallies mean "not checked" — never imply
     // "0 = none in the org". Regression guard for the org_overview honesty fix.
     expect(d.coverage.integrationRetrieved).toBe(false);

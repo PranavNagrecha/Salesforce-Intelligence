@@ -52,7 +52,7 @@ describe('extractCpqCustomMetadataRecord', () => {
       if (!result.ok) return;
       // Two sibling nodes: the underlying CMD record + the recognized
       // CpqPriceRule node. The original CMD node is NOT removed —
-      // both coexist so v1.6 lookup surfaces keep working.
+      // both coexist so lookup surfaces keep working.
       expect(result.value.nodes.length).toBe(2);
       const cpqNode = result.value.nodes.find(
         (n) => n.type === 'CpqPriceRule',
@@ -87,7 +87,7 @@ describe('extractCpqCustomMetadataRecord', () => {
       expect(cpqNode).toBeDefined();
       if (!cpqNode) return;
       // Boolean properties round-trip through; numeric properties
-      // pass through verbatim (the v1.6 R2 extractor coerces them
+      // pass through verbatim (the extractor coerces them
       // via xsi:type, so the source-of-truth shape is preserved).
       expect(cpqNode.properties['active']).toBe(true);
       expect(cpqNode.properties['evaluationOrder']).toBe(10);
@@ -185,8 +185,8 @@ describe('extractCpqCustomMetadataRecord', () => {
       const result = await extractCpqCustomMetadataRecord(fixturePath);
       expect(result.ok).toBe(true);
       if (!result.ok) return;
-      // Two parentOf edges total: one from the v1.6 extractor (declared
-      // confidence, to the CMD record) and one from the v2.6a layer
+      // Two parentOf edges total: one from the extractor (declared
+      // confidence, to the CMD record) and one from the layer
       // (heuristic confidence, to the CpqPriceRule sibling).
       const cpqEdge = result.value.edges.find(
         (e) =>
@@ -200,9 +200,9 @@ describe('extractCpqCustomMetadataRecord', () => {
       expect(cpqEdge.fromId).toBe('CustomObject:SBQQ__PriceRule__c');
     });
 
-    itHarness('preserves the original v1.6 CMD parentOf edge untouched', async () => {
+    itHarness('preserves the original CMD parentOf edge untouched', async () => {
       // The specialization layer ADDS — it never mutates or removes.
-      // The original parentOf edge produced by the v1.6 extractor
+      // The original parentOf edge produced by the extractor
       // continues to point to the CustomMetadataRecord node.
       const fixturePath = resolve(HARNESS_ROOT, PRICE_RULE_FIXTURE_REL);
       const result = await extractCpqCustomMetadataRecord(fixturePath);
@@ -216,8 +216,8 @@ describe('extractCpqCustomMetadataRecord', () => {
       expect(cmdEdge).toBeDefined();
       if (!cmdEdge) return;
       expect(cmdEdge.edgeType).toBe('parentOf');
-      // Confidence stays declared on the v1.6-emitted edge; only the
-      // v2.6a edge carries heuristic confidence.
+      // Confidence stays declared on the emitted edge; only the
+      // Edge carries heuristic confidence.
       expect(cmdEdge.confidence).toBe('declared');
       expect(cmdEdge.source).toBe('custom-metadata-record-extractor');
     });
@@ -299,7 +299,7 @@ describe('extractCpqCustomMetadataRecord', () => {
     });
 
     it('collapses masked values to the default — does not fabricate the underlying value', async () => {
-      // The CPQ specialization layer inherits v1.6's masked-value
+      // The CPQ specialization layer inherits the masked-value
       // honesty axis: any SBQQ field value that surfaces as
       // `isMasked: true` collapses to the per-type default rather
       // than passing the underlying value through.

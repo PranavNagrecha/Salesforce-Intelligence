@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 /**
- * Ensures destructive / what-if tools honor partial coverage (v4.1 audit).
+ * Ensures destructive / what-if tools honor partial coverage (audit).
  */
 
 import { mkdtempSync, rmSync } from 'node:fs';

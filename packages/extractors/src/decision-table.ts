@@ -120,9 +120,9 @@ const validateRoot = (
  * as the discriminant, so a row without it has no place in either
  * bucket. This intentionally avoids guessing.
  *
- * The counts are the *parameter-shape* surface — Q179's anchor. Row
+ * The counts are the *parameter-shape* surface — the anchor. Row
  * data (the actual values the parameters lookup against) lives in CSV
- * uploads or SObject records, NOT in the metadata XML; v3.2 refuses to
+ * uploads or SObject records, NOT in the metadata XML; this refuses to
  * fabricate it.
  */
 const countParameterUsages = (
@@ -152,7 +152,7 @@ const countParameterUsages = (
  * are outputs, the matching operators, and the lookup-time condition
  * expression — but does NOT carry the lookup row data itself.
  *
- * v3.2 surfaces:
+ * This surfaces:
  *   - `setupName` (the canonical DT name; also the apiName).
  *   - `dataSourceType` (`CsvUpload` | `SObject` | `Manual`).
  *   - `sourceObject` (for `SObject` dataSourceType; verbatim).
@@ -166,11 +166,11 @@ const countParameterUsages = (
  *   - `inputParamCount` and `outputParamCount` — the parameter-shape
  *     surface counted from `<decisionTableParameters>` children.
  *
- * **Q179 honesty boundary — refusal to fabricate row data.**
+ * **Honesty boundary — refusal to fabricate row data.**
  * Per `DecisionTable.md`:
  *
  *   > "DecisionTable rows live in CSV uploads or SObject records, not
- *   > in the metadata XML. v3.2 cannot enumerate row content. To see
+ *   > in the metadata XML. This cannot enumerate row content. To see
  *   > the actual rows, query the row data source (SObject record query
  *   > or the original CSV)."
  *
@@ -178,16 +178,16 @@ const countParameterUsages = (
  * schema), never the row content. Three concrete refusals:
  *
  *   1. `dataSourceType: CsvUpload` — the CSV file is uploaded as a
- *      Salesforce File. v3.2 does NOT enumerate File content.
+ *      Salesforce File. This does NOT enumerate File content.
  *   2. `dataSourceType: SObject` — rows live in `sourceObject`
- *      records. v3.2 does NOT query SObject records.
+ *      records. This does NOT query SObject records.
  *   3. `dataSourceType: Manual` — rows live in the OmniStudio
- *      designer's row-editor UI. v3.2 does NOT reach into that UI.
+ *      designer's row-editor UI. This does NOT reach into that UI.
  *
  * The `inputParamCount` / `outputParamCount` properties expose only the
  * shape — the count of input columns vs output columns declared by the
  * table — never any row value. Downstream MCP tools surface the verbatim
- * Q179 boundary phrase when callers ask for rows.
+ * boundary phrase when callers ask for rows.
  *
  * **Leaf-of-the-chain — zero edges.**
  * DecisionTable is the leaf of the OmniStudio call chain. It does NOT
@@ -195,7 +195,7 @@ const countParameterUsages = (
  * components. (DTs ARE invoked BY IPs and Apex via
  * `omnistudio.DecisionTableInvocableService` Remote Actions; the IP
  * extractor surfaces those Remote Action targets verbatim, and the
- * Apex→OmniProcess coupling is the v3.3 follow-up. v3.2 captures
+ * Apex→OmniProcess coupling is the later follow-up. This captures
  * neither edge family on the DT side — leaf semantics.)
  *
  * Error cases (per vendored `DecisionTable.md`):
@@ -289,7 +289,7 @@ export const extractDecisionTable = async (
         unwrapSingle(rootObj['doesConsiderNullValue']),
       ),
       filterResultBy: optionalString(rootObj, 'filterResultBy'),
-      // Parameter-shape surface only. Row data is the Q179 boundary —
+      // Parameter-shape surface only. Row data is the boundary —
       // see this module's JSDoc and `DecisionTable.md`. The counts
       // come from `<decisionTableParameters>` children whose `<usage>`
       // is `INPUT` or `OUTPUT`; rows without a `<usage>` element are

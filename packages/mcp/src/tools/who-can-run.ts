@@ -1,5 +1,5 @@
 /**
- * Handler for the `sfi.who_can_run` MCP tool (P11-REVERSE-who-can-run).
+ * Handler for the `sfi.who_can_run` MCP tool.
  *
  * The REVERSE of `sfi.user_ability` (which is "what can this user run"): given
  * a `Flow:X`, which profiles / permission sets grant run access to it — from
@@ -76,7 +76,7 @@ export const whoCanRunInputSchema = z.object({
   componentId: z.string().min(1),
   limit: z.number().int().min(1).max(MAX_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
-  // CR-22 continuation cursor: an OPAQUE token echoed back from a prior
+  // Continuation cursor: an OPAQUE token echoed back from a prior
   // truncated page's `nextCursor`. When present it supplies the resume offset;
   // omitting it = today's behavior (offset 0 / explicit `offset`).
   cursor: z.string().min(1).optional(),
@@ -95,7 +95,7 @@ export interface FlowRunGranter {
  * Internal sort/page carrier: a {@link FlowRunGranter} plus the edge `source`
  * used as the TOTAL-ORDER tiebreak. `__source` is NEVER emitted (it is stripped
  * before the page goes onto `data.granters`) so the visible output stays
- * byte-identical to pre-CR-22.
+ * byte-identical to the pre-paging shape.
  */
 interface FlowRunGranterInternal extends FlowRunGranter {
   readonly __source: string;
@@ -138,7 +138,7 @@ export interface WhoCanRunOutput {
   readonly hasMore: boolean;
   readonly truncated: boolean;
   /**
-   * CR-22 opaque continuation token, present ONLY when this page was truncated
+   * Opaque continuation token, present ONLY when this page was truncated
    * (more granters remain past `limit`). Echo it back as `cursor` to resume.
    * Absent on a whole-fits page so an in-budget response stays byte-identical.
    */
@@ -208,7 +208,7 @@ export const whoCanRunHandler = async (
   // (from_id, to_id, edge_type, source); to_id (the flow) and edge_type
   // (grantedBy) are fixed here, so within a fixed granterId only `source`
   // distinguishes two edges — appending it makes the order unique/total so a
-  // CR-22 resume cannot dup or skip on a page boundary.
+  // resume cannot dup or skip on a page boundary.
   granters.sort((a, b) =>
     a.granterId < b.granterId
       ? -1
@@ -249,7 +249,7 @@ export const whoCanRunHandler = async (
   const total = granters.length;
   const limit = input.limit ?? DEFAULT_LIMIT;
 
-  // CR-22: resolve the resume offset — an echoed cursor wins over an explicit
+  // Resolve the resume offset — an echoed cursor wins over an explicit
   // `offset`; a stale/forged cursor (changed componentId, different tool, or
   // refreshed vault) is rejected with `invalid-query`.
   const fingerprint = argsFingerprint({ componentId: input.componentId });
@@ -281,7 +281,7 @@ export const whoCanRunHandler = async (
     keyOf: (g) => `${g.granterId} ${g.__source}`,
   });
   // Strip the internal `__source` tiebreak so the visible page stays exactly
-  // the pre-CR-22 FlowRunGranter shape.
+  // the pre-paging FlowRunGranter shape.
   const page: FlowRunGranter[] = paged.items.map((g) => ({
     granterId: g.granterId,
     granterType: g.granterType,

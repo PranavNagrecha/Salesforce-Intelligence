@@ -1,5 +1,5 @@
 /**
- * Handler for the `sfi.review_change` MCP tool (R6-16).
+ * Handler for the `sfi.review_change` MCP tool.
  *
  * The daily deploy gate: given a CHANGE SET — a list of change entries a host
  * assembled from a PR / package.xml / `git diff`, each selecting its component
@@ -131,7 +131,7 @@
  *     blind spot (dynamic dispatch, reflection, managed-package tests, depth-3
  *     cap). Selection ≠ validation.
  *
- * ## Cross-vault mode — `againstVault` (R7-C2)
+ * ## Cross-vault mode — `againstVault`
  *
  * The release-manager question is "will this changeset break anything in PROD?"
  * — which the DEFAULT mode cannot answer, because it resolves the changeset
@@ -140,8 +140,8 @@
  * THAT vault READ-ONLY via the shared cross-vault machinery
  * (`openVaultReadOnly`, the same helper `compare_vaults` uses — never a second
  * writer lock) and computes EVERY signal — dependents, verdict, selected tests,
- * coverage caveat — against ITS graph instead. Composes R6-16 (this tool) with
- * R6-12 (the cross-vault registry + extractor-version caveat).
+ * coverage caveat — against ITS graph instead. Composes this tool with
+ * the cross-vault registry + extractor-version caveat.
  *
  * Disclosures unique to this mode (all absent in the default path, which stays
  * byte-identical):
@@ -156,7 +156,7 @@
  *   - `extractorVersionCaveat` — present only when the current vault and the
  *     against-vault report different sf-intelligence product versions: a
  *     verdict / edge-set difference MAY reflect an EXTRACTOR change, not a real
- *     difference in the target org (mirrors R6-12).
+ *     difference in the target org (mirrors compare_vaults).
  */
 
 import { basename, resolve } from 'node:path';
@@ -670,7 +670,7 @@ export type ParsedChangeEntry =
 const normaliseEntry = (val: z.infer<typeof changeEntrySchema>): ParsedChangeEntry => {
   const raw = typeof val === 'string' ? { componentId: val } : val;
   // `kindDefaulted` is carried only when TRUE, so an explicit row normalises
-  // to exactly `{ type, apiName, changeKind }` (the R6-16 shape).
+  // to exactly `{ type, apiName, changeKind }` (the review-change shape).
   const defaulted = typeof val === 'string' || val.changeKind === undefined;
   const kd = defaulted ? { kindDefaulted: true } : {};
   const changeKind: ChangeKind =
@@ -858,7 +858,7 @@ export interface ReviewChangeSummary {
 
 /**
  * Describes the vault the review was computed AGAINST when `againstVault` is
- * supplied (R7-C2). Absent in the default (current-vault) path.
+ * supplied. Absent in the default (current-vault) path.
  */
 export interface AgainstVaultInfo {
   /** The alias (registry) or directory basename (path) the caller named. */
@@ -918,23 +918,23 @@ export interface ReviewChangeOutput {
   readonly disclosure: string;
   readonly boundaries: readonly string[];
   /**
-   * R7-C2: present ONLY when `againstVault` was supplied — the vault whose
+   * Present ONLY when `againstVault` was supplied — the vault whose
    * graph produced every dependent / verdict / test below (NOT the current
    * vault). Absent in the default path.
    */
   readonly againstVault?: AgainstVaultInfo;
   /**
-   * R7-C2: present ONLY in `againstVault` mode — changeset ids labelled
+   * Present ONLY in `againstVault` mode — changeset ids labelled
    * modified/deleted that are ABSENT from the against-vault. Relative to it
    * they would be ADDED (nothing there depends on them), and their OWN
    * contents were not analysed. Full set (never trimmed by `limit`).
    */
   readonly absentInAgainstVault?: readonly ComponentId[];
   /**
-   * R7-C2: present ONLY when the current vault and the against-vault report
+   * Present ONLY when the current vault and the against-vault report
    * different sf-intelligence product versions — a verdict / edge-set
    * difference MAY reflect an EXTRACTOR change, not a real org difference
-   * (mirrors R6-12).
+   * (mirrors compare_vaults).
    */
   readonly extractorVersionCaveat?: string;
 }
@@ -1465,7 +1465,7 @@ const runReviewCore = async (
 
   // Additive grant-completeness ("ships for nobody") section — computed ONLY
   // when the caller opts in via `checkAccessParity`. Default (flag off) leaves
-  // the response byte-for-byte identical to the R6-16 / R7-C2 output, so every
+  // the response byte-for-byte identical to the previous output, so every
   // existing consumer and snapshot is unaffected. Runs against THIS ctx's graph
   // (the current vault, or the against-vault shadow context in cross-vault
   // mode), so a cross-vault parity check honestly reports the target's grants.
@@ -1569,7 +1569,7 @@ const buildAgainstVaultBoundary = (info: AgainstVaultInfo): string =>
   '`safe` verdict as safe-for-that-org.';
 
 /**
- * R6-12-style extractor-version caveat: emitted only when the current vault and
+ * Extractor-version caveat (as in compare_vaults): emitted only when the current vault and
  * the against-vault report different sf-intelligence product versions, because
  * a verdict / edge-set difference can then reflect an EXTRACTOR change rather
  * than a real difference in the target org.
@@ -1586,7 +1586,7 @@ const buildExtractorVersionCaveat = (
 
 /**
  * The `sfi.review_change` MCP tool. In the DEFAULT path it reviews the
- * changeset against the current vault's graph — byte-for-byte the R6-16
+ * changeset against the current vault's graph — byte-for-byte the
  * behaviour. When `againstVault` is supplied it opens that vault (a registered
  * alias OR a path) READ-ONLY and computes every signal against ITS graph
  * instead (the release-manager "will this break PROD?" question), disclosing
@@ -1609,7 +1609,7 @@ export const reviewChangeHandler = async (
   input: ReviewChangeInput,
 ): Promise<Result<McpResponse<ReviewChangeOutput>, McpError>> => {
   // Default path — resolve against the current vault. With typed rows and
-  // explicit change kinds the R6-16 keys are unchanged; the conversational
+  // explicit change kinds the keys are unchanged; the conversational
   // additions (`deployDecision`, and `inputResolution` / `automationCollisions`
   // when they apply) are additive.
   if (input.againstVault === undefined) {
@@ -1649,7 +1649,7 @@ export const reviewChangeHandler = async (
         .filter((r) => !r.inVault && r.changeKind !== 'added')
         .map((r) => r.id),
     );
-    // Extractor-version caveat: the current vault vs the against-vault (R6-12).
+    // Extractor-version caveat: the current vault vs the against-vault.
     const versionCaveat =
       ctx.manifest.version !== resolved.value.manifest.version
         ? buildExtractorVersionCaveat(

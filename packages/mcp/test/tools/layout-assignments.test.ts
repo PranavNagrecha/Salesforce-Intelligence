@@ -249,10 +249,10 @@ describe('layoutAssignmentsHandler', () => {
   });
 });
 
-// CR-22 B3: the Profile scan now windows past the per-type cap. A profile that
+// The Profile scan now windows past the per-type cap. A profile that
 // assigns the layout but sorts PAST a low cap must still be reached (the pre-B3
 // scan-tail-unreachable bug), and the output list pages via an opaque cursor.
-describe('layoutAssignmentsHandler — full multi-window scan + cursor (CR-22 B3)', () => {
+describe('layoutAssignmentsHandler — full multi-window scan + cursor', () => {
   let b3Dir: string;
   let b3Store: GraphStore;
   let b3Ctx: Context;

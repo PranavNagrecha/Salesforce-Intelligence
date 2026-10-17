@@ -144,7 +144,7 @@ export const scanFlowConditionFieldReaders = async (
   const byFlow = new Map<ComponentId, FlowConditionFieldReader>();
   for (const node of scan.value.nodes) {
     const parentId = node.parentId;
-    // Only Flow firers: the v1.3 rule family (WorkflowRule, ValidationRule, …)
+    // Only Flow firers: the rule family (WorkflowRule, ValidationRule, …)
     // already emits its own field edges (visible in `automations` / `validates`),
     // so scanning them here would double-count. Flow is the gap.
     if (parentId === null || !parentId.startsWith(FLOW_PREFIX)) continue;

@@ -13,10 +13,12 @@ properties:
   enableHistory: false
   enableReports: false
   enableSearch: false
+  externalSharingModel: null
   label: Site Survey
   nameFieldLabel: Site Survey Name
   nameFieldType: Text
   pluralLabel: Site Surveys
+  recordPageOverrides: []
   sharingModel: Private
   visibility: Public
 sourcePath: source/main/default/objects/Site_Survey__c/Site_Survey__c.object-meta.xml
@@ -37,9 +39,11 @@ type: CustomObject
 | enableHistory | `false` |
 | enableReports | `false` |
 | enableSearch | `false` |
+| externalSharingModel | `null` |
 | nameFieldLabel | `Site Survey Name` |
 | nameFieldType | `Text` |
 | pluralLabel | `Site Surveys` |
+| recordPageOverrides | `` |
 | sharingModel | `Private` |
 | visibility | `Public` |
 

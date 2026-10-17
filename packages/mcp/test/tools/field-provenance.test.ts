@@ -56,11 +56,11 @@ const makeEdge = (
 
 // =============================================================================
 // Seeds:
-//   Q151 — Opportunity.Customer_Health_Score__c (declared formula)
-//   Q152 — Contact.External_Customer_Id__c (integration-synced via Stripe)
-//   Q153 — Account.Close_Date__c (Flow writer, manual-and-coded)
-//   Q147 — Account.Internal_Notes__c (no writers, manual)
-//   Pre-v2.9 — Account.Old_Field__c (no sourceOfTruth populated)
+//   Opportunity.Customer_Health_Score__c (declared formula)
+//   Contact.External_Customer_Id__c (integration-synced via Stripe)
+//   Account.Close_Date__c (Flow writer, manual-and-coded)
+//   Account.Internal_Notes__c (no writers, manual)
+//   Legacy — Account.Old_Field__c (no sourceOfTruth populated)
 // =============================================================================
 
 const OPP_OBJ = 'CustomObject:Opportunity';
@@ -101,7 +101,7 @@ const seed: ExtractionResult = {
     makeNode({ id: OPP_OBJ, type: 'CustomObject', apiName: 'Opportunity' }),
     makeNode({ id: CONTACT_OBJ, type: 'CustomObject', apiName: 'Contact' }),
     makeNode({ id: ACCOUNT_OBJ, type: 'CustomObject', apiName: 'Account' }),
-    // Q151: formula field. sourceOfTruth declared:derived.
+    // Formula field. sourceOfTruth declared:derived.
     makeNode({
       id: FORMULA_FIELD,
       type: 'CustomField',
@@ -116,7 +116,7 @@ const seed: ExtractionResult = {
         semanticCategory: { value: 'unknown', confidence: 'heuristic' },
       },
     }),
-    // Q152: integration-synced field. Single Apex writer that references
+    // Integration-synced field. Single Apex writer that references
     // a NamedCredential.
     makeNode({
       id: INTEG_FIELD,
@@ -134,7 +134,7 @@ const seed: ExtractionResult = {
         semanticCategory: { value: 'identifier', confidence: 'heuristic' },
       },
     }),
-    // Q153: flow-written field. manual-and-coded classification.
+    // Flow-written field. manual-and-coded classification.
     makeNode({
       id: FLOW_WRITTEN_FIELD,
       type: 'CustomField',
@@ -151,7 +151,7 @@ const seed: ExtractionResult = {
         semanticCategory: { value: 'date', confidence: 'heuristic' },
       },
     }),
-    // Q147: no writers, no formula → manual.
+    // No writers, no formula → manual.
     makeNode({
       id: MANUAL_FIELD,
       type: 'CustomField',
@@ -165,7 +165,7 @@ const seed: ExtractionResult = {
         semanticCategory: { value: 'descriptor', confidence: 'heuristic' },
       },
     }),
-    // Pre-v2.9: no classification populated.
+    // Legacy: no classification populated.
     makeNode({
       id: PRE_V29_FIELD,
       type: 'CustomField',
@@ -283,7 +283,7 @@ const seed: ExtractionResult = {
   ],
   edges: [
     // Stripe writes to the integration field, AND references the
-    // NamedCredential (v2.0a integration tagging).
+    // NamedCredential (integration tagging).
     makeEdge({
       fromId: STRIPE_INTEGRATION,
       toId: INTEG_FIELD,
@@ -414,7 +414,7 @@ describe('fieldProvenanceHandler', () => {
     expect(result.error.kind).toBe('component-not-found');
   });
 
-  it('Q151: declared formula — surfaces declaredAsFormula trace, noWritersDetected: false', async () => {
+  it('declared formula — surfaces declaredAsFormula trace, noWritersDetected: false', async () => {
     const result = await fieldProvenanceHandler(ctx, {
       fieldId: FORMULA_FIELD,
     });
@@ -440,7 +440,7 @@ describe('fieldProvenanceHandler', () => {
     ).toBe(false);
   });
 
-  it('Q152: integration-synced — surfaces apexWriters with isIntegrationTagged per-writer', async () => {
+  it('integration-synced — surfaces apexWriters with isIntegrationTagged per-writer', async () => {
     const result = await fieldProvenanceHandler(ctx, {
       fieldId: INTEG_FIELD,
     });
@@ -469,7 +469,7 @@ describe('fieldProvenanceHandler', () => {
     ).toBe(true);
   });
 
-  it('Q153: Flow writer — surfaces flowWriters and manual-and-coded classification', async () => {
+  it('Flow writer — surfaces flowWriters and manual-and-coded classification', async () => {
     const result = await fieldProvenanceHandler(ctx, {
       fieldId: FLOW_WRITTEN_FIELD,
     });
@@ -488,7 +488,7 @@ describe('fieldProvenanceHandler', () => {
     expect(data.trace.noWritersDetected).toBe(false);
   });
 
-  it('Q147: manual — empty trace, noWritersDetected: true', async () => {
+  it('manual — empty trace, noWritersDetected: true', async () => {
     const result = await fieldProvenanceHandler(ctx, {
       fieldId: MANUAL_FIELD,
     });
@@ -507,7 +507,7 @@ describe('fieldProvenanceHandler', () => {
     expect(data.trace.noWritersDetected).toBe(true);
   });
 
-  it('surfaces classification-missing boundary on pre-v2.9 fields', async () => {
+  it('surfaces classification-missing boundary on legacy fields', async () => {
     const result = await fieldProvenanceHandler(ctx, {
       fieldId: PRE_V29_FIELD,
     });
@@ -620,7 +620,7 @@ describe('fieldProvenanceHandler', () => {
 
   it('R1 control: a genuinely unwritten field still reports zero and no extra boundary', async () => {
     // The other half of the ratchet — the fix must not flip every field to
-    // "something writes it". Q147 has no writesTo edge at all.
+    // "something writes it". That field has no writesTo edge at all.
     const result = await fieldProvenanceHandler(ctx, { fieldId: MANUAL_FIELD });
     expect(result.ok).toBe(true);
     if (!result.ok) return;

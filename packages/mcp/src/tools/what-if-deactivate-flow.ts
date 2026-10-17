@@ -1,14 +1,14 @@
 /**
  * Handler for the `sfi.what_if_deactivate_flow` MCP tool.
  *
- * v2.3 R2b — the first of three component-level what-if composers.
+ * The first of three component-level what-if composers.
  * Given a Flow canonical id (`Flow:{ApiName}`), enumerates the
  * downstream impact of deactivating the Flow: every outgoing edge the
  * Flow has becomes a potential lost-effect when the Flow no longer
- * fires. Pairs with R2a's field-level tools (`what_if_change_field_type`,
+ * fires. Pairs with the field-level tools (`what_if_change_field_type`,
  * `what_if_remove_picklist_value`, `what_if_make_field_required`) and
  * R2c's profile-level tools (`what_if_merge_profiles`,
- * `what_if_split_profile`) to complete the v2.3 what-if catalogue.
+ * `what_if_split_profile`) to complete the what-if catalogue.
  *
  * **What deactivation breaks.** Deactivating a Flow means none of its
  * actions run anymore. The composer walks each outgoing edge type the
@@ -40,7 +40,7 @@
  * of the category error. It is surfaced with `category: 'input-only'`
  * and contributes NOTHING to the verdict.
  *
- * R6-02 adds the INCOMING side. Before it the composer walked only
+ * This adds the INCOMING side. Before it the composer walked only
  * OUTGOING edges, so a subflow called by N parents had zero surfaced
  * dependents and read `safe` to deactivate — a wrong destructive verdict.
  * The incoming `references` edges (confidence `declared`) are now walked and
@@ -76,7 +76,7 @@
  *
  *   - `structuralVerdict` is what the dependency structure says, over
  *     the VERDICT-BEARING impacts only (`input-only` excluded). Cascade,
- *     mirroring R2a's `WhatIfChangeFieldType`:
+ *     mirroring `WhatIfChangeFieldType`:
  *       * `safe` when there is no verdict-bearing impact at all — counting
  *         `unresolvedImpacts` as well, so an unresolvable dependent can never
  *         be answered with `safe` — and then `notProvenHarmless` states what
@@ -84,7 +84,7 @@
  *         over-claims.
  *       * `blocking` if ANY `metadata-blocker` impact appears (record
  *         writes / email sends / subflow invocations would silently
- *         stop), OR any `broken-caller` is an ACTIVE parent Flow (R6-02:
+ *         stop), OR any `broken-caller` is an ACTIVE parent Flow (
  *         a live parent breaks at runtime).
  *       * `risky` if no blocker but at least one `code-needs-update`
  *         impact, or a `broken-caller` whose parents are all inactive.
@@ -105,7 +105,7 @@
  * to its own subject. Only `structuralVerdict` is coverage-downgraded;
  * being switched off is not a coverage-dependent claim.
  *
- * **Honesty axis.** v2.3 applies a fail-conservative approach when
+ * **Honesty axis.** This applies a fail-conservative approach when
  * disclosing impact. Deactivation does NOT delete the Flow — its
  * definition remains in the org and a later reactivation restores every
  * effect listed. Apex code that conditionally invokes the Flow's outputs
@@ -138,7 +138,7 @@
  *     edges all left the vault report `impacts: []`, which `aggregateVerdict`
  *     turns into the literal word `safe`.
  *   - The `firingConditions` array is sourced from the Flow's outgoing
- *     `firesWhen` edges (the v2.0a ConditionalContext primitive). Each
+ *     `firesWhen` edges (the ConditionalContext primitive). Each
  *     entry carries the synthetic conditionContextId and the parsed
  *     expression so the renderer can inline the gating predicate
  *     without an extra graph roundtrip.
@@ -189,12 +189,12 @@ const FLOW_PREFIX = 'Flow:';
 
 /**
  * One finding category in the `WhatIfImpactItem` shape, mirroring
- * R2a's `what-if-change-field-type.ts` definition. The composer module
- * uses the same union across every v2.3 tool so the
+ * `what-if-change-field-type.ts` definition. The composer module
+ * uses the same union across every tool so the
  * `architect-what-if-analysis` skill can group by category uniformly.
  *
  * `broken-caller` is a Flow-deactivation-specific EXTENSION of the shared
- * union (R6-02): it names an INCOMING dependent — a parent Flow that invokes
+ * union: it names an INCOMING dependent — a parent Flow that invokes
  * THIS Flow as a subflow and would break at runtime on deactivation. It is
  * distinct from `metadata-blocker` (which names this Flow's own OUTGOING
  * effects that stop). A `broken-caller` from an ACTIVE parent forces the
@@ -226,10 +226,9 @@ type Category =
 
 /**
  * One impact entry in the response's `impacts` array. Mirrors the
- * `WhatIfImpactItem` interface in R2a's `what-if-change-field-type.ts`
- * — scoped to the fields v2.3 R2 populates. The full R1b contract
- * (with `location` + `suggestedAction`) is deferred to the R1b plan
- * worker.
+ * `WhatIfImpactItem` interface in `what-if-change-field-type.ts`
+ * — scoped to the fields that tool populates. The full contract
+ * (with `location` + `suggestedAction`) is deferred.
  */
 export interface WhatIfImpactItem {
   readonly category: Category;
@@ -242,7 +241,7 @@ export interface WhatIfImpactItem {
 
 /**
  * One condition currently gating the Flow's firing. Sourced from the
- * Flow's outgoing `firesWhen` edges (the v2.0a ConditionalContext
+ * Flow's outgoing `firesWhen` edges (the ConditionalContext
  * primitive). Each entry carries the synthetic conditionContextId and
  * the parsed expression so the renderer can inline the predicate
  * without an extra graph traversal. The caller may render this list
@@ -388,7 +387,7 @@ export interface WhatIfDeactivateFlowOutput {
  * The verbatim disclosure surfaced in every response. Frozen so the
  * test suite can assert the exact string; rephrasing during rendering
  * is a code-review concern, not silent drift. The phrasing mirrors
- * R2a's `what-if-change-field-type.ts` disclosure to keep the v2.3
+ * `what-if-change-field-type.ts` disclosure to keep the
  * tool surface uniform.
  */
 const DISCLOSURE =
@@ -533,7 +532,7 @@ const classifyOutgoingEdge = (
     case 'sendsEmail':
       return { category: 'metadata-blocker', verdict: 'blocking' };
     case 'references':
-      // R6-02: an OUTGOING subflow reference (`referenceKind: 'subflow'`) is
+      // An OUTGOING subflow reference (`referenceKind: 'subflow'`) is
       // this Flow invoking ANOTHER Flow. Deactivating this Flow silently stops
       // that subflow (and every effect it performs) from running in this Flow's
       // path — a metadata-blocker, same tier as a lost DML/trigger. Non-subflow
@@ -562,16 +561,16 @@ const outgoingVerb = (edgeType: EdgeType): string =>
 
 /**
  * Synthesise the per-finding `explanation` string. The phrasing
- * mirrors R2a's `what-if-change-field-type.ts` `buildExplanation` so
+ * mirrors `what-if-change-field-type.ts` `buildExplanation` so
  * the renderer can rely on a uniform "the Flow does X to component Y"
- * shape across the v2.3 surface.
+ * shape across the surface.
  */
 const buildExplanation = (
   toNode: Node,
   edge: Edge,
   flowApiName: string,
 ): string => {
-  // R6-02: an outgoing subflow reference reads as "invokes subflow" so the
+  // An outgoing subflow reference reads as "invokes subflow" so the
   // renderer distinguishes a nested-Flow call from a generic reference.
   if (
     edge.edgeType === 'references' &&
@@ -669,14 +668,14 @@ const isVerdictBearing = (impact: { readonly category: Category }): boolean =>
 
 /**
  * Aggregate the verdict-bearing impacts into the STRUCTURAL severity. The
- * cascade mirrors R2a's `aggregateVerdict`:
+ * cascade mirrors `aggregateVerdict`:
  *   - no verdict-bearing impact → `safe` (plus `notProvenHarmless`).
  *   - any `metadata-blocker` OR `embedded-caller` → `blocking`.
  *   - any non-blocker `code-needs-update` / `integration-touch` → `risky`.
  *   - only `configuration-only` / `broken-caller` → `risky` (the finding
  *     still warrants attention even though the deploy itself won't fail).
  *
- * R6-02: `broken-caller` impacts (parent Flows that call THIS Flow as a
+ * `broken-caller` impacts (parent Flows that call THIS Flow as a
  * subflow) fall through to `risky` HERE — the escalation to `blocking` for
  * an ACTIVE parent is applied by the caller
  * ({@link whatIfDeactivateFlowFromNode}) via `escalateForActiveCallers`,
@@ -753,7 +752,7 @@ const resolveRuntimeState = (
 
 /**
  * Escalate a computed verdict to `blocking` when at least one broken caller is
- * an ACTIVE parent Flow (R6-02). An active parent invokes this subflow in a
+ * an ACTIVE parent Flow. An active parent invokes this subflow in a
  * currently-running path, so deactivating the subflow breaks that parent at
  * runtime — the verdict must not sit below `blocking`. Non-active parents
  * (Draft / Obsolete / InvalidDraft) are still surfaced as `broken-caller`
@@ -851,7 +850,7 @@ const readCallerStatus = (node: Node): string => {
 };
 
 /**
- * R6-02 (+ embedded-caller extension): the INCOMING side. Walk `references`
+ * The INCOMING side (+ embedded-caller extension). Walk `references`
  * edges pointing AT this Flow and split them by `referenceKind` into the two
  * real incoming dependents this vault can name:
  *
@@ -1191,7 +1190,7 @@ const whatIfDeactivateFlowFromNode = async (
     });
   }
 
-  // R6-02 (+ embedded-caller): the INCOMING side. Parent Flows that invoke
+  // The INCOMING side (+ embedded-caller). Parent Flows that invoke
   // THIS Flow as a subflow, and FlexiPages whose Flow component embeds THIS
   // Flow, are both dependents on deactivation — the single outgoing-edge walk
   // above is blind to them, which is exactly why a called subflow (or an

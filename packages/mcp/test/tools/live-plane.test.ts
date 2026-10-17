@@ -85,7 +85,7 @@ afterAll(() => {
   rmSync(consentDir, { recursive: true, force: true });
 });
 
-// CR-09: every live read now routes through the shared per-session budget +
+// Every live read now routes through the shared per-session budget +
 // result cache. Reset both before each test so (a) cumulative spend across the
 // file's many handler calls never trips budgetExceededError, and (b) a prior
 // test's cached result for a reused (org, SOQL) key cannot leak into the next.
@@ -1324,12 +1324,12 @@ describe('liveReportUsageHandler', () => {
     expect(r.value.data.reports.find((x) => x.name === 'Old Report')?.stale).toBe(true);
     expect(r.value.data.rendered).toContain('stale');
     expect(r.value.data.trust.provenance).toBe('live_org');
-    // CR-P3-7: within budget, the disclosure is additive and stays off.
+    // Within budget, the disclosure is additive and stays off.
     expect(r.value.data.budgetStopped).toBe(false);
     expect(r.value.data.rendered.toLowerCase()).not.toContain('budget');
   });
 
-  it('CR-P3-7: names the budget (not a false "0 of N") when the budget runs out on the stale-count query', async () => {
+  it('names the budget (not a false "0 of N") when the budget runs out on the stale-count query', async () => {
     process.env.SFI_LIVE_QUERY_BUDGET = '1';
     // FIRST query (COUNT Report) succeeds; the stale-count query is over budget.
     const r = await liveReportUsageHandler(ctx, { liveEnabled: true, staleDays: 90 }, exec);
@@ -1458,7 +1458,7 @@ describe('liveFolderAccessHandler', () => {
     expect(r.value.data.budgetStopped).toBe(false);
   });
 
-  it('CR-P3-8: surfaces the budget when the (un-gated) total COUNT budget-stops; verdict stays correct', async () => {
+  it('surfaces the budget when the (un-gated) total COUNT budget-stops; verdict stays correct', async () => {
     process.env.SFI_LIVE_QUERY_BUDGET = '1';
     // FIRST query (detail) succeeds; the COUNT Folder is over budget.
     const r = await liveFolderAccessHandler(ctx, { liveEnabled: true }, exec);
@@ -1554,7 +1554,7 @@ describe('liveEmailTemplateUsageHandler', () => {
     expect(r.value.data.budgetStopped).toBe(false);
   });
 
-  it('CR-P3-8: surfaces the budget when the (un-gated) total COUNT budget-stops; verdicts stay correct', async () => {
+  it('surfaces the budget when the (un-gated) total COUNT budget-stops; verdicts stay correct', async () => {
     process.env.SFI_LIVE_QUERY_BUDGET = '1';
     // FIRST query (detail) succeeds; the COUNT EmailTemplate is over budget.
     const r = await liveEmailTemplateUsageHandler(ctx, { liveEnabled: true, staleDays: 180 }, exec);
@@ -1684,7 +1684,7 @@ describe('liveSetupAuditTrailHandler', () => {
     expect(r.value.data.rendered.toLowerCase()).not.toContain('budget');
   });
 
-  it('CR-P3-8: surfaces the budget when the (un-gated) detail query budget-stops; count stays exact', async () => {
+  it('surfaces the budget when the (un-gated) detail query budget-stops; count stays exact', async () => {
     process.env.SFI_LIVE_QUERY_BUDGET = '1';
     // FIRST query (COUNT) succeeds; the detail SELECT is over budget.
     const r = await liveSetupAuditTrailHandler(ctx, { liveEnabled: true, days: 30 }, exec);
@@ -1781,7 +1781,7 @@ describe('liveStaleCheckHandler (P5-stale-detection)', () => {
 });
 
 // ===========================================================================
-// CR-09 (H9) — EVERY live read routes through the per-session query budget.
+// EVERY live read routes through the per-session query budget.
 // Before this fix only ~5 hybrid tools decremented the budget; ~20 single-shot
 // live_* tools bypassed it, so the marketed "cannot exhaust your org API limits"
 // safety was a half-truth and live_budget over-claimed. These tests pin the
@@ -1790,7 +1790,7 @@ describe('liveStaleCheckHandler (P5-stale-detection)', () => {
 // budget stop is LEGIBLE, the REST sites count 1, the budget CHECK stays neutral,
 // and live_budget reports the true total across ALL tools.
 // ===========================================================================
-describe('CR-09 — live-plane budget routing (H9)', () => {
+describe('live-plane budget routing', () => {
   /** Counting `sf` mock for the SOQL/describe path; returns a fixed count. */
   const countingExec = (
     totalSize = 3,

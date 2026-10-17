@@ -95,7 +95,7 @@ const seed: ExtractionResult = {
       label: 'SSN',
       parentId: 'CustomObject:Account',
     }),
-    // R5-CLARIFY-riselever: cross-type same-apiName collision — a Flow AND an
+    // Cross-type same-apiName collision — a Flow AND an
     // ApexClass both named "DataSync". Neither has a parent (top-level
     // components). When a user asks "explain DataSync" without a type qualifier,
     // the router currently picks one type over the other without clarifying —
@@ -184,7 +184,7 @@ describe('R4 narrow clarify — scope-vague does NOT fire', () => {
 });
 
 /**
- * R5-CLARIFY-riselever: NEW honest clarify-trigger class —
+ * NEW honest clarify-trigger class —
  * "cross-type single-name collision".
  *
  * When the SAME apiName (e.g. "DataSync") matches components of DIFFERENT
@@ -208,7 +208,7 @@ describe('R4 narrow clarify — scope-vague does NOT fire', () => {
  * throw — assertions validate the shape is well-formed AND that both distinct
  * types remain in the options (no over-confident single-type pick).
  */
-describe('R5-CLARIFY-riselever — cross-type same-name collision fires type-disambiguate', () => {
+describe('cross-type same-name collision fires type-disambiguate', () => {
   it('"explain DataSync" (Flow AND ApexClass same name) blocks with a type-disambiguate clarification', async () => {
     const data = await route({ question: 'explain DataSync' });
     // Must be blocked — the router cannot pick Flow over ApexClass without asking.

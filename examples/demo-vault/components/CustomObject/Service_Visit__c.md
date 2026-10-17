@@ -13,10 +13,12 @@ properties:
   enableHistory: false
   enableReports: true
   enableSearch: false
+  externalSharingModel: null
   label: Service Visit
   nameFieldLabel: Service Visit Number
   nameFieldType: AutoNumber
   pluralLabel: Service Visits
+  recordPageOverrides: []
   sharingModel: Private
   visibility: Public
 sourcePath: source/main/default/objects/Service_Visit__c/Service_Visit__c.object-meta.xml
@@ -39,9 +41,11 @@ A field service visit to a completed installation (inspection, repair, warranty,
 | enableHistory | `false` |
 | enableReports | `true` |
 | enableSearch | `false` |
+| externalSharingModel | `null` |
 | nameFieldLabel | `Service Visit Number` |
 | nameFieldType | `AutoNumber` |
 | pluralLabel | `Service Visits` |
+| recordPageOverrides | `` |
 | sharingModel | `Private` |
 | visibility | `Public` |
 

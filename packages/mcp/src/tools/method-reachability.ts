@@ -47,7 +47,7 @@
  *   - `likely-dead-code`: NEITHER an entry point NOR a test class
  *     reaches it within the depth cap.
  *
- * **v2.7 honesty boundary**: dynamic dispatch (`Type.forName(...)`)
+ * **Honesty boundary**: dynamic dispatch (`Type.forName(...)`)
  * and reflective invocation are invisible to the heuristic; a class
  * genuinely invoked at runtime via reflection will surface as
  * `likely-dead-code` UNLESS it matches a dynamic-registration classifier
@@ -58,7 +58,7 @@
  *
  * Implementation notes:
  *   - One BFS walks upstream USAGE edges from the target, bounded by
- *     the v2.1 depth-3 cap. Visited set is global; cycles are detected
+ *     the depth-3 cap. Visited set is global; cycles are detected
  *     automatically.
  *   - The walk visits each id at most once. Cycles do not loop.
  *   - The root itself is also checked for entry-point classifiers
@@ -99,7 +99,7 @@ const REACHABILITY_BFS_DEPTH = 3;
 const APEX_CLASS_PREFIX = 'ApexClass:';
 const APEX_TRIGGER_PREFIX = 'ApexTrigger:';
 
-/** Verbatim v2.7 honesty disclosure. */
+/** Verbatim honesty disclosure. */
 const REACHABILITY_DISCLOSURE =
   'method_reachability works at CLASS granularity. Dynamic dispatch (Type.forName) and reflective invocation are invisible — a class genuinely invoked at runtime via reflection or framework wiring will surface as likely-dead-code. Trigger framework base classes (TriggerHandler, fflib) may be partially invisible. BFS is capped at depth 3.';
 

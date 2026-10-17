@@ -111,7 +111,7 @@ describe('classifyForDemandRetrieve (P7-demand-retrieve gate)', () => {
   });
 });
 
-describe('markDemandQueueDrains (P13-STAGED-demand-queue)', () => {
+describe('markDemandQueueDrains', () => {
   it('marks retrieved / already-present / refused outcomes; unknown ids are ignored at read', async () => {
     const { mkdtemp, rm } = await import('node:fs/promises');
     const { tmpdir } = await import('node:os');

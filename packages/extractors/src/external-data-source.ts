@@ -112,9 +112,9 @@ const validateRoot = (
  * Emits one `references` edge from this data source to
  * `AuthProvider:{authProvider}` when the `<authProvider>` element is
  * set. The edge confidence is `declared` (the binding is explicit in
- * the metadata XML); v1.5 does NOT validate that the named provider
+ * the metadata XML); this does NOT validate that the named provider
  * exists in the extracted set — dangling edges are surfaced per the
- * v0.1 dangling-edge policy. The edge's `properties.role` is `'auth'`
+ * dangling-edge policy. The edge's `properties.role` is `'auth'`
  * per the task spec.
  *
  * Error cases (per vendored `ExternalDataSource.md`):
@@ -178,7 +178,7 @@ export const extractExternalDataSource = async (
     // Per `ExternalDataSource.md`: `<label>` is optional in the XML;
     // when absent, label falls back to the API name (consistent with
     // RemoteSiteSetting / CspTrustedSite / NetworkAccess behaviour
-    // across the v1.5 family).
+    // across the family).
     label: labelElement ?? apiName,
     parentId: null,
     sourcePath: path,

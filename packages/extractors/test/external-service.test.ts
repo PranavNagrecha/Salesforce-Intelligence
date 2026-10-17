@@ -116,7 +116,7 @@ info:
     itHarness('reads from <ExternalServiceRegistration> root but emits ExternalService:* canonical ID', async () => {
       // Per ExternalService.md: the XML root tag is
       // ExternalServiceRegistration (matching the metadata type
-      // name) but the v1.5 ComponentType is the shorter
+      // name) but the ComponentType is the shorter
       // ExternalService. The canonical ID prefix is ExternalService.
       const fixtureAbsPath = resolve(HARNESS_ROOT, ORDER_FIXTURE_PATH_REL);
       const result = await extractExternalService(fixtureAbsPath);

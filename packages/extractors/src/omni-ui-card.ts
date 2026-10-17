@@ -16,7 +16,7 @@ import { readStaticSoql } from './omnistudio/soql.js';
 import { deriveComponentApiName } from './path-utils.js';
 
 /**
- * v3.2 OmniUiCard (FlexCard) extractor.
+ * OmniUiCard (FlexCard) extractor.
  *
  * Reads a single Salesforce Industries `*.ouc-meta.xml` file — the
  * widget-canvas primitive of OmniStudio — and produces:
@@ -35,7 +35,7 @@ import { deriveComponentApiName } from './path-utils.js';
  *           · `OmniScript` → `OmniScript:{omniType.Name}` (the designer's
  *             canonical `{Type}/{SubType}/{Language}` form, verbatim;
  *             resolution to a vaulted OmniScript id is deferred to the
- *             v3.2 R3 MCP tool).
+ *             MCP tool).
  *           · `Integration Procedure` →
  *             `OmniIntegrationProcedure:{integrationProcedureKey}`.
  *           · `DataAction` whose stringified-JSON `message` blob wraps a
@@ -53,7 +53,7 @@ import { deriveComponentApiName } from './path-utils.js';
  *     card `dataSource` and DataAction `message` blobs, for consistency
  *     with the OmniScript / Integration Procedure extractors (which emit
  *     `dispatchesOmniAction` -> `OmniDataTransform:{bundle}` for their
- *     DataRaptor steps). This closes the v3.2 gap where a card's
+ *     DataRaptor steps). This closes the gap where a card's
  *     DataRaptor dependency was invisible to impact analysis.
  *   - `Web Page` and `Custom` actions carry no OmniStudio target and stay
  *     silent.
@@ -78,11 +78,10 @@ import { deriveComponentApiName } from './path-utils.js';
  * The `<propertySetConfig>` element carries an HTML-entity-escaped JSON
  * blob. fast-xml-parser (with the configured `processEntities`) decodes
  * `&quot;` → `"` so the input to `JSON.parse` is plain JSON. Malformed
- * blobs become per-card warnings rather than hard failures — the v3.2
+ * blobs become per-card warnings rather than hard failures — the
  * "best-effort JSON parsing" honesty axis.
  *
  * @see docs/vendor/salesforce-metadata/OmniUiCard.md
- * @see PLAN-v3.2.md §3 (contracts), §4 (sfi.omniuicard_widget_breakdown).
  */
 const OMNI_UI_CARD_FILE_SUFFIX = '.ouc-meta.xml';
 const ROOT_ELEMENT = 'OmniUiCard';
@@ -310,7 +309,7 @@ const collectStates = (
     };
     // The widget root is `components.layer-0.children`. The doc shows
     // this nesting because FlexCards support multiple visual layers
-    // historically; v3.2 only walks `layer-0` (production cards in the
+    // historically; this only walks `layer-0` (production cards in the
     // recon use the layer-0 root exclusively).
     const componentsRaw = stateObj['components'];
     if (typeof componentsRaw === 'object' && componentsRaw !== null) {
@@ -540,8 +539,8 @@ const buildDataSourceEdge = (
  *   - `stateAction.type === 'OmniScript'` →
  *     `OmniScript:{stateAction.omniType.Name}`. The omniType.Name uses
  *     the designer's `{Type}/{SubType}/{Language}` canonical form;
- *     v3.2 surfaces it verbatim. Resolution to a vaulted OmniScript id
- *     is the v3.2 R3 MCP tool's job.
+ *     this surfaces it verbatim. Resolution to a vaulted OmniScript id
+ *     is the MCP tool's job.
  *   - `stateAction.type === 'Integration Procedure'` →
  *     `OmniIntegrationProcedure:{stateAction.integrationProcedureKey}`.
  *   - `stateAction.type === 'DataAction'` whose `message` blob wraps a
@@ -757,7 +756,7 @@ export const extractOmniUiCard = async (
   if (!xmlResult.ok) return xmlResult;
 
   // Local trusted disk content; XXE not a concern. FlexCards are the
-  // most entity-heavy v3.2 metadata shape: a single card commonly
+  // most entity-heavy metadata shape: a single card commonly
   // carries 200+ widgets × ~10 entity references each, and the
   // largest Globex FlexCards (NoticeDetails / common footers /
   // PreScreenerResults) hit 20k+ entity expansions. Raised to 50000

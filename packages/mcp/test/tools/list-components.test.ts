@@ -634,13 +634,13 @@ describe('listComponentsHandler formula-field classification', () => {
 });
 
 // =============================================================================
-// CR-22 — single-axis continuation cursor. list_components pages
+// single-axis continuation cursor. list_components pages
 // listNodesByType DIRECTLY by SQL OFFSET, so `o` already IS the SQL offset (it
 // natively reaches node 501+); no separate scan axis. A truncated page emits an
 // opaque nextCursor + a TRUE total (countNodesByType); a whole-fits final page
 // is byte-identical.
 // =============================================================================
-describe('listComponentsHandler — continuation cursor (CR-22)', () => {
+describe('listComponentsHandler — continuation cursor', () => {
   it('a final page (hasMore=false) omits nextCursor/pageInfo (byte-identical)', async () => {
     // All 7 CustomFields fit in one default page → hasMore is false → no cursor.
     const r = await listComponentsHandler(ctx, { type: 'CustomField' });
@@ -1014,7 +1014,7 @@ describe('listComponentsInputSchema', () => {
   it('accepts an empty object (handler enforces the type requirement)', () => {
     // Zod itself does not reject this — the handler emits the
     // `invalid-query` envelope. Splitting the validation lets the schema
-    // stay reusable for a v0.2 list-all mode.
+    // stay reusable for a list-all mode.
     const parsed = listComponentsInputSchema.safeParse({});
     expect(parsed.success).toBe(true);
   });

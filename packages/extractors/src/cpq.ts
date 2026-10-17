@@ -25,7 +25,7 @@ type CpqComponentType =
   | 'CpqConfigurationAttribute';
 
 /**
- * The five CPQ object-type prefixes v2.6a recognizes against the
+ * The five CPQ object-type prefixes the layer recognizes against the
  * underlying record's apiName.
  *
  * Each prefix maps a CustomMetadataRecord or CustomSettingRecord whose
@@ -33,7 +33,7 @@ type CpqComponentType =
  * The recognition is purely structural — the SBQQ__ managed-package
  * namespace is the fingerprint, not a declared Salesforce metadata
  * marker. Confidence on every emission is `heuristic` per the
- * v2.1 recognizer convention.
+ * recognizer convention.
  */
 const CPQ_RECOGNITION_RULES: ReadonlyArray<{
   readonly prefix: string;
@@ -217,7 +217,7 @@ const PROPERTY_DERIVATIONS: Readonly<
 
 /**
  * One field/value tuple in the underlying record's values mirror. The
- * shape mirrors the v1.6 R2 extractors' `ValueEntry` so consumers can
+ * shape mirrors the extractors' `ValueEntry` so consumers can
  * round-trip a CPQ node back to its underlying CMD/CSR record without
  * re-reading the source XML.
  */
@@ -229,7 +229,7 @@ interface ValueEntry {
 }
 
 /**
- * Decide whether a record's apiName matches one of the five v2.6a CPQ
+ * Decide whether a record's apiName matches one of the five CPQ
  * prefixes. Returns the recognized CPQ ComponentType or `null` for non-
  * CPQ records.
  */
@@ -243,7 +243,7 @@ const recognizeCpqType = (apiName: string): CpqComponentType | null => {
 /**
  * Derive a single property from the underlying record's values mirror.
  * Returns the field's value verbatim when found, `null` (or `false`
- * when `defaultToFalse`) otherwise. Masked values per v1.6's
+ * when `defaultToFalse`) otherwise. Masked values per the
  * `isMasked: true` shape collapse to the default — the recognition
  * layer MUST NOT fabricate the underlying value.
  */
@@ -267,7 +267,7 @@ const deriveProperty = (
 /**
  * Extract the values mirror from an underlying record node's
  * `properties.values`. Tolerates the property being absent or
- * malformed (returns an empty array) — every v1.6 R2 extractor emits a
+ * malformed (returns an empty array) — every extractor emits a
  * `values: []` even for empty records, so a missing property indicates
  * an upstream extraction issue rather than a record with no fields.
  */
@@ -333,8 +333,8 @@ const buildCpqNode = (
 /**
  * Build the `parentOf` edge connecting the underlying CustomObject
  * (the SBQQ__-prefixed type definition) to the new CPQ node. Mirrors
- * the v1.6 CustomField → CustomObject pattern; no new EdgeType is
- * introduced. Confidence `heuristic` per the v2.6a recognition axis.
+ * the CustomField → CustomObject pattern; no new EdgeType is
+ * introduced. Confidence `heuristic` per the recognition axis.
  */
 const buildParentEdge = (
   underlyingRecord: Node,
@@ -352,7 +352,7 @@ const buildParentEdge = (
 };
 
 /**
- * Specialize a v1.6 underlying-record `ExtractionResult` by recognizing
+ * Specialize an underlying-record `ExtractionResult` by recognizing
  * any CPQ-prefixed records and emitting sibling CPQ-typed nodes plus
  * their `parentOf` edges. Non-CPQ records pass through unchanged. The
  * input result's nodes and edges are preserved verbatim; the
@@ -394,8 +394,8 @@ export const specializeCpq = (
 
 /**
  * Extract a CPQ-specialized result from a Custom Metadata record file
- * (`.md-meta.xml`). Calls the underlying v1.6 R2 extractor and then
- * applies the v2.6a specialization layer. Non-CPQ records (any
+ * (`.md-meta.xml`). Calls the underlying extractor and then
+ * applies the specialization layer. Non-CPQ records (any
  * apiName without an `SBQQ__` recognition prefix) round-trip through
  * unchanged — the same nodes and edges the underlying extractor
  * emitted.
@@ -425,8 +425,8 @@ export const extractCpqCustomMetadataRecord = async (
 
 /**
  * Extract a CPQ-specialized result from a Custom Setting record file
- * (`.dataset-meta.xml`). Calls the underlying v1.6 R2 extractor and
- * then applies the v2.6a specialization layer. Behavior is identical
+ * (`.dataset-meta.xml`). Calls the underlying extractor and
+ * then applies the specialization layer. Behavior is identical
  * to `extractCpqCustomMetadataRecord` except for the underlying
  * extractor; the recognition layer treats both record shapes
  * uniformly.

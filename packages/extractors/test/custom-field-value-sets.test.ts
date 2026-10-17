@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { extractCustomField } from '../src/custom-field.js';
 
 /**
- * P14-USAGE-gvs-edge (closes FINDINGS P-GVS-EDGE): GlobalValueSet-driven
+ * edge (closes FINDINGS P-GVS-EDGE): GlobalValueSet-driven
  * picklists emit the `usesValueSet` edge that the contracts declared and the
  * docs described for two minor versions while no code emitted it. Fully
  * synthetic fixtures — the maintainer-only custom-field.test.ts (untracked,
@@ -27,7 +27,7 @@ const writeFieldXml = async (
   return { dir, path };
 };
 
-describe('GlobalValueSet-driven picklists (P14-USAGE-gvs-edge)', () => {
+describe('GlobalValueSet-driven picklists', () => {
   const GVS_FIELD_XML = `<?xml version="1.0" encoding="UTF-8"?>
 <CustomField xmlns="http://soap.sforce.com/2006/04/metadata">
     <fullName>Region__c</fullName>

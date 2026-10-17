@@ -51,7 +51,7 @@ describe('extractOmniDataTransform', () => {
       expect(node.label).toBe(
         'Synthetic v3.2 R2c fixture — extracts a single Contact by Id to a JSON payload, exercising the colon-prefix alias convention plus the SObject-element edge surface.',
       );
-      // Per-type properties documented in PLAN-v3.2 §3 + the vendored
+      // Per-type properties documented in the vendored
       // OmniDataTransform.md.
       expect(node.properties['name']).toBe('SampleExtractMapper');
       expect(node.properties['uniqueName']).toBe('SampleExtractMapper_1');

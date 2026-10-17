@@ -1,19 +1,19 @@
 /**
- * Vault registry for v3.1 cross-org tooling.
+ * Vault registry for cross-org tooling.
  *
- * v3.1 opens the "compare multiple orgs" surface: sandbox-vs-prod
+ * This opens the "compare multiple orgs" surface: sandbox-vs-prod
  * comparison, prod-vs-prod (multi-customer) audit, or "what changed
  * since the last vault refresh?" diffs. The registry is the load-
  * bearing primitive — a small top-level `registry.json` that maps
  * vault aliases (`acme-prod`, `acme-sandbox`) to absolute on-disk
- * paths. Every v3.1 cross-vault MCP tool resolves through it.
+ * paths. Every cross-vault MCP tool resolves through it.
  *
- * Layout (per PLAN-v3.1 §3):
+ * Layout:
  *
  *   ~/sf-intelligence-vaults/
  *     registry.json            (the registry file)
- *     acme-prod/               (one v3.0-shape vault)
- *     acme-sandbox/            (another v3.0-shape vault)
+ *     acme-prod/               (one vault)
+ *     acme-sandbox/            (another vault)
  *
  * The registry is intentionally minimal. Per-vault state (refresh
  * timestamps, source-tree hashes, component counts) is read from each
@@ -36,7 +36,7 @@ import { err, ok, type Result } from '@sf-intelligence/core';
 
 import { loadManifest } from './manifest.js';
 
-/** Schema version embedded in every `registry.json` file. v3.1 ships 1.0. */
+/** Schema version embedded in every `registry.json` file. Currently 1.0. */
 const REGISTRY_VERSION = '1.0' as const;
 
 /** Suffix used for the temporary file in `saveRegistry`'s atomic write. */
@@ -412,7 +412,7 @@ export const saveRegistry = async (
  * `force` is true.
  *
  * The `vaultPath` must be an absolute path. The function does NOT
- * verify that the path holds a valid v3.0-shape vault — that's a
+ * verify that the path holds a valid vault — that's a
  * downstream concern (the cross-vault tools surface a per-call
  * disclosure when they read a registered vault that turns out to be
  * empty or unrefreshed). This separation keeps `registerVault` cheap
@@ -495,7 +495,7 @@ export const registerVault = async (
 const VAULT_DIR_NAME = 'org-kb' as const;
 
 /**
- * R7-W9 — normalize a registered vault path so an alias resolves whether
+ * normalize a registered vault path so an alias resolves whether
  * or not the path the caller registered included the `org-kb` suffix.
  *
  * `vaultPaths()` (in `layout.ts`) expects its input to be the vault ROOT
@@ -514,7 +514,7 @@ const VAULT_DIR_NAME = 'org-kb' as const;
  * refreshed" rather than "wrong path" (see R6-12's real-vault
  * verification, which discovered exactly this on a live registry and
  * worked around it by registering CORRECTED aliases rather than fixing
- * resolution — R6-HANDOFF.md, `wt2-vizdiff`).
+ * resolution).
  *
  * Both forms now resolve to the same working vault root:
  *
@@ -547,7 +547,7 @@ const normalizeVaultRootPath = (rawPath: string): string => {
  * carrying the verbatim pointer the skill surfaces (`sfi register-vault
  * <alias> <path>`).
  *
- * R7-W9: the returned path is normalized via {@link normalizeVaultRootPath}
+ * the returned path is normalized via {@link normalizeVaultRootPath}
  * so a registration that named the `org-kb` PARENT directory instead of the
  * vault itself still resolves to a working vault root.
  *
@@ -589,7 +589,7 @@ export const resolveVault = async (
  *
  * Sorted by alias ASC for stable rendering.
  *
- * R7-W9: each entry's `path` is normalized via {@link normalizeVaultRootPath}
+ * each entry's `path` is normalized via {@link normalizeVaultRootPath}
  * before the manifest read, so an `org-kb`-parent registration reports real
  * freshness data instead of a false "never refreshed" (`null` fields).
  *
@@ -645,7 +645,7 @@ export const listRegisteredVaults = async (
  * `vaultA: VaultRef` / `vaultB: VaultRef` fields in their responses
  * — callers see the freshness skew explicitly.
  *
- * R7-W9: `path` is normalized via {@link normalizeVaultRootPath}, matching
+ * `path` is normalized via {@link normalizeVaultRootPath}, matching
  * `resolveVault` / `listRegisteredVaults` — see that helper's JSDoc.
  */
 export const getVaultRef = async (
