@@ -1,4 +1,5 @@
 ---
+import measured from "../data/measured.json";
 import InfoPage from "../layouts/InfoPage.astro";
 import CtaBlock from "../components/CtaBlock.astro";
 import FaqBlock from "../components/FaqBlock.astro";
@@ -137,7 +138,7 @@ const faqs = [
       {siteData.gates.map((g) => <li>{g}</li>)}
     </ul>
     <p class="narrow">Speed limits are tested too: graph import, {budgets.graphImport}; a full refresh, {budgets.fullRefresh}; name lookup, {budgets.resolve}.</p>
-    <p class="narrow">Before each release, a second gate runs on the maintainer’s machine: the integration suites, plus checks of real verdicts against real production orgs, asked deliberately hostile questions. Every bug found that way becomes a test. Those orgs’ names and metadata are never published; a leak scan fails the build if a real org name turns up.</p>
+    <p class="narrow">Before each release, a second gate runs on the maintainer’s machine: the integration suites, plus checks of real verdicts against real production orgs, asked deliberately hostile questions. Every bug found that way becomes a test. Two more checks run on the release candidate: the same {measured.ab.questionCount} admin questions asked of plain Claude Code and of Claude Code with the server on a real org, graded against ground truth (<a href="/compare/plain-claude-code">the {measured.measuredFor} numbers</a>), and a fresh install from the packed package by someone following only the README ({Math.floor(measured.onboarding.firstCitedAnswerSeconds / 60)} min {measured.onboarding.firstCitedAnswerSeconds % 60} s to the first cited answer on {measured.measuredFor}). Anything wrong on an advertised question blocks the release. Those orgs’ names and metadata are never published; a leak scan fails the build if a real org name turns up.</p>
   </section>
 
   <section class="block" aria-labelledby="limits">

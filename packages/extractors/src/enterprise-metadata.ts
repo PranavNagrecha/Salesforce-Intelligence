@@ -2448,7 +2448,7 @@ export const extractQueueRoutingConfig = (
 // <assignments><users> sub-block has no User ComponentType to target").
 // Folder/suffix + the <assignments> shape below were verified against REAL
 // scoped retrieves (`sf project retrieve start --metadata
-// PresenceUserConfig`) from two live orgs (a production-scale university
+// PresenceUserConfig`) from two live orgs (a production-scale real-org
 // sandbox and a small services org) — one `<assignments>` block wrapping
 // optional `<profiles><profile>` (repeatable) and optional `<users><user>`
 // (repeatable); the org-default config in BOTH verification orgs carried no

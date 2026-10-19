@@ -1,4 +1,5 @@
 ---
+import measured from "../../data/measured.json";
 import InfoPage from "../../layouts/InfoPage.astro";
 import CtaBlock from "../../components/CtaBlock.astro";
 import site from "../../data/site.ts";
@@ -9,6 +10,7 @@ const description =
   "How free, local sf-intelligence compares with Salesforce's MCP servers, Elements.cloud, Clientell, dx0, Hubbl, Metazoa and Sweep, and when to pick each one.";
 
 const pages = [
+  { href: "/compare/plain-claude-code", name: "plain Claude Code", text: `The same ${measured.ab.questionCount} questions on a real org, with and without the server: ${measured.ab.sfiCorrect}/${measured.ab.questionCount} and ${measured.ab.plainCorrect}/${measured.ab.questionCount} correct, ${measured.ab.sfiMedianSeconds} s against ${measured.ab.plainMedianSeconds} s, citations and quantified coverage on one side.` },
   { href: "/compare/salesforce-dx-mcp", name: "Salesforce’s MCP servers", text: "Salesforce’s servers act on the org: records, deploys, tests. sf-intelligence explains how it’s built. Many people run both." },
   { href: "/compare/elements-cloud", name: "Elements.cloud", text: "A paid metadata platform that now has an MCP server too. The differences left are price, where the metadata lives, and scope." },
   { href: "/compare/clientell", name: "Clientell", text: "A hosted org map for AI assistants from $249 a month, with team memory and work-tool links." },

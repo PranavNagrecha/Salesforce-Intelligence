@@ -400,6 +400,20 @@ if (existsSync(join(root, 'SECURITY.md'))) {
       );
     }
   }
+  // The site states measured numbers (plain Claude Code vs with the server; a
+  // stranger's first install). They live in one file and every page reads it,
+  // so the only way they go stale is a release that skips the measurement.
+  // Refuse that: the file must name the version being shipped.
+  const measuredRel = 'website/src/data/measured.json';
+  if (existsSync(join(root, measuredRel))) {
+    const measuredFor = JSON.parse(readText(measuredRel)).measuredFor;
+    if (measuredFor !== expected) {
+      errors.push(
+        `${measuredRel} measuredFor is ${measuredFor} but the release is ${expected} — ` +
+          'run AB-PLAIN-VS-SFI and ONBOARDING-STRANGER on this release candidate (RELEASING.md step 1) and write their numbers into that file; the site and llms.txt read it',
+      );
+    }
+  }
 }
 
 // --- 2. SERVER_VERSION resolve (shipped path) ---

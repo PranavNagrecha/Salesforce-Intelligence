@@ -1,4 +1,5 @@
 ---
+import measured from "../data/measured.json";
 import Base from "../layouts/Base.astro";
 import CmdText from "../components/CmdText.astro";
 import AnswerTabs from "../components/AnswerTabs.astro";
@@ -110,7 +111,7 @@ const faqs = [
       <div class="section-head">
         <span class="kicker">Real answers</span>
         <h2 id="answers-title">Straight answers, with the receipts.</h2>
-        <p>Three questions asked of the built-in demo org, Verdant, a solar-installation company. Every component in an answer is named, so you can check it yourself.</p>
+        <p>Three questions asked of the built-in demo org, Verdant, a solar-installation company. Every component in an answer is named, so you can check it yourself. Measured on a real org before {measured.measuredFor}: the same {measured.ab.questionCount} admin questions, {measured.ab.sfiCorrect} of {measured.ab.questionCount} correct with the server and {measured.ab.plainCorrect} of {measured.ab.questionCount} without, a median {measured.ab.sfiMedianSeconds} seconds against {measured.ab.plainMedianSeconds}, with the coverage spelled out (<a href="/compare/plain-claude-code">the numbers</a>).</p>
       </div>
       <AnswerTabs answers={homeAnswers} idPrefix="home" showTool={false} showIds={false} />
       <p class="more"><a class="text-link" href="/demo">See all the demo answers, including the tool calls <span aria-hidden="true">&rarr;</span></a></p>

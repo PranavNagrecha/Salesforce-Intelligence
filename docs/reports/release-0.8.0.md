@@ -1,6 +1,6 @@
 # Release report: 0.8.0 (2026-10-19)
 
-Anonymized. No customer org, class, field or vault name appears here. Counts come from re-extracting a copy of a real university sandbox (a managed-package org with a trigger framework) and a real OmniStudio sandbox with the release build, and from the bundled demo org.
+Anonymized. No customer org, class, field or vault name appears here. Counts come from re-extracting a copy of a real sandbox (a managed-package org with a trigger framework) and a real OmniStudio sandbox with the release build, and from the bundled demo org.
 
 ## What shipped
 

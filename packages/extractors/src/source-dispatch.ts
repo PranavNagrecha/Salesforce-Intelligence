@@ -388,7 +388,7 @@ export const dispatchSourceFile = (
   // ("Bot's nested folder-per-bot layout doesn't fit the flat generic
   // pattern"). Folder/suffixes verified against a real scoped retrieve
   // (`sf project retrieve start --metadata Bot`) from a production-scale
-  // university sandbox: both `.bot-meta.xml` (the definition) AND every
+  // real-org sandbox: both `.bot-meta.xml` (the definition) AND every
   // `.botVersion-meta.xml` (one per version) land under the SAME nested
   // `bots/{BotName}/` directory from that single retrieve — no separate
   // `--metadata BotVersion` request is needed or issued. The `bots`

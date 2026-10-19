@@ -30,7 +30,7 @@ cta:
   question: "What happens when I save a Project__c record?"
 ---
 
-0.7.0 finished an external review. 0.8.0 started with a harder test: a plain Claude Code session reading the raw metadata of a real university sandbox, against the same session with sf-intelligence attached, on eight questions an admin actually asks. Plain Claude answered all eight correctly. With the product, six. The two it lost were the product's own fault. This release fixes those, then fixes the same class of mistake everywhere else we could find it. Nothing was added.
+0.7.0 finished an external review. 0.8.0 started with a harder test: a plain Claude Code session reading the raw metadata of a real sandbox, against the same session with sf-intelligence attached, on eight questions an admin actually asks. Plain Claude answered all eight correctly. With the product, six. The two it lost were the product's own fault. This release fixes those, then fixes the same class of mistake everywhere else we could find it. Nothing was added.
 
 ## 1. "What happens when I save this record?" is right on a framework org
 

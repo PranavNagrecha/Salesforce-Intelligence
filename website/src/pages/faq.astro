@@ -1,4 +1,5 @@
 ---
+import measured from "../data/measured.json";
 import InfoPage from "../layouts/InfoPage.astro";
 import CtaBlock from "../components/CtaBlock.astro";
 import FaqBlock, { type Faq } from "../components/FaqBlock.astro";
@@ -36,7 +37,7 @@ const groups: { id: string; label: string; faqs: Faq[] }[] = [
     faqs: [
       {
         q: "How is this different from asking Claude or ChatGPT on its own?",
-        a: "On its own, an AI answers from general Salesforce knowledge, which is often wrong about your org. With sf-intelligence it answers from your org’s actual setup, names each component it relies on, and asks which one you mean when a name matches more than one thing.",
+        a: `On its own, an AI answers from general Salesforce knowledge, which is often wrong about your org. With sf-intelligence it answers from your org’s actual setup, names each component it relies on, and asks which one you mean when a name matches more than one thing. We measure this before each release: on a real org, plain Claude Code reading the metadata files answered ${measured.ab.plainCorrect} of ${measured.ab.questionCount} admin questions correctly and Claude Code with sf-intelligence ${measured.ab.sfiCorrect} of ${measured.ab.questionCount}; the product answered in a median ${measured.ab.sfiMedianSeconds} seconds against ${measured.ab.plainMedianSeconds}, with component ids and coverage numbers in every answer.`,
       },
       {
         q: "Are the answers always right?",

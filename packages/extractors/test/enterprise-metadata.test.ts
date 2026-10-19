@@ -2686,7 +2686,7 @@ describe('enterprise metadata extractors', () => {
   // Omni-Channel presence configuration — the R6-18 leftover ("the
   // <assignments><users> sub-block has no User ComponentType to target").
   // Fixture shapes mirror REAL retrieves from two live orgs (a
-  // production-scale university sandbox and a small services org) — no real
+  // production-scale real-org sandbox and a small services org) — no real
   // org identifiers reproduced, per the privacy policy.
   describe('PresenceUserConfig', () => {
     it('captures profile assignments as a references edge and user assignments as a property array with NO edge', async () => {

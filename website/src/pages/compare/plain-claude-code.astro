@@ -1,0 +1,94 @@
+---
+import CompareLayout from "../../layouts/CompareLayout.astro";
+import { SFI } from "../../data/compare.ts";
+import measured from "../../data/measured.json";
+
+const ab = measured.ab;
+const m = (s: number) => `${s} s`;
+const faster = Math.round((1 - ab.sfiMedianSeconds / ab.plainMedianSeconds) * 100);
+const rows = [
+  { label: "Correct answers", sfi: `${ab.sfiCorrect} of ${ab.questionCount}`, them: `${ab.plainCorrect} of ${ab.questionCount}` },
+  { label: "Median time per question", sfi: m(ab.sfiMedianSeconds), them: m(ab.plainMedianSeconds) },
+  { label: "Fabricated components or facts", sfi: String(ab.fabrications), them: String(ab.fabrications) },
+  { label: "Component ids in every answer", sfi: "Yes", them: "File paths when it chose to cite them" },
+  { label: "Says what it could not check, with numbers", sfi: `Yes (“${ab.coverageExample}”)`, them: "Caveats without numbers" },
+  { label: "Where the metadata is processed", sfi: SFI.where, them: "On your computer, by the assistant reading the repository" },
+  { label: "Price", sfi: SFI.price, them: "Free beyond the assistant you already pay for" },
+  ...ab.questions.map((q) => ({ label: q.ask, sfi: q.sfi, them: q.plain })),
+];
+const byModel = (measured as any).abByModel ?? [];
+const modelRows = byModel.map((r: any) => ({
+  label: `${r.model} host: correct answers · fabrications · median seconds`,
+  sfi: `${r.sfiCorrect} of ${ab.questionCount} · ${r.sfiFabrications} · ${r.sfiMedianSeconds ?? "—"} s`,
+  them: `${r.plainCorrect} of ${ab.questionCount} · ${r.plainFabrications} · ${r.plainMedianSeconds ?? "—"} s`,
+}));
+const cheaper = byModel.filter((r: any) => r.model !== "Opus");
+const cheaperFaq = cheaper.length
+  ? [{
+      q: "Does a cheaper model do better with sf-intelligence?",
+      a: cheaper.map((r: any) => `${r.model}: ${r.plainCorrect} of ${ab.questionCount} correct alone with ${r.plainFabrications} fabrication${r.plainFabrications === 1 ? "" : "s"}, ${r.sfiCorrect} of ${ab.questionCount} with the server and ${r.sfiFabrications}. ${r.note}`).join(" "),
+    }]
+  : [];
+---
+
+<CompareLayout
+  name="plain Claude Code"
+  title="Claude Code Alone vs With sf-intelligence, Measured"
+  description={`The same ${ab.questionCount} admin questions about a real org, with and without the server: ${ab.sfiCorrect}/${ab.questionCount} and ${ab.plainCorrect}/${ab.questionCount} correct, ${ab.sfiMedianSeconds} s against ${ab.plainMedianSeconds} s, citations and quantified coverage on one side.`}
+  path="/compare/plain-claude-code"
+  heading="Claude Code alone vs Claude Code with sf-intelligence"
+  lede={`A strong assistant reading your metadata repository is the real baseline, so we measure against it before every release. For ${measured.measuredFor} (${measured.measuredOn}), on ${ab.orgShape}: plain Claude Code answered ${ab.plainCorrect} of ${ab.questionCount} admin questions correctly in a median ${ab.plainMedianSeconds} seconds from grep and file reads; with sf-intelligence it answered ${ab.sfiCorrect} of ${ab.questionCount} in a median ${ab.sfiMedianSeconds} seconds, every answer carrying component ids, a verdict word and the coverage it could not see.`}
+  short={`Both arms correct on all ${ab.questionCount}. The product's measured edge on this org is not correctness: it is ${faster}% less time per question, citations a reviewer can check, and honesty with numbers (“${ab.coverageExample}”). ${ab.previousCandidate.label.charAt(0).toUpperCase() + ab.previousCandidate.label.slice(1)}, the product scored ${ab.previousCandidate.sfiCorrect} of ${ab.questionCount}; ${ab.previousCandidate.why}. Those were fixed and the test re-run before the release was tagged.`}
+  rows={[...rows, ...modelRows]}
+  chooseSfi={[
+    `<strong>${faster}% less time</strong> per question; twice as fast on the save-order and field-writer questions, because one tool call replaces a dozen file reads`,
+    "<strong>Component ids in every answer</strong>, so someone else can check it without re-deriving it",
+    "<strong>Verdict words and status</strong>: review, restricted, uncertain, definitely_dead; an obsolete flow marked obsolete, not counted as a live writer",
+    `<strong>Quantified honesty</strong>: “${ab.coverageExample}” is a sentence grep cannot write`,
+  ]}
+  chooseThem={[
+    "You ask these questions a few times a year and the metadata is already in a DX repository",
+    "A top-tier host model, which read trigger handlers, flow XML and permission sets correctly on its own",
+    `Two things it did better here: ${ab.plainDidBetter.join("; ")}`,
+    "Nothing to install, refresh or register",
+  ]}
+  notSfi={[
+    "The questions are rare and nobody else needs to review the answer",
+    "The org is small enough that “what did you not check” never matters",
+    "Your host model is strong and you are happy to wait for grep",
+  ]}
+  exampleIntro="The method, so you can repeat it on your own org."
+  sources={[
+    { label: "Release report 0.8.0 (method, ground truth, every score)", href: "https://github.com/PranavNagrecha/Salesforce-Intelligence/blob/main/docs/reports/release-0.8.0.md" },
+    { label: "Release process: the comparison runs before every tag", href: "https://github.com/PranavNagrecha/Salesforce-Intelligence/blob/main/RELEASING.md" },
+  ]}
+  verified={measured.measuredOn}
+  related={[
+    { href: "/compare/salesforce-mcp-servers", label: "Salesforce MCP servers compared" },
+    { href: "/use-cases/claude-salesforce-mcp", label: "Claude and Salesforce over MCP" },
+    { href: "/trust", label: "How the answers are tested" },
+  ]}
+  faqs={[
+    ...cheaperFaq,
+    {
+      q: "Does sf-intelligence answer more correctly than Claude Code reading the metadata files?",
+      a: `On the org we measured, with ${ab.hostModel} as the host, no: both answered all ${ab.questionCount} questions correctly. On ${ab.previousCandidate.label} the product was worse (${ab.previousCandidate.sfiCorrect} of ${ab.questionCount}) because ${ab.previousCandidate.why}; that was fixed before ${measured.measuredFor} shipped. The measured edge is time (${ab.sfiMedianSeconds} seconds against ${ab.plainMedianSeconds}), component ids in every answer, verdict words, and coverage numbers such as ${ab.coverageExample}.`,
+    },
+    {
+      q: "When is plain Claude Code enough?",
+      a: "When the metadata is in a DX repository, the host model is strong, and you ask these questions rarely. Plain Claude Code grepped and read files for every answer and got them right; it took about a quarter longer per question and could not say what it had not checked.",
+    },
+    {
+      q: "Were any answers made up?",
+      a: `${ab.fabrications === 0 ? "No fabrications in either arm." : `${ab.fabrications} fabrications.`} Every component, verdict, count and tool name in all ${ab.questionCount * 2} answers was checked against the vault. Two false asides came from the test layout itself (a symlinked repository), not from either product.`,
+    },
+    {
+      q: "How was this measured?",
+      a: `One question per non-interactive Claude Code run (${ab.hostModel}), 25 turns maximum, no conversation carry-over. One arm had only a copy of the org's metadata as force-app. The other had the same plus the sf-intelligence MCP server with its default tools. Ground truth was written first from the graph database and the source XML. The prompt is kept in the repository's release process and is re-run before every release; the numbers on this page are from the run that gated ${measured.measuredFor}.`,
+    },
+    {
+      q: "Which org was it?",
+      a: `${ab.orgShape.charAt(0).toUpperCase() + ab.orgShape.slice(1)}. Its name and components are not published; the write-up uses counts, verdict words and redacted ids.`,
+    },
+  ]}
+/>

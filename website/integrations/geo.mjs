@@ -96,8 +96,20 @@ export default function geo({ siteDir }) {
         const dist = fileURLToPath(dir);
         const data = JSON.parse(fs.readFileSync(path.join(siteDir, "src/data/site-data.json"), "utf8"));
         const toolsData = JSON.parse(fs.readFileSync(path.join(siteDir, "src/data/tools.json"), "utf8"));
+        const measured = JSON.parse(fs.readFileSync(path.join(siteDir, "src/data/measured.json"), "utf8"));
+        const fa = measured.onboarding.firstCitedAnswerSeconds;
         const tokens = {
           ...data,
+          measuredOn: measured.measuredOn,
+          measuredFor: measured.measuredFor,
+          abQuestionCount: measured.ab.questionCount,
+          abPlainCorrect: measured.ab.plainCorrect,
+          abSfiCorrect: measured.ab.sfiCorrect,
+          abFabrications: measured.ab.fabrications,
+          abSfiMedianSeconds: measured.ab.sfiMedianSeconds,
+          abPlainMedianSeconds: measured.ab.plainMedianSeconds,
+          abCoverageExample: measured.ab.coverageExample,
+          onboardingFirstAnswer: `${Math.floor(fa / 60)} min ${fa % 60} s`,
           testsApprox: data.tests?.approx,
           testPackages: data.tests?.packageCount,
           listedToolCount: data.listedToolCount ?? toolsData.listedToolCount,

@@ -3110,7 +3110,7 @@ A vault with a single source layout is unchanged on every surface: no `sourceCon
   — one version; a `dialogCount`/`intentCount`, `entryDialog`, `toneType`, and
   the `<conversationDefinitionPlanners><genAiPlannerName>` targets). Verified
   against a real scoped retrieve (`sf project retrieve start --metadata Bot`)
-  from a production-scale university sandbox (5 Bots / 15 BotVersions), which
+  from a production-scale real-org sandbox (5 Bots / 15 BotVersions), which
   corrected two assumptions against ground truth rather than shipping a
   documentation guess: neither type carries a `status`/`active`/
   `versionNumber` element in real files, and a modern Agentforce-template
@@ -3134,7 +3134,7 @@ A vault with a single source layout is unchanged on every surface: no `sourceCon
   ComponentType to target. New ComponentType
   `presenceUserConfigs/{fullName}.presenceUserConfig-meta.xml`; carries
   `label`/`capacity`/the enable* toggles. Real retrieves (a production-scale
-  university sandbox and a small services org) confirm the shape: one
+  real-org sandbox and a small services org) confirm the shape: one
   `<assignments>` block wrapping optional `<profiles><profile>` (repeatable)
   and optional `<users><user>` (repeatable) — either, both, or neither may be
   present (an org-default config in both verification orgs carries no
@@ -3928,7 +3928,7 @@ A vault with a single source layout is unchanged on every surface: no `sourceCon
   than claimed as real-org-verified.
 - **ListView legacy dotted addressing minted phantom field edges (R6-04).**
   `ListView` `<columns>`/`<filters>` field-identity extraction (CR-CAP-13 /
-  CR-CAP-13b) was already shipped, but real gate-vault data from a large university org (580
+  CR-CAP-13b) was already shipped, but real gate-vault data from a large real org (580
   ListView files) surfaced a real, systematic gap: Salesforce's legacy
   dotted SOAP-style column addressing (`CONTACT.EMAIL`, `ACCOUNT.NAME`,
   `CASES.STATUS`, `CORE.USERS.ALIAS`, `CORE.PROFILE.NAME`, and 91 more

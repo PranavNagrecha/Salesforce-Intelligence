@@ -45,6 +45,12 @@ is your checklist. Do not work from memory.
   - `pnpm product-manifest` and `node scripts/product-surface.mjs --write`;
   - `node website/recalibrate.mjs`, which refreshes the website's counts, `tools.json` and page dates;
   - `pnpm regen:embedding-index`, if tool descriptions changed (`pnpm check:embedding-index` tells you).
+- Re-measure the numbers the site states. Run the two validations in the release process on this
+  release candidate (plain Claude Code vs with the server on a real org; a stranger's first install
+  from the packed package) and write their results into `website/src/data/measured.json`
+  (`measuredFor` = this version). The home page, FAQ, trust page, llms.txt and
+  `/compare/plain-claude-code` all read that file, and `check-version-consistency.mjs` fails until
+  `measuredFor` matches the version being shipped, so stale numbers cannot ship.
 - Write the release post under `website/src/content/guides/blog/`. `llms.txt` and the blog index
   are generated from the content collection.
 

@@ -1,0 +1,107 @@
+{
+  "$comment": "Numbers the site states as measured facts. One source for the home page, the FAQ, the trust page, llms.txt and /compare/plain-claude-code. Re-measured on every release candidate by the two validations in the release process (plain Claude Code vs with the server; a stranger's first install) and written here before the tag. scripts/check-version-consistency.mjs refuses a release whose measuredFor is not the version being shipped, so these numbers can never be older than the release that shows them. abByModel adds one row per host model (Opus, Sonnet, Haiku) from the same eight questions, so the site can say what the server adds when the assistant is cheaper.",
+  "measuredFor": "0.8.0",
+  "measuredOn": "2026-10-19",
+  "ab": {
+    "hostModel": "Claude Code, Opus",
+    "orgShape": "a real sandbox with a managed package and a trigger framework: about 3,450 custom fields, 122 Apex classes, 110 flows",
+    "questionCount": 8,
+    "plainCorrect": 8,
+    "sfiCorrect": 8,
+    "plainMedianSeconds": 61,
+    "sfiMedianSeconds": 46,
+    "fabrications": 0,
+    "coverageExample": "499 of 14,018 reports retrieved",
+    "previousCandidate": {
+      "label": "release candidate 1, three days earlier",
+      "sfiCorrect": 6,
+      "plainCorrect": 8,
+      "why": "the save-order answer missed framework-registered trigger handlers and showed a flow's first inner decision as its entry condition; the analysis catalog required every word of a question to match"
+    },
+    "questions": [
+      {
+        "ask": "Where is a custom field used? (one Apex writer, one obsolete flow writer)",
+        "plain": "correct, 54 s, 10 file reads",
+        "sfi": "correct, 42 s, 9 calls; each referrer carries its status: 2 active, 1 obsolete"
+      },
+      {
+        "ask": "Can I safely delete a zero-reference custom field?",
+        "plain": "correct, 62 s",
+        "sfi": "correct, 40 s; verdict review, gap quantified: 499 of 14,018 reports retrieved"
+      },
+      {
+        "ask": "What happens when I save a record of an object with a trigger framework and three flows?",
+        "plain": "correct, 91 s, 24 file reads",
+        "sfi": "correct, 56 s; 4 framework handlers as conditional steps, 1 obsolete flow excluded"
+      },
+      {
+        "ask": "Why can't a profile see an object's records?",
+        "plain": "correct, 69 s",
+        "sfi": "correct, 48 s; verdict restricted at the permission-grant stage"
+      },
+      {
+        "ask": "Is a scheduled Apex class with no inbound edges dead code?",
+        "plain": "wrong on the first run (the symlinked repo was not searched), correct on retry",
+        "sfi": "correct, 34 s; verdict uncertain, reason given"
+      },
+      {
+        "ask": "Is an unreferenced public class dead code?",
+        "plain": "correct, 34 s",
+        "sfi": "correct, 45 s; verdict definitely_dead, 0 inbound edges"
+      },
+      {
+        "ask": "Which fields on the object are written by automation?",
+        "plain": "correct, 99 s, 25 file reads",
+        "sfi": "correct, 46 s"
+      },
+      {
+        "ask": "What external endpoints does this org call out to?",
+        "plain": "correct, 60 s",
+        "sfi": "correct, 51 s"
+      }
+    ],
+    "plainDidBetter": [
+      "on the save question it also named a unique external-id field as a save blocker",
+      "on the endpoints question it also found the Change Data Capture triggers that fire a callout"
+    ]
+  },
+  "onboarding": {
+    "firstCitedAnswerSeconds": 214,
+    "stepCount": 4,
+    "frictionsFound": 10,
+    "blockersFound": 1,
+    "note": "a stranger installing the packed package and following only the README; the one blocker (headless Claude Code needs --allowedTools) is now in the README"
+  },
+  "history": [
+    {
+      "version": "0.8.0",
+      "date": "2026-10-19",
+      "plainCorrect": 8,
+      "sfiCorrect": 8,
+      "plainMedianSeconds": 61,
+      "sfiMedianSeconds": 46,
+      "firstCitedAnswerSeconds": 214
+    },
+    {
+      "version": "0.8.0-rc1",
+      "date": "2026-10-17",
+      "plainCorrect": 8,
+      "sfiCorrect": 6,
+      "plainMedianSeconds": null,
+      "sfiMedianSeconds": null,
+      "firstCitedAnswerSeconds": 180
+    }
+  ],
+  "abByModel": [
+    {
+      "model": "Opus",
+      "plainCorrect": 8,
+      "sfiCorrect": 8,
+      "plainFabrications": 0,
+      "sfiFabrications": 0,
+      "plainMedianSeconds": 61,
+      "sfiMedianSeconds": 46,
+      "note": "the primary run above"
+    }
+  ]
+}

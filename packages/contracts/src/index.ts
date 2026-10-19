@@ -328,7 +328,7 @@ export type ComponentType =
   // agents" gap. Both sub-families use the generic `extractEnterpriseMetadata`
   // pattern (mirroring `CustomPermission`'s flat-top-level shape) — verified
   // against real retrieves from two live orgs (a small services org and a
-  // university sandbox), NOT assumed from docs alone.
+  // real-org sandbox), NOT assumed from docs alone.
   //
   // `EntitlementProcess` (`entitlementProcesses/`, `.entitlementProcess-meta.xml`
   // — folder/suffix confirmed via a real scoped retrieve) is Salesforce's SLA
@@ -438,7 +438,7 @@ export type ComponentType =
   // deferred. Three families, verified against REAL scoped retrieves
   // (`sf project retrieve start --metadata Bot --metadata PresenceUserConfig
   // --metadata EntitlementProcess`) from two live orgs (a production-scale
-  // university sandbox with 5 Bots / 15 BotVersions / 4 PresenceUserConfigs,
+  // real-org sandbox with 5 Bots / 15 BotVersions / 4 PresenceUserConfigs,
   // and a small services org with 2 PresenceUserConfigs + 1 EntitlementProcess
   // — that org reported `Bot` as "not available"). Real files corrected two
   // assumptions in this tier's brief against ground truth rather than
@@ -467,7 +467,7 @@ export type ComponentType =
   // `{BotName}.{fileBasename}` (the immediate parent DIRECTORY name +
   // the file's own version suffix — verified to match Salesforce's own
   // retrieve-manifest `fullName` for this type EXACTLY, e.g.
-  // `University_Semantic_Search_Agent.v7`), mirroring the dot-joined
+  // `Demo_Semantic_Search_Agent.v7`), mirroring the dot-joined
   // convention `PathAssistant`/`deriveDotSplitObjectAndApiName` already use
   // for a DIFFERENT nesting shape (object.name-in-filename) — here the
   // disambiguating half comes from the DIRECTORY instead.
