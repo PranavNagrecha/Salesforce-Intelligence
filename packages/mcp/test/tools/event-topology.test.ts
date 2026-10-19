@@ -218,6 +218,14 @@ const cdcSeed: ExtractionResult = {
       edgeType: 'triggersOn',
       source: 'apex-trigger-extractor',
     }),
+    // A re-extracted CDC trigger ALSO carries the subscription edge; the two
+    // must collapse to one code subscriber, read through the subscription edge.
+    makeEdge({
+      fromId: CDC_TRIGGER,
+      toId: CDC_EVENT_ID,
+      edgeType: 'subscribesToChange',
+      source: 'apex-trigger-extractor',
+    }),
   ],
 };
 
@@ -350,10 +358,10 @@ describe('event_topology — CDC enablement', () => {
     expect(entry?.filterExpression).toBe("City = 'SF'");
   });
 
-  it('reaches the CDC Apex trigger through the EXISTING triggersOn edge', async () => {
+  it('lists the CDC Apex trigger ONCE, through its subscribesToChange edge (triggersOn collapses into it)', async () => {
     const data = await run();
     expect(data.cdcEntities[0]?.codeSubscribers).toEqual([
-      { id: CDC_TRIGGER, type: 'ApexTrigger', via: 'triggersOn' },
+      { id: CDC_TRIGGER, type: 'ApexTrigger', via: 'subscribesToChange' },
     ]);
   });
 

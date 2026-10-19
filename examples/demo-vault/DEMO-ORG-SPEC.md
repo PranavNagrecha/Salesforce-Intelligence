@@ -130,6 +130,7 @@ Field notation: `Name__c (Type[, detail])`. Lookups/MD name the target.
 
 **Apex** (`classes/`, `triggers/`):
 - `ProjectTrigger.trigger` (on Project__c, before insert/update + after update) → delegates to handler.
+- `Demo_ProjectChangeTrigger.trigger` (on `Project__ChangeEvent`, after insert) — the Change Data Capture subscriber; mints `subscribesToChange` so `cdc_subscribers` / `event_topology` list it.
 - `ProjectTriggerHandler.cls` — validation/derivation (sets `Risk_Score__c`).
 - `PaymentService.cls` — `applyPayment(...)`; updates Invoice/Project; references `Payment__c.Amount__c`, `Invoice__c.Total_Paid__c`.
 - `IncentiveBatch.cls` — `Database.Batchable`; **intentional SOQL-in-loop** + a **hardcoded 15-char Id** literal `a01000000000001` (for governor-limit + hardcoded-value demos).

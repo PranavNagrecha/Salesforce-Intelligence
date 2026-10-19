@@ -15,8 +15,21 @@ import { formatTrustStatement } from './trust-statement.js';
 const DEFAULT_VAULT_ROOT = 'org-kb';
 /** JSON indentation. 2 spaces for diffable committed configs. */
 const JSON_INDENT = 2;
-/** Entries appended to `.gitignore` so generated artifacts are not tracked. */
-const GITIGNORE_ENTRIES: readonly string[] = ['org-kb/source/', 'org-kb/graph/'];
+/**
+ * Entries appended to `.gitignore`: the regenerable trees, everything under
+ * `meta/` that holds org data (profile-name-map, annotations, demand queue,
+ * history and retrieval ledgers, caches) and `snapshots/`. Only the three
+ * committable meta files are let back in.
+ */
+const GITIGNORE_ENTRIES: readonly string[] = [
+  'org-kb/source/',
+  'org-kb/graph/',
+  'org-kb/meta/*',
+  '!org-kb/meta/manifest.json',
+  '!org-kb/meta/config.json',
+  '!org-kb/meta/version.txt',
+  'org-kb/snapshots/',
+];
 /** Salesforce metadata API version stamped into the scaffolded `sfdx-project.json`. */
 const SF_API_VERSION = '62.0';
 /** Default DX package directory that `sf project retrieve` requires to exist on disk. */
@@ -96,7 +109,7 @@ export const runInit = async (
   const paths = vaultPaths(resolvedRoot);
   const mkdirResult = await createVaultDirs(paths);
   if (!mkdirResult.ok) return mkdirResult;
-  const writeResult = await writeVaultMetadata(paths, opts.targetOrg, resolvedRoot);
+  const writeResult = await writeVaultMetadata(paths, opts.targetOrg);
   if (!writeResult.ok) return writeResult;
   const dxProjectScaffolded = await ensureDxProject(opts.cwd);
   const gitignoreUpdated = await updateGitignore(opts.cwd);
@@ -159,12 +172,12 @@ const createVaultDirs = async (
 const writeVaultMetadata = async (
   paths: ReturnType<typeof vaultPaths>,
   targetOrg: string,
-  resolvedRoot: string,
 ): Promise<Result<void, InitError>> => {
   const config = {
     createdAt: new Date().toISOString(),
     targetOrg,
-    vaultRoot: resolvedRoot,
+    // Relative to the vault folder, so the committed config works from any clone.
+    vaultRoot: '.',
     version: readCliPackageVersion(),
     snapshotOnRefresh: true,
   };

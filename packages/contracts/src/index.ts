@@ -188,6 +188,14 @@ export type ComponentType =
   // `CustomObject:{ObjectApiName}`. The `WorkflowRule→WorkflowAlert`
   // `references` edge already existed (via the Alert action variant);
   // This gives that edge a real node target instead of a phantom stub.
+  // WorkflowFieldUpdate promotion. Each `<fieldUpdates>` entry in a
+  // `*.workflow-meta.xml` file is a node, so the rule's and the approval
+  // process's `references` land on a component and a file holding only
+  // field updates counts as modeled workflow metadata. Id format
+  // `WorkflowFieldUpdate:{ObjectApiName}.{fullName}`; parent edge is the
+  // existing `parentOf` from `CustomObject:{ObjectApiName}`; a same-object
+  // update `writesTo` the field it sets. `WorkflowTask:` stays unmodeled.
+  | 'WorkflowFieldUpdate' //  Field update embedded inside `*.workflow-meta.xml`'s `<fieldUpdates>` collection. Carries `name` (fullName), `field`, `operation` (Literal | Formula | Null | NextValue | PreviousValue | LookupValue), `targetObject` (set only on a cross-object update), `value` (the literal / formula / lookup it writes), `reevaluateOnChange` and `referencedByWorkflowRule`. Id `WorkflowFieldUpdate:{ObjectApiName}.{fullName}`. Parented by `CustomObject:{ObjectApiName}` via `parentOf`; `writesTo` its `CustomField` (same-object only).
   | 'WorkflowAlert' //        Email alert embedded inside `*.workflow-meta.xml`'s `<alerts>` collection. Carries `name` (fullName), `description`, `senderType` (CurrentUser | OrgWideEmailAddress | DefaultWorkflowUser), `template` (EmailTemplate path), and `ccEmails` (string array). Id `WorkflowAlert:{ObjectApiName}.{fullName}`. Parented by `CustomObject:{ObjectApiName}` via `parentOf`. Referenced by `WorkflowRule` via the existing Alert-variant `references` edge, which now resolves to a real node rather than a phantom stub.
   // CPQ specialist tier. Five typed CPQ ComponentTypes
   // recognized HEURISTICALLY from underlying CustomMetadataRecord /
@@ -643,6 +651,12 @@ export const ORG_METADATA_CONTENT_POLICY_DISCLOSURE =
 /** One-word envelope marker; hosts read the full policy from initialize instructions. */
 export const ORG_METADATA_CONTENT_POLICY_MARKER = 'org-metadata';
 
+/**
+ * The `targetOrg` / `manifest.sourceOrg` of the synthetic vault `sfi demo`
+ * builds. There is no org behind it, so nothing may offer to refresh it.
+ */
+export const DEMO_ORG_ALIAS = 'demo-org';
+
 export const ORG_METADATA_CONTENT_POLICY: ContentPolicy = {
   orgMetadata: 'untrusted-data',
   disclosure: ORG_METADATA_CONTENT_POLICY_DISCLOSURE,
@@ -842,6 +856,18 @@ export type EdgeType =
   | 'visibleTo'
   // OmniStudio declarative-process tier edge (intra-OmniStudio call chain only).
   | 'dispatchesOmniAction' //  {Caller} -> {OmniIntegrationProcedure | OmniDataTransform | OmniScript | OmniUiCard}. Caller can be `OmniScript` (Integration Procedure Action, DataRaptor Extract / Transform Action, navigate-to-OmniScript step), `OmniIntegrationProcedure` (Remote Action calling nested IP, DataRaptor Extract / Transform Action, chained IP Action), or `OmniUiCard` (Action widget whose `actionList[].stateAction.type` is `OmniScript` or `Integration Procedure`). Confidence: `declared` when the target name is in a top-level XML element (e.g., the `<bundle>` element of a DataRaptor Extract Action child), `parsed` when the target name is inside the `propertySetConfig` JSON blob (e.g., `integrationProcedureKey`, `actionList[].stateAction.omniType.Name`). Dangling references (target name present but no matching component in the vault) are emitted with `properties.targetMissing: true` so impact-analysis tools can surface them. Also `ApexClass` / `ApexTrigger`: Apex that runs an IP or DataRaptor by a literal key through `<ns>.IntegrationProcedureService` / `<ns>.DRGlobal` (`properties.via: 'apex'`, heuristic, apex-scanner). The reserved `implementsOmniInterface` edge stays unused — `implements omnistudio.VlocityOpenInterface` classes are reached FROM OmniStudio through `callsApex`. See the per-type vendored docs.
+  // Change Data Capture subscription tier. ApexTrigger / ApexClass -> the
+  // synthetic `CustomObject:{Object}ChangeEvent` / `{Object}__ChangeEvent` id
+  // (never a retrieved node — see `isChangeEventApiName`), the SAME dangling
+  // target a CDC trigger's `triggersOn` and a channel member's `references`
+  // already point at, so every CDC reader scans one id. `declared` from a
+  // `trigger X on AccountChangeEvent` header (`properties.mechanism:
+  // 'triggerOnChangeEvent'`), `heuristic` from `EventBus.subscribe(...)` with a
+  // literal channel naming the Change Event, bare or `/data/`-prefixed
+  // (`mechanism: 'eventBusSubscribe'`). A non-literal channel mints NO edge and is counted on
+  // the owner node as `properties.unresolvedSubscriptions`. `triggersOn` stays
+  // alongside (object-lifecycle semantics); `listensTo` stays `__e`-only.
+  | 'subscribesToChange'
 
 /**
  * Every {@link EdgeType} as a runtime tuple — the single source the Zod input
@@ -877,6 +903,7 @@ export const EDGE_TYPES = [
   'lookupTo',
   'visibleTo',
   'dispatchesOmniAction',
+  'subscribesToChange',
 ] as const satisfies readonly EdgeType[];
 
 /**
@@ -934,6 +961,29 @@ const edgeTypesComplete: EdgeTypesComplete = true;
  * `test/` directory at all.)
  */
 export const UNPRODUCED_EDGE_TYPES = ['coversTest'] as const satisfies readonly EdgeType[];
+
+/**
+ * The Change Data Capture stream-entity name suffix. A CDC entity is
+ * `{StandardObject}ChangeEvent` (`AccountChangeEvent`) or
+ * `{CustomObjectWithout__c}__ChangeEvent` (`Order__ChangeEvent`); both end in
+ * this literal, and neither carries a `__c` / `__e` object suffix.
+ */
+export const CHANGE_EVENT_SUFFIX = 'ChangeEvent';
+
+/**
+ * True when `apiName` names a Change Data Capture stream entity
+ * (`AccountChangeEvent`, `Order__ChangeEvent`, `ns__Widget__ChangeEvent`).
+ *
+ * Single source of truth for the CDC name-pattern rule: the extractors that
+ * mint `subscribesToChange`, the MCP CDC tools, the phantom classifier, and the
+ * refresh's auto-expansion gate all read it, so "is this a Change Event?"
+ * cannot drift between the surface that mints one, the surface that reports
+ * one, and the surface that tries to retrieve one. Lives in `contracts` because
+ * it is the lowest package every one of those depends on.
+ */
+export const isChangeEventApiName = (apiName: string): boolean =>
+  apiName.length > CHANGE_EVENT_SUFFIX.length &&
+  apiName.endsWith(CHANGE_EVENT_SUFFIX);
 
 /**
  * A directed edge between two nodes.

@@ -162,7 +162,7 @@ Report: SAFE / RISKY with the ranked dependents and the coverage + soundness cav
 The save-time behavior map:
 
 1. `sfi.resolve` — pin the object.
-2. `sfi.what_happens_on_save` (per DML event) — the triggers / flows / workflow rules that fire on save.
+2. `sfi.what_happens_on_save` (per DML event) — the triggers / flows / workflow rules that fire on save. A Flow step's `conditional` is its `<start>` entry criteria (never an inner decision); `entryCriteria: { none: true }` means it runs on every save of its kind, and `branches` lists its decisions. Steps with `conditionalOn.reason: framework-registered-handler` are org classes a managed trigger framework (TDTM-style) runs only if a registration record names them; the vault cannot see that record, so report them as "runs if registered", never as certain.
 3. `sfi.order_of_execution` — the full ordered save sequence (before-save flows → triggers → after-save → …).
 4. `sfi.automation_risk_report` — the automation-risk overlay for the object.
 5. `sfi.governor_limit_risks` — SOQL/DML-in-loop in the Apex that runs.
@@ -218,8 +218,8 @@ Report: READY / NOT-READY, the blockers, and the tests to run.
   and report what you could and couldn't gather.
 - **One report at the end**, not seven raw tool dumps. Lead with the verdict
   (GO/NO-GO, R/A/G, the headline), then the ranked detail with ids + provenance.
-- If `sfi.route_question` returns `unknown`/a `gap` for part of the ask, say that
-  capability isn't built yet (it's logged) — don't fabricate that step.
+- If `sfi.route_question` returns a `gap` for part of the ask, say that
+  capability isn't built yet — don't fabricate that step.
 
 ## Verification
 
@@ -238,4 +238,4 @@ Before sending:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from); each row names its plane and carries any component it resolved as `suggestedArgs`. **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

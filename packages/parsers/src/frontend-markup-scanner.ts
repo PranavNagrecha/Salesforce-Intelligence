@@ -147,8 +147,12 @@ const LWC_RECORD_FORM_TAGS = new Set([
   'lightning-record-view-form',
 ]);
 
-const recordFormAccessType = (tag: string): 'read' | 'write' => {
+const recordFormAccessType = (tag: string, attrs: string): 'read' | 'write' => {
   if (tag === 'lightning-record-view-form') return 'read';
+  // lightning-record-form defaults to mode="view", which still exposes inline edit.
+  if (tag === 'lightning-record-form' && readAttr(attrs, 'mode')?.toLowerCase() === 'readonly') {
+    return 'read';
+  }
   return 'write';
 };
 
@@ -205,7 +209,7 @@ export const scanLwcHtml = (
       objectStack.push(stackObject);
       const fieldsRaw = readAttr(attrs, 'fields');
       if (fieldsRaw !== null) {
-        const access = recordFormAccessType(tag);
+        const access = recordFormAccessType(tag, attrs);
         for (const fieldName of parseFieldNameList(fieldsRaw)) {
           bindFieldName(
             ctx,

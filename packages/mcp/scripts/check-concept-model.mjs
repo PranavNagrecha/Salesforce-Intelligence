@@ -102,6 +102,51 @@ export const whereMappingPairs = (whereProperty, label) =>
   });
 
 /**
+ * Sub-predicate keys that give a bind its OWN positional-fill contract (a join
+ * fills `{0}` firer / `{1}` field / `{2}` writer, an aggregate fills `{0}` with the
+ * root, …). The plain-edge `{0}`-slot check below does not apply to them.
+ */
+const OWN_FILL_KEYS = [
+  'join',
+  'aggregate',
+  'dualEdge',
+  'antiJoin',
+  'setDifference',
+  'crossObjectCascade',
+  'propertyEqualsEndpoint',
+];
+
+/**
+ * RM-MIXED-DML-ROOT-GATE — a plain edge rule whose template uses the positional
+ * `{0}` slot means the FROM endpoint by it (the writer, the caller, the
+ * referencing rule). `runBind` fills `{0}` with the first CITED endpoint of the
+ * first matched edge, from-then-to, and `componentTypes` scopes which endpoints
+ * are cited — so when an edge's `from` node is NOT a cited type, the `to` node
+ * (a field, an object, a layout) lands in `{0}` and the claim names the thing
+ * written as the writer (a Flow root rendered "CustomField:A writes setup object
+ * data at CustomField:B" with no Flow cited). The from endpoint is guaranteed to
+ * be cited only when `componentTypes` is unset (both endpoints cited) or every
+ * `fromTypeIn` type is a cited type (the EC-16 gate fails closed otherwise).
+ * Returns the reason the rule is ungated, or null when it is safe.
+ */
+export const writerSlotUngated = (rule) => {
+  const bind = rule.bind;
+  if (bind.edgeType === undefined) return null;
+  if (OWN_FILL_KEYS.some((k) => bind[k] !== undefined)) return null;
+  const templates = [rule.interpretation, rule.interpretationCrossPhase];
+  if (!templates.some((t) => typeof t === 'string' && t.includes('{0}'))) return null;
+  if (bind.componentTypes === undefined) return null;
+  if (bind.fromTypeIn === undefined) {
+    return 'no fromTypeIn — an edge from an un-cited type puts the TO endpoint into {0}';
+  }
+  const uncited = bind.fromTypeIn.filter((t) => !bind.componentTypes.includes(t));
+  if (uncited.length > 0) {
+    return `fromTypeIn ${JSON.stringify(uncited)} not in componentTypes — those writers are never cited, so {0} falls to the TO endpoint`;
+  }
+  return null;
+};
+
+/**
  * Run the parity + no-canonical-id gate. Exits the process with status 1 on any
  * failure, or logs PASS and returns on success. Wrapped in a function (invoked
  * only from the CLI entry below) so importing this module for tests has no side
@@ -305,6 +350,20 @@ function main() {
     failed = true;
   } else {
     console.log('[check-concept-model] OK — no canonical-id strings in the concept model');
+  }
+
+  // ── 3. `{0}` writer slot must be the FROM endpoint (RM-MIXED-DML-ROOT-GATE) ──
+  const ungated = conceptRules
+    .map((rule) => [rule.id, writerSlotUngated(rule)])
+    .filter(([, reason]) => reason !== null);
+  if (ungated.length > 0) {
+    console.error(
+      `[check-concept-model] FAIL: edge rule(s) whose {0} slot can bind the TO endpoint (the thing written, not the writer) — gate the from type with fromTypeIn ⊆ componentTypes:`,
+    );
+    for (const [id, reason] of ungated) console.error(`    ${id}: ${reason}`);
+    failed = true;
+  } else {
+    console.log('[check-concept-model] OK — every {0} writer slot is type-gated to the from endpoint');
   }
 
   if (failed) {

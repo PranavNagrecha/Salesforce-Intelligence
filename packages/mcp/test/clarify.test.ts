@@ -60,7 +60,7 @@ describe('buildClarify', () => {
     expect(out.clarification).toBeNull();
   });
 
-  it('on none: offers to refresh from the org (with /sfi-refresh) or stop', () => {
+  it('on none: offers to refresh from the org (with the CLI command `sfi refresh`) or stop', () => {
     const result: ResolveResult = {
       disposition: 'none',
       queryTokens: ['zzzqqq'],
@@ -72,9 +72,27 @@ describe('buildClarify', () => {
     expect(actions).toContain('refresh');
     expect(actions).toContain('stop');
     const refresh = out.nextActions.find((a) => a.action === 'refresh');
-    expect(refresh?.command).toBe('/sfi-refresh');
+    // The CLI command, which every install has — not the plugin-only slash command.
+    expect(refresh?.command).toBe('sfi refresh');
     // The refresh reason names the freshness so the user can judge staleness.
     expect(refresh?.reason).toContain('2026-05-20');
+  });
+
+  it('on the demo vault: offers no refresh action (there is no org to pull from)', () => {
+    const none: ResolveResult = { disposition: 'none', queryTokens: ['zzzqqq'], candidates: [] };
+    const outNone = buildClarify('zzzqqq', none, { ...VAULT, demo: true });
+    expect(outNone.nextActions.map((a) => a.action)).toEqual(['stop']);
+
+    const ambiguous: ResolveResult = {
+      disposition: 'ambiguous',
+      queryTokens: ['email'],
+      candidates: [
+        candidate('CustomField:Account.Email__c', 'Email__c'),
+        candidate('CustomField:Contact.Email__c', 'Email__c'),
+      ],
+    };
+    const outAmbiguous = buildClarify('email', ambiguous, { ...VAULT, demo: true });
+    expect(outAmbiguous.nextActions.map((a) => a.action)).toEqual(['narrow']);
   });
 
   it('on none with scopedCoverageComplete: leads with stop, frames absence as a false premise not a coverage gap (batch 8)', () => {

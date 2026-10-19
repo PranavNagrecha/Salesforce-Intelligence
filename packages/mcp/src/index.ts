@@ -34,23 +34,23 @@ export {
 // budget and false-positive drift). The CLI calls this at the start of each
 // sweep. The MCP live_* tools keep their session budget untouched.
 export { resetLiveSession } from './tools/live-session.js';
-// Route-gap telemetry: the local question-gap log the router appends to when a
-// question hits a gap. `sfi doctor` / `sfi gaps report` / `sfi.capabilities`
-// read it — exported here so
-// the CLI shares the canonical path/shape/summarizer instead of duplicating it.
+// Route-gap telemetry: the local question-gap log `sfi.route_question` appends
+// to (opt-in) when it cannot place a question. `sfi doctor` / `sfi gaps report`
+// / `sfi.capabilities` read it — exported here so the CLI shares the canonical
+// path/shape/summarizer instead of duplicating it.
 export {
   gapLogPath,
   ROUTE_GAP_NUDGE_THRESHOLD,
   routeGapsNudge,
   summarizeRouteGaps,
-} from './intent-router.js';
+} from './route-gaps.js';
 export type {
   GapLogEntry,
   RouteGapCategoryCount,
   RouteGapSummary,
   RouteGapsNudge,
   SummarizeRouteGapsOptions,
-} from './intent-router.js';
+} from './route-gaps.js';
 export {
   bindCallerIdentity,
   buildContext,

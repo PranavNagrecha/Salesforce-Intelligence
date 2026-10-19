@@ -320,23 +320,30 @@ Aura / Invocable / Queueable / Batchable / Schedulable / triggers),
 and zero-usage detection. Returns one of three verdicts per
 candidate:
 
-- **`definitely_dead`** — zero incoming USAGE edges: every edge type
+- **`definitely_dead`** — an ApexClass, ApexTrigger or Obsolete /
+  InvalidDraft Flow with zero incoming USAGE edges: every edge type
   except `parentOf` (structural containment) and `grantedBy` (a
   Profile / PermissionSet access grant — access is not usage). No
-  callers, no triggers, no listeners. For CustomField, no incoming
-  references at all (no formula refs, no Apex reads/writes, no Flow
-  record-ops, no layout placements) — AND, for an Activity/Task/Event-
-  family CustomField specifically (the same physical field can be
-  materialized as up to three graph nodes,
-  `CustomField:Activity/Task/Event.<field>`), no OTHER EXISTING
-  representation of that field has a real incoming usage edge either.
-  A sibling with usage this candidate does not have downgrades the
-  verdict to `uncertain` instead — see cause (d) below; the import-
-  time polymorphic mirror can under-mint or be absent, so it is not
-  trusted alone.
+  callers, no triggers, no listeners. A CustomField never reads
+  `definitely_dead`: every row is `confidence: heuristic`, so a field
+  with no incoming references (no formula refs, no Apex reads/writes,
+  no Flow record-ops, no layout placements) caps at `likely_dead`; the
+  CustomField entry in `boundaries` names the referrer families the
+  call did not check (Report / Dashboard / ListView when the vault never
+  retrieved them, Flow formula text, dynamic SOQL, reflective access)
+  and each field row points to it. Relay that list before the verdict. For an
+  Activity/Task/Event-family CustomField (the same physical field can
+  be materialized as up to three graph nodes,
+  `CustomField:Activity/Task/Event.<field>`), the verdict also requires
+  that no OTHER EXISTING representation of that field has a real
+  incoming usage edge; a sibling with usage this candidate does not
+  have downgrades it to `uncertain` instead — see cause (d) below; the
+  import-time polymorphic mirror can under-mint or be absent, so it is
+  not trusted alone.
 - **`likely_dead`** — reached only by test classes
   (`isTest === true`) or via heuristic-only edges that may be
-  stripped by dynamic SOQL / reflective access.
+  stripped by dynamic SOQL / reflective access; and every dead
+  CustomField, as above.
 - **`uncertain`** — four different causes, all suppressed by default
   and surfaced with `includeUncertain: true`: (a) reached by at least
   one EXTERNAL entry point; (b) an unproven dynamic registration — a
@@ -503,6 +510,14 @@ developer needs them to interpret findings honestly.
   invoked only via `EventBus.subscribe(...)`, virtual sObject
   callouts, or managed-package framework wiring will surface as
   `likely_dead` even when it's reachable at runtime.
+- **`sfi.unused_components` and `sfi.find_dead_code` share one Apex
+  liveness predicate.** An ApexClass with zero inbound edges that is a
+  REST / Aura / Invocable entry point, a Queueable / Batchable /
+  Schedulable job, a framework subclass, a Callable or
+  namespaced-interface implementation (registered in a Custom Metadata
+  cell or managed code), or is named only by a static type reference is
+  `uncertain` in both tools — `unused_components` lists it under
+  `uncertain` with `reasons`, never as unused and never in `byType`.
 - **CustomField dead-code includes layouts.** A field that's on a
   layout but never read by Apex / Flow is NOT `definitely_dead` —
   the layout placement counts as a reference. To find fields that
@@ -660,4 +675,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from); each row names its plane and carries any component it resolved as `suggestedArgs`. **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

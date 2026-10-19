@@ -1,6 +1,6 @@
 {
-  "generatedAt": "2026-10-17T16:46:21.862Z",
-  "version": "0.7.0",
+  "generatedAt": "2026-10-19T19:45:25.032Z",
+  "version": "0.8.0",
   "toolCount": 231,
   "listedToolCount": 226,
   "coreToolCount": 16,
@@ -36,7 +36,7 @@
         },
         {
           "name": "sfi.list_analyses",
-          "description": "Catalog of every analysis on this server, including the ones not in tools/list: name, one-line summary and category (core, search, what-if, documentation, live, cross-org, industries). Use it to find a tool that is not listed, then sfi.describe_analysis for its args and sfi.run_analysis to run it.",
+          "description": "Catalog of every analysis on this server, including the ones not in tools/list: name, one-line summary and category. Use it to find a tool that is not listed, then sfi.describe_analysis for its args and sfi.run_analysis to run it.",
           "core": true,
           "readOnly": true,
           "livePlane": "never"
@@ -57,7 +57,7 @@
         },
         {
           "name": "sfi.route_question",
-          "description": "Advisory router for a vague, broad or compound question. It does not answer the question.",
+          "description": "Advisory shortlist for a vague, broad or compound question. It does not answer the question.",
           "core": false,
           "readOnly": true,
           "livePlane": "never"
@@ -98,7 +98,7 @@
         },
         {
           "name": "sfi.resolve",
-          "description": "Turns an informal or misspelled name into canonical-id candidates with a disposition: exact | ambiguous | none.",
+          "description": "Turns an informal or misspelled name into canonical-id candidates with a disposition: exact | ambiguous | none. Call it FIRST whenever the user names a component loosely ('the SSN field', 'something like Intake'), then pass the id on.",
           "core": true,
           "readOnly": true,
           "livePlane": "never"
@@ -195,7 +195,7 @@
         },
         {
           "name": "sfi.what_happens_on_save",
-          "description": "What runs when a record of one object is saved, in Salesforce order of execution for one DML event.",
+          "description": "What runs when a record of one object is saved, in Salesforce order of execution for one DML event: flows, validation and duplicate rules, triggers, workflow, assignment, auto-response and escalation rules, approvals, roll-ups and async Apex, by phase.",
           "core": true,
           "readOnly": true,
           "livePlane": "never"
@@ -453,7 +453,7 @@
         },
         {
           "name": "sfi.find_component_usages",
-          "description": "Where is this component used: everything that points to one canonical component (`componentId` of any type: field, class, flow, label, permission set, custom permission, static resource, page).",
+          "description": "Where is this component used: everything that points to one canonical component (`componentId` of any type).",
           "core": true,
           "readOnly": true,
           "livePlane": "never"
@@ -466,7 +466,7 @@
       "tools": [
         {
           "name": "sfi.synthesize_answer",
-          "description": "Grounding check before you answer. Pass the JSON output of earlier sfi.* calls as `input` (any JSON; combine several results in one array or object), optionally the user's `question`, and optionally your `draft` answer.",
+          "description": "Grounding check before you answer. `input` is REQUIRED: the JSON output of earlier sfi.* calls (any JSON; combine several results in one array or object).",
           "core": false,
           "readOnly": true,
           "livePlane": "never"
@@ -514,7 +514,7 @@
         },
         {
           "name": "sfi.who_can_access_object",
-          "description": "Reverse access lookup: which profiles, permission sets, roles and groups can reach records of one object, and how (org-wide default, object CRUD and View/Modify All, ViewAllData/ModifyAllData, sharing rules with groups expanded to members).",
+          "description": "Reverse access lookup: which profiles, permission sets, roles and groups can reach records of one object, and how.",
           "core": false,
           "readOnly": true,
           "livePlane": "never"
@@ -535,7 +535,7 @@
         },
         {
           "name": "sfi.why_cant_user_see_record",
-          "description": "Whether a user can see, edit, delete or create records of an object, and why not. Walks the access cascade (object CRUD, View/Modify All, org-wide defaults, role hierarchy, sharing rules, restriction and scoping rules) and returns a step-by-step chain with a verdict: visible | restricted | unknown.",
+          "description": "Whether a user can see, edit, delete or create records of an object, and why not. Walks the access cascade (object CRUD, View/Modify All, org-wide defaults, role hierarchy, sharing, restriction and scoping rules) into a step-by-step chain with a verdict: visible | restricted | unknown.",
           "core": true,
           "readOnly": true,
           "livePlane": "never"
@@ -904,7 +904,7 @@
         },
         {
           "name": "sfi.endpoint_catalog",
-          "description": "Returns every URL / endpoint participating in an integration in one structured response, split four ways - `inboundApis`, `apexCallouts`, `outboundMessages`, `externalDataSources`, and `namedCredentials`.",
+          "description": "Returns every URL / endpoint participating in an integration in one structured response, split four ways - `inboundApis`, `apexCallouts`, `outboundMessages`, `externalDataSources`, and `namedCredentials`, plus `storedEndpoints`.",
           "core": false,
           "readOnly": true,
           "livePlane": "never"

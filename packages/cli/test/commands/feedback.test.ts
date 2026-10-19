@@ -39,7 +39,7 @@ describe('recordFeedback + buildFeedbackExport', () => {
       const exp = await buildFeedbackExport({ gapPath, feedbackPath, all: true });
       expect(exp.counts.routeGaps).toBe(1);
       expect(exp.counts.ratings).toBe(1);
-      // The route gap keeps its category/intent (the routing signal).
+      // The route gap keeps its category (the routing signal).
       expect(exp.routeGaps[0]?.category).toBe('folder-access');
       // PII is scrubbed from BOTH the gap and the rating questions.
       const blob = JSON.stringify(exp);

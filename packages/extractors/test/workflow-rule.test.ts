@@ -277,9 +277,10 @@ describe('extractWorkflowRule', () => {
       }
     });
 
-    it('returns zero nodes and zero edges when <Workflow> has no <rules> and no <alerts>', async () => {
+    it('promotes a <fieldUpdates>-only file to WorkflowFieldUpdate nodes (no rule, no alert)', async () => {
       // A workflow file with only <fieldUpdates> (no <alerts>, no <rules>)
-      // produces truly zero nodes and zero edges (no promotable entries).
+      // yields the definition node, its parentOf and its writesTo — so the
+      // object counts as modeled workflow metadata (NO-MINTED-PLATFORM-IDS B).
       const xml = `<?xml version="1.0"?>
 <Workflow xmlns="http://soap.sforce.com/2006/04/metadata">
   <fieldUpdates>
@@ -293,8 +294,11 @@ describe('extractWorkflowRule', () => {
         const result = await extractWorkflowRule(path);
         expect(result.ok).toBe(true);
         if (!result.ok) return;
-        expect(result.value.nodes).toHaveLength(0);
-        expect(result.value.edges).toHaveLength(0);
+        expect(result.value.nodes.map((n) => n.id)).toEqual(['WorkflowFieldUpdate:Account.Set_Status']);
+        expect(result.value.edges.map((e) => `${e.edgeType} ${e.fromId} -> ${e.toId}`)).toEqual([
+          'parentOf CustomObject:Account -> WorkflowFieldUpdate:Account.Set_Status',
+          'writesTo WorkflowFieldUpdate:Account.Set_Status -> CustomField:Account.Status__c',
+        ]);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }
@@ -333,7 +337,7 @@ describe('extractWorkflowRule', () => {
         if (!result.ok) return;
         // The new field-level writesTo edge.
         const writesTo = result.value.edges.filter(
-          (e) => e.edgeType === 'writesTo',
+          (e) => e.edgeType === 'writesTo' && e.fromId.startsWith('WorkflowRule:'),
         );
         expect(writesTo).toHaveLength(1);
         expect(writesTo[0]).toEqual({
@@ -385,7 +389,7 @@ describe('extractWorkflowRule', () => {
         expect(result.ok).toBe(true);
         if (!result.ok) return;
         const writesTo = result.value.edges.filter(
-          (e) => e.edgeType === 'writesTo',
+          (e) => e.edgeType === 'writesTo' && e.fromId.startsWith('WorkflowRule:'),
         );
         expect(writesTo).toHaveLength(1);
         expect(writesTo[0]!.toId).toBe('CustomField:Account.Description');
@@ -419,7 +423,7 @@ describe('extractWorkflowRule', () => {
         expect(result.ok).toBe(true);
         if (!result.ok) return;
         const writesTo = result.value.edges.filter(
-          (e) => e.edgeType === 'writesTo',
+          (e) => e.edgeType === 'writesTo' && e.fromId.startsWith('WorkflowRule:'),
         );
         expect(writesTo).toHaveLength(1);
         expect(writesTo[0]!.toId).toBe('CustomField:ns__Target__c.Bar__c');
@@ -460,7 +464,7 @@ describe('extractWorkflowRule', () => {
         if (!result.ok) return;
         // No writesTo — no phantom CustomField for the cross-object target.
         const writesTo = result.value.edges.filter(
-          (e) => e.edgeType === 'writesTo',
+          (e) => e.edgeType === 'writesTo' && e.fromId.startsWith('WorkflowRule:'),
         );
         expect(writesTo).toHaveLength(0);
         // The references edge to the scaffolding node still emits.
@@ -500,7 +504,7 @@ describe('extractWorkflowRule', () => {
         expect(result.ok).toBe(true);
         if (!result.ok) return;
         const writesTo = result.value.edges.filter(
-          (e) => e.edgeType === 'writesTo',
+          (e) => e.edgeType === 'writesTo' && e.fromId.startsWith('WorkflowRule:'),
         );
         expect(writesTo).toHaveLength(1);
         expect(writesTo[0]!.toId).toBe('CustomField:Account.Foo__c');
@@ -540,7 +544,7 @@ describe('extractWorkflowRule', () => {
         expect(result.ok).toBe(true);
         if (!result.ok) return;
         expect(
-          result.value.edges.filter((e) => e.edgeType === 'writesTo'),
+          result.value.edges.filter((e) => e.edgeType === 'writesTo' && e.fromId.startsWith('WorkflowRule:')),
         ).toHaveLength(0);
         // The references edges to the scaffolding nodes still emit.
         expect(
@@ -579,7 +583,7 @@ describe('extractWorkflowRule', () => {
         expect(result.ok).toBe(true);
         if (!result.ok) return;
         expect(
-          result.value.edges.filter((e) => e.edgeType === 'writesTo'),
+          result.value.edges.filter((e) => e.edgeType === 'writesTo' && e.fromId.startsWith('WorkflowRule:')),
         ).toHaveLength(1);
       } finally {
         await rm(dir, { recursive: true, force: true });
@@ -619,7 +623,7 @@ describe('extractWorkflowRule', () => {
         expect(result.ok).toBe(true);
         if (!result.ok) return;
         const writesTo = result.value.edges.filter(
-          (e) => e.edgeType === 'writesTo',
+          (e) => e.edgeType === 'writesTo' && e.fromId.startsWith('WorkflowRule:'),
         );
         expect(writesTo).toHaveLength(2);
         const fromIds = writesTo.map((e) => e.fromId).sort();
@@ -666,7 +670,7 @@ describe('extractWorkflowRule', () => {
         expect(result.ok).toBe(true);
         if (!result.ok) return;
         const writesTo = result.value.edges.filter(
-          (e) => e.edgeType === 'writesTo',
+          (e) => e.edgeType === 'writesTo' && e.fromId.startsWith('WorkflowRule:'),
         );
         expect(writesTo).toHaveLength(0);
         const refs = result.value.edges.filter(
@@ -710,7 +714,7 @@ describe('extractWorkflowRule', () => {
           expect(result.ok).toBe(true);
           if (!result.ok) return;
           const writesTo = result.value.edges.filter(
-            (e) => e.edgeType === 'writesTo',
+            (e) => e.edgeType === 'writesTo' && e.fromId.startsWith('WorkflowRule:'),
           );
           expect(writesTo, `<field>${malformed}</field>`).toHaveLength(0);
           const refs = result.value.edges.filter(
@@ -760,7 +764,7 @@ describe('extractWorkflowRule', () => {
         expect(result.ok).toBe(true);
         if (!result.ok) return;
         const writesTo = result.value.edges
-          .filter((e) => e.edgeType === 'writesTo')
+          .filter((e) => e.edgeType === 'writesTo' && e.fromId.startsWith('WorkflowRule:'))
           .map((e) => e.toId)
           .sort();
         expect(writesTo).toEqual([

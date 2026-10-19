@@ -1,42 +1,42 @@
 {
-  "generatedAt": "2026-10-17T16:46:21.862Z",
-  "version": "0.7.0",
+  "generatedAt": "2026-10-19T19:45:25.032Z",
+  "version": "0.8.0",
   "toolCount": 231,
   "coreToolCount": 16,
   "listedToolCount": 226,
   "skillCount": 26,
   "agentCount": 4,
   "commandCount": 5,
-  "componentTypeCount": 103,
-  "edgeTypeCount": 23,
+  "componentTypeCount": 104,
+  "edgeTypeCount": 24,
   "conceptCount": 153,
   "conceptRuleCount": 207,
   "tests": {
     "packages": [
       {
         "name": "mcp",
-        "files": 367,
-        "cases": 8005
+        "files": 368,
+        "cases": 7731
       },
       {
         "name": "extractors",
         "files": 102,
-        "cases": 1320
+        "cases": 1345
       },
       {
         "name": "cli",
-        "files": 56,
-        "cases": 591
+        "files": 57,
+        "cases": 597
       },
       {
         "name": "graph",
         "files": 30,
-        "cases": 403
+        "cases": 413
       },
       {
         "name": "parsers",
-        "files": 12,
-        "cases": 262
+        "files": 13,
+        "cases": 271
       },
       {
         "name": "patterns",
@@ -64,10 +64,10 @@
         "cases": 86
       }
     ],
-    "totalCases": 11267,
-    "totalFiles": 603,
+    "totalCases": 11043,
+    "totalFiles": 606,
     "packageCount": 10,
-    "approx": 11200
+    "approx": 11000
   },
   "integrationSuiteCount": 5,
   "gates": [
@@ -92,32 +92,32 @@
   "packageDescriptions": [
     {
       "name": "mcp",
-      "files": 367,
-      "cases": 8005,
+      "files": 368,
+      "cases": 7731,
       "description": "The 231 read-only tools + router + grounding layer"
     },
     {
       "name": "extractors",
       "files": 102,
-      "cases": 1320,
+      "cases": 1345,
       "description": "Metadata parsing for every Salesforce component type"
     },
     {
       "name": "cli",
-      "files": 56,
-      "cases": 591,
+      "files": 57,
+      "cases": 597,
       "description": "The sfi command-line tool"
     },
     {
       "name": "graph",
       "files": 30,
-      "cases": 403,
+      "cases": 413,
       "description": "The DuckDB dependency-graph engine"
     },
     {
       "name": "parsers",
-      "files": 12,
-      "cases": 262,
+      "files": 13,
+      "cases": 271,
       "description": "Formula / SOQL / source tokenizers"
     },
     {

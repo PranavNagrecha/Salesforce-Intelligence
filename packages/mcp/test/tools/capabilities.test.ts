@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import type { VaultManifest } from '@sf-intelligence/contracts';
 import { closeGraph, openGraph, type GraphStore } from '@sf-intelligence/graph';
 
-import { classifyQuestion, ROUTE_GAP_NUDGE_THRESHOLD } from '../../src/intent-router.js';
+import { ROUTE_GAP_NUDGE_THRESHOLD } from '../../src/route-gaps.js';
 import type { Context } from '../../src/server.js';
 import {
   capabilitiesHandler,
@@ -138,33 +138,6 @@ describe('capabilitiesHandler', () => {
         expect(deadTools).toEqual([]);
       }
     }
-  });
-
-  it('every published question path actually routes into its own tool list', async () => {
-    // A persona path advertises "ask THIS, the answer comes from THESE tools".
-    // If `route_question` sends the advertised question somewhere outside the
-    // path, the published path is a lie. Assert the router routes each question
-    // to a non-prelude tool that appears in the path (overlap — multi-tool
-    // intents have a fixed primary, so exact-primary equality is too strict).
-    const PRELUDE = new Set(['sfi.resolve', 'sfi.route_question']);
-    const r = await capabilitiesHandler(ctx, {});
-    expect(r.ok).toBe(true);
-    if (!r.ok) return;
-    const offenders: string[] = [];
-    for (const p of r.value.data.personas) {
-      for (const path of p.questionPaths) {
-        const route = classifyQuestion(path.question);
-        const routedAnswerTools = route.tools.filter((t) => !PRELUDE.has(t));
-        const pathAnswerTools = new Set(path.tools.filter((t) => !PRELUDE.has(t)));
-        const overlaps = routedAnswerTools.some((t) => pathAnswerTools.has(t));
-        if (!overlaps) {
-          offenders.push(
-            `[${p.id}] "${path.question}" routed to ${route.intent} ${JSON.stringify(route.tools)} — none in path ${JSON.stringify([...pathAnswerTools])}`,
-          );
-        }
-      }
-    }
-    expect(offenders).toEqual([]);
   });
 
   it('surfaces the resolve-first conversational guidance', async () => {

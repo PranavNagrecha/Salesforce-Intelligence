@@ -7,7 +7,8 @@
  *      own-method return types; own + inner class names; extends target.
  *   2. RESOLUTION — dot-chains resolve their receiver through the scoped
  *      symbol table: SObject-typed receivers yield field reads/writes
- *      (assignment LHS = write, everything else = read), class-typed
+ *      (assignment LHS = write, `new Obj(Field = v)` named argument = write,
+ *      everything else = read), class-typed
  *      receivers yield method calls; own-method return types propagate
  *      through same-file call chains (`getAccount().Name`,
  *      `this.getAccount().Industry`); bare calls matching own methods are
@@ -41,7 +42,7 @@ export interface ApexAstEdges {
   readonly calls: readonly string[];
   /** Field reads as `Object.Field[...]` (dot chains kept verbatim after the root type). */
   readonly reads: readonly string[];
-  /** Field writes as `Object.Field` (assignment left-hand sides). */
+  /** Field writes as `Object.Field` (assignment left-hand sides, and the named arguments of `new Object(Field = v)`). */
   readonly writes: readonly string[];
   /** First syntax error when the file did not parse — caller falls back to the scanner. */
   readonly parseError?: string;
@@ -562,10 +563,28 @@ export const extractApexAstEdges = (
     return peelOwnFields(afterCalls.type, path, afterCalls.fieldStart);
   };
 
+  /**
+   * `new Obj__c(Id = x, Field__c = v)` — the named-argument SObject constructor
+   * is the other way Apex writes a field (then `insert` / `update` /
+   * `Database.update`). Its assignments are direct arguments of the creator, so
+   * the constructed type is the receiver of every bare-Id left-hand side.
+   */
+  const ctorType = (asg: Ctx): string | null => {
+    let cur: Ctx = asg;
+    for (const want of ['ExpressionList', 'Arguments', 'ClassCreatorRest', 'Creator']) {
+      cur = cur.parentCtx as Ctx | undefined;
+      if (cur === undefined || cur === null || ctxName(cur) !== want) return null;
+    }
+    return canonicalType(kids(cur)[0]?.getText() as string);
+  };
+
   const writeRoots = new Set<Ctx>();
   for (const asg of findAll(tree, 'AssignExpression')) {
     const lhs = kids(asg)[0];
-    if (lhs !== undefined && ctxName(lhs) === 'DotExpression') {
+    if (lhs !== undefined && ctxName(lhs) === 'PrimaryExpression') {
+      const type = ctorType(asg);
+      if (isSObjectish(type)) writes.add(`${type}.${lhs.getText() as string}`);
+    } else if (lhs !== undefined && ctxName(lhs) === 'DotExpression') {
       writeRoots.add(lhs);
       const seg = dotSegments(lhs);
       if (seg !== null) {

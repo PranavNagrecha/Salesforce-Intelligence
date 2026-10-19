@@ -33,10 +33,12 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { EDGE_TYPES } from '@sf-intelligence/contracts';
-import { err, ok, type Result } from '@sf-intelligence/core';
+import { err, ok, type Result, splitPathSegments } from '@sf-intelligence/core';
 import { isHiddenUnresolved, listEdgesForNodes } from '@sf-intelligence/graph';
 
 import type { Context } from '../server.js';
+
+import { grepVaultSource } from './search-apex-source.js';
 
 /**
  * Edge types that are NOT usage.
@@ -557,4 +559,119 @@ export const walkDownstreamApex = async (
     frontier = next.sort();
   }
   return ok(reached);
+};
+
+/**
+ * Why a zero-inbound ApexClass is NOT dead: an entry-point / registration kind
+ * read off the node ({@link entryKindsFor}), or a static type-name reference
+ * found by {@link staticallyReferencedApex}. `find_dead_code` maps every one of
+ * these to `uncertain`; `unused_components` reports the same rows under the
+ * same reasons instead of calling them "unused".
+ */
+export type ApexLivenessReason = EntryPointKind | 'static-type-usage';
+
+/**
+ * RESOLVED DYNAMIC DISPATCH — the third half of the liveness predicate, and
+ * the one that is an EDGE rather than a node shape or a grep.
+ *
+ * `properties.mechanism` of the heuristic `references` edge the extractors mint
+ * for a `Type.forName` they could resolve: a string-literal operand
+ * (`@sf-intelligence/extractors` `buildApexDynamicDispatchEdges`) or a Custom
+ * Metadata cell joined at refresh (`sf-intelligence` CLI
+ * `resolveDynamicDispatchEdges`). Both producers write this exact string.
+ *
+ * Both verdict tools see it the same way because it is a usage in-edge: the
+ * class is never a zero-inbound candidate in `unused_components`, and
+ * `find_dead_code` reads the mechanism BEFORE the unproven-registration shape,
+ * so a framework subclass reached this way is "in use via resolved dynamic
+ * dispatch", not "zero inbound is expected". A dispatch whose only caller is a
+ * test class does not count, like every other test-only in-edge. A variable
+ * operand is never guessed: it is counted on the dispatching class as
+ * `unresolvedDynamicDispatch` and stays a caveat.
+ */
+export const DYNAMIC_DISPATCH_MECHANISM = 'Type.forName';
+
+/** Escape a string for literal use inside a `new RegExp(...)`. */
+const escapeForRegex = (s: string): string =>
+  s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+/**
+ * Derive the ApexClass / ApexTrigger api name from a vault source path.
+ * Source files are named `{ApiName}.cls` / `{ApiName}.trigger` (flat or
+ * DX-nested), so the basename minus the suffix is the referencing component's
+ * api name — used to attribute a grep hit to its file and to skip test /
+ * self references.
+ */
+const sourceFileApiName = (vaultRelativePath: string): string => {
+  const base = splitPathSegments(vaultRelativePath).at(-1) ?? vaultRelativePath;
+  return base.replace(/\.(cls|trigger)$/i, '');
+};
+
+/**
+ * Lower-cased api names of every ApexClass whose `isTest` property is true.
+ * Used to exclude test classes from the static-type-usage re-check: a class
+ * referenced only from @isTest code is NOT kept alive (test references do not
+ * count as production usage — the same posture the graph cascade takes). Apex
+ * identifiers are case-insensitive, so the set is lower-cased for comparison.
+ */
+const fetchTestClassApiNames = async (ctx: Context): Promise<Set<string>> => {
+  try {
+    const reader = await ctx.graph.connection.runAndReadAll(
+      `SELECT api_name FROM nodes
+       WHERE type = 'ApexClass'
+         AND json_extract_string(properties_json, '$.isTest') = 'true'`,
+    );
+    const rows = reader.getRowObjectsJS() as unknown as ReadonlyArray<{
+      api_name: string;
+    }>;
+    return new Set(rows.map((r) => String(r.api_name).toLowerCase()));
+  } catch {
+    // A query failure must not fake death — fall back to "no known test
+    // classes" so a reference in a test file is (conservatively) counted as
+    // usage rather than silently dropped.
+    return new Set<string>();
+  }
+};
+
+/**
+ * STATIC-TYPE-USAGE re-check — the half of the liveness predicate that reads
+ * source, not the graph. A class used ONLY via a static-field or type-name
+ * reference (`Other.CONST`, `List<Other>`, `JSON.deserialize(.., List<Other>.class)`)
+ * never becomes an inbound `callsApex` / `references` edge, so an in-degree
+ * scan sees zero and wrongly certifies death. Each candidate's api name is
+ * grep-searched (whole word) across non-test, non-self `.cls` / `.trigger`
+ * source; a hit means live-at-compile-time.
+ *
+ * Returns componentId → vault-relative path of the first production referrer.
+ * A candidate absent from the map passed the grep. Candidates should already
+ * be the zero-inbound / test-only set — both callers hand over a small list.
+ */
+export const staticallyReferencedApex = async (
+  ctx: Context,
+  candidates: ReadonlyArray<{ readonly componentId: ComponentId; readonly apiName: string }>,
+): Promise<ReadonlyMap<ComponentId, string>> => {
+  const staticallyUsed = new Map<ComponentId, string>();
+  if (candidates.length === 0) return staticallyUsed;
+  const testClassApiNames = await fetchTestClassApiNames(ctx);
+  for (const candidate of candidates) {
+    const selfLower = candidate.apiName.toLowerCase();
+    // limit:1 — existence is all that matters. The pathFilter drops the
+    // class's own file (a class references its own name) and every test
+    // file, so any surviving match is a production static reference.
+    const grep = await grepVaultSource(ctx, {
+      query: `\\b${escapeForRegex(candidate.apiName)}\\b`,
+      regex: true,
+      limit: 1,
+      suffixes: ['.cls', '.trigger'],
+      pathFilter: (vaultRelativePath) => {
+        const refName = sourceFileApiName(vaultRelativePath).toLowerCase();
+        if (refName === selfLower) return false; // self-reference
+        if (testClassApiNames.has(refName)) return false; // test class
+        return true;
+      },
+    });
+    const hit = grep.ok ? grep.value.matches[0] : undefined;
+    if (hit !== undefined) staticallyUsed.set(candidate.componentId, hit.path);
+  }
+  return staticallyUsed;
 };

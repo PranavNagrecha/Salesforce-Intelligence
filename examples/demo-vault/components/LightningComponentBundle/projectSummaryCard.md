@@ -43,15 +43,15 @@ type: LightningComponentBundle
 
 ## Incident edges
 
-### references (incoming, 1)
-
-| Source | Confidence | Producer |
-| --- | --- | --- |
-| `Flow:Project_Site_Survey` | declared | flow-extractor |
-
-### writesTo (outgoing, 2)
+### readsFrom (outgoing, 2)
 
 | Target | Confidence | Producer |
 | --- | --- | --- |
 | `CustomField:Project__c.Status__c` | declared | lwc-extractor |
 | `CustomField:Project__c.Utility_Provider__c` | declared | lwc-extractor |
+
+### references (incoming, 1)
+
+| Source | Confidence | Producer |
+| --- | --- | --- |
+| `Flow:Project_Site_Survey` | declared | flow-extractor |

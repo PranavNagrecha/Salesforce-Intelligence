@@ -6,6 +6,35 @@
 
 import type { ComponentId, ComponentType, Node } from '@sf-intelligence/contracts';
 
+/**
+ * A referrer's run state, normalised from the one property its node carries:
+ * the extractors' `status` string (Flow `Active` / `Obsolete` / `Draft` /
+ * `InvalidDraft`; ApexTrigger and ApexClass `Active` / `Inactive` / `Deleted`)
+ * or the `active` / `isActive` boolean (ValidationRule, WorkflowRule,
+ * ApprovalProcess, the rule trio, DuplicateRule; OmniStudio DataPack nodes
+ * stamp it as the STRING `'true'` / `'false'`). `unknown` = the node
+ * carries no activation property (Layout, LWC, ReportType, a CustomField) or
+ * there is no node (a phantom referrer) — never a defaulted `active`.
+ */
+export type ReferrerStatus = 'active' | 'inactive' | 'obsolete' | 'draft' | 'unknown';
+
+/** The ONE reading of a node's activation property; usage tools stamp it on every referrer row. */
+export const referrerStatus = (node: Node | null | undefined): ReferrerStatus => {
+  if (node == null) return 'unknown';
+  const props = node.properties;
+  const status = props['status'];
+  if (typeof status === 'string' && status.length > 0) {
+    if (status === 'Active') return 'active';
+    if (status === 'Obsolete') return 'obsolete';
+    if (status === 'Draft' || status === 'InvalidDraft') return 'draft';
+    return 'inactive';
+  }
+  const active = props['active'] ?? props['isActive'];
+  if (active === true || active === 'true') return 'active';
+  if (active === false || active === 'false') return 'inactive';
+  return 'unknown';
+};
+
 export interface InactiveConfiguredFirer {
   readonly componentId: ComponentId;
   readonly componentType: ComponentType;
@@ -16,8 +45,8 @@ export interface InactiveConfiguredFirer {
 /**
  * Whether a firer node represents automation that runs at save time. Flow uses
  * `status === 'Active'`; WorkflowRule, ValidationRule, and ApprovalProcess use
- * `active: true`; ApexTrigger uses `status !== 'Inactive'` (the extractor
- * emits `status: Active | Inactive` from the trigger's `<status>` element).
+ * `active: true`; ApexTrigger uses `status === 'Active'` (the extractor
+ * emits the trigger's `<status>` element: Active | Inactive | Deleted).
  * Missing status/active is treated as active (conservative prior).
  */
 export const isActiveSoeFirer = (node: Node): boolean => {
@@ -29,9 +58,10 @@ export const isActiveSoeFirer = (node: Node): boolean => {
   }
   if (node.type === 'ApexTrigger') {
     const status = props['status'];
-    // The extractor records `status: Active | Inactive` from the trigger XML.
-    // Treat absent status as active (conservative prior for older vault data).
-    if (typeof status === 'string') return status !== 'Inactive';
+    // The extractor records the trigger's `<status>`; only `Active` runs
+    // (`Deleted` does not). Absent status is treated as active (conservative
+    // prior for older vault data).
+    if (typeof status === 'string') return status === 'Active';
     return true;
   }
   if (

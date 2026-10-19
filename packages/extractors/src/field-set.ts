@@ -94,6 +94,11 @@ const derivePathParts = (
  * `<displayedFields>` + `<availableFields>` (sorted by `toId`). A field set is
  * consumed by LWC/VF/managed code, so a referenced field is a real dependent.
  *
+ * A dotted field (`Account__r.Name`) lives on the RELATED object, which this
+ * file cannot name, so it is parked on `properties.unresolvedTraversalRefs`
+ * for `mintRelationshipTraversalEdges` in `@sf-intelligence/graph`, never
+ * minted as `CustomField:{Object}.{Rel__r}.{Field}`.
+ *
  * @example
  *   const r = await extractFieldSet('.../objects/Contact/fieldSets/SparkTable__Fields.fieldSet-meta.xml');
  *   // r.value.nodes[0].id === 'FieldSet:Contact.SparkTable__Fields'
@@ -143,6 +148,8 @@ export const extractFieldSet = async (
 
   const parentId = `CustomObject:${objectApiName}`;
   const nodeId = `${ROOT_ELEMENT}:${objectApiName}.${apiName}`;
+  const allFields = [...new Set([...displayedFields, ...availableFields])];
+  const unresolvedTraversalRefs = allFields.filter((field) => field.includes('.'));
 
   const node: Node = {
     id: nodeId,
@@ -159,6 +166,7 @@ export const extractFieldSet = async (
       description: toNullableString(rootObj['description']),
       displayedFields,
       availableFields,
+      ...(unresolvedTraversalRefs.length > 0 ? { unresolvedTraversalRefs } : {}),
     },
   };
 
@@ -171,7 +179,8 @@ export const extractFieldSet = async (
     properties: {},
   };
 
-  const fieldEdges: Edge[] = [...new Set([...displayedFields, ...availableFields])]
+  const fieldEdges: Edge[] = allFields
+    .filter((field) => !field.includes('.'))
     .map((field) => ({
       fromId: nodeId,
       toId: `CustomField:${objectApiName}.${field}`,

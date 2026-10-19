@@ -4,8 +4,8 @@
 //   1. the pure `marginClarification` gate over synthetic candidates — every
 //      axis, the threshold boundary, and each non-fire guard, drift-proof;
 //   2. the real `routeQuestionHandler` over a fixture vault — proves the gate
-//      is wired, fires on a genuine PLANE tie, stays quiet on clear routes and
-//      in offline mode, and that a tool selection deterministically resumes.
+//      is wired, fires on a genuine destructive/read-only tie, stays quiet on
+//      clear shortlists, and that a tool selection deterministically resumes.
 
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -19,10 +19,14 @@ import {
   type GraphStore,
 } from '@sf-intelligence/graph';
 
-import type { RouteClarification } from '../../src/intent-router.js';
 import type { ToolCandidate } from '../../src/semantic-funnel.js';
 import type { Context } from '../../src/server.js';
-import { MARGIN, marginClarification, routeQuestionHandler } from '../../src/tools/route-question.js';
+import {
+  MARGIN,
+  marginClarification,
+  routeQuestionHandler,
+  type RouteClarification,
+} from '../../src/tools/route-question.js';
 
 // --- synthetic candidate builder -------------------------------------------
 const cand = (o: Partial<ToolCandidate> & Pick<ToolCandidate, 'tool' | 'score'>): ToolCandidate => ({
@@ -58,7 +62,24 @@ describe('marginClarification — the pure I6 gate', () => {
     );
     expect(clar?.required).toBe(true);
     expect(clar?.options).toEqual(['sfi.safe_to_delete_field', 'sfi.get_impact']);
-    expect(clar?.question).toMatch(/DESTRUCTIVE/);
+    // Every sf-intelligence tool is read-only; the tie is verdict vs readout.
+    expect(clar?.question).not.toMatch(/DESTRUCTIVE/);
+  });
+
+  it.each([
+    'What breaks if I delete the Account field?',
+    'What breaks if I change Account.Industry?',
+    'what depends on the Discount field',
+  ])('does NOT fire when the question itself says which reading it wants: %s', (question) => {
+    const clar = marginClarification(
+      [
+        cand({ tool: 'sfi.safe_to_delete_field', score: 0.31, plane: 'vault' }),
+        cand({ tool: 'sfi.get_impact', score: 0.30, plane: 'vault' }),
+      ],
+      null,
+      question,
+    );
+    expect(clar).toBeNull();
   });
 
   it('FIRES for the what_if_* family too (not just safe_to_delete)', () => {
@@ -89,18 +110,6 @@ describe('marginClarification — the pure I6 gate', () => {
       [
         cand({ tool: 'sfi.find_code_usages', score: 0.45, plane: 'vault' }),
         cand({ tool: 'sfi.find_apex_usages', score: 0.44, plane: 'vault' }),
-      ],
-      null,
-    );
-    expect(clar).toBeNull();
-  });
-
-  it('does NOT fire when both top candidates came from the regex route (coordinated plan)', () => {
-    // e.g. an impact route deliberately stacking the simulation + the readout.
-    const clar = marginClarification(
-      [
-        cand({ tool: 'sfi.safe_to_delete_field', score: 0.54, plane: 'vault', fromRoute: true }),
-        cand({ tool: 'sfi.get_impact', score: 0.53, plane: 'vault', fromRoute: true }),
       ],
       null,
     );
@@ -188,17 +197,14 @@ afterAll(async () => {
 });
 
 describe('routeQuestionHandler — I6 margin gate wired end to end', () => {
-  it('P4: a plane near-tie no longer blocks — "actually used" reports route LIVE deterministically', async () => {
-    // Pre-P4 this phrasing BLOCKED on a plane near-tie (live_report_usage vs
-    // find_code_usages). Run-history is live LastRunDate — the reports-usage
-    // rule now routes it, and the plane axis never stops execution.
+  it('a plane near-tie never blocks — "actually used" reports lead LIVE by the runtime-data signal', async () => {
     const r = await routeQuestionHandler(ctx, { question: 'which reports are actually used', logGap: false });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.executionBlocked).toBe(false);
-    expect(r.value.data.route.intent).toBe('reports-usage');
-    expect(r.value.data.route.tools).toContain('sfi.live_report_usage');
-    expect(r.value.data.route.liveRequired).toBe(true);
+    expect(r.value.data.clarification).toBeNull();
+    const tools = (r.value.data.toolCandidates ?? []).map((c) => c.tool);
+    expect(tools).toContain('sfi.live_report_usage');
   });
 
   it('fires on a genuine DESTRUCTIVE/read-only near-tie and offers the two divergent tools', async () => {
@@ -206,13 +212,26 @@ describe('routeQuestionHandler — I6 margin gate wired end to end', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.executionBlocked).toBe(true);
-    const opts = r.value.data.route.clarification?.options ?? [];
+    const opts = r.value.data.clarification?.options ?? [];
     expect(opts).toContain('sfi.safe_to_delete_field');
     expect(opts).toContain('sfi.find_code_usages');
-    expect(opts.every((o) => o.startsWith('sfi.'))).toBe(true);
+    expect(opts.every((o: string) => o.startsWith('sfi.'))).toBe(true);
   });
 
-  it('does NOT block a clear vault route (goldset shape stays executable)', async () => {
+  it.each([
+    ['What breaks if I delete the Account field?', ['sfi.get_impact', 'sfi.safe_to_delete_field']],
+    ['What breaks if I change Account.Industry?', ['sfi.get_impact', 'sfi.safe_to_delete_field']],
+  ])('a what-breaks question never stops: %s', async (question, expected) => {
+    const r = await routeQuestionHandler(ctx, { question, logGap: false });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.executionBlocked).toBe(false);
+    expect(r.value.data.clarification).toBeNull();
+    const top3 = (r.value.data.toolCandidates ?? []).slice(0, 3).map((c) => c.tool);
+    expect(top3.some((t) => expected.includes(t))).toBe(true);
+  });
+
+  it('does NOT block a clear vault shortlist', async () => {
     for (const question of [
       'what custom objects do we have',
       'what flows run on Account',
@@ -230,7 +249,7 @@ describe('routeQuestionHandler — I6 margin gate wired end to end', () => {
     const first = await routeQuestionHandler(ctx, { question, logGap: false });
     expect(first.ok).toBe(true);
     if (!first.ok) return;
-    const clarificationId = first.value.data.route.clarification?.id as string;
+    const clarificationId = first.value.data.clarification?.id as string;
     expect(clarificationId).toBeDefined();
 
     const resumed = await routeQuestionHandler(ctx, {
@@ -241,8 +260,11 @@ describe('routeQuestionHandler — I6 margin gate wired end to end', () => {
     expect(resumed.ok).toBe(true);
     if (!resumed.ok) return;
     expect(resumed.value.data.executionBlocked).toBe(false);
-    expect(resumed.value.data.route.clarification).toBeNull();
-    expect(resumed.value.data.route.tools).toContain('sfi.safe_to_delete_field');
+    expect(resumed.value.data.clarification).toBeNull();
+    // The pick leads; the losing rival is dropped from the shortlist.
+    const tools = (resumed.value.data.toolCandidates ?? []).map((c) => c.tool);
+    expect(tools[0]).toBe('sfi.safe_to_delete_field');
+    expect(tools).not.toContain('sfi.find_code_usages');
     expect(resumed.value.data.clarificationResolution).toEqual({
       clarificationId,
       selection: 'sfi.safe_to_delete_field',
@@ -255,27 +277,12 @@ describe('routeQuestionHandler — I6 margin gate wired end to end', () => {
     const first = await routeQuestionHandler(ctx, { question, logGap: false });
     expect(first.ok).toBe(true);
     if (!first.ok) return;
-    const clarificationId = first.value.data.route.clarification?.id as string;
+    const clarificationId = first.value.data.clarification?.id as string;
     const bad = await routeQuestionHandler(ctx, {
       question,
       logGap: false,
       clarificationResponse: { clarificationId, selection: 'sfi.what_if_merge_profiles' },
     });
     expect(bad.ok).toBe(false);
-  });
-
-  it('never blocks in offline mode — the deterministic route is authoritative', async () => {
-    const prev = process.env.SFI_ROUTER_MODE;
-    process.env.SFI_ROUTER_MODE = 'offline';
-    try {
-      const r = await routeQuestionHandler(ctx, { question: 'which reports are actually used', logGap: false });
-      expect(r.ok).toBe(true);
-      if (!r.ok) return;
-      expect(r.value.data.executionBlocked).toBe(false);
-      expect(r.value.data.toolCandidates).toBeUndefined();
-    } finally {
-      if (prev === undefined) delete process.env.SFI_ROUTER_MODE;
-      else process.env.SFI_ROUTER_MODE = prev;
-    }
   });
 });

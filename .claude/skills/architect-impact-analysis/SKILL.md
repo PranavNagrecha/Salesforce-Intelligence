@@ -61,12 +61,13 @@ as a coverage signal rather than proof of no dependents.
 `sfi.get_impact` carries a `soundness` envelope (`complete` /
 `blindSpots[]` / `staticCoverage`) with two blind-spot kinds:
 `dynamic-apex` (an impacted class uses dynamic SOQL / reflective
-describe / `Type.forName` / untyped JSON — named by id) and, on a
-`CustomField` / `CustomObject` root, `unwalked-referrer-class` — the
-referrer classes that are NOT modeled as incoming edges and so were
-never walked: roll-up source coupling, layout placement, Flow
-decision/filter reads, and tab/app membership. That one is STRUCTURAL,
-so it names no ids; `referrerClasses` names the classes instead.
+describe / `Type.forName` / untyped JSON — named by id) and
+`unwalked-referrer-class` — the referrer kinds that are NOT modeled as
+incoming edges on this vault and so were never walked. Which kinds
+depends on the root type and the vault's builder version (a
+`CustomField` on a current vault has none; a `CustomObject` still has
+some), so it is STRUCTURAL and names no ids; `referrerClasses` names
+the kinds — quote that list, never one from memory.
 Surface both — a `complete: false` impact result is a floor, not a
 ceiling, and on a field root "no referrers found" is "these classes
 were not checked", never a proven "nothing references this".
@@ -468,7 +469,7 @@ The architect-facing summary of what's modeled, at what confidence:
 | `writesTo` | flow XML walker | yes | `parsed` / `declared` | Flow recordCreates, recordUpdates (write fields); R7-W1 whole-record `<inputReference>` DML → OBJECT-level `declared`; R7-W2 before-save `$Record.<Field>` assignment → FIELD-level `declared`. |
 | `callsApex` | flow XML walker | yes | `parsed` | Flow `actionCalls` with `actionType=apex`. |
 | `listensTo` | (reserved) | partial | n/a | Generic event listener edge; not all sources emit it yet. |
-| Apex `readsFrom` / `writesTo` | **Apex AST parser** (default) | yes | **`parsed`** | **Apex method-body field reads/writes, AST-resolved. High confidence.** |
+| Apex `readsFrom` / `writesTo` | **Apex AST parser** (default) | yes | **`parsed`** | **Apex method-body field reads/writes, AST-resolved. High confidence.** A write is `rec.Field__c = v` or a named constructor argument `new Obj__c(Field__c = v)` (then `insert` / `update` / `Database.update`). |
 | Apex `readsFrom` / `writesTo` | regex/token Apex scanner (backfill) | yes | `heuristic` | Apex method-body field reads/writes for parse failures / recall gaps. Heuristic, not compiler-precise. |
 | Apex `callsApex` (class → class) | **Apex AST parser** (default) | yes | **`parsed`** | **Which Apex class calls which (AST-resolved, per-class granular).** |
 | Apex `callsApex` (class → class) | regex/token Apex scanner (backfill) | yes | `heuristic` | Which Apex class calls which (scanner-detected). Supplemental to parsed tier. |
@@ -571,4 +572,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from); each row names its plane and carries any component it resolved as `suggestedArgs`. **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

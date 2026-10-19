@@ -48,6 +48,12 @@ import {
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { fullScanTruncationNote } from './scan-cap.js';
 import {
+  readSecurityToggleEvidence,
+  SECURITY_SETTINGS_NOT_IN_VAULT,
+  securityEvidenceRows,
+  type SecurityToggleEvidence,
+} from './security-settings.js';
+import {
   techDebtScoreHandler,
   type TechDebtScoreOutput,
 } from './tech-debt-score.js';
@@ -1301,6 +1307,7 @@ const grantorFinding = (
   viewAllObjects: number,
   worst: RankedFinding['severity'] | null,
   examples: readonly string[],
+  security: SecurityToggleEvidence | null,
 ): RankedFinding | null => {
   if (riskyPerms.length === 0 && modifyAllObjects === 0 && viewAllObjects === 0) {
     return null;
@@ -1344,7 +1351,9 @@ const grantorFinding = (
       : standardProfile
       ? `Standard Profile ${node.apiName} grants ${parts.join('; ')} (Salesforce-defined; review who holds it)`
       : `${type} ${node.apiName} grants ${parts.join('; ')}`,
-    evidence: [node.id, ...examples],
+    // The org toggles that change what this grant means ride with it as
+    // evidence rows, not prose (CHECK-BEFORE-CAVEAT).
+    evidence: [node.id, ...examples, ...securityEvidenceRows(security, riskyPerms)],
     confidence: 'declared',
     audience,
   };
@@ -1377,6 +1386,7 @@ const audienceRank = (f: RankedFinding): number =>
 const analyzeOverPrivilege = async (
   ctx: Context,
   limit: number,
+  security: SecurityToggleEvidence | null,
 ): Promise<
   Result<{ findings: RankedFinding[]; privilege: PrivilegeSummary }, McpError>
 > => {
@@ -1507,6 +1517,7 @@ const analyzeOverPrivilege = async (
       viewAllObjects,
       worst,
       examples,
+      security,
     );
     if (finding !== null) findings.push(finding);
   }
@@ -1595,7 +1606,7 @@ const analyzeOverPrivilege = async (
         (hasMuting
           ? ' (has a muting permission set, not subtracted in this god-mode roster — effective perms may be lower; use sfi.effective_permissions for the muting-correct net grant, R6-06)'
           : ''),
-      evidence: [psg.id, ...riskyMembers],
+      evidence: [psg.id, ...riskyMembers, ...securityEvidenceRows(security, conferred)],
       confidence: 'declared',
       audience: psgAudience,
     });
@@ -1683,6 +1694,9 @@ const scopedProfileReport = async (
     worst = 'medium';
   }
 
+  const securityResult = await readSecurityToggleEvidence(ctx);
+  if (!securityResult.ok) return securityResult;
+  const security = securityResult.value;
   const finding = grantorFinding(
     node,
     'Profile',
@@ -1691,6 +1705,7 @@ const scopedProfileReport = async (
     viewAllObjects,
     worst,
     examples,
+    security,
   );
   const findings: RankedFinding[] = finding !== null ? [finding] : [];
 
@@ -1713,6 +1728,7 @@ const scopedProfileReport = async (
   const limitations: string[] = [];
   if (findingsPage.note !== null) limitations.push(findingsPage.note);
   limitations.push(UNASSIGNED_NOT_EVALUATED.note);
+  if (security === null) limitations.push(SECURITY_SETTINGS_NOT_IN_VAULT);
 
   return ok({
     data: {
@@ -1721,6 +1737,7 @@ const scopedProfileReport = async (
       truncated: findingsPage.truncated,
       findingsPage,
       unassignedCoverage: UNASSIGNED_NOT_EVALUATED,
+      securityContext: security,
       privilege: {
         modifyAllDataGrantors: [...modifyAllDataGrantors].sort(),
         viewAllDataGrantors: [...viewAllDataGrantors].sort(),
@@ -1741,7 +1758,9 @@ const scopedProfileReport = async (
       trust: coverageTrust(ctx, limitations),
       disclosure:
         `${findingsPage.note !== null ? `${findingsPage.note} ` : ''}` +
-        `${UNASSIGNED_NOT_EVALUATED.note} ${SYNTHESIS_DISCLOSURE}`,
+        `${UNASSIGNED_NOT_EVALUATED.note} ` +
+        `${security === null ? `${SECURITY_SETTINGS_NOT_IN_VAULT} ` : ''}` +
+        `${SYNTHESIS_DISCLOSURE}`,
     },
     vaultState: {
       sourceTreeHash: ctx.manifest.sourceTreeHash,
@@ -1861,6 +1880,16 @@ export interface PermissionRiskReportOutput extends SynthesisBase {
    * the resolved profile id.
    */
   readonly profileFilter?: ProfileFilterResult;
+  /**
+   * CHECK-BEFORE-CAVEAT: the org security toggles that change what a god-mode
+   * or Manage Users grant means (login as any user, session lock, password
+   * policy), read from `SecuritySettings:default` / `SessionSettings:default`.
+   * The rows relevant to a grant also ride on that finding's `evidence`. `null`
+   * when neither node is in the vault — then `trust.limitations` says so; this
+   * is the only case the report prints a caveat about org settings. Absent
+   * when the report stopped before analysing (unknown `profileFilter`).
+   */
+  readonly securityContext?: SecurityToggleEvidence | null;
 }
 
 /** Resolution of a requested `profileFilter` against the vault's profiles. */
@@ -2065,6 +2094,14 @@ const buildUnassignedCoverage = (
     readonly unknownAssignmentCount: number;
     readonly totalScanned: number;
     readonly enrichmentStatus: string;
+    /** The vault's PermissionSet count, when the sub-analysis scanned fewer. */
+    readonly totalPermissionSets?: number;
+    /** What the sub-analysis's default filter dropped, when it dropped anything. */
+    readonly filterExcluded?: {
+      readonly managedPackage: number;
+      readonly muting: number;
+      readonly total: number;
+    };
   } | null,
 ): UnassignedCoverageSummary => {
   if (data === null) {
@@ -2082,6 +2119,15 @@ const buildUnassignedCoverage = (
     };
   }
   const known = data.unknownAssignmentCount === 0;
+  // "scanned" is the sub-analysis's post-filter count; when the vault holds
+  // more, say how many it skipped and why, from the filter's own counters.
+  const skipped =
+    data.filterExcluded !== undefined && data.totalPermissionSets !== undefined
+      ? ` ${data.totalScanned} of ${data.totalPermissionSets} permission sets in this vault were scanned; ` +
+        `${data.filterExcluded.total} skipped by the unassigned sub-analysis default filter ` +
+        `(${data.filterExcluded.managedPackage} managed-package, ${data.filterExcluded.muting} muting) — ` +
+        `sfi.unassigned_permission_sets with includeManagedPackage / includeMutingPermissionSets widens it.`
+      : '';
   return {
     analyzed: true,
     unassignedCount: data.unassignedCount,
@@ -2089,16 +2135,17 @@ const buildUnassignedCoverage = (
     permissionSetsScanned: data.totalScanned,
     enrichmentStatus: data.enrichmentStatus,
     assignmentStatusKnown: known,
-    note: known
-      ? `Assignment status was resolved for all ${data.totalScanned} scanned ` +
-        `permission set(s) (enrichment: ${data.enrichmentStatus}); ` +
-        `${data.unassignedCount} confirmed unassigned.`
-      : `Assignment status is UNKNOWN for ${data.unknownAssignmentCount} of ` +
-        `${data.totalScanned} scanned permission set(s) (enrichment: ` +
-        `${data.enrichmentStatus}), so the ${data.unassignedCount} ` +
-        `unassigned-grant finding(s) here are a FLOOR, not a checked zero. ` +
-        `Run \`${ASSIGNMENT_ENRICHMENT_REMEDY}\` to resolve them, or see ` +
-        `sfi.unassigned_permission_sets for the per-set breakdown.`,
+    note:
+      (known
+        ? `Assignment status was resolved for all ${data.totalScanned} scanned ` +
+          `permission set(s) (enrichment: ${data.enrichmentStatus}); ` +
+          `${data.unassignedCount} confirmed unassigned.`
+        : `Assignment status is UNKNOWN for ${data.unknownAssignmentCount} of ` +
+          `${data.totalScanned} scanned permission set(s) (enrichment: ` +
+          `${data.enrichmentStatus}), so the ${data.unassignedCount} ` +
+          `unassigned-grant finding(s) here are a FLOOR, not a checked zero. ` +
+          `Run \`${ASSIGNMENT_ENRICHMENT_REMEDY}\` to resolve them, or see ` +
+          `sfi.unassigned_permission_sets for the per-set breakdown.`) + skipped,
   };
 };
 
@@ -2168,7 +2215,12 @@ export const permissionRiskReportHandler = async (
   // Over-privilege: god-mode system perms + object-level View All / Modify All,
   // read straight from the extracted profile / permission-set metadata. This is
   // the headline of a permission-risk report, so it leads the findings.
-  const overPrivResult = await analyzeOverPrivilege(ctx, limit);
+  // The org toggles that change what a god-mode grant means are READ, not
+  // caveated: a caveat is for what the vault truly cannot see.
+  const securityResult = await readSecurityToggleEvidence(ctx);
+  if (!securityResult.ok) return securityResult;
+  const security = securityResult.value;
+  const overPrivResult = await analyzeOverPrivilege(ctx, limit, security);
   if (!overPrivResult.ok) return overPrivResult;
   const overPriv = overPrivResult.value;
   findings.push(...overPriv.findings);
@@ -2201,6 +2253,8 @@ export const permissionRiskReportHandler = async (
       unknownAssignmentCount: u.unknownAssignmentCount,
       totalScanned: u.totalScanned,
       enrichmentStatus: u.enrichmentStatus,
+      ...(u.totalPermissionSets !== undefined ? { totalPermissionSets: u.totalPermissionSets } : {}),
+      ...(u.filterExcluded !== undefined ? { filterExcluded: u.filterExcluded } : {}),
     });
   } else {
     unassignedCoverage = buildUnassignedCoverage(null);
@@ -2267,6 +2321,7 @@ export const permissionRiskReportHandler = async (
   if (overPriv.privilege.scanBoundaryNote !== null) {
     limitations.push(overPriv.privilege.scanBoundaryNote);
   }
+  if (security === null) limitations.push(SECURITY_SETTINGS_NOT_IN_VAULT);
 
   return ok({
     data: {
@@ -2276,6 +2331,7 @@ export const permissionRiskReportHandler = async (
       findingsPage,
       unassignedCoverage,
       privilege: overPriv.privilege,
+      securityContext: security,
       ...(dataShape !== undefined ? { dataShape } : {}),
       trust: coverageTrust(ctx, limitations),
       // A capped census must SAY it was capped — the roster is otherwise read
@@ -2285,6 +2341,7 @@ export const permissionRiskReportHandler = async (
         overPriv.privilege.scanBoundaryNote,
         findingsPage.note,
         unassignedCoverage.assignmentStatusKnown ? null : unassignedCoverage.note,
+        security === null ? SECURITY_SETTINGS_NOT_IN_VAULT : null,
         SYNTHESIS_DISCLOSURE,
       ]
         .filter((part): part is string => part !== null)

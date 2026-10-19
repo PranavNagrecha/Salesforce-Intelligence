@@ -85,3 +85,9 @@ How the payment was tendered.
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `CustomObject:Payment__c` | declared | custom-field-extractor |
+
+### writesTo (incoming, 1)
+
+| Source | Confidence | Producer |
+| --- | --- | --- |
+| `ApexClass:PaymentService` | parsed | apex-ast |

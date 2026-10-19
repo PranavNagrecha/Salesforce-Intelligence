@@ -106,7 +106,7 @@ import {
   type PaginateResult,
 } from './page-cursor.js';
 import { responseReductionCap } from './response-budget.js';
-import { isActiveSoeFirer } from './soe-active.js';
+import { isActiveSoeFirer, referrerStatus } from './soe-active.js';
 import { isTimeTriggeredEdge } from './time-triggered-write.js';
 
 /** Default and max number of collisions / cycles returned per list. */
@@ -723,31 +723,17 @@ const gatherFieldWritesForFirer = async (
 };
 
 /**
- * The activation properties a node can CARRY, strongest signal first. A node
- * that carries none has no activation concept at all (an ApexClass in an older
- * vault), and its state must read `'not-modeled'` rather than a defaulted
- * `true`.
- */
-const ACTIVATION_PROPERTY_KEYS = ['status', 'active', 'isActive'] as const;
-
-/**
  * The activation state of a component the vault holds, decided by the property
- * the node CARRIES (R1). See {@link ExternalWriter.activation} for why
- * `isActiveSoeFirer` is not consulted directly here: it returns `true` for
- * every type it does not model, which would publish a default as a check.
- * A drift test pins that this agrees with that predicate on every type it does.
+ * the node CARRIES (R1), read through the shared `referrerStatus` helper so
+ * every usage row and this tool agree on what `Obsolete` or `active: false`
+ * means. See {@link ExternalWriter.activation} for why `isActiveSoeFirer` is
+ * not consulted directly here: it returns `true` for every type it does not
+ * model, which would publish a default as a check. A drift test pins that this
+ * agrees with that predicate on every type it does.
  */
 const activationOf = (node: Node | null): ExternalWriter['activation'] => {
-  if (node === null) return 'not-modeled';
-  for (const key of ACTIVATION_PROPERTY_KEYS) {
-    const value = node.properties[key];
-    // A string state is the extractors' `status` vocabulary (`Active`,
-    // `Draft`, `Obsolete`, `Inactive`, `Deleted`); a boolean is the
-    // `active` / `isActive` element. Anything else is not an activation.
-    if (typeof value === 'string') return value === 'Active' ? 'active' : 'inactive';
-    if (typeof value === 'boolean') return value ? 'active' : 'inactive';
-  }
-  return 'not-modeled';
+  const status = referrerStatus(node);
+  return status === 'unknown' ? 'not-modeled' : status === 'active' ? 'active' : 'inactive';
 };
 
 /** What {@link gatherExternalFieldWriters} found, plus the honesty of its own reach. */

@@ -39,9 +39,11 @@ A real answer from the built-in demo org (a solar installer called Verdant), une
 
 ```bash
 npm install -g sf-intelligence
-sfi demo            # a built-in demo org, no Salesforce login needed
-sfi init            # then: connect your own org (read-only retrieve)
+claude mcp add --scope user sf-intelligence-demo -- npx -y sf-intelligence demo   # a built-in demo org, no Salesforce login; then ask your assistant a question
+cd your-sfdx-project && sfi init --target-org my-org-alias   # then: connect your own org (read-only retrieve)
 ```
+
+`sfi demo` on its own starts an MCP server and waits for a host; it is not a command to run in a terminal.
 
 Then register the server in your AI host; the [install guide](./llms-install.md) has the exact block for each host. Or one click: [![Add the demo to Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/install-mcp?name=sf-intelligence-demo&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsInNmLWludGVsbGlnZW5jZSIsImRlbW8iXX0%3D) Try the built-in demo org in Cursor in one click (no Salesforce login). AI agents installing this server: see [llms-install.md](llms-install.md).
 
@@ -215,6 +217,8 @@ over MCP — fully offline, no auth, no `sf` CLI:
 claude mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo
 ```
 
+Scripting it with `claude -p`? Put the question first and allow the server's tools, or the run answers nothing: `claude -p "What happens when I save a Project?" --allowedTools mcp__sf-intelligence-demo`. An interactive session asks once instead.
+
 Then ask it things like:
 
 > - *What happens when I save a Project?*
@@ -261,7 +265,8 @@ Moving from an earlier release: **[docs/guides/upgrading.md](./docs/guides/upgra
 | Cline (VS Code extension) | `cline_mcp_settings.json` (via Cline → MCP Servers → Configure) | `mcpServers` |
 
 **Claude Code** — from your Salesforce DX repo, add it project-scoped (writes a
-`.mcp.json` at the repo root that your team can commit):
+`.mcp.json` at the repo root; it embeds your absolute vault path, so each
+teammate runs the same command once rather than committing the file):
 
 ```sh
 claude mcp add --scope project sf-intelligence -- \
@@ -375,7 +380,9 @@ this repo into your project's `.claude/agents/` enables its parallel path.
 Work from **your per-org repository** — the Salesforce DX project you want to
 vault (the directory with `sfdx-project.json`). The first refresh is read-only:
 it retrieves metadata and builds a local knowledge base; it never deploys or
-mutates Salesforce data.
+mutates Salesforce data. `sfi init` leaves `org-kb/meta/manifest.json`,
+`config.json` and `version.txt` for you to commit and ignores the rest of the
+vault (source, graph, snapshots, the other `meta/` files) as org data.
 
 ```sh
 # 0. New here? The guided path walks install → auth → init → refresh → ask,

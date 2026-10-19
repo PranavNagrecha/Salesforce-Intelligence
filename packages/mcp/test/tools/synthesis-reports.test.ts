@@ -219,6 +219,7 @@ describe('permissionRiskReportHandler — over-privilege / god-mode (admin analy
                 'ModifyAllData',
                 'ViewAllData',
                 'AuthorApex',
+                'ManageUsers',
                 'ApiEnabled',
               ],
             },
@@ -238,6 +239,27 @@ describe('permissionRiskReportHandler — over-privilege / god-mode (admin analy
             id: 'CustomObject:Contact',
             type: 'CustomObject',
             apiName: 'Contact',
+          }),
+          // CHECK-BEFORE-CAVEAT: the org toggles that change what a god-mode
+          // grant means, as the SecuritySettings extractor stores them.
+          makeNode({
+            id: 'SecuritySettings:default',
+            type: 'SecuritySettings',
+            apiName: 'SecuritySettings',
+            properties: {
+              orgToggles: { enableAdminLoginAsAnyUser: 'true', canUsersGrantLoginAccess: 'false', enableCoepHeader: 'false' },
+              passwordPolicies: { expiration: 'NinetyDays', maxLoginAttempts: 'ThreeAttempts', complexity: 'UpperLowerCaseNumeric' },
+            },
+          }),
+          makeNode({
+            id: 'SessionSettings:default',
+            type: 'SessionSettings',
+            apiName: 'SessionSettings',
+            properties: {
+              sessionTimeout: 'TwoHours',
+              mfaRequired: null,
+              sessionSettings: { lockSessionsToIp: 'false', enforceIpRangesEveryRequest: 'true', enableCSRFOnGet: 'true' },
+            },
           }),
         ],
         edges: [
@@ -291,6 +313,34 @@ describe('permissionRiskReportHandler — over-privilege / god-mode (admin analy
     expect(op?.summary).toContain('Modify All on 1 object(s)');
     expect(op?.summary).toContain('View All on 1 object(s)');
     expect(op?.evidence).toContain('Profile:GodAdmin');
+  });
+
+  it('CHECK-BEFORE-CAVEAT: security toggles ride as evidence rows next to the god-mode grant, and once in securityContext', async () => {
+    const r = await permissionRiskReportHandler(opCtx, { limit: 20 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const op = r.value.data.findings.find((f) => f.category === 'over-privilege');
+    // Manage Users → who an admin can log in as; Modify/View All Data → the session that holds it.
+    expect(op?.evidence).toContain('SecuritySettings:default orgToggles.enableAdminLoginAsAnyUser=true');
+    expect(op?.evidence).toContain('SecuritySettings:default orgToggles.canUsersGrantLoginAccess=false');
+    expect(op?.evidence).toContain('SessionSettings:default sessionTimeout=TwoHours');
+    expect(op?.evidence).toContain('SessionSettings:default sessionSettings.lockSessionsToIp=false');
+    expect(op?.evidence).toContain('SessionSettings:default sessionSettings.enforceIpRangesEveryRequest=true');
+    // Not declared in this org's file → not a row (absence is silence, never "off").
+    expect(op?.evidence.some((e) => e.includes('mfaRequired'))).toBe(false);
+    // A header switch does not change what a permission means → not a row.
+    expect(op?.evidence.some((e) => e.includes('enableCoepHeader') || e.includes('enableCSRFOnGet'))).toBe(false);
+    const sc = r.value.data.securityContext;
+    expect(sc?.sources).toEqual(['SecuritySettings:default', 'SessionSettings:default']);
+    expect(sc?.toggles).toEqual(
+      expect.arrayContaining([
+        { source: 'SecuritySettings:default', key: 'orgToggles.enableAdminLoginAsAnyUser', value: 'true' },
+        { source: 'SecuritySettings:default', key: 'passwordPolicies.expiration', value: 'NinetyDays' },
+        { source: 'SessionSettings:default', key: 'sessionSettings.lockSessionsToIp', value: 'false' },
+      ]),
+    );
+    // The check ran, so no caveat about org settings.
+    expect(r.value.data.trust.limitations.some((l) => /security settings/i.test(l))).toBe(false);
   });
 });
 
@@ -356,6 +406,15 @@ describe('permissionRiskReportHandler — Permission Set Group god-mode (effecti
     expect(p.modifyAllDataGrantors).toContain('PermissionSet:God_PS');
     expect(p.modifyAllDataGrantors).toContain('PermissionSetGroup:GodGroup');
     expect(p.scanned.permissionSetGroups).toBe(1);
+  });
+
+  it('CHECK-BEFORE-CAVEAT: without the settings nodes the context is null and the caveat names what could not be read', async () => {
+    const r = await permissionRiskReportHandler(psgCtx, { limit: 20 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.securityContext).toBeNull();
+    expect(r.value.data.trust.limitations).toContainEqual(expect.stringMatching(/security settings .*not in this vault/i));
+    expect(r.value.data.findings.every((f) => f.evidence.every((e) => !e.startsWith('SecuritySettings:') && !e.startsWith('SessionSettings:')))).toBe(true);
   });
 
   it('emits a critical PSG finding noting the membership + the muting caveat', async () => {
@@ -1204,6 +1263,16 @@ describe('permissionRiskReportHandler — truncation + unassigned-coverage hones
         properties: { userPermissions: ['ApiEnabled'] },
       }),
     );
+    // One managed-package permission set: the unassigned sub-analysis skips it
+    // by default, so "scanned" is one less than the vault's count.
+    nodes.push(
+      psNode({
+        id: 'PermissionSet:acme__Pkg_Set',
+        type: 'PermissionSet',
+        apiName: 'acme__Pkg_Set',
+        properties: { userPermissions: ['ApiEnabled'] },
+      }),
+    );
     const imp = await importExtractionResults(opened.value, [
       { nodes, edges: [] },
     ]);
@@ -1254,6 +1323,21 @@ describe('permissionRiskReportHandler — truncation + unassigned-coverage hones
     expect(d.findingsPage.returnedCount).toBe(d.findings.length);
     expect(d.findingsPage.note).toBeNull();
     expect(d.trust.limitations.join(' ')).not.toContain('dropped by limit');
+  });
+
+  // PROSE-FROM-ROWS: "scanned 107 permission sets" while the vault held 112.
+  // The sentence now states both numbers and why they differ, from the
+  // sub-analysis's own filter counters.
+  it('says how many permission sets the unassigned scan skipped, and why, from the scan\'s own counters', async () => {
+    const r = await permissionRiskReportHandler(truncCtx, { limit: 500 });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.privilege.scanned.permissionSets).toBe(2);
+    expect(d.unassignedCoverage.permissionSetsScanned).toBe(1);
+    expect(d.unassignedCoverage.note).toContain('1 of 2 permission sets in this vault were scanned');
+    expect(d.unassignedCoverage.note).toContain('1 skipped');
+    expect(d.unassignedCoverage.note).toContain('1 managed-package');
   });
 
   it('discloses that assignment status is UNKNOWN — zero unassigned findings is not a checked zero', async () => {

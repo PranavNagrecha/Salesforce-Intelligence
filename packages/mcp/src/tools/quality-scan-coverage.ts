@@ -33,11 +33,16 @@ import type { ComponentType, Node } from '@sf-intelligence/contracts';
 /** The node property the Apex quality recognizers write. */
 export const QUALITY_ISSUES_PROPERTY = 'qualityIssues';
 
-/** Per-type census of which nodes actually carry a quality scan. */
+/**
+ * Per-type census of which nodes actually carry a quality scan. `candidates`
+ * is the set THIS TOOL read (e.g. the test classes for test_coverage_gaps),
+ * never the org's total of that type — a host read `nodes: 2` as "the vault
+ * has only 2 Apex classes" when the org had 5 and the tool had read 2 tests.
+ */
 export interface QualityScanTypeCoverage {
   readonly type: ComponentType;
-  /** Nodes of this type in the scanned set. */
-  readonly nodes: number;
+  /** Nodes of this type the tool read — its scope, not the org total. */
+  readonly candidates: number;
   /** Of those, how many carry the `qualityIssues` property at all. */
   readonly scanned: number;
 }
@@ -51,10 +56,10 @@ export interface QualityScanTypeCoverage {
 export const censusQualityScanCoverage = (
   nodes: readonly Node[],
 ): readonly QualityScanTypeCoverage[] => {
-  const byType = new Map<ComponentType, { nodes: number; scanned: number }>();
+  const byType = new Map<ComponentType, { candidates: number; scanned: number }>();
   for (const node of nodes) {
-    const entry = byType.get(node.type) ?? { nodes: 0, scanned: 0 };
-    entry.nodes += 1;
+    const entry = byType.get(node.type) ?? { candidates: 0, scanned: 0 };
+    entry.candidates += 1;
     if (Object.hasOwn(node.properties, QUALITY_ISSUES_PROPERTY)) {
       entry.scanned += 1;
     }
@@ -73,12 +78,24 @@ export const censusQualityScanCoverage = (
 export const buildUnscannedNodesNote = (
   coverage: readonly QualityScanTypeCoverage[],
 ): string | undefined => {
-  const gaps = coverage.filter((c) => c.scanned < c.nodes);
-  if (gaps.length === 0) return undefined;
-  const named = gaps
-    .map((c) => `${c.nodes - c.scanned} of ${c.nodes} ${c.type}`)
-    .join(', ');
+  const named = nameUnscanned(coverage);
+  if (named === undefined) return undefined;
   return `NOT SCANNED IN THIS VAULT: ${named} node(s) carry no \`qualityIssues\` property, so the code-quality recognizers never ran over their source. Zero findings for them is "not checked", NOT "clean". This vault predates the extractor that scans them — re-run \`sfi refresh\` to close the gap.`;
+};
+
+/**
+ * "N of M ApexTrigger, …" for every type with unscanned candidates, or
+ * `undefined` when every candidate carries a scan. The one place that wording
+ * is derived; every sentence that quotes the gap builds on it.
+ */
+export const nameUnscanned = (
+  coverage: readonly QualityScanTypeCoverage[],
+): string | undefined => {
+  const gaps = coverage.filter((c) => c.scanned < c.candidates);
+  if (gaps.length === 0) return undefined;
+  return gaps
+    .map((c) => `${c.candidates - c.scanned} of ${c.candidates} ${c.type}`)
+    .join(', ');
 };
 
 /** A type the Apex recognizers can never say anything about, and why. */

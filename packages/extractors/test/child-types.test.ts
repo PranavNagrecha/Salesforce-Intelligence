@@ -83,6 +83,9 @@ describe('extractFieldSet', () => {
     <availableFields>
         <field>Department</field>
     </availableFields>
+    <availableFields>
+        <field>Demo_Programme__r.Status__c</field>
+    </availableFields>
     <label>Table Fields</label>
 </FieldSet>`;
     const { dir, path } = await writeChild(
@@ -99,13 +102,16 @@ describe('extractFieldSet', () => {
       const node = r.value.nodes[0];
       expect(node?.id).toBe('FieldSet:Contact.Table_Fields');
       expect(node?.properties['displayedFields']).toEqual(['Email', 'Title']);
-      expect(node?.properties['availableFields']).toEqual(['Department']);
+      expect(node?.properties['availableFields']).toEqual(['Department', 'Demo_Programme__r.Status__c']);
       const fieldEdges = r.value.edges.filter((e) => e.edgeType === 'usedInLayout');
+      // FAIL-BEFORE: the dotted field minted `CustomField:Contact.Demo_Programme__r.Status__c`,
+      // an id no node has. It is parked for the import-time relationship resolver instead.
       expect(fieldEdges.map((e) => e.toId)).toEqual([
         'CustomField:Contact.Department',
         'CustomField:Contact.Email',
         'CustomField:Contact.Title',
       ]);
+      expect(node?.properties['unresolvedTraversalRefs']).toEqual(['Demo_Programme__r.Status__c']);
     } finally {
       await rm(dir, { recursive: true, force: true });
     }

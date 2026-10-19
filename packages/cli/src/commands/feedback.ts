@@ -78,7 +78,7 @@ const readJsonl = async (path: string): Promise<Record<string, unknown>[]> => {
 
 export interface FeedbackExport {
   readonly generatedAt: string;
-  readonly routeGaps: ReadonlyArray<{ question: string; category: string; intent: string }>;
+  readonly routeGaps: ReadonlyArray<{ question: string; category: string }>;
   readonly ratings: ReadonlyArray<{ question: string; rating: string }>;
   readonly counts: {
     readonly routeGaps: number;
@@ -126,7 +126,6 @@ export const buildFeedbackExport = async (opts?: {
     routeGaps: gaps.map((g) => ({
       question: scrubText(String(g['question'] ?? '')),
       category: String(g['category'] ?? 'unknown'),
-      intent: String(g['intent'] ?? 'unknown'),
     })),
     ratings: ratings.map((r) => ({
       question: scrubText(String(r['question'] ?? '')),

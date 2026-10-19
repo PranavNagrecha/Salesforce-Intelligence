@@ -52,6 +52,34 @@ If you commit the vault, commit the refreshed `org-kb/components/` plus
 `org-kb/meta/manifest.json`, `meta/config.json` and `meta/version.txt`, as
 in [first-refresh.md](./first-refresh.md).
 
+## Coming from 0.7.x: what changed in 0.8.0
+
+No new tools. Three things to know:
+
+- **Refresh once.** Lightning page visibility rules and component placements,
+  report-type and field-set columns, dynamically loaded Apex classes
+  (`Type.forName('Known_Class')`), Change Data Capture subscriptions and
+  workflow field updates are references and nodes now, and edges to platform
+  classes the vault can never hold are gone. All of that is read at refresh
+  time; until you refresh, where-used and safe-to-delete answers keep the old
+  gaps.
+- **The regex router is gone.** `sfi.route_question` returns the semantic
+  funnel's shortlist (`toolCandidates`, `clarification`, `gap`); there is no
+  `route.intent` or `route.plane`. Hosts never needed them; a script that read
+  them must read `toolCandidates[0]` instead. `SFI_ROUTER_OFFLINE` is ignored.
+- **Verdicts moved on purpose.** A custom field is never `definitely_dead` on
+  heuristic evidence; it is `likely_dead` and the `boundaries` entry names what
+  was not checked. Save-order flow steps show the flow's entry criteria, not
+  its first decision, and framework-registered handler classes appear as
+  conditional steps. If you pinned counts from `find_dead_code` or
+  `what_happens_on_save`, re-read them once.
+
+Also in this release: `sfi init` writes `"vaultRoot": "."` and a deny-list
+`.gitignore` (a project copied to another folder refreshes without edits),
+next actions name `sfi refresh` rather than a slash command, `sfi.resolve`
+returns `candidates: []` plus `lookalikes` on no match, and
+`sfi.synthesize_answer` requires `input`.
+
 ## Coming from 0.6.x: what changed in 0.7.0
 
 No new tools and no envelope change. Two things to know:

@@ -136,6 +136,7 @@ import {
   REPORT_DASHBOARD_USAGE_CAVEAT,
   reportDashboardUsageDetail,
 } from './report-dashboard-usage.js';
+import { referrerStatus } from './soe-active.js';
 
 /** Canonical id prefix for the object this tool profiles. */
 const CUSTOM_OBJECT_PREFIX = 'CustomObject:';
@@ -536,18 +537,13 @@ const tallyEdgeTypes = (edges: readonly Edge[]): Readonly<Record<string, number>
 };
 
 /**
- * Read a component's activation state without inventing one. Flows and Apex
- * carry `status`; rules carry `active` / `isActive`. A component whose family
- * stamps neither is `unknown` — never silently counted as active.
+ * A component's activation state, read by the shared `referrerStatus` helper
+ * and folded to three values. A component whose family stamps no status is
+ * `unknown` — never silently counted as active.
  */
 const activationOf = (node: Node | undefined): 'active' | 'inactive' | 'unknown' => {
-  if (node === undefined) return 'unknown';
-  const props = node.properties;
-  if (props['active'] === true || props['isActive'] === true) return 'active';
-  if (props['active'] === false || props['isActive'] === false) return 'inactive';
-  const status = stringProp(props, 'status');
-  if (status === null) return 'unknown';
-  return status === 'Active' ? 'active' : 'inactive';
+  const state = referrerStatus(node);
+  return state === 'unknown' ? 'unknown' : state === 'active' ? 'active' : 'inactive';
 };
 
 /**

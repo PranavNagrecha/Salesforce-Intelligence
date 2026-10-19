@@ -41,9 +41,9 @@ export const CORE_PROFILE_TOOLS = Object.freeze(new Set(loadCoreRoster()));
 export const GATEWAY_FOOTER = [
   '**Grounding & routing (shared contract).** For a vague or broad ask, run',
   '`sfi.route_question` through `sfi.run_analysis` first — it returns a',
-  'meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a',
-  'suggested plane and a `route` hint (and whether to `sfi.resolve` a name',
-  'first). **Default tool profile is `core`:** only the core spine (including',
+  'meaning-ranked `toolCandidates` shortlist (which YOU pick from); each row',
+  'names its plane and carries any component it resolved as `suggestedArgs`.',
+  '**Default tool profile is `core`:** only the core spine (including',
   '`sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis,',
   'call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or',
   'follow `route_question.invoke`, which already wraps non-core steps).',

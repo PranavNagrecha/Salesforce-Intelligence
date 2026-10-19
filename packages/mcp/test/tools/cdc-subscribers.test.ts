@@ -468,7 +468,11 @@ describe('cdcSubscribersHandler', () => {
     expect(disclosure).toMatch(/listensTo/);
     expect(disclosure).toMatch(/Change Event/);
     expect(disclosure).not.toMatch(/EventBus\.subscribe\(\.\.\.\) registration is NOT modeled/);
-    expect(disclosure).not.toMatch(/subscribesToChange/);
+    // The edge is real now: the caveat names it and no longer claims a Change
+    // Event subscription is "not yet minted".
+    expect(disclosure).toMatch(/subscribesToChange/);
+    expect(disclosure).not.toMatch(/not yet minted/);
+    expect(disclosure).not.toMatch(/remain invisible/);
   });
 
   it('carries vaultState from the manifest', async () => {
@@ -729,6 +733,79 @@ describe('cdcSubscribersHandler — real-org shape (ChangeEvent is never a node)
 // grounded in a real object. Fixed by resolving the base entity through the
 // shared `resolveExistingObjectScope` before deriving the ChangeEvent name.
 // =============================================================================
+
+// =============================================================================
+// CDC-SUBSCRIBES-EDGE: the `subscribesToChange` edge the extractors now mint.
+// A re-extracted CDC trigger carries BOTH `triggersOn` and `subscribesToChange`
+// into the same (dangling) Change Event; an `EventBus.subscribe('X__ChangeEvent')`
+// class carries ONLY `subscribesToChange`. One subscriber = one row.
+// =============================================================================
+
+const SUBSCRIBES_CLASS = 'ApexClass:Demo_ChannelChangeSubscriber';
+const SUBSCRIBES_CLASS_EVENT = 'CustomObject:Demo_Channel__ChangeEvent';
+
+const subscribesEdgeSeed: ExtractionResult = {
+  nodes: [
+    makeNode({ id: 'CustomObject:Contact', type: 'CustomObject', apiName: 'Contact' }),
+    makeNode({ id: 'CustomObject:Demo_Channel__c', type: 'CustomObject', apiName: 'Demo_Channel__c' }),
+    makeNode({ id: REAL_SHAPE_TRIGGER, type: 'ApexTrigger', apiName: 'ContactChangeCdcHandler' }),
+    makeNode({ id: SUBSCRIBES_CLASS, type: 'ApexClass', apiName: 'Demo_ChannelChangeSubscriber' }),
+  ],
+  edges: [
+    makeEdge({
+      fromId: REAL_SHAPE_TRIGGER,
+      toId: REAL_SHAPE_EVENT,
+      edgeType: 'triggersOn',
+      source: 'apex-trigger-extractor',
+    }),
+    makeEdge({
+      fromId: REAL_SHAPE_TRIGGER,
+      toId: REAL_SHAPE_EVENT,
+      edgeType: 'subscribesToChange',
+      source: 'apex-trigger-extractor',
+    }),
+    makeEdge({
+      fromId: SUBSCRIBES_CLASS,
+      toId: SUBSCRIBES_CLASS_EVENT,
+      edgeType: 'subscribesToChange',
+      confidence: 'heuristic',
+      source: 'apex-scanner',
+    }),
+  ],
+};
+
+describe('cdcSubscribersHandler — subscribesToChange edge', () => {
+  it('FAIL-BEFORE/PASS-AFTER: lists an EventBus.subscribe Change Event subscriber that has only a subscribesToChange edge', async () => {
+    const result = await withCdcStore(subscribesEdgeSeed, (c) => cdcSubscribersHandler(c, {}));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const row = result.value.data.subscribers.find((s) => s.subscriberId === SUBSCRIBES_CLASS);
+    expect(row).toBeDefined();
+    expect(row?.changeEventName).toBe('Demo_Channel__ChangeEvent');
+    expect(row?.subscriptionEdge).toBe('subscribesToChange');
+    expect(row?.source).toBe('apex-scanner');
+  });
+
+  it('a trigger carrying both triggersOn and subscribesToChange is ONE row, tagged subscribesToChange', async () => {
+    const result = await withCdcStore(subscribesEdgeSeed, (c) => cdcSubscribersHandler(c, {}));
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const rows = result.value.data.subscribers.filter((s) => s.subscriberId === REAL_SHAPE_TRIGGER);
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.subscriptionEdge).toBe('subscribesToChange');
+    expect(result.value.data.summary.totalSubscribers).toBe(2);
+    expect(result.value.data.summary.uniqueChangeEvents).toBe(2);
+  });
+
+  it('scoped mode reaches the class through the custom-object filter', async () => {
+    const result = await withCdcStore(subscribesEdgeSeed, (c) =>
+      cdcSubscribersHandler(c, { sObjectFilter: 'Demo_Channel__c' }),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.data.subscribers.map((s) => s.subscriberId)).toEqual([SUBSCRIBES_CLASS]);
+  });
+});
 
 describe('cdcSubscribersHandler — object scope honesty', () => {
   it('FAIL-BEFORE/PASS-AFTER: refuses a sObjectFilter absent from the vault, never a silent zero', async () => {

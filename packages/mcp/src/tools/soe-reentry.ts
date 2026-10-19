@@ -52,6 +52,7 @@ import { resolveVaultSourcePath } from '@sf-intelligence/vault';
 import type { Context } from '../server.js';
 
 import { apexDmlFactsFor, dmlActsOn } from './apex-dml-index.js';
+import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { isActiveSoeFirer } from './soe-active.js';
 import { flowMatchesEvent, triggerMatchesEvent } from './soe-event-match.js';
 import { enrichTriggerStepsWithHandlerEffects, type SoeHandlerEffects } from './soe-trigger-effects.js';
@@ -153,6 +154,12 @@ export interface SoeReentry {
   readonly rules: Partial<Record<ReentryRule, string>>;
   /** Flows whose source could not be read: their DML came from graph edges (less exact). */
   readonly flowSourceUnread?: { readonly flows: readonly ComponentId[]; readonly omitted?: number; readonly note: string };
+  /**
+   * What this answer leaves out. Data-dependent clauses (Process Builder
+   * processes, approval field updates, time-triggered workflow updates) appear
+   * only when the vault holds one, with the count; the closing sentence names
+   * the analysis limits of this tool, not of the vault. See {@link buildSoeNotModeled}.
+   */
   readonly notModeled: string;
 }
 
@@ -174,8 +181,52 @@ const MAX_SITES = 3;
 const MAX_CASCADES = 8;
 const MAX_RERUN_TRIGGERS = 10;
 
-export const SOE_REENTRY_NOT_MODELED =
-  'Conditions are not evaluated. Not listed: approval-process field updates, time-triggered workflow updates, Process Builder processes (not linked to their object in the vault, so absent from this save order), deletes of this object\'s own records, DML inside subflows or invocable actions, flow elements not connected to the start, Apex field writes without DML, Apex merge and lead conversion calls. A cascade target\'s automation is counted, not expanded.';
+/** Flow `processType` values that are Process Builder processes. */
+const PROCESS_BUILDER_TYPES: ReadonlySet<unknown> = new Set(['Workflow', 'InvocableProcess']);
+
+const plural = (n: number, one: string, many: string): string => `${n} ${n === 1 ? one : many}`;
+
+/**
+ * CHECK-BEFORE-CAVEAT: a clause is printed only when its check found
+ * something the module cannot place, and then WITH the count. A fixed
+ * "not listed: Process Builder processes, approval-process field updates"
+ * on an org with none of either read to the host as a snapshot gap. The
+ * last sentence names what this tool does not analyse although the
+ * source is in the vault, so it cannot be mistaken for a vault gap.
+ */
+export const buildSoeNotModeled = (counts: {
+  readonly processBuilders: number;
+  readonly approvalProcesses: number;
+  readonly timeTriggeredFieldUpdates: number;
+}): string => {
+  const parts = ['Conditions are not evaluated.'];
+  if (counts.processBuilders > 0) {
+    parts.push(
+      `${plural(counts.processBuilders, 'active Process Builder process exists', 'active Process Builder processes exist')} in this org; the vault does not link a Process Builder to its object, so any that run on this object are absent from this save order.`,
+    );
+  }
+  if (counts.approvalProcesses > 0) {
+    parts.push(
+      `${plural(counts.approvalProcesses, 'approval process on this object is listed as a step', 'approval processes on this object are listed as steps')}; approval field updates run when a record is submitted, approved or rejected (a separate save) and are not listed as write-backs.`,
+    );
+  }
+  if (counts.timeTriggeredFieldUpdates > 0) {
+    parts.push(
+      `${plural(counts.timeTriggeredFieldUpdates, 'time-triggered workflow field update on this object runs', 'time-triggered workflow field updates on this object run')} later as a separate save and ${counts.timeTriggeredFieldUpdates === 1 ? 'is' : 'are'} not listed as a write-back.`,
+    );
+  }
+  parts.push(
+    "Not analysed by this tool (the source is in the vault): deletes of this object's own records, DML inside subflows or invocable actions, flow elements not connected to the start, Apex field writes without DML, Apex merge and lead conversion calls. A cascade target's automation is counted, not expanded.",
+  );
+  return parts.join(' ');
+};
+
+/** Active Process Builder processes in the org, from the full Flow census; null when the graph cannot be read. */
+const countProcessBuilders = async (ctx: Context): Promise<number | null> => {
+  const scan = await scanAllNodesOfTypes(ctx.graph, ['Flow']);
+  if (!scan.ok) return null;
+  return scan.value.nodes.filter((n) => PROCESS_BUILDER_TYPES.has(n.properties['processType']) && isActiveSoeFirer(n)).length;
+};
 
 const FLOW_SOURCE_UNREAD_NOTE =
   'Flow source unreadable: DML read from graph edges, where one flow\'s several same-object DML elements can collapse into one edge, so the target is a best guess and scheduled paths are not separated.';
@@ -439,6 +490,7 @@ export const buildSoeReentry = async (
       : null;
   const wfDefByName = new Map((wfDefs ?? []).map((d) => [d.name, d]));
   const seen = new Set<ComponentId>();
+  const timeTriggeredUpdates = new Set<string>();
   for (const s of wfSteps) {
     if (seen.has(s.componentId)) continue;
     seen.add(s.componentId);
@@ -446,6 +498,9 @@ export const buildSoeReentry = async (
     const fields: string[] = [];
     let reevaluates = false;
     for (const e of edges) {
+      if (e.edgeType === 'references' && e.toId.startsWith('WorkflowFieldUpdate:') && e.properties['timeTriggered'] === true) {
+        timeTriggeredUpdates.add(e.toId);
+      }
       if (e.edgeType === 'writesTo' && e.properties['timeTriggered'] !== true) {
         const f = fieldOf(e.toId, objectApiName);
         if (f !== null) fields.push(f);
@@ -701,6 +756,10 @@ export const buildSoeReentry = async (
     };
   }
 
+  const processBuilders = await countProcessBuilders(ctx);
+  if (processBuilders === null) return null;
+  const approvalProcesses = new Set(steps.filter((s) => s.componentType === 'ApprovalProcess').map((s) => s.componentId)).size;
+
   const usedRules = new Set<ReentryRule>(writeBacks.flatMap((w) => w.rules));
   const rules: Partial<Record<ReentryRule, string>> = {};
   for (const r of Object.keys(REENTRY_RULES) as ReentryRule[]) if (usedRules.has(r)) rules[r] = REENTRY_RULES[r];
@@ -721,7 +780,7 @@ export const buildSoeReentry = async (
             note: FLOW_SOURCE_UNREAD_NOTE,
           },
         }),
-    notModeled: SOE_REENTRY_NOT_MODELED,
+    notModeled: buildSoeNotModeled({ processBuilders, approvalProcesses, timeTriggeredFieldUpdates: timeTriggeredUpdates.size }),
   };
 };
 

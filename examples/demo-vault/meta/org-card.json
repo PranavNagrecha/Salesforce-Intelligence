@@ -1,12 +1,12 @@
 {
-  "generatedAt": "2026-10-17T16:10:41.527Z",
-  "sourceTreeHash": "937e69c4140fa1b350bf5c90b68d850e6b314bf005122976ccf07520ce92cb33",
-  "refreshedAt": "2026-10-17T16:10:41.527Z",
+  "generatedAt": "2026-10-19T15:38:20.243Z",
+  "sourceTreeHash": "6a2c6d9c4d0d4bc81daaa254d55294106dd62dbca8fd32c57659e2cd8cd57fa9",
+  "refreshedAt": "2026-10-19T15:38:20.243Z",
   "kind": "org-card",
   "targetOrg": "demo-org",
   "totals": {
-    "components": 141,
-    "edges": 361
+    "components": 142,
+    "edges": 377
   },
   "componentCounts": {
     "CustomField": 64,
@@ -17,13 +17,13 @@
     "Flow": 3,
     "Profile": 3,
     "ValidationRule": 3,
+    "ApexTrigger": 2,
     "Group": 2,
     "Layout": 2,
     "PermissionSet": 2,
     "Queue": 2,
     "RecordType": 2,
     "SharingRule": 2,
-    "ApexTrigger": 1,
     "ApprovalProcess": 1,
     "AuthProvider": 1,
     "Bot": 1,
@@ -177,8 +177,8 @@
     },
     {
       "type": "ApexTrigger",
-      "total": 1,
-      "active": 1
+      "total": 2,
+      "active": 2
     },
     {
       "type": "WorkflowRule",

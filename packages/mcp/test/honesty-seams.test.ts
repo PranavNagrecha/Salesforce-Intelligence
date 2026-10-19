@@ -37,7 +37,6 @@ import {
 } from '@sf-intelligence/graph';
 
 import { detectGapShapedFollowUp } from '../src/context-resolution.js';
-import { classifyQuestion } from '../src/intent-router.js';
 import { detectRefusalShape } from '../src/refusal-gates.js';
 import type { Context } from '../src/server.js';
 import {
@@ -116,8 +115,8 @@ describe('seam 1 — runtime-analytics gap arms fire on the unmodeled families',
   });
 
   // Must-NOT-fire negatives: every one is ANSWERABLE (mislabeled-expect
-  // lessons + the tools that exist) and must route to a real intent with no
-  // refusal shape — the zero-false-refusals bar.
+  // lessons + the tools that exist) and must carry no refusal shape — the
+  // zero-false-refusals bar.
   const negatives: readonly (readonly [string, string])[] = [
     // live_inactive_users territory — dormancy, not login events
     ['which users are inactive', 'inactive-users'],
@@ -144,9 +143,8 @@ describe('seam 1 — runtime-analytics gap arms fire on the unmodeled families',
     // component-history metadata, not run forensics
     ['when was the Order_Sync flow last modified', 'last-modified'],
   ];
-  it.each(negatives)('does NOT gate (routes %#): %s', (question, intent) => {
+  it.each(negatives)('does NOT gate: %s', (question) => {
     expect(detectRefusalShape(question)).toBeNull();
-    expect(classifyQuestion(question).intent).toBe(intent);
   });
 });
 
@@ -212,40 +210,6 @@ describe('seam 3 — privilege-escalation injection arm', () => {
   it('does NOT refuse READ delivery asks phrased "give me…" (q260 lesson)', () => {
     expect(detectRefusalShape('give me the FLS grant list for every field on Order__c')).toBeNull();
     expect(detectRefusalShape('give me the list of validation rules on Account')).toBeNull();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Seam 3c — PSG-composition capability gap (q1948/q1559 shapes).
-// ---------------------------------------------------------------------------
-
-describe('seam 3 — permset-group-grants (ENGINE-ARC §4 PARTIAL flip: live containment, honest 2-hop gap)', () => {
-  it('routes "Which PSG grants the <custom permission>?" live, 2-hop chain still disclosed (q1948)', () => {
-    const route = classifyQuestion('Which PSG grants the FullAccessOverride custom permission?');
-    expect(route.intent).toBe('permset-group-grants');
-    // live_permset_holders surfaces PSG containment (PermissionSetGroupComponent);
-    // the 2-hop custom-permission→set→PSG chain stays an honest gap NOTE.
-    expect(route.tools).toEqual(['sfi.live_permset_holders']);
-    expect(route.gap?.category).toBe('permset-group-grants');
-    expect(route.gap?.note).toMatch(/2-hop/);
-  });
-  it('routes "Which permission set group grants the <role>?" the same way (q1559)', () => {
-    const route = classifyQuestion('Which permission set group grants the Registrar role?');
-    expect(route.intent).toBe('permset-group-grants');
-    expect(route.tools).toEqual(['sfi.live_permset_holders']);
-    expect(route.gap).not.toBeNull();
-    // Roles are never granted by PSGs — the reason keeps saying so.
-    expect(route.reason).toMatch(/Roles are never granted/);
-  });
-  it('does NOT gap the PSG→permset REFERENCE read (q1916, answerable)', () => {
-    const route = classifyQuestion(
-      'Which permission set groups reference a permission set that grants a custom permission?',
-    );
-    expect(route.intent).not.toBe('permset-group-grants');
-  });
-  it('does NOT gap "which permission sets grant edit on the SSN field" (no group)', () => {
-    const route = classifyQuestion('which permission sets grant edit on the SSN field');
-    expect(route.intent).toBe('field-access');
   });
 });
 
@@ -416,11 +380,10 @@ describe('seam 2 — gap detection precedes context continuation (handler)', () 
         previous: { componentId: 'CustomObject:Account', tool: 'sfi.effective_permissions' },
       },
     });
-    expect(data.route.intent).toBe('context-gap-followup');
-    expect(data.route.tools).toEqual([]);
-    expect(data.route.gap?.category).toBe('context-gap-followup');
-    expect(data.route.contextApplied).toBeUndefined();
-    expect(data.route.reason).toContain('HONEST GAP');
+    expect(data.gap?.category).toBe('context-gap-followup');
+    expect(data.gap?.note).toContain('HONEST GAP');
+    expect(data.contextApplied).toBeUndefined();
+    expect((data.toolCandidates ?? []).map((c) => c.tool)[0]).not.toBe('sfi.effective_permissions');
   });
 
   it('a delivery follow-up never inherits the previous tool (q914 shape)', async () => {
@@ -428,8 +391,8 @@ describe('seam 2 — gap detection precedes context continuation (handler)', () 
       question: 'Can I get it as a file rather than just on screen?',
       context: { previous: { componentId: 'CustomObject:Contact', tool: 'sfi.pii_inventory' } },
     });
-    expect(data.route.intent).toBe('context-gap-followup');
-    expect(data.route.tools).toEqual([]);
+    expect(data.gap?.category).toBe('context-gap-followup');
+    expect(data.contextApplied).toBeUndefined();
   });
 
   it('a telemetry follow-up hits the stage-0 runtime gap BEFORE context (q1117 shape)', async () => {
@@ -437,8 +400,8 @@ describe('seam 2 — gap detection precedes context continuation (handler)', () 
       question: "can it tell me who's actually accessed those fields?",
       context: { previous: { componentId: 'CustomField:Account.Status__c', tool: 'sfi.field_access_audit' } },
     });
-    expect(data.route.intent).toBe('honest-gap-runtime');
-    expect(data.route.tools).toEqual([]);
+    expect(data.refusal?.kind).toBe('runtime-analytics');
+    expect(data.invoke).toBeUndefined();
   });
 
   it('a legitimate pronoun follow-up STILL continuation-routes (must-not-regress)', async () => {
@@ -446,12 +409,12 @@ describe('seam 2 — gap detection precedes context continuation (handler)', () 
       question: 'does it fire on delete too',
       context: { previous: { componentId: 'Flow:Order_Sync', tool: 'sfi.explain_flow' } },
     });
-    expect(data.route.intent).toBe('context-continuation');
-    expect(data.route.tools).toContain('sfi.explain_flow');
+    expect(data.contextApplied?.kind).toBe('continuation');
+    expect(data.toolCandidates?.[0]?.tool).toBe('sfi.explain_flow');
   });
 
   it('a gap-shaped question WITHOUT context routes exactly as before (no-context parity)', async () => {
     const data = await route({ question: 'How hard is it to close?' });
-    expect(data.route.intent).not.toBe('context-gap-followup');
+    expect(data.gap?.category).not.toBe('context-gap-followup');
   });
 });

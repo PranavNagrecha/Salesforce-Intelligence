@@ -106,6 +106,7 @@ const mixedSeed: ExtractionResult = {
       id: TRIGGER_T,
       type: 'ApexTrigger',
       apiName: 'AccountTrigger',
+      properties: { status: 'Inactive' },
     }),
     makeNode({
       id: LWC_L,
@@ -401,6 +402,11 @@ describe('findCodeUsagesHandler', () => {
     expect(lwc?.apiName).toBe('accountTile');
     expect(lwc?.source).toBe('lwc-aura-vf-scanner');
     expect(lwc?.properties).toEqual({ wirePath: 'Account.Industry' });
+    // REFERRER-STATUS: every row says whether its referrer runs — an Inactive
+    // trigger is not a live writer; a bundle has no activation flag.
+    expect(usages.find((u) => u.id === TRIGGER_T)?.status).toBe('inactive');
+    expect(usages.find((u) => u.id === APEX_A)?.status).toBe('unknown');
+    expect(lwc?.status).toBe('unknown');
     // vaultState comes from manifest, not edge data.
     expect(result.value.vaultState.sourceTreeHash).toBe('sha256:fixture');
     expect(result.value.vaultState.refreshedAt).toBe('2026-05-28T09:12:00Z');

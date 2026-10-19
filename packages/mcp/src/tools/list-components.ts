@@ -198,8 +198,9 @@ export const COMPONENT_TYPES = [
   // Async + integration deep tier. Promoted from dangling-by-
   // design references.
   'OutboundMessage',
-  // WorkflowAlert promotion (email alerts inside *.workflow-meta.xml).
+  // WorkflowAlert / WorkflowFieldUpdate promotion (inside *.workflow-meta.xml).
   'WorkflowAlert',
+  'WorkflowFieldUpdate',
   // CPQ specialist tier (SBQQ__ namespace recognition).
   'CpqProductRule',
   'CpqPriceRule',

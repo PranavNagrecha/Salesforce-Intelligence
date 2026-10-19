@@ -367,6 +367,22 @@ export const extractApexClass = async (
   if (header.isTest) {
     baseProperties['assertionCount'] = countAssertions(source);
   }
+  // `EventBus.subscribe(<non-literal>, ...)`: a subscription exists but its
+  // channel cannot be named, so no edge was minted. Written only when non-zero
+  // so the node shape of every other class is unchanged.
+  if (scannerResult.unresolvedSubscriptions > 0) {
+    baseProperties['unresolvedSubscriptions'] = scannerResult.unresolvedSubscriptions;
+  }
+  // `Type.forName(<non-literal>)`: the class dispatches to something it cannot
+  // name statically. Same non-zero-only rule; the refresh pipeline reads it.
+  if (scannerResult.unresolvedDynamicDispatch > 0) {
+    baseProperties['unresolvedDynamicDispatch'] = scannerResult.unresolvedDynamicDispatch;
+  }
+  // Calls on platform classes (`Database`, `Type`, `Schema`…) are counted here
+  // instead of minting `callsApex` edges to classes no vault holds.
+  if (Object.keys(scannerResult.platformCalls).length > 0) {
+    baseProperties['platformCalls'] = scannerResult.platformCalls;
+  }
   const properties =
     scannerResult.warnings.length === 0
       ? baseProperties

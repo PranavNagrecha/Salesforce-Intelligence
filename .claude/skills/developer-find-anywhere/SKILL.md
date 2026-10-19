@@ -219,9 +219,10 @@ CustomField id, returns:
   always `heuristic` confidence).
 - **Usage frequency** — asymmetric read vs write EDGE counts.
   `incomingReads` counts every inbound edge that CONSUMES the field's
-  value: `readsFrom` (Apex, Flow, condition contexts) **and**
-  `references` (formulas, validation rules, list views, report types,
-  Lightning pages, quick actions, web links). It is an edge count, not
+  value: `readsFrom` (Apex, Flow, condition contexts, Lightning page
+  visibility rules) **and** `references` (formulas, validation rules,
+  list views, report types, Lightning page field items and related
+  lists, quick actions, web links). It is an edge count, not
   a referrer count, so it legitimately differs from
   `find_formula_references`'s `totalCount`. `readsByEdgeType` gives
   the per-type breakdown, `countedEdgeTypes` names the vocabulary, and
@@ -575,4 +576,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from); each row names its plane and carries any component it resolved as `suggestedArgs`. **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

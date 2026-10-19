@@ -3,6 +3,7 @@ import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { DEMO_ORG_ALIAS } from '@sf-intelligence/contracts';
 import { shutdown, startServer } from '@sf-intelligence/mcp';
 import { Command } from 'commander';
 
@@ -91,7 +92,7 @@ export const registerDemoCommand = (program: Command): void => {
         process.stderr.write('sfi demo: building the synthetic demo vault (first run, ~a few seconds)...\n');
         const init = await runInit({
           cwd: cacheCwd,
-          targetOrg: 'demo-org',
+          targetOrg: DEMO_ORG_ALIAS,
           vaultRoot: 'org-kb',
           force: true,
         });

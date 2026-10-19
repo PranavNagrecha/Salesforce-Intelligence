@@ -37,6 +37,7 @@ Reports, each a measurement rather than a promise:
 
 | Report | What it measures |
 | --- | --- |
+| [0.8.0 release report](./reports/release-0.8.0.md) | What shipped and what was measured on a real managed-package sandbox and an OmniStudio sandbox: save order, dead-code verdicts, sharing filters, the router's removal, and the plain-Claude-Code comparison. |
 | [0.7.0 release report](./reports/release-0.7.0.md) | What shipped and what was measured on a real OmniStudio sandbox and the demo org (counts only) |
 | [0.6.0 release report](./reports/release-0.6.0.md) | What shipped and how it was verified on real orgs (counts only) |
 | [0.5.0 release report](./reports/release-0.5.0.md) | The 16-tool default, smaller answers, two real-org verdict fixes |

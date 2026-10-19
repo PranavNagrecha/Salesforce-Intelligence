@@ -43,11 +43,11 @@
  * `{Object}__ChangeEvent`) IS the org's declaration that CDC is on for that
  * entity — that is the metadata Salesforce writes when an admin selects an
  * entity in Setup → Change Data Capture. Code that reacts to the stream is
- * read from the edges that ALREADY EXIST — a CDC Apex trigger's declared
- * `triggersOn` into `CustomObject:{X}ChangeEvent` (the trigger extractor
- * emits `triggersOn` unconditionally; the `__e` gate applies only to the
- * extra `listensTo` edge) plus any `listensTo` a scanner minted. No new
- * edge type is introduced and nothing is name-matched into existence.
+ * read from modeled edges into `CustomObject:{X}ChangeEvent`: the dedicated
+ * `subscribesToChange` (a CDC trigger header, or `EventBus.subscribe` with a
+ * literal Change Event channel) and, on a vault built before that edge
+ * existed, the trigger's lifecycle `triggersOn` or a scanner `listensTo`.
+ * Nothing is name-matched into existence.
  *
  * ABSENCE IS TYPED, NEVER FLATTENED. Three distinct kinds of "nothing here",
  * each with its own disclosure:
@@ -92,6 +92,7 @@ import {
   getNodeById,
   listEdgesForNodes,
   listNodesByIds,
+  isChangeEventApiName,
 } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
@@ -158,16 +159,6 @@ const CODE_NODE_TYPES: ReadonlySet<ComponentType> = new Set([
   'ApexClass',
   'Flow',
 ]);
-
-/**
- * True when an apiName is a Change Event by the platform's naming rule:
- * `{Object}ChangeEvent` for standard objects, `{Object}__ChangeEvent` for
- * custom. Excludes the bare literal so a hypothetical object named exactly
- * `ChangeEvent` is not mistaken for one.
- */
-const isChangeEventApiName = (apiName: string): boolean =>
-  apiName.endsWith(CHANGE_EVENT_SUFFIX) &&
-  apiName.length > CHANGE_EVENT_SUFFIX.length;
 
 /** True when an apiName is a Platform Event by suffix (`Application_Event__e`). */
 const isPlatformEventApiName = (apiName: string): boolean =>
@@ -255,10 +246,12 @@ export interface EventParticipant {
   readonly type: ComponentType;
   /**
    * The MODELED edge this participation was read from — never an inference:
-   * `listensTo` (subscribes), `writesTo` (publishes), `triggersOn` (a CDC
-   * Apex trigger declared on the Change Event).
+   * `listensTo` (subscribes to a Platform Event), `writesTo` (publishes),
+   * `subscribesToChange` (subscribes to a Change Event: a CDC trigger header
+   * or a literal `EventBus.subscribe` channel), `triggersOn` (a CDC Apex
+   * trigger on a vault built before `subscribesToChange` existed).
    */
-  readonly via: 'listensTo' | 'writesTo' | 'triggersOn';
+  readonly via: 'listensTo' | 'writesTo' | 'subscribesToChange' | 'triggersOn';
 }
 
 /** A channel binding for an event — the publish-side routing. */
@@ -309,7 +302,12 @@ export interface CdcEntityEntry {
   readonly channelApiName: string | null;
   readonly channelType: string | null;
   readonly filterExpression: string | null;
-  /** Apex/Flow reached by a modeled `triggersOn` / `listensTo` into the Change Event. */
+  /**
+   * Apex/Flow reached by a modeled `subscribesToChange` (or, on an older
+   * vault, `triggersOn` / `listensTo`) into the Change Event. One row per
+   * component: a re-extracted CDC trigger carries both `triggersOn` and
+   * `subscribesToChange`, and is listed once, by the latter.
+   */
   readonly codeSubscribers: readonly EventParticipant[];
 }
 
@@ -518,9 +516,25 @@ const sweepObjectNodes = async (
 };
 
 /**
- * Resolve the inbound `listensTo` / `writesTo` / `triggersOn` edges for a set
- * of event ids into typed participants, in THREE batched round-trips rather
- * than a per-event N+1 walk.
+ * One row per CDC code subscriber. A re-extracted CDC trigger reaches its
+ * Change Event by BOTH its lifecycle `triggersOn` and its subscription
+ * `subscribesToChange`; keep the subscription row and drop the lifecycle twin.
+ * Same rule as `sfi.cdc_subscribers`, so the two tools cannot disagree about
+ * one registration.
+ */
+const oneRowPerCdcSubscriber = (
+  participants: readonly EventParticipant[],
+): readonly EventParticipant[] =>
+  participants.filter(
+    (p) =>
+      p.via === 'subscribesToChange' ||
+      !participants.some((q) => q.id === p.id && q.via === 'subscribesToChange'),
+  );
+
+/**
+ * Resolve the inbound `listensTo` / `writesTo` / `subscribesToChange` /
+ * `triggersOn` edges for a set of event ids into typed participants, in two
+ * batched round-trips rather than a per-event N+1 walk.
  */
 const resolveParticipants = async (
   ctx: Context,
@@ -532,7 +546,7 @@ const resolveParticipants = async (
 
   const edgesResult = await listEdgesForNodes(ctx.graph, eventIds, {
     direction: 'in',
-    edgeTypes: ['listensTo', 'writesTo', 'triggersOn'],
+    edgeTypes: ['listensTo', 'writesTo', 'subscribesToChange', 'triggersOn'],
   });
   if (!edgesResult.ok) return err(edgesResult.error.message);
 
@@ -881,7 +895,7 @@ export const eventTopologyHandler = async (
         channelApiName: m.channelApiName ?? m.declaredChannel,
         channelType: m.channelType,
         filterExpression: m.filterExpression,
-        codeSubscribers: participantsById.get(changeEventId) ?? [],
+        codeSubscribers: oneRowPerCdcSubscriber(participantsById.get(changeEventId) ?? []),
       };
     })
     .sort((a, b) => byId(a.changeEventName, b.changeEventName));

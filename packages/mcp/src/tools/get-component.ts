@@ -90,8 +90,9 @@ import {
 
 /**
  * Synthetic, file-less graph node types. `ConditionalContext` (a `firesWhen`
- * condition on a validation/approval/flow/rule) and `WorkflowAlert` (an
- * approval/workflow email alert) are emitted into the graph as byproducts of
+ * condition on a validation/approval/flow/rule), `WorkflowAlert` (an
+ * approval/workflow email alert) and `WorkflowFieldUpdate` (a workflow field
+ * update definition) are emitted into the graph as byproducts of
  * the declarative extractors, but they have no source directory and no
  * file-based extractor, so `renderVault` — which walks only the file-backed
  * supported types — never writes them a markdown file. The graph node is
@@ -104,6 +105,7 @@ import {
 const FILELESS_SYNTHETIC_TYPES: ReadonlySet<ComponentType> = new Set([
   'ConditionalContext',
   'WorkflowAlert',
+  'WorkflowFieldUpdate',
 ]);
 
 /**

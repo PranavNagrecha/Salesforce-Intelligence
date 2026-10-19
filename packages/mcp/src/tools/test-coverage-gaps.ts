@@ -238,9 +238,10 @@ export interface TestCoverageGapsOutput {
   /** Per-status counter across the FULL matched set. */
   readonly byStatus: Readonly<Record<CoverageStatus, number>>;
   /**
-   * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Nodes read vs nodes that actually
-   * carry a `qualityIssues` scan, over the TEST classes whose `fake-assertion`
-   * findings drive the `fake-coverage` / `low-quality-coverage` verdicts.
+   * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. `candidates` (the TEST classes this
+   * tool read — not the org's Apex class total) vs `scanned` (those carrying a
+   * `qualityIssues` scan); the fake-assertion findings on them drive the
+   * `fake-coverage` / `low-quality-coverage` verdicts.
    * D-3: emitted UNCONDITIONALLY. It used to appear only when some test class
    * was never scanned, so the answer that most needed it — `gaps: []`, the very
    * shape an unscanned test roster produces — was the one that carried no

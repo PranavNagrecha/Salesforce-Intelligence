@@ -147,14 +147,14 @@ const route = async (input: RouteQuestionInput) => {
   return r.value.data;
 };
 
-describe('R4 narrow clarify — entity-ambiguous on a single-component intent FIRES', () => {
+describe('R4 narrow clarify — entity-ambiguous on a single-component lead tool FIRES', () => {
   it('"explain the ApplicationForm class" (2 same-named apex classes) blocks with a clarification', async () => {
     const data = await route({ question: 'explain the ApplicationForm class' });
     expect(data.executionBlocked).toBe(true);
-    expect(data.route.clarification?.required).toBe(true);
+    expect(data.clarification?.required).toBe(true);
     // Options are the resolve candidates (both distinct apex classes), never
     // invented.
-    const opts = data.route.clarification?.options ?? [];
+    const opts = data.clarification?.options ?? [];
     expect(opts).toContain('ApexClass:ApplicationForm_Controller');
     expect(opts).toContain('ApexClass:ApplicationForm_Service');
     expect(data.entityEvidence?.disposition).toBe('ambiguous');
@@ -166,20 +166,20 @@ describe('R4 narrow clarify — scope-vague does NOT fire', () => {
   it('"audit the sensitive fields" (no single entity) never blocks on a clarification', async () => {
     const data = await route({ question: 'audit the sensitive fields' });
     expect(data.executionBlocked).toBe(false);
-    expect(data.route.clarification).toBeNull();
+    expect(data.clarification).toBeNull();
   });
 
   it('"which fields hold financial data" (scope-vague) never blocks', async () => {
     const data = await route({ question: 'which fields hold financial data across the org' });
     expect(data.executionBlocked).toBe(false);
-    expect(data.route.clarification).toBeNull();
+    expect(data.clarification).toBeNull();
   });
 
   it('a UNIQUELY-named field over a scope/audit intent routes clean (no false clarify)', async () => {
     const data = await route({ question: 'who can edit the SsnValue__c field' });
     // Unique name → exact resolve → routes; never a clarification block.
     expect(data.executionBlocked).toBe(false);
-    expect(data.route.clarification).toBeNull();
+    expect(data.clarification).toBeNull();
   });
 });
 
@@ -199,10 +199,8 @@ describe('R4 narrow clarify — scope-vague does NOT fire', () => {
  *     ambiguity prompt ("Several components match. Which component did you
  *     mean?"), and `options` = the two competing component IDs
  *     ("ApexClass:DataSync", "Flow:DataSync") — NOT a synthetic type-picker.
- *   - `entityEvidence` is NOT populated on this path — it is undefined. There
- *     is no `disambiguateBy:'type'` field and no entity-evidence disposition to
- *     read; `route.clarification` IS the contract. The asserts below check that
- *     real signal unconditionally.
+ *   - `entityEvidence` reports the ambiguous resolve; `clarification` IS the
+ *     contract. The asserts below check that real signal unconditionally.
  *
  * Guard: the clarify path (executionBlocked=true, clarification set) must not
  * throw — assertions validate the shape is well-formed AND that both distinct
@@ -213,8 +211,8 @@ describe('cross-type same-name collision fires type-disambiguate', () => {
     const data = await route({ question: 'explain DataSync' });
     // Must be blocked — the router cannot pick Flow over ApexClass without asking.
     expect(data.executionBlocked).toBe(true);
-    expect(data.route.clarification).not.toBeNull();
-    const clr = data.route.clarification!;
+    expect(data.clarification).not.toBeNull();
+    const clr = data.clarification!;
     // Options are string labels/ids (RouteClarification.options: string[]).
     expect(clr.options.length).toBeGreaterThanOrEqual(2);
     const joined = clr.options.join('\n');
@@ -223,12 +221,9 @@ describe('cross-type same-name collision fires type-disambiguate', () => {
     expect(clr.required).toBe(true);
     expect(typeof clr.question).toBe('string');
     expect(clr.question.length).toBeGreaterThan(0);
-    // R5 fires this clarify through the RESOLVE-CANDIDATES path, not the
-    // entity-ambiguous path — so entityEvidence is deliberately ABSENT here.
-    // Lock that in (a prior version guarded the disposition asserts behind
-    // `if (data.entityEvidence)`, which made them vacuous because the branch
-    // never runs). Assert UNCONDITIONALLY on the real signal instead.
-    expect(data.entityEvidence).toBeUndefined();
+    // The short-phrase fallback resolved the whole phrase; the evidence says so.
+    expect(data.entityEvidence?.disposition).toBe('ambiguous');
+    expect(data.entityEvidence?.clarificationRequired).toBe(true);
     // clarificationRequired: the block is a hard stop.
     expect(clr.required).toBe(true);
     // The ambiguous disposition is expressed AS the resolve-candidates prompt
@@ -253,10 +248,9 @@ describe('cross-type same-name collision fires type-disambiguate', () => {
     // the resolver didn't pick up the qualifier) — either is acceptable. What
     // MUST NOT happen: an unhandled exception.
     expect(typeof data.executionBlocked).toBe('boolean');
-    expect(data.route).toBeDefined();
     // If still blocked, the clarification must be well-formed (guard).
-    if (data.executionBlocked && data.route.clarification !== null) {
-      const clr = data.route.clarification;
+    if (data.executionBlocked && data.clarification !== null) {
+      const clr = data.clarification;
       expect(clr.options.length).toBeGreaterThanOrEqual(1);
       expect(typeof clr.question).toBe('string');
       expect(clr.question.length).toBeGreaterThan(0);
@@ -269,6 +263,6 @@ describe('cross-type same-name collision fires type-disambiguate', () => {
     // SINGLE named component → the narrow clarify guard (routeTargetsSingleComponent)
     // must suppress the block. Wrong-clarify must not fire here.
     expect(data.executionBlocked).toBe(false);
-    expect(data.route.clarification).toBeNull();
+    expect(data.clarification).toBeNull();
   });
 });

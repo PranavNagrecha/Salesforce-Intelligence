@@ -18,6 +18,14 @@
  *      points at the target object AND whose `events` property contains
  *      a matching `before <event>` lifecycle event. Before triggers run
  *      after before-save flows but ahead of custom validation rules.
+ *      Org Apex classes that extend a trigger-framework base class from
+ *      another namespace and touch the object follow as CONDITIONAL
+ *      `ApexClass` steps (`conditionalOn.reason:
+ *      'framework-registered-handler'`): the package's trigger runs them
+ *      only if a registration record — data the vault does not hold — names
+ *      them. Each sits in the trigger phase its source names
+ *      (`Before<Event>` / `After<Event>`); one naming neither sits here with
+ *      `conditionalOn.phase: 'unknown'`. See `soe-framework-handlers.ts`.
  *   2. **pre-save-validation** — ValidationRules parented to the
  *      target object. Each emits its `firesWhen` ConditionalContext so
  *      callers can see the condition gate before the rule runs.
@@ -124,7 +132,6 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
-  getNodeById,
   listEdges,
   listEdgesForNodes,
   listNodesByIds,
@@ -155,7 +162,6 @@ import {
   type RefGroundableStep,
   SOE_UNGROUNDED_REFS_NOTE,
   soeRefGroundingNotCheckedNote,
-  type SoeUngroundedRef,
 } from './order-of-execution.js';
 import { responseReductionCap } from './response-budget.js';
 import {
@@ -181,6 +187,10 @@ import {
 } from './soe-event-match.js';
 import { classifyAfterSaveFlowTiming, flowStepFacts } from './soe-flow-timing.js';
 import {
+  buildFrameworkHandlerSteps,
+  type SoeFrameworkRegistration,
+} from './soe-framework-handlers.js';
+import {
   AUTOMATION_PHASES,
   type BoundableStep,
   computePhasesOmitted,
@@ -201,6 +211,12 @@ import {
   findRollupRecalcSteps,
   rollupScanTruncationNote,
 } from './soe-rollup-recalc.js';
+import {
+  type SoeNoEntryCriteria,
+  type SoeStepBranches,
+  type SoeStepCondition,
+  surfaceStepCondition,
+} from './soe-step-condition.js';
 import { annotateSoeTriggerBypass } from './soe-trigger-bypass-annotate.js';
 import { type SoeHandlerEffects } from './soe-trigger-effects.js';
 import {
@@ -352,31 +368,12 @@ export type WhatHappensOnSaveInput = z.infer<typeof whatHappensOnSaveInputSchema
  * touches (sourced from the ConditionalContext node's
  * `properties.fieldRefs` per `ConditionalContextSemantics.md`).
  */
-export interface SoeStepCondition {
-  readonly conditionContextId: ComponentId;
-  readonly expression: string;
-  /**
-   * GROUNDED ONLY. Every id here names a real node in this vault and is safe
-   * to cite. FIX 15 (3): before this, a ref the extractor recorded but that
-   * named NO component was republished here as a citable component id.
-   */
-  readonly fieldRefs: readonly ComponentId[];
-  /**
-   * Refs the condition mentions that do NOT name a component. NEVER citable.
-   * Omitted when every ref grounded. See {@link SOE_UNGROUNDED_REFS_NOTE}.
-   */
-  readonly ungroundedRefs?: readonly SoeUngroundedRef[];
-  /**
-   * So an empty `fieldRefs` is readable as CHECKED. `checked: false` means the
-   * single grounding query FAILED — the counts are then UNCHECKED zeros and
-   * `fieldRefs` is the raw extractor record, not a verified list.
-   */
-  readonly refGrounding: {
-    readonly checked: boolean;
-    readonly grounded: number;
-    readonly ungrounded: number;
-  };
-}
+/**
+ * The step gate is defined ONCE in `soe-step-condition.ts`, beside the helper
+ * that surfaces it for both save-order tools. Re-exported so this module's
+ * public type surface is unchanged.
+ */
+export type { SoeStepCondition };
 
 /**
  * One action a step performs (e.g., a WorkflowRule's `sendsEmail` to
@@ -421,10 +418,33 @@ export interface SoeStep {
   readonly componentId: ComponentId;
   readonly componentType: ComponentType;
   readonly apiName: string;
+  /**
+   * The ConditionalContext gate. For a Flow step this is the flow's `<start>`
+   * ENTRY criteria (`kind: 'flow-recordtrigger'`) — what decides whether the
+   * flow runs at all — never one of its inner `<decisions>` rules.
+   */
   readonly conditional?: SoeStepCondition;
+  /**
+   * Flow steps only: present when the record-triggered flow declares NO entry
+   * criteria, so it runs on every save of its `recordTriggerType`. `conditional`
+   * is then absent.
+   */
+  readonly entryCriteria?: SoeNoEntryCriteria;
+  /**
+   * Flow steps only: the inner `<decisions>` rules — count and the first two
+   * expressions — so the host can explain the flow's branching without
+   * mistaking a branch for the gate. Omitted when the flow has none.
+   */
+  readonly branches?: SoeStepBranches;
   readonly actions: readonly SoeStepAction[];
   /** ApexTrigger steps only: the handler chain walked and any bypass switch it reads. */
   readonly handlerEffects?: SoeHandlerEffects;
+  /**
+   * ApexClass steps only: a framework-registered handler (see
+   * `soe-framework-handlers.ts`). The step is conditional on a registration
+   * record the vault does not hold; `phase` says what its source names.
+   */
+  readonly conditionalOn?: SoeFrameworkRegistration;
   /** Flow steps: declared Flow Trigger Order (omitted when none). */
   readonly triggerOrder?: number;
   /** Flow steps: fires only on the save that CHANGES the record to meet its entry criteria. */
@@ -531,6 +551,9 @@ export interface WhatHappensOnSaveOutput {
    * update, after-save flow DML, Apex DML), the documented rule each relies on,
    * what an update re-runs (with any visible recursion guard), and one-hop
    * cross-object cascades. Exactly one of `reentry` / `reentryNotChecked` is set.
+   * `reentry.notModeled` names Process Builder processes, approval field updates
+   * and time-triggered workflow updates only when the vault holds some, with the
+   * count (CHECK-BEFORE-CAVEAT).
    */
   readonly reentry?: SoeReentry;
   readonly reentryNotChecked?: string;
@@ -768,57 +791,10 @@ const CONCEPT_REASONING_NO_HEADROOM_NOTE = (headroom: number): string =>
 export type { SoeInactiveSummary };
 
 /**
- * Surface the first `firesWhen` ConditionalContext for a firer node,
- * or `undefined` when the firer has no conditions. The condition
- * carries `kind`, `expression`, and the `fieldRefs` array; this
- * helper extracts the
- * `{ conditionContextId, expression, fieldRefs }` triple.
- *
- * Multi-condition firers (a Flow with several `<decisions>` blocks,
- * an ApprovalProcess with both `entryCriteria` formula and
- * `criteriaItems`) surface their FIRST condition only. Callers
- * wanting the full list re-query via
- * `sfi.get_edges({ nodeId, direction: 'out', edgeType: 'firesWhen' })`.
- */
-const surfaceFirstCondition = async (
-  ctx: Context,
-  firerId: ComponentId,
-): Promise<Result<SoeStepCondition | undefined, string>> => {
-  const edgesResult = await listEdges(ctx.graph, firerId, {
-    direction: 'out',
-    edgeType: 'firesWhen',
-  });
-  if (!edgesResult.ok) {
-    return err(edgesResult.error.message);
-  }
-  const firstEdge = edgesResult.value[0];
-  if (firstEdge === undefined) return ok(undefined);
-  const conditionNodeResult = await getNodeById(ctx.graph, firstEdge.toId);
-  if (!conditionNodeResult.ok) {
-    return err(conditionNodeResult.error.message);
-  }
-  if (conditionNodeResult.value === null) return ok(undefined);
-  const conditionNode = conditionNodeResult.value;
-  const expression = conditionNode.properties['expression'];
-  const rawFieldRefs = conditionNode.properties['fieldRefs'];
-  const fieldRefs: readonly ComponentId[] = Array.isArray(rawFieldRefs)
-    ? rawFieldRefs.filter((v): v is ComponentId => typeof v === 'string')
-    : [];
-  return ok({
-    conditionContextId: conditionNode.id,
-    expression: typeof expression === 'string' ? expression : '',
-    fieldRefs,
-    // Provisional: `groundStepConditions` runs ONE batched probe over the whole
-    // composition and rewrites this. Until then nothing is claimed.
-    refGrounding: { checked: false, grounded: 0, ungrounded: 0 },
-  });
-};
-
-
-/**
  * Compose the structural step for a single firer. Resolves the
- * firer node, fetches its first `firesWhen` condition (when one
- * exists), and builds the actions array. Returns `null` when the
+ * firer node, fetches its `firesWhen` gate through the shared
+ * `surfaceStepCondition` (a Flow's ENTRY criteria, never its first
+ * decision), and builds the actions array. Returns `null` when the
  * firer node went missing (sparse-graph case — matches the silent-
  * skip convention every composition tool uses).
  */
@@ -828,11 +804,11 @@ const buildStep = async (
   phase: SoePhase,
   stepIndex: number,
 ): Promise<Result<SoeStep, string>> => {
-  const conditionResult = await surfaceFirstCondition(ctx, firer.id);
+  const conditionResult = await surfaceStepCondition(ctx.graph, firer);
   if (!conditionResult.ok) return err(conditionResult.error);
   const actionsResult = await buildFirerActions(ctx, firer.id);
   if (!actionsResult.ok) return err(actionsResult.error);
-  const base: Omit<SoeStep, 'conditional'> = {
+  const base: SoeStep = {
     phase,
     stepIndex,
     componentId: firer.id,
@@ -857,11 +833,7 @@ const buildStep = async (
         }
       : {}),
   };
-  return ok(
-    conditionResult.value === undefined
-      ? base
-      : { ...base, conditional: conditionResult.value },
-  );
+  return ok({ ...base, ...conditionResult.value });
 };
 
 /**
@@ -1532,6 +1504,21 @@ export const whatHappensOnSaveHandler = async (
       stepIndex += 1;
     }
   }
+  // SAVE-REGISTERED-HANDLERS. Org subclasses of a managed trigger-framework
+  // base that touch this object: run by the package's trigger only if a
+  // registration record (data, not in the vault) names them — conditional.
+  const frameworkHandlers = await buildFrameworkHandlerSteps(
+    ctx,
+    input.objectApiName,
+    input.event === 'upsert' ? ['insert', 'update'] : [input.event],
+  );
+  if (!frameworkHandlers.ok) {
+    return err({ kind: 'internal', message: frameworkHandlers.error });
+  }
+  for (const handler of frameworkHandlers.value.before) {
+    soe.push({ phase: 'pre-save-triggers', stepIndex, ...handler });
+    stepIndex += 1;
+  }
 
   // Phase 2: pre-save-validation. Custom validation rules run AFTER
   // before triggers. ValidationRules fire on every insert/update;
@@ -1647,6 +1634,10 @@ export const whatHappensOnSaveHandler = async (
       afterTriggers.push(firer);
       stepIndex += 1;
     }
+  }
+  for (const handler of frameworkHandlers.value.after) {
+    soe.push({ phase: 'after-triggers', stepIndex, ...handler });
+    stepIndex += 1;
   }
 
   // Phase 6: post-save-assignment. Assignment / AutoResponse rules
@@ -1870,7 +1861,9 @@ export const whatHappensOnSaveHandler = async (
     soe as unknown as RefGroundableStep[],
   );
 
-  const conditionalCount = soe.filter((s) => s.conditional !== undefined).length;
+  const conditionalCount = soe.filter(
+    (s) => s.conditional !== undefined || s.conditionalOn !== undefined,
+  ).length;
   const inactiveConfigured = sortedInactiveConfigured(inactiveCollector);
   const inactiveSummary = buildInactiveSummary(
     inactiveConfigured,
@@ -1979,7 +1972,12 @@ export const whatHappensOnSaveHandler = async (
     // `boundaries[]`. Always appended: a zero census must read as CHECKED, and
     // a failed probe must read as NOT CHECKED. Attached BEFORE the byte-budget
     // pass so its bytes are measured, never re-inflating the payload after.
-    disclosure: buildSoePrimaryDisclosure(objectModeled, receiverVerification, handlerEnriched),
+    disclosure: buildSoePrimaryDisclosure(
+      objectModeled,
+      receiverVerification,
+      handlerEnriched,
+      soe.some((s) => s.conditionalOn !== undefined),
+    ),
   };
 
   // The org-wide Summary-field scan behind post-save-rollup-recalc hit the

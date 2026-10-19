@@ -283,7 +283,7 @@ describe('findHardcodedValuesHandler', () => {
     expect(joined).toMatch(/heuristic/i);
     expect(joined).not.toContain('NOT SCANNED IN THIS VAULT');
     expect(r.value.data.qualityScanCoverage).toEqual([
-      { type: 'ApexClass', nodes: 1, scanned: 1 },
+      { type: 'ApexClass', candidates: 1, scanned: 1 },
     ]);
     await closeGraph(localStore);
     rmSync(localDir, { recursive: true, force: true });
@@ -332,8 +332,8 @@ describe('findHardcodedValuesHandler', () => {
     if (!r.ok) return;
     expect(r.value.data.matches.length).toBe(0);
     expect(r.value.data.qualityScanCoverage).toEqual([
-      { type: 'ApexClass', nodes: 1, scanned: 1 },
-      { type: 'ApexTrigger', nodes: 1, scanned: 0 },
+      { type: 'ApexClass', candidates: 1, scanned: 1 },
+      { type: 'ApexTrigger', candidates: 1, scanned: 0 },
     ]);
     expect(r.value.data.boundaries.join(' ')).toContain('NOT SCANNED IN THIS VAULT');
 
@@ -352,7 +352,7 @@ describe('findHardcodedValuesHandler', () => {
     // so the scoped clean answer proves the class was read, and the scanner
     // disclosure rides along; only the NOT-SCANNED note is scope-dependent.
     expect(scoped.value.data.qualityScanCoverage).toEqual([
-      { type: 'ApexClass', nodes: 1, scanned: 1 },
+      { type: 'ApexClass', candidates: 1, scanned: 1 },
     ]);
     expect(scoped.value.data.boundaries.join(' ')).not.toContain(
       'NOT SCANNED IN THIS VAULT',
@@ -606,7 +606,7 @@ describe('findHardcodedValuesHandler — FIX 6 clean-scope disclosure', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.qualityScanCoverage).toEqual([
-      { type: 'ApexClass', nodes: 1, scanned: 1 },
+      { type: 'ApexClass', candidates: 1, scanned: 1 },
     ]);
   });
 

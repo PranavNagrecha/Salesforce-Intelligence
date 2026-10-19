@@ -1,5 +1,6 @@
 import { existsSync } from 'node:fs';
 import { readFile, stat } from 'node:fs/promises';
+import { homedir } from 'node:os';
 import { resolve } from 'node:path';
 
 import { execHelper } from '@sf-intelligence/core';
@@ -40,6 +41,9 @@ const SF_DOCTOR_TIMEOUT_MS = (() => {
   const n = Number(process.env['SFI_SF_QUERY_TIMEOUT_MS']);
   return Number.isFinite(n) && n > 0 ? Math.floor(n) : 120_000;
 })();
+
+/** The gap log's location as the user would type it; derived from the one writer. */
+const GAP_LOG_DISPLAY = gapLogPath().replace(homedir(), '~');
 
 /** Default vault root, relative to CWD. Mirrors init/status. */
 const DEFAULT_VAULT_ROOT = 'org-kb';
@@ -304,12 +308,19 @@ export const runDoctor = async (opts: RunDoctorOptions): Promise<DoctorReport> =
           fix: `Re-authenticate: sf org login web --alias "${targetOrg}"`,
         });
       }
-    } catch {
+    } catch (cause) {
+      // execFile marks a timeout kill with `killed: true`; that is "sf hung",
+      // not "you are logged out", and the two need different fixes.
+      const timedOut = (cause as { killed?: unknown }).killed === true;
       checks.push({
         name: 'Org auth',
         status: 'fail',
-        detail: `could not query ${targetOrg}`,
-        fix: `Re-authenticate: sf org login web --alias "${targetOrg}"`,
+        detail: timedOut
+          ? `sf did not answer in ${String(Math.round(SF_DOCTOR_TIMEOUT_MS / 1000))} s`
+          : `could not query ${targetOrg}`,
+        fix: timedOut
+          ? `Run \`sf org display --target-org "${targetOrg}"\` by hand; if it hangs, fix sf first (or raise SFI_SF_QUERY_TIMEOUT_MS).`
+          : `Re-authenticate: sf org login web --alias "${targetOrg}"`,
       });
     }
   }
@@ -385,10 +396,10 @@ export const runDoctor = async (opts: RunDoctorOptions): Promise<DoctorReport> =
     );
   }
 
-  // 7. Route-gap telemetry. Informational, never
-  // blocking — the router appends a local entry whenever a question hits a gap
-  // (an unrouted/no-good-tool question, or an honest live-plane disclosure), so
-  // the count is a signal of where routing could improve, not a health failure.
+  // 7. Route-gap telemetry. Informational, never blocking — the server appends
+  // a local entry whenever a question hits a gap (no good tool, or an honest
+  // live-plane disclosure). A count of past questions is history, not a
+  // problem with this vault, so every row here is `info`.
   const gaps = await summarizeRouteGaps(opts.gapLogFile ?? gapLogPath());
   if (!gaps.exists) {
     // Distinguish "never used" from "used and clean" — a fresh machine with no
@@ -397,7 +408,7 @@ export const runDoctor = async (opts: RunDoctorOptions): Promise<DoctorReport> =
       name: 'Route gaps',
       status: 'info',
       detail:
-        'no route-gap log yet on this machine (machine-global ~/.sfi/question-gaps.jsonl — not per-vault)',
+        `no route-gap log yet on this machine (machine-global ${GAP_LOG_DISPLAY} — not per-vault)`,
     });
   } else if (gaps.count === 0) {
     checks.push({
@@ -409,10 +420,9 @@ export const runDoctor = async (opts: RunDoctorOptions): Promise<DoctorReport> =
     const top = gaps.topCategory !== null ? ` (top: ${gaps.topCategory} ×${gaps.topCount})` : '';
     checks.push({
       name: 'Route gaps',
-      status: 'warn',
+      status: 'info',
       detail:
-        `${gaps.count.toLocaleString()} question(s) logged a route gap on this machine${top} — machine-global history, not this vault's health`,
-      fix: 'Review locally-logged routing gaps (question-gaps.jsonl) — phrasings the router could not answer well are candidates for a new intent/gold case.',
+        `${gaps.count.toLocaleString()} question(s) logged a route gap on this machine${top} — machine-global history (${GAP_LOG_DISPLAY}), not this vault's health`,
     });
   }
 
@@ -517,13 +527,6 @@ export const formatDoctorReport = (report: DoctorReport): string => {
       '',
     );
   }
-  // SYNTH-04 — grounding reminder: every org answer should cite only ids the
-  // tools returned. `sfi.synthesize_answer` enforces that (flags hallucinatedIds).
-  lines.push(
-    'Grounding: build org answers from sfi.* tool output and pass them through `sfi.synthesize_answer`,',
-    'which flags any canonical id in the prose that no tool returned (hallucinatedIds) — never invent ids.',
-    '',
-  );
   // Feedback channel: a wrong/weak answer or a route gap has a
   // home. `sfi feedback export` writes a scrubbed file (no org PII, nothing uploaded).
   lines.push(

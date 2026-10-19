@@ -1,11 +1,12 @@
 import { readFile } from 'node:fs/promises';
 
-import type {
-  Edge,
-  ExtractionResult,
-  ExtractorError,
-  Node,
-  Result,
+import {
+  isChangeEventApiName,
+  type Edge,
+  type ExtractionResult,
+  type ExtractorError,
+  type Node,
+  type Result,
 } from '@sf-intelligence/contracts';
 import { err, ok } from '@sf-intelligence/core';
 import { detectCodeQualityIssues } from '@sf-intelligence/patterns';
@@ -189,7 +190,10 @@ const readTriggerSource = async (
  * XML.
  *
  * Returns one `Node` of type `'ApexTrigger'` and one or more edges:
- * always a declared `'triggersOn'` edge to the trigger's target SObject;
+ * always a declared `'triggersOn'` edge to the trigger's target SObject; a
+ * declared `'listensTo'` edge when that object is a Platform Event (`__e`) and
+ * a declared `'subscribesToChange'` edge when it is a Change Event
+ * (`*ChangeEvent`, the Change Data Capture subscriber case);
  * zero-to-many declared `'dispatchesAsync'` edges when the body dispatches a
  * Queueable/Batchable/Schedulable via `new X(...)` (the scanner is blind to
  * `new X()`, so this is wired in explicitly — mirroring `apex-class.ts`);
@@ -292,6 +296,26 @@ export const extractApexTrigger = async (
       },
     });
   }
+  // The Change Data Capture twin of the rule above: `trigger X on
+  // AccountChangeEvent` is a CDC subscriber. `triggersOn` keeps the lifecycle
+  // semantics; `subscribesToChange` records the subscription, into the SAME
+  // synthetic `CustomObject:{X}ChangeEvent` id (never a retrieved node) every
+  // CDC reader already scans. Before this the edge type existed only in a
+  // comment and `cdc_subscribers` could see the trigger solely by reading its
+  // object-lifecycle edge.
+  if (isChangeEventApiName(header.objectApiName)) {
+    declaredEdges.push({
+      fromId: ownerId,
+      toId: `CustomObject:${header.objectApiName}`,
+      edgeType: 'subscribesToChange',
+      confidence: 'declared',
+      source: EDGE_SOURCE,
+      properties: {
+        changeEventName: header.objectApiName,
+        mechanism: 'triggerOnChangeEvent',
+      },
+    });
+  }
   // A trigger that enqueues a Queueable / executes a Batch / schedules a job
   // names the target class via an inline `new X(...)` constructor — a declared
   // async-dispatch dependency the regex scanner can't see (it only matches the
@@ -359,10 +383,23 @@ export const extractApexTrigger = async (
     // collapse those two into one silent answer.
     qualityIssues,
   };
-  const properties =
-    scannerResult.warnings.length === 0
-      ? baseProperties
-      : { ...baseProperties, apexScannerWarnings: scannerResult.warnings };
+  const properties = {
+    ...baseProperties,
+    // Mirrors `apex-class.ts`: both written only when non-empty, so the clean
+    // path keeps the pre-existing node shape byte-for-byte.
+    ...(scannerResult.unresolvedSubscriptions > 0
+      ? { unresolvedSubscriptions: scannerResult.unresolvedSubscriptions }
+      : {}),
+    ...(scannerResult.unresolvedDynamicDispatch > 0
+      ? { unresolvedDynamicDispatch: scannerResult.unresolvedDynamicDispatch }
+      : {}),
+    ...(Object.keys(scannerResult.platformCalls).length > 0
+      ? { platformCalls: scannerResult.platformCalls }
+      : {}),
+    ...(scannerResult.warnings.length > 0
+      ? { apexScannerWarnings: scannerResult.warnings }
+      : {}),
+  };
 
   const node: Node = {
     id: ownerId,

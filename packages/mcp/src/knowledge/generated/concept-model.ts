@@ -390,7 +390,7 @@ export const CONCEPTS: Readonly<Record<ConceptId, Concept>> =
       kind: 'automation-collision',
       label: 'Writing a setup object risks MIXED_DML with non-setup DML',
       summary:
-        'Salesforce forbids mixing DML on setup objects (User, Group, PermissionSet, UserRole, Profile, and similar) with DML on non-setup (business) objects in the SAME synchronous transaction — the runtime throws MIXED_DML_OPERATION. An Apex class or trigger that writes a setup object is therefore a MIXED_DML risk surface whenever it (or a caller in the same transaction) also writes a business object. The offline claim is STRUCTURAL: it is grounded only in a `writesTo` edge whose target object is in a curated, org-agnostic setup-object name set. It does NOT prove that a particular transaction actually mixes both kinds of DML, nor that every call path hits the setup write.',
+        'Salesforce forbids mixing DML on setup objects (User, Group, PermissionSet, UserRole, Profile, and similar) with DML on non-setup (business) objects in the SAME synchronous transaction — the runtime throws MIXED_DML_OPERATION. An Apex class, trigger, or Flow that writes a setup object is therefore a MIXED_DML risk surface whenever it (or a caller in the same transaction) also writes a business object. The offline claim is STRUCTURAL: it is grounded only in a `writesTo` edge whose target object is in a curated, org-agnostic setup-object name set. It does NOT prove that a particular transaction actually mixes both kinds of DML, nor that every call path hits the setup write.',
       severity: 'high',
     },
     'concept:automation-collision': {
@@ -1808,7 +1808,7 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
   {
     id: 'rule:field/formula-on-derived-formula',
     concept: 'concept:formula-on-derived',
-    bind: { edgeType: 'references', componentTypes: ['CustomField'], toWhereProperty: { key: 'isFormula', equals: true }, fromWhereProperty: { key: 'isFormula', equals: true } },
+    bind: { edgeType: 'references', componentTypes: ['CustomField'], toWhereProperty: { key: 'isFormula', equals: true }, fromWhereProperty: { key: 'isFormula', equals: true }, fromTypeIn: ['CustomField'] },
     interpretation:
       '{0} is a formula field that references another formula field {1} — a second-order derivation. A change to the deeper formula\'s inputs can ripple through both recalculations; confirm dependency depth with find_formula_references before editing either field.',
     maxConfidence: 'parsed',
@@ -1818,7 +1818,7 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
   {
     id: 'rule:field/formula-on-derived-summary',
     concept: 'concept:formula-on-derived',
-    bind: { edgeType: 'references', componentTypes: ['CustomField'], toWhereProperty: { key: 'dataType', equals: 'Summary' }, fromWhereProperty: { key: 'isFormula', equals: true } },
+    bind: { edgeType: 'references', componentTypes: ['CustomField'], toWhereProperty: { key: 'dataType', equals: 'Summary' }, fromWhereProperty: { key: 'isFormula', equals: true }, fromTypeIn: ['CustomField'] },
     interpretation:
       '{0} is a formula field that references roll-up summary field {1} — a second-order derivation over an aggregate. Child DML that recalculates {1} can also change {0}; confirm with find_formula_references and order_of_execution.',
     maxConfidence: 'parsed',
@@ -1828,7 +1828,7 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
   {
     id: 'rule:automation/validation-gates-rollup-stale',
     concept: 'concept:validation-gates-on-rollup-recalculated-later',
-    bind: { edgeType: 'references', componentTypes: ['ValidationRule', 'CustomField'], toWhereProperty: { key: 'dataType', equals: 'Summary' } },
+    bind: { edgeType: 'references', componentTypes: ['ValidationRule', 'CustomField'], toWhereProperty: { key: 'dataType', equals: 'Summary' }, fromTypeIn: ['ValidationRule'] },
     interpretation:
       '{0} references roll-up summary field {1} in its error condition — validation runs in pre-save-validation BEFORE post-save-rollup-recalc, so the rule tests the PRE-SAVE aggregate, not the value after child DML on this save is rolled up. If the rule should react to the updated roll-up, gate on a different field, move validation later, or redesign around the phase order.',
     maxConfidence: 'parsed',
@@ -1838,12 +1838,12 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
   {
     id: 'rule:apex/mixed-dml-setup-write',
     concept: 'concept:mixed-dml-setup-vs-nonsetup',
-    bind: { edgeType: 'writesTo', componentTypes: ['ApexClass', 'ApexTrigger', 'CustomField', 'CustomObject'], toObjectIn: ['User', 'Group', 'PermissionSet', 'PermissionSetAssignment', 'UserRole', 'Profile', 'QueueSobject', 'ObjectPermissions', 'FieldPermissions', 'SetupEntityAccess'] },
+    bind: { edgeType: 'writesTo', componentTypes: ['ApexClass', 'ApexTrigger', 'Flow', 'CustomField', 'CustomObject'], toObjectIn: ['User', 'Group', 'PermissionSet', 'PermissionSetAssignment', 'UserRole', 'Profile', 'QueueSobject', 'ObjectPermissions', 'FieldPermissions', 'SetupEntityAccess'], fromTypeIn: ['ApexClass', 'ApexTrigger', 'Flow'] },
     interpretation:
       '{0} writes setup object data at {1} — DML on setup objects (User, Group, PermissionSet, roles, profiles, …) cannot mix with non-setup DML in the same synchronous transaction (MIXED_DML_OPERATION). Confirm call paths do not also write business objects in the same txn, or move setup DML into a separate async/context boundary.',
     maxConfidence: 'heuristic',
     absenceShaped: false,
-    dependsOnCoverage: ['ApexClass', 'ApexTrigger'],
+    dependsOnCoverage: ['ApexClass', 'ApexTrigger', 'Flow'],
   },
   {
     id: 'rule:automation/coupled-field-write',
@@ -3257,7 +3257,7 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
   {
     id: 'rule:code-quality/bulkification-gap-trigger-reachable',
     concept: 'concept:bulkification-gap-in-trigger-reachable',
-    bind: { edgeType: 'callsApex', componentTypes: ['ApexTrigger', 'ApexClass'], toWhereProperty: { key: 'qualityIssues', anyElement: { key: 'rule', in: ['soql-in-loop', 'dml-in-loop'] } } },
+    bind: { edgeType: 'callsApex', componentTypes: ['ApexTrigger', 'ApexClass'], toWhereProperty: { key: 'qualityIssues', anyElement: { key: 'rule', in: ['soql-in-loop', 'dml-in-loop'] } }, fromTypeIn: ['ApexTrigger', 'ApexClass'] },
     interpretation:
       '{0} calls Apex class {1} that runs a SOQL query or DML statement INSIDE a loop (a soql-in-loop / dml-in-loop pattern in a handler reachable via callsApex). An Apex trigger can process up to 200 records in one invocation, so the loop anti-pattern is AMPLIFIED here: each iteration may consume a query or DML against the per-transaction governor limits, and a bulk data load (import, API batch, or mass update) can throw a LimitException that fails the whole trigger transaction. Bulkify the called class by pulling queries and DML OUT of the loop. The callsApex edge is HEURISTIC (class-granularity scanner); the loop gap is HEURISTIC recognition from TOKENIZED Apex source — NOT a compiler AST: the recognizer can MISS a query behind a helper method and can FLAG a loop that in practice runs a bounded, tiny number of times. It names an amplified governor-risk review candidate reachable from trigger context, not a proven runtime limit failure.',
     maxConfidence: 'heuristic',
@@ -3437,7 +3437,7 @@ export const CONCEPT_RULES: readonly ConceptRule[] = Object.freeze<ConceptRule[]
   {
     id: 'rule:field/restricted-global-value-set',
     concept: 'concept:field-restricted-global-value-set',
-    bind: { edgeType: 'usesValueSet', componentTypes: ['CustomField', 'GlobalValueSet'], toWhereProperty: { key: 'restricted', equals: true } },
+    bind: { edgeType: 'usesValueSet', componentTypes: ['CustomField', 'GlobalValueSet'], toWhereProperty: { key: 'restricted', equals: true }, fromTypeIn: ['CustomField'] },
     interpretation:
       '{0} draws its values from restricted global value set {1} — a closed vocabulary. Only values defined in the shared set are valid, so admins cannot add ad-hoc values on this field and an integration or API write of an out-of-set value is rejected; changing the allowed values means editing the shared set, which ripples to every other field bound to it. This is the metadata-declared restriction, not proof of runtime enforcement or that no existing record already holds an out-of-set value.',
     maxConfidence: 'declared',

@@ -87,3 +87,10 @@ type: CustomField
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `Layout:Project__c.Residential Layout` | declared | layout-extractor |
+
+### writesTo (incoming, 2)
+
+| Source | Confidence | Producer |
+| --- | --- | --- |
+| `ApexClass:PaymentServiceTest` | parsed | apex-ast |
+| `ApexClass:ProjectTriggerHandlerTest` | parsed | apex-ast |

@@ -1,7 +1,13 @@
 /// <reference types="vitest/globals" />
 
 import { INTERPRET_CONCEPT_CARDS } from '../src/funnel-utterances.js';
-import { resetFunnelIndex, semanticCandidates, tokenize } from '../src/semantic-funnel.js';
+import {
+  CONF_MIN_COVERAGE,
+  queryCoverage,
+  resetFunnelIndex,
+  semanticCandidates,
+  tokenize,
+} from '../src/semantic-funnel.js';
 
 beforeEach(() => resetFunnelIndex());
 
@@ -272,5 +278,41 @@ describe('grow-forever funnel — per-concept cards (INTERPRET_CONCEPT_CARDS)', 
   it('does not displace specialists on non-reasoning queries', () => {
     expect(names('how many open opportunities do we have', 5)[0]).not.toBe('sfi.interpret');
     expect(names('which paid licenses sit unused', 5)[0]).not.toBe('sfi.interpret');
+  });
+});
+
+describe('FUNNEL-CMDT-AND-TYPO — typo tolerance and custom-metadata vocabulary', () => {
+  // The tools that answer "where is <field>": the universal usage finder, the
+  // field-specific finder and the component reader.
+  const FIELD_FINDERS = ['sfi.find_component_usages', 'sfi.find_field_anywhere', 'sfi.get_component'];
+
+  it('a standard field with one dropped letter is understood, not out of scope', () => {
+    // The QA regression bank's typo-suite row shape, verbatim: "Where is the <variant>?".
+    const q = 'Where is the where is acount industry?';
+    // `acount` is one edit from a corpus word, so the corpus "knows" the whole question.
+    expect(queryCoverage(q)).toBeGreaterThanOrEqual(CONF_MIN_COVERAGE);
+    const out = semanticCandidates(q, 3);
+    expect(out[0]?.confidence).not.toBe('low');
+    expect(out.some((c) => FIELD_FINDERS.includes(c.tool))).toBe(true);
+  });
+
+  it('a transposed letter is corrected the same way', () => {
+    const out = semanticCandidates('Where is the where is accoutn industry?', 3);
+    expect(out[0]?.confidence).not.toBe('low');
+    expect(out.some((c) => FIELD_FINDERS.includes(c.tool))).toBe(true);
+  });
+
+  it('gibberish is still gibberish — a short or far-off token is never "corrected"', () => {
+    expect(semanticCandidates('zxqw plkj vbnm')).toEqual([]);
+    expect(semanticCandidates('xyzzy quantum flibbertigibbet metadata')[0]?.confidence).toBe('low');
+  });
+
+  it('which classes read from a custom metadata type is a usage question', () => {
+    expect(names('Which classes read from Demo_Rule__mdt?', 3)).toContain('sfi.find_component_usages');
+  });
+
+  it('values in a custom metadata record reach lookup_record, not the picklist tools alone', () => {
+    expect(names('What values are in Demo_Rule DemoRecordActive?', 3)).toContain('sfi.lookup_record');
+    expect(names('What values are in Demo_Rule Demo_Record?', 3)).toContain('sfi.lookup_record');
   });
 });

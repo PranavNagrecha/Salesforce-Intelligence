@@ -7,7 +7,7 @@ import {
   renderLiveCountMarkdown,
   renderOrgOverviewMarkdown,
   renderResolveMarkdown,
-  renderRouteMarkdown,
+  renderShortlistMarkdown,
   renderTrustFooter,
 } from '../src/answer-render.js';
 
@@ -60,7 +60,16 @@ describe('renderOrgOverviewMarkdown', () => {
   const base = {
     componentCounts: { CustomField: 900, Flow: 40, ApexClass: 30 },
     topObjects: [{ apiName: 'Account', inboundReferences: 50 }],
-    automationSummary: { flows: 40, apexTriggers: 12, workflowRules: 3, activeRatio: 0.8 },
+    automationSummary: {
+      flows: 40,
+      apexTriggers: 12,
+      workflowRules: 3,
+      approvalProcesses: 2,
+      activeRatio: 0.8,
+      activeCount: 44,
+      measuredCount: 55,
+      activeStatusUnknownCount: 2,
+    },
     integrationSummary: { total: 6 },
   };
 
@@ -79,6 +88,10 @@ describe('renderOrgOverviewMarkdown', () => {
     expect(md).toContain('| Type | Count |');
     expect(md).toContain('Account');
     expect(md).toContain('40 flows');
+    // PROSE-FROM-ROWS: the percentage names the rows it was computed over.
+    expect(md).toContain('44 of 55 automation items active (80%)');
+    expect(md).toContain('2 without a status');
+    expect(md).not.toContain('workflow rules (');
     expect(md).toContain('Trend over 3 refreshes: growing');
     expect(md).toContain('+20 CustomField');
   });
@@ -165,54 +178,55 @@ describe('live answer renderers', () => {
   });
 });
 
-describe('renderRouteMarkdown', () => {
-  it('renders a routed plan with the tool sequence', () => {
-    const md = renderRouteMarkdown({
+describe('renderShortlistMarkdown', () => {
+  it('renders the ranked shortlist with answers, args and the live note', () => {
+    const md = renderShortlistMarkdown({
       question: 'How many Accounts?',
-      plane: 'live',
-      intent: 'record-count',
-      tools: ['sfi.live_count'],
-      liveRequired: true,
-      needsResolve: false,
-      reason: 'A record COUNT is live data.',
+      toolCandidates: [
+        { tool: 'sfi.live_count', score: 0.512, plane: 'live', liveRequired: true, answers: 'Count records live.', missingArgs: ['soql'] },
+        { tool: 'sfi.list_components', score: 0.3, plane: 'vault', liveRequired: false, answers: 'List components.', suggestedArgs: { type: 'CustomObject' } },
+      ],
+      clarification: null,
       gap: null,
     });
-    expect(md).toContain('**live** plane');
-    expect(md).toContain('`record-count`');
-    expect(md).toContain('`sfi.live_count`');
-    expect(md).toContain('live plane');
+    expect(md).toContain('Candidate tools for "How many Accounts?"');
+    expect(md).toContain('1. `sfi.live_count` (0.512, live · needs the opt-in live plane) — Count records live. · still needs: soql');
+    expect(md).toContain('2. `sfi.list_components` (0.300, vault) — List components. · args {"type":"CustomObject"}');
+    expect(md).not.toContain('intent');
   });
 
-  it('does not list sfi.resolve twice when the route both needsResolve and leads with it', () => {
-    const md = renderRouteMarkdown({
-      question: 'is it safe to delete the Discount__c field?',
-      plane: 'vault',
-      intent: 'safe-to-delete',
-      tools: ['sfi.resolve', 'sfi.safe_to_delete_field'],
-      liveRequired: false,
-      needsResolve: true,
-      reason: 'Coverage-aware dependency check.',
-      gap: null,
+  it('renders a stop-and-ask and a gap note after the shortlist', () => {
+    const md = renderShortlistMarkdown({
+      question: 'who can edit the Status field',
+      toolCandidates: [
+        { tool: 'sfi.field_access_audit', score: 0.4, plane: 'vault', liveRequired: false, answers: 'Who can see a field.' },
+      ],
+      clarification: { required: true, question: 'Which component did you mean?', options: ['CustomField:A.Status__c', 'CustomField:B.Status__c'] },
+      gap: { category: 'unrouted', note: 'thin evidence' },
+      entityEvidence: { warning: 'PREMISE CHECK: nope' },
     });
-    expect(md).toContain('`sfi.resolve` the named component first');
-    expect(md).toContain('`sfi.safe_to_delete_field`');
-    // The "resolve first" prefix already covers it — the tool list must not repeat it.
-    expect(md.match(/sfi\.resolve/g)).toHaveLength(1);
-    expect(md).not.toContain('first → `sfi.resolve`');
+    expect(md).toContain('**Stop before executing:** Which component did you mean? Options: `CustomField:A.Status__c`, `CustomField:B.Status__c`');
+    expect(md).toContain('_Gap (`unrouted`): thin evidence_');
+    expect(md).toContain('PREMISE CHECK: nope');
   });
 
-  it('is honest about an unknown route', () => {
-    const md = renderRouteMarkdown({
+  it('is honest about an empty shortlist and a refusal', () => {
+    const empty = renderShortlistMarkdown({
       question: 'meaning of life',
-      plane: 'unknown',
-      intent: 'unrouted',
-      tools: ['sfi.resolve'],
-      liveRequired: false,
-      needsResolve: true,
-      reason: 'No rule matched.',
-      gap: { category: 'unrouted', note: 'logged' },
+      clarification: null,
+      gap: { category: 'unrouted', note: 'nothing matched' },
     });
-    expect(md).toMatch(/don't have a tool/i);
-    expect(md).toContain('unrouted');
+    expect(empty).toMatch(/don't have a tool/i);
+    expect(empty).toContain('nothing matched');
+    const refused = renderShortlistMarkdown({
+      question: 'delete the field for me',
+      toolCandidates: [{ tool: 'sfi.safe_to_delete_field', score: 0.5, plane: 'vault', liveRequired: false, answers: 'x' }],
+      clarification: null,
+      refusal: { disclosure: 'REFUSED (read-only boundary).', readOnlyAlternative: 'sfi.safe_to_delete_field' },
+      gap: { category: 'write-request', note: 'refused' },
+    });
+    expect(refused).toContain('REFUSED (read-only boundary).');
+    expect(refused).toContain('Read-only alternative: `sfi.safe_to_delete_field`');
+    expect(refused).toContain('transparency only');
   });
 });

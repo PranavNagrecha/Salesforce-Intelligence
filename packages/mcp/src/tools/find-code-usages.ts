@@ -72,6 +72,7 @@ import {
   type CoverageCaveat,
 } from './coverage-trust.js';
 import { argsFingerprint, decodeCursor, paginateLegacy } from './page-cursor.js';
+import { referrerStatus, type ReferrerStatus } from './soe-active.js';
 
 const FIND_CODE_USAGES_TOOL = 'sfi.find_code_usages';
 
@@ -198,6 +199,12 @@ export interface CodeUsage {
   readonly edgeType: EdgeType;
   readonly source: string;
   readonly properties: Readonly<Record<string, unknown>>;
+  /**
+   * The referrer's run state from its own node (shared `referrerStatus`): an
+   * `Inactive` trigger is not a live writer. Bundles and pages carry no
+   * activation flag and read `unknown`.
+   */
+  readonly status: ReferrerStatus;
 }
 
 /** Payload wrapped inside the `McpResponse` envelope on success. */
@@ -317,6 +324,7 @@ const resolveCodeUsage = async (
     edgeType: edge.edgeType,
     source: edge.source,
     properties: edge.properties,
+    status: referrerStatus(node),
   });
 };
 

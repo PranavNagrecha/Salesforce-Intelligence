@@ -977,3 +977,98 @@ describe('whoCanAccessObjectHandler — sourceRuleId disambiguates same-type sha
     expect(objectPermRow?.sourceRuleId).toBeUndefined();
   });
 });
+
+// SHARING-PREDICATE: a rule with ONE criterion and no custom logic has an empty
+// `booleanFilter` (Salesforce only writes one for custom AND/OR logic), so the
+// detail rendered "(predicate not extracted)" although the node held the
+// criterion in `criteriaItems` — on a real org copy 72 of 81 criteria-shaped
+// rules, including four guest rules sharing every user-created record with a
+// site's guest user. The detail must render from `criteriaItems`.
+const PRED_OBJ = 'CustomObject:Demo_Grant__c';
+const predicateSeed: ExtractionResult = {
+  nodes: [
+    node({ id: PRED_OBJ, type: 'CustomObject', apiName: 'Demo_Grant__c', properties: { sharingModel: 'Private' } }),
+    node({ id: 'Group:Demo_Ops', type: 'Group', apiName: 'Demo_Ops' }),
+    node({ id: 'Group:Demo_Site_Guest', type: 'Group', apiName: 'Demo_Site_Guest' }),
+    node({
+      id: 'SharingRule:Demo_Grant__c.Guest_All_Created',
+      type: 'SharingRule',
+      apiName: 'Demo_Grant__c.Guest_All_Created',
+      parentId: PRED_OBJ,
+      properties: {
+        ruleType: 'guest',
+        accessLevel: 'Read',
+        siteName: 'Demo_Site',
+        booleanFilter: null,
+        criteriaItemCount: 1,
+        criteriaItems: [{ field: 'CreatedById', operation: 'startsWith', value: '005' }],
+      },
+    }),
+    node({
+      id: 'SharingRule:Demo_Grant__c.Ops_Logic',
+      type: 'SharingRule',
+      apiName: 'Demo_Grant__c.Ops_Logic',
+      parentId: PRED_OBJ,
+      properties: {
+        ruleType: 'criteria',
+        accessLevel: 'Edit',
+        booleanFilter: '1 AND (2 OR 3)',
+        criteriaItemCount: 3,
+        criteriaItems: [
+          { field: 'Status__c', operation: 'equals', value: 'Open' },
+          { field: 'Region__c', operation: 'equals', value: 'EMEA' },
+          { field: 'Region__c', operation: 'equals', value: 'APAC' },
+        ],
+      },
+    }),
+    node({
+      id: 'SharingRule:Demo_Grant__c.Bare',
+      type: 'SharingRule',
+      apiName: 'Demo_Grant__c.Bare',
+      parentId: PRED_OBJ,
+      properties: { ruleType: 'criteria', accessLevel: 'Read', booleanFilter: null, criteriaItemCount: 0, criteriaItems: [] },
+    }),
+  ],
+  edges: [
+    edge({ fromId: 'SharingRule:Demo_Grant__c.Guest_All_Created', toId: 'Group:Demo_Site_Guest', edgeType: 'sharedWith' }),
+    edge({ fromId: 'SharingRule:Demo_Grant__c.Ops_Logic', toId: 'Group:Demo_Ops', edgeType: 'sharedWith' }),
+    edge({ fromId: 'SharingRule:Demo_Grant__c.Bare', toId: 'Group:Demo_Ops', edgeType: 'sharedWith' }),
+  ],
+};
+
+describe('whoCanAccessObjectHandler — sharing-rule filters render from criteriaItems', () => {
+  let predDir: string;
+  let predStore: GraphStore;
+  let predCtx: Context;
+
+  beforeAll(async () => {
+    predDir = mkdtempSync(join(tmpdir(), 'sfi-who-can-access-predicate-'));
+    const opened = await openGraph(join(predDir, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    predStore = opened.value;
+    const imported = await importExtractionResults(predStore, [predicateSeed]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    predCtx = { vaultRoot: predDir, manifest: MANIFEST, graph: predStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(predStore);
+    rmSync(predDir, { recursive: true, force: true });
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a one-criterion guest rule names its filter, not "(predicate not extracted)"', async () => {
+    const r = await whoCanAccessObjectHandler(predCtx, { view: 'paths', componentId: PRED_OBJ });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const byRule = (id: string) => r.value.data.granters.find((g) => g.sourceRuleId === id)?.detail ?? '';
+    expect(byRule('SharingRule:Demo_Grant__c.Guest_All_Created')).toContain('`CreatedById startsWith 005`');
+    expect(byRule('SharingRule:Demo_Grant__c.Guest_All_Created')).toContain("'Demo_Site'");
+    expect(byRule('SharingRule:Demo_Grant__c.Ops_Logic')).toContain(
+      '`Status__c equals Open AND (Region__c equals EMEA OR Region__c equals APAC)`',
+    );
+    // Only a rule with neither a filter nor criteria keeps the honest placeholder.
+    expect(byRule('SharingRule:Demo_Grant__c.Bare')).toContain('(predicate not extracted)');
+    const placeholders = r.value.data.granters.filter((g) => g.detail.includes('(predicate not extracted)'));
+    expect(placeholders.map((g) => g.sourceRuleId)).toEqual(['SharingRule:Demo_Grant__c.Bare']);
+  });
+});

@@ -1251,6 +1251,7 @@ describe('automationCollisionsHandler — external writers outside the triggersO
       [node('Flow:DriftObsolete', 'Flow', { status: 'Obsolete' }), 'inactive'],
       [node('ApexTrigger:DriftActive', 'ApexTrigger', { status: 'Active' }), 'active'],
       [node('ApexTrigger:DriftOff', 'ApexTrigger', { status: 'Inactive' }), 'inactive'],
+      [node('ApexTrigger:DriftDeleted', 'ApexTrigger', { status: 'Deleted' }), 'inactive'],
       [node('WorkflowRule:DriftOn', 'WorkflowRule', { active: true }), 'active'],
       [node('WorkflowRule:DriftOff', 'WorkflowRule', { active: false }), 'inactive'],
       [node('ApprovalProcess:DriftOn', 'ApprovalProcess', { active: true }), 'active'],

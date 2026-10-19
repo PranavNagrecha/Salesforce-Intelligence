@@ -11,6 +11,7 @@ import {
   composeSoeDisclosure,
   type SoeAdmissionResult,
 } from './soe-admission.js';
+import { SOE_FRAMEWORK_HANDLERS_NOTE } from './soe-framework-handlers.js';
 import { SOE_HANDLER_EFFECTS_NOTE } from './soe-trigger-effects.js';
 
 export const SOE_PRIMARY_DISCLOSURE =
@@ -21,7 +22,9 @@ export const buildSoePrimaryDisclosure = (
   objectModeled: boolean,
   receiverVerification: ApexReceiverVerification,
   handlerEnriched: boolean,
+  /** True when the composition lists at least one framework-registered handler step. */
+  frameworkHandlers: boolean,
 ): string =>
-  `${composeSoeDisclosure(SOE_PRIMARY_DISCLOSURE, objectModeled)}${soeReceiverVerificationNote(receiverVerification)}${handlerEnriched ? ` ${SOE_HANDLER_EFFECTS_NOTE}` : ''}`;
+  `${composeSoeDisclosure(SOE_PRIMARY_DISCLOSURE, objectModeled)}${soeReceiverVerificationNote(receiverVerification)}${handlerEnriched ? ` ${SOE_HANDLER_EFFECTS_NOTE}` : ''}${frameworkHandlers ? ` ${SOE_FRAMEWORK_HANDLERS_NOTE}` : ''}`;
 
 export type { SoeAdmissionResult };

@@ -72,12 +72,51 @@ describe('describe_analysis default includes a compact arg signature', () => {
 });
 
 describe('list_analyses honors a query filter', () => {
-  it('filters to analyses whose name or summary contains every word, and echoes it', async () => {
+  // CATALOG-SEARCH-ANY-TERM (A/B question 7): the filter required EVERY word,
+  // so a question-shaped query returned 0 analyses and the host read Apex by
+  // hand. Rows now rank by how many query terms they match.
+  it('ranks by any matching term: a field-writer tool is in the top 3 for a question-shaped query', async () => {
+    const r = await listAnalysesHandler(ctx, { query: 'fields written by automation' });
+    if (!r.ok) throw new Error(r.error.message);
+    const names = r.value.data.analyses.map((a) => a.name);
+    expect(names.slice(0, 3)).toContain('sfi.field_lineage');
+    expect(names.length).toBeLessThanOrEqual(8);
+    for (const a of r.value.data.analyses) {
+      expect(a.matchedTerms?.length ?? 0).toBeGreaterThan(0);
+    }
+    expect(r.value.data.analyses[0]?.matchedTerms).toEqual(['field', 'automation']);
+  });
+
+  it('a partly-matching query still finds endpoint_catalog first and names the matched terms', async () => {
+    const r = await listAnalysesHandler(ctx, { query: 'external endpoints callouts' });
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.data.analyses[0]?.name).toBe('sfi.endpoint_catalog');
+    expect(r.value.data.analyses[0]?.matchedTerms).toEqual(['endpoint', 'callouts']);
+  });
+
+  it('a nonsense or stop-word-only query returns an empty list with the existing guidance, never the catalog', async () => {
+    for (const query of ['xyzzy plugh', 'what is this']) {
+      const r = await listAnalysesHandler(ctx, { query });
+      if (!r.ok) throw new Error(r.error.message);
+      expect(r.value.data.analyses).toEqual([]);
+      expect(r.value.data.total).toBe(0);
+      expect(r.value.data.appliedQuery).toBe(query);
+      expect(r.value.data.next).toContain('sfi.describe_analysis');
+    }
+  });
+
+  it('an exact tool name ranks first even when a sibling matches the same words', async () => {
+    const r = await listAnalysesHandler(ctx, { query: 'SFI.Outbound_Message_Catalog' });
+    if (!r.ok) throw new Error(r.error.message);
+    expect(r.value.data.analyses[0]?.name).toBe('sfi.outbound_message_catalog');
+  });
+
+  it('filters to analyses whose name or summary contains a query word, and echoes it', async () => {
     const r = await listAnalysesHandler(ctx, { query: 'picklist' });
     if (!r.ok) throw new Error(r.error.message);
     const names = r.value.data.analyses.map((a) => a.name);
     expect(names).toContain('sfi.what_if_remove_picklist_value');
-    expect(r.value.data.total).toBeLessThan(30);
+    expect(r.value.data.total).toBeLessThanOrEqual(8);
     expect(r.value.data.appliedQuery).toBe('picklist');
   });
 
@@ -88,6 +127,6 @@ describe('list_analyses honors a query filter', () => {
       argumentNotes?: unknown;
     };
     expect(body.argumentNotes).toBeUndefined();
-    expect(body.data.total).toBeLessThan(30);
+    expect(body.data.total).toBeLessThanOrEqual(8);
   });
 });

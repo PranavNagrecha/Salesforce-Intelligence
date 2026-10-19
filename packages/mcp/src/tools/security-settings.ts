@@ -38,7 +38,7 @@ import type {
   McpResponse,
   Node,
 } from '@sf-intelligence/contracts';
-import { ok, type Result } from '@sf-intelligence/core';
+import { err, ok, type Result } from '@sf-intelligence/core';
 import { getNodeById } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
@@ -47,6 +47,106 @@ import type { Context } from '../server.js';
 /** The two org-level singleton ids this tool joins. */
 const SECURITY_SETTINGS_ID = 'SecuritySettings:default' as ComponentId;
 const SESSION_SETTINGS_ID = 'SessionSettings:default' as ComponentId;
+
+/**
+ * CHECK-BEFORE-CAVEAT: the org-wide toggles that change what a god-mode or
+ * Manage Users grant MEANS, keyed by the node that holds them. Read by
+ * `permission_risk_report`, which used to say nothing about org settings, so
+ * the host told an admin "I can't confirm login-as is on; org settings aren't
+ * captured" while `SecuritySettings:default` sat in the vault. A key is a
+ * dotted path into the node's properties; only declared values become rows.
+ * Header, CSP and clickjack switches are deliberately not here: they do not
+ * change what a permission grants.
+ */
+const SECURITY_TOGGLE_KEYS: Readonly<Record<ComponentId, readonly string[]>> = {
+  [SECURITY_SETTINGS_ID]: [
+    'orgToggles.enableAdminLoginAsAnyUser',
+    'orgToggles.canUsersGrantLoginAccess',
+    'orgToggles.enableRequireHttpsConnection',
+    'passwordPolicies.expiration',
+    'passwordPolicies.maxLoginAttempts',
+    'passwordPolicies.lockoutInterval',
+    'passwordPolicies.minimumPasswordLength',
+    'passwordPolicies.complexity',
+  ],
+  [SESSION_SETTINGS_ID]: [
+    'sessionTimeout',
+    'mfaRequired',
+    'sessionSettings.lockSessionsToIp',
+    'sessionSettings.lockSessionsToDomain',
+    'sessionSettings.enforceIpRangesEveryRequest',
+    'sessionSettings.forceLogoutOnSessionTimeout',
+    'sessionSettings.forceRelogin',
+  ],
+};
+
+/** Which toggle rows ride on a finding, by the system permission that makes them matter. */
+const SECURITY_EVIDENCE_KEYS_BY_PERM: Readonly<Record<string, readonly string[]>> = {
+  ModifyAllData: ['sessionTimeout', 'mfaRequired', 'sessionSettings.lockSessionsToIp', 'sessionSettings.enforceIpRangesEveryRequest'],
+  ViewAllData: ['sessionTimeout', 'mfaRequired', 'sessionSettings.lockSessionsToIp', 'sessionSettings.enforceIpRangesEveryRequest'],
+  ManageUsers: ['orgToggles.enableAdminLoginAsAnyUser', 'orgToggles.canUsersGrantLoginAccess'],
+};
+
+/** One declared org toggle, cited by the node that holds it. */
+export interface SecurityToggleRow {
+  readonly source: ComponentId;
+  /** Dotted path into the node's properties, e.g. `orgToggles.enableAdminLoginAsAnyUser`. */
+  readonly key: string;
+  readonly value: string;
+}
+
+/** The org toggles that change what a permission means, with the nodes they came from. */
+export interface SecurityToggleEvidence {
+  readonly sources: readonly ComponentId[];
+  readonly toggles: readonly SecurityToggleRow[];
+}
+
+/** Printed only when neither settings node is in the vault: the check could not run. */
+export const SECURITY_SETTINGS_NOT_IN_VAULT =
+  'Org security settings are not in this vault (`settings/Security.settings-meta.xml` was not retrieved or not extracted), so the toggles that change what Modify All Data, View All Data and Manage Users mean (login as any user, session lock, password policy) were not read. Re-run `/sfi-refresh` with the Settings container to close this.';
+
+const readPath = (props: Readonly<Record<string, unknown>>, path: string): string | null => {
+  const [head, tail] = path.split('.', 2) as [string, string | undefined];
+  if (tail === undefined) return str(props, head);
+  return stringMap(props, head)?.[tail] ?? null;
+};
+
+/**
+ * Read the toggles in {@link SECURITY_TOGGLE_KEYS} from whichever of the two
+ * settings singletons the vault holds. `null` when neither exists (then
+ * {@link SECURITY_SETTINGS_NOT_IN_VAULT} is the honest line); a graph failure
+ * is an error, never an empty row set.
+ */
+export const readSecurityToggleEvidence = async (
+  ctx: Context,
+): Promise<Result<SecurityToggleEvidence | null, McpError>> => {
+  const sources: ComponentId[] = [];
+  const toggles: SecurityToggleRow[] = [];
+  for (const [source, keys] of Object.entries(SECURITY_TOGGLE_KEYS) as [ComponentId, readonly string[]][]) {
+    const nodeResult = await getNodeById(ctx.graph, source);
+    if (!nodeResult.ok) {
+      return err({ kind: 'internal', message: `graph query failed: ${nodeResult.error.message}` });
+    }
+    if (nodeResult.value === null) continue;
+    sources.push(source);
+    for (const key of keys) {
+      const value = readPath(nodeResult.value.properties, key);
+      if (value !== null) toggles.push({ source, key, value });
+    }
+  }
+  return ok(sources.length === 0 ? null : { sources, toggles });
+};
+
+/** The evidence rows (`<source> <key>=<value>`) a finding with these system perms carries. */
+export const securityEvidenceRows = (
+  evidence: SecurityToggleEvidence | null,
+  perms: Iterable<string>,
+): string[] => {
+  if (evidence === null) return [];
+  const wanted = new Set<string>();
+  for (const perm of perms) for (const key of SECURITY_EVIDENCE_KEYS_BY_PERM[perm] ?? []) wanted.add(key);
+  return evidence.toggles.filter((t) => wanted.has(t.key)).map((t) => `${t.source} ${t.key}=${t.value}`);
+};
 
 /** Default / maximum page size for the trusted-IP window list. */
 const IP_RANGE_DEFAULT_LIMIT = 100;

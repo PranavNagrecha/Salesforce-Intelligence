@@ -14,8 +14,11 @@ const LOCAL_NAMESPACE_PREFIX = 'c:';
 export const bundleId = (
   type: 'LightningComponentBundle' | 'AuraDefinitionBundle',
   name: string,
-): string =>
-  `${type}:${name.startsWith(LOCAL_NAMESPACE_PREFIX) ? name.slice(LOCAL_NAMESPACE_PREFIX.length) : name}`;
+): string => `${type}:${localBundleName(name)}`;
+
+/** The bundle directory name a markup reference resolves to: `c:name` and `name` both give `name`. */
+export const localBundleName = (name: string): string =>
+  name.startsWith(LOCAL_NAMESPACE_PREFIX) ? name.slice(LOCAL_NAMESPACE_PREFIX.length) : name;
 
 /** True when a markup component reference names one of the org's own components. */
 export const isLocalComponentRef = (name: string): boolean =>

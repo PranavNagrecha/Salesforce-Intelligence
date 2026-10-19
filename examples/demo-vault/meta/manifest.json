@@ -1,11 +1,11 @@
 {
   "apexAst": {
-    "filesParsed": 6,
+    "filesParsed": 7,
     "parseErrors": 0
   },
   "components": {
     "ApexClass": 5,
-    "ApexTrigger": 1,
+    "ApexTrigger": 2,
     "ApprovalProcess": 1,
     "AuthProvider": 1,
     "Bot": 1,
@@ -59,7 +59,7 @@
       "errored": false,
       "neverModeled": false,
       "requested": true,
-      "retrieved": 1,
+      "retrieved": 2,
       "type": "ApexTrigger"
     },
     {
@@ -716,7 +716,7 @@
       "type": "certs"
     }
   ],
-  "coverageComputedAt": "2026-10-17T16:10:41.527Z",
+  "coverageComputedAt": "2026-10-19T15:38:20.243Z",
   "edges": {
     "callsApex": 2,
     "dispatchesOmniAction": 4,
@@ -725,28 +725,29 @@
     "inheritsFrom": 4,
     "lookupTo": 16,
     "parentOf": 76,
-    "readsFrom": 32,
+    "readsFrom": 35,
     "references": 41,
     "sharedWith": 4,
-    "triggersOn": 4,
+    "subscribesToChange": 1,
+    "triggersOn": 5,
     "usedInLayout": 20,
-    "writesTo": 17
+    "writesTo": 28
   },
   "phantomSummary": {
     "buckets": {
-      "automation-critical": 11,
-      "blindspot-manifest": 1,
+      "automation-critical": 12,
+      "change-event-stream": 1,
       "standard-field-phantom": 7,
       "unknown": 3
     },
-    "computedAt": "2026-10-17T16:10:41.529Z",
-    "distinctPhantoms": 22
+    "computedAt": "2026-10-19T15:38:20.245Z",
+    "distinctPhantoms": 23
   },
-  "refreshedAt": "2026-10-17T16:10:41.527Z",
+  "refreshedAt": "2026-10-19T15:38:20.243Z",
   "skippedDirectories": {
     "certs": 1
   },
   "sourceOrg": "demo-org",
-  "sourceTreeHash": "937e69c4140fa1b350bf5c90b68d850e6b314bf005122976ccf07520ce92cb33",
-  "version": "0.6.0"
+  "sourceTreeHash": "6a2c6d9c4d0d4bc81daaa254d55294106dd62dbca8fd32c57659e2cd8cd57fa9",
+  "version": "0.7.0"
 }

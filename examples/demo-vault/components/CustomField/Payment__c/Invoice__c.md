@@ -70,3 +70,9 @@ type: CustomField
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `CustomField:Invoice__c.Total_Paid__c` | declared | rollup-summary |
+
+### writesTo (incoming, 1)
+
+| Source | Confidence | Producer |
+| --- | --- | --- |
+| `ApexClass:PaymentService` | parsed | apex-ast |

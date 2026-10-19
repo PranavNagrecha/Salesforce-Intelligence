@@ -69,6 +69,7 @@ import {
   buildNotCheckedTypesNote,
   buildUnscannedNodesNote,
   censusQualityScanCoverage,
+  nameUnscanned,
   NOT_APEX_TYPES,
   type QualityScanTypeCoverage,
 } from './quality-scan-coverage.js';
@@ -427,7 +428,7 @@ export interface TechDebtScoreOutput {
    */
   readonly hardcodedIdCount: number | null;
   /**
-   * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Per-type count of Apex nodes read vs
+   * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Per-type count of `candidates` (Apex nodes this tool read, not the org total) vs
    * nodes that actually carry a `qualityIssues` scan, feeding the `codeQuality`
    * axis. Present ONLY when the axis ran AND some node was never scanned — the
    * path where the axis is computed over part of the Apex surface and presented
@@ -483,11 +484,8 @@ const contribFor = (
 const unscannedRecommendationQualifier = (
   coverage: readonly QualityScanTypeCoverage[],
 ): string => {
-  const gaps = coverage.filter((c) => c.scanned < c.nodes);
-  if (gaps.length === 0) return '';
-  const named = gaps
-    .map((c) => `${c.nodes - c.scanned} of ${c.nodes} ${c.type}`)
-    .join(', ');
+  const named = nameUnscanned(coverage);
+  if (named === undefined) return '';
   return ` This is a FLOOR, not a total: ${named} node(s) carry no \`qualityIssues\` property, so the recognizers never ran over their source and their findings are NOT in this count — zero findings for them is "not checked", NOT "clean" (see \`qualityScanCoverage\`; re-run \`sfi refresh\` to close the gap).`;
 };
 

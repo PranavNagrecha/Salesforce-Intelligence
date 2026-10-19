@@ -30,14 +30,10 @@ import { ok, type Result, type UpdateCheckResult } from '@sf-intelligence/core';
 import { z } from 'zod';
 
 import {
-  gapLogPath,
-  routeGapsNudge,
-  type RouteGapsNudge,
-} from '../intent-router.js';
-import {
   buildProductManifestSummary,
   type ProductManifestSummary,
 } from '../product-manifest-summary.js';
+import { gapLogPath, routeGapsNudge, type RouteGapsNudge } from '../route-gaps.js';
 import type { Context } from '../server.js';
 
 /**

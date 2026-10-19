@@ -79,6 +79,16 @@ const seed: ExtractionResult = {
       type: 'EmailTemplate',
       apiName: 'WelcomeEmail',
     }),
+    makeNode({
+      id: 'NamedCredential:Demo_Payments',
+      type: 'NamedCredential',
+      apiName: 'Demo_Payments',
+    }),
+    makeNode({
+      id: 'CustomLabel:Demo_Greeting',
+      type: 'CustomLabel',
+      apiName: 'Demo_Greeting',
+    }),
   ],
   edges: [
     // Call chain
@@ -86,6 +96,20 @@ const seed: ExtractionResult = {
       fromId: 'ApexClass:Root',
       toId: 'ApexClass:A',
       edgeType: 'callsApex',
+    }),
+    // B calls out: the `callout:Demo_Payments` edge the Apex extractor mints.
+    makeEdge({
+      fromId: 'ApexClass:B',
+      toId: 'NamedCredential:Demo_Payments',
+      edgeType: 'references',
+      properties: { referenceKind: 'apexCallout' },
+    }),
+    // A plain reference (a label read) is a dependency, not a side effect.
+    makeEdge({
+      fromId: 'ApexClass:B',
+      toId: 'CustomLabel:Demo_Greeting',
+      edgeType: 'references',
+      properties: { referenceKind: 'apexLabel' },
     }),
     makeEdge({
       fromId: 'ApexClass:A',
@@ -178,6 +202,31 @@ describe('downstreamEffectsHandler', () => {
     expect(categories).toContain('field-write');
     expect(categories).toContain('async-dispatch');
     expect(categories).toContain('email');
+    expect(categories).toContain('callout');
+  });
+
+  it('FAIL-BEFORE/PASS-AFTER: a `callout:` named-credential reference is a callout effect, a label reference is not', async () => {
+    const r = await downstreamEffectsHandler(ctx, {
+      classApiName: 'ApexClass:Root',
+      maxDepth: 5,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const callouts = r.value.data.effects.filter((e) => e.category === 'callout');
+    expect(callouts).toEqual([
+      expect.objectContaining({
+        sourceClassId: 'ApexClass:B',
+        targetId: 'NamedCredential:Demo_Payments',
+        targetType: 'NamedCredential',
+        targetApiName: 'Demo_Payments',
+        edgeType: 'references',
+      }),
+    ]);
+    expect(r.value.data.summary.callout).toBe(1);
+    expect(r.value.data.effects.map((e) => e.targetId)).not.toContain('CustomLabel:Demo_Greeting');
+    expect(r.value.data.disclosure).not.toMatch(/NOT recognized as effects/);
+    // What is still unseen stays said: a callout to a literal or runtime-built URL.
+    expect(r.value.data.disclosure).toMatch(/literal or runtime-built URL/);
   });
 
   it('categorises writesTo as field-write with the field target metadata', async () => {
@@ -871,7 +920,7 @@ describe('downstreamEffectsHandler — bounded graph queries (transitive)', () =
     if (!result.ok) return;
     const d = result.value.data;
     expect(d.reachableClassCount).toBe(3); // Root, Mid, Leaf (Job is not callsApex-reachable)
-    expect(d.summary).toEqual({ fieldWrite: 1, asyncDispatch: 1, email: 1 });
+    expect(d.summary).toEqual({ fieldWrite: 1, asyncDispatch: 1, email: 1, callout: 0 });
     expect(
       d.effects.map((e) => ({ sourceClassId: e.sourceClassId, category: e.category, targetId: e.targetId })),
     ).toEqual([

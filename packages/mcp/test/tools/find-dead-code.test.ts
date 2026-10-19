@@ -427,7 +427,7 @@ describe('findDeadCodeHandler', () => {
     const stale = r.value.data.candidates.find(
       (c) => c.componentId === 'CustomField:Account.Stale__c',
     );
-    expect(stale?.verdict).toBe('definitely_dead');
+    expect(stale?.verdict).toBe('likely_dead');
     const joined = r.value.data.boundaries.join(' ');
     expect(joined).toContain('sfi.field_360');
     // The new truth markers…
@@ -461,14 +461,14 @@ describe('findDeadCodeHandler', () => {
     expect(c?.incomingEdgeCount).toBe(0); // grant excluded → zero usage edges
   });
 
-  it('F6: a CustomField whose only incoming edge is an FLS grant is definitely_dead', async () => {
+  it('F6: a CustomField whose only incoming edge is an FLS grant is dead (likely_dead: access is not usage)', async () => {
     const r = await findDeadCodeHandler(ctx, {});
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const c = r.value.data.candidates.find(
       (x) => x.componentId === 'CustomField:Account.GrantedOnly__c',
     );
-    expect(c?.verdict).toBe('definitely_dead');
+    expect(c?.verdict).toBe('likely_dead');
     expect(c?.incomingEdgeCount).toBe(0);
   });
 
@@ -483,14 +483,44 @@ describe('findDeadCodeHandler', () => {
     expect(tos?.reachedByTestClassOnly).toBe(true);
   });
 
-  it('flags Stale__c CustomField as definitely_dead', async () => {
+  it('flags Stale__c CustomField as likely_dead, never definitely_dead on a heuristic row', async () => {
     const r = await findDeadCodeHandler(ctx, {});
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const stale = r.value.data.candidates.find(
       (c) => c.componentId === 'CustomField:Account.Stale__c',
     );
-    expect(stale?.verdict).toBe('definitely_dead');
+    expect(stale?.verdict).toBe('likely_dead');
+  });
+
+  // PROSE-FROM-ROWS (4): a field row printed `definitely_dead` next to
+  // `confidence: 'heuristic'`. A heuristic verdict caps at likely_dead and
+  // names the referrer families it did not check before the verdict word.
+  it('every CustomField candidate is at most likely_dead and names the families not checked', async () => {
+    const r = await findDeadCodeHandler(ctx, { types: ['CustomField'] });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const fields = r.value.data.candidates;
+    expect(fields.length).toBeGreaterThan(0);
+    for (const c of fields) {
+      expect(c.confidence).toBe('heuristic');
+      expect(c.verdict).not.toBe('definitely_dead');
+    }
+    expect(r.value.data.byVerdict.definitely_dead).toBe(0);
+    const stale = fields.find((c) => c.componentId === 'CustomField:Account.Stale__c');
+    expect(stale?.verdict).toBe('likely_dead');
+    // The fixture manifest carries no coverage rows, so the analytics and
+    // list-view families are unchecked and must be named, with the standing
+    // blind spots, once in the CustomField boundary the rows point at.
+    expect(stale?.reasoning).toContain('capped at likely_dead');
+    expect(stale?.reasoning).toContain('not checked: see the CustomField boundary');
+    const fieldBoundary = r.value.data.boundaries.find((b) => b.startsWith('CustomField dead-detection'));
+    expect(fieldBoundary).toContain('Not checked before any field verdict here:');
+    for (const family of ['Report', 'Dashboard', 'ListView']) expect(fieldBoundary).toContain(family);
+    // No coverage rows in the fixture manifest: unknown, not "not retrieved".
+    expect(fieldBoundary).toContain('(coverage not recorded in this vault)');
+    expect(fieldBoundary).toContain('DYNAMIC SOQL');
+    expect(fieldBoundary).toContain('sfi.safe_to_delete_field');
   });
 
   it('does NOT flag a report/dashboard-used field as dead, and discloses the caveat', async () => {
@@ -529,7 +559,7 @@ describe('findDeadCodeHandler', () => {
     const stale = r.value.data.candidates.find(
       (c) => c.componentId === 'CustomField:Account.Stale__c',
     );
-    expect(stale?.verdict).toBe('definitely_dead');
+    expect(stale?.verdict).toBe('likely_dead');
   });
 
   it('flags an Obsolete flow with no incoming refs as definitely_dead', async () => {
@@ -1675,10 +1705,10 @@ describe('findDeadCodeHandler — Activity-polymorphic re-check (real-org honest
       (x) => x.componentId === 'CustomField:Task.Shared__c',
     );
     expect(c?.incomingEdgeCount).toBe(1);
-    expect(c?.verdict).not.toBe('definitely_dead');
+    expect(c?.verdict).toBe('uncertain');
   });
 
-  it('STILL flags a multi-rep Activity field as definitely_dead when EVERY existing representation has zero usage edges (control — no overclaiming)', async () => {
+  it('STILL flags a multi-rep Activity field as dead (likely_dead) when EVERY existing representation has zero usage edges (control — no overclaiming)', async () => {
     const r = await findDeadCodeHandler(aCtx, {
       componentId: 'CustomField:Task.TrulyDeadShared__c',
     });
@@ -1687,7 +1717,7 @@ describe('findDeadCodeHandler — Activity-polymorphic re-check (real-org honest
     const c = r.value.data.candidates.find(
       (x) => x.componentId === 'CustomField:Task.TrulyDeadShared__c',
     );
-    expect(c?.verdict).toBe('definitely_dead');
+    expect(c?.verdict).toBe('likely_dead');
 
     const rSibling = await findDeadCodeHandler(aCtx, {
       componentId: 'CustomField:Event.TrulyDeadShared__c',
@@ -1697,10 +1727,10 @@ describe('findDeadCodeHandler — Activity-polymorphic re-check (real-org honest
     const cSibling = rSibling.value.data.candidates.find(
       (x) => x.componentId === 'CustomField:Event.TrulyDeadShared__c',
     );
-    expect(cSibling?.verdict).toBe('definitely_dead');
+    expect(cSibling?.verdict).toBe('likely_dead');
   });
 
-  it('STILL flags a solo Activity-family field (no sibling representation exists at all) as definitely_dead (control)', async () => {
+  it('STILL flags a solo Activity-family field (no sibling representation exists at all) as dead (control)', async () => {
     const r = await findDeadCodeHandler(aCtx, {
       componentId: 'CustomField:Task.SoloNoSibling__c',
     });
@@ -1709,7 +1739,7 @@ describe('findDeadCodeHandler — Activity-polymorphic re-check (real-org honest
     const c = r.value.data.candidates.find(
       (x) => x.componentId === 'CustomField:Task.SoloNoSibling__c',
     );
-    expect(c?.verdict).toBe('definitely_dead');
+    expect(c?.verdict).toBe('likely_dead');
   });
 
   it('discloses the Activity-polymorphic re-check in boundaries when it fires', async () => {
@@ -1730,7 +1760,7 @@ describe('findDeadCodeHandler — Activity-polymorphic re-check (real-org honest
     const c = r.value.data.candidates.find(
       (x) => x.componentId === 'CustomField:Account.Unrelated__c',
     );
-    expect(c?.verdict).toBe('definitely_dead');
+    expect(c?.verdict).toBe('likely_dead');
     expect(r.value.data.boundaries.join(' ')).not.toContain(
       'Activity-family CustomField re-check',
     );
@@ -2071,6 +2101,67 @@ describe('find_dead_code — unproven dynamic registration is uncertain, never d
 });
 
 // =============================================================================
+// P21-MOAT-apex-frameworks — a `Type.forName` the extractor RESOLVED (literal
+// operand, or a Custom Metadata cell joined at refresh) is an inbound edge
+// carrying `properties.mechanism: 'Type.forName'`. A framework subclass reached
+// that way is in use, not an "unproven registration whose empty in-degree is
+// expected": the cascade must read the edge before it reads the shape.
+// =============================================================================
+describe('find_dead_code — resolved dynamic dispatch is usage, not an unproven registration', () => {
+  const withStore = async <T>(
+    seedData: ExtractionResult,
+    run: (ctx: Context) => Promise<T>,
+  ): Promise<T> => {
+    const dir = mkdtempSync(join(tmpdir(), 'sfi-fdc-dispatch-'));
+    const opened = await openGraph(join(dir, 'fdc.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    const st = opened.value;
+    const imported = await importExtractionResults(st, [seedData]);
+    if (!imported.ok) throw new Error(`seed import failed: ${imported.error.message}`);
+    const out = await run({ vaultRoot: dir, manifest: MANIFEST, graph: st } as Context);
+    await closeGraph(st);
+    rmSync(dir, { recursive: true, force: true });
+    return out;
+  };
+
+  const DISPATCHED = 'ApexClass:Demo_DispatchedHandler';
+  const TEST_ONLY = 'ApexClass:Demo_TestOnlyDispatched';
+  const seedDispatch: ExtractionResult = {
+    nodes: [
+      makeNode({ type: 'ApexClass', id: 'ApexClass:Demo_Dispatcher', apiName: 'Demo_Dispatcher', properties: { isTest: false } }),
+      makeNode({ type: 'ApexClass', id: 'ApexClass:Demo_DispatcherTest', apiName: 'Demo_DispatcherTest', properties: { isTest: true } }),
+      makeNode({ type: 'ApexClass', id: DISPATCHED, apiName: 'Demo_DispatchedHandler', properties: { isTest: false, superclass: 'pkg.TriggerRunnable' } }),
+      makeNode({ type: 'ApexClass', id: TEST_ONLY, apiName: 'Demo_TestOnlyDispatched', properties: { isTest: false, superclass: 'pkg.TriggerRunnable' } }),
+    ],
+    edges: [
+      makeEdge({ fromId: 'ApexClass:Demo_Dispatcher', toId: DISPATCHED, edgeType: 'references', properties: { mechanism: 'Type.forName' } }),
+      makeEdge({ fromId: 'ApexClass:Demo_DispatcherTest', toId: TEST_ONLY, edgeType: 'references', properties: { mechanism: 'Type.forName' } }),
+    ],
+  };
+
+  const candidatesFor = async () => {
+    const r = await withStore(seedDispatch, (c) =>
+      findDeadCodeHandler(c, { types: ['ApexClass'], includeUncertain: true, limit: 500 }),
+    );
+    if (!r.ok) throw new Error(`handler failed: ${r.error.message}`);
+    return new Map(r.value.data.candidates.map((x) => [x.componentId as string, x]));
+  };
+
+  it('a framework subclass dispatched from a production class is in use: its reasoning names the resolved dispatch, not an expected empty in-degree', async () => {
+    const c = (await candidatesFor()).get(DISPATCHED);
+    expect(c?.verdict).toBe('uncertain');
+    expect(c?.reasoning).toMatch(/dynamic dispatch/);
+    expect(c?.reasoning).not.toMatch(/EXPECTED/);
+  });
+
+  it('CONTROL: a dispatch only from a test class is still the unproven registration it was', async () => {
+    const c = (await candidatesFor()).get(TEST_ONLY);
+    expect(c?.verdict).toBe('uncertain');
+    expect(c?.reasoning).toMatch(/BUILT for dynamic registration/);
+  });
+});
+
+// =============================================================================
 // F9 — the tallies describe the FULL classified set; the LISTING is filtered,
 // and the response says so.
 //
@@ -2300,12 +2391,13 @@ describe('find_dead_code — soundness certifies the ANALYZED corpus, not the re
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const d = r.value.data;
-    // A dead field is listed and certified — this is the delete-verdict path.
-    expect(d.byVerdict.definitely_dead).toBeGreaterThan(0);
+    // A dead field is listed and certified — this is the delete-verdict path
+    // (a field caps at likely_dead: its verdict is heuristic).
+    expect(d.byVerdict.likely_dead).toBeGreaterThan(0);
     // The census the five sibling quality tools already publish.
     expect(d.qualityScanCoverage).toEqual([
-      { type: 'ApexClass', nodes: 1, scanned: 1 },
-      { type: 'ApexTrigger', nodes: 2, scanned: 0 },
+      { type: 'ApexClass', candidates: 1, scanned: 1 },
+      { type: 'ApexTrigger', candidates: 2, scanned: 0 },
     ]);
     expect(d.boundaries.some((b) => b.includes('NOT SCANNED IN THIS VAULT'))).toBe(true);
     // And the machine-readable certificate agrees with the prose.
@@ -2354,7 +2446,7 @@ describe('find_dead_code — soundness certifies the ANALYZED corpus, not the re
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const d = r.value.data;
-    expect(d.qualityScanCoverage).toEqual([{ type: 'ApexClass', nodes: 1, scanned: 1 }]);
+    expect(d.qualityScanCoverage).toEqual([{ type: 'ApexClass', candidates: 1, scanned: 1 }]);
     expect(d.soundness).toEqual({ complete: true, blindSpots: [], staticCoverage: 'full' });
     expect(d.boundaries.some((b) => b.includes('NOT SCANNED IN THIS VAULT'))).toBe(false);
   });

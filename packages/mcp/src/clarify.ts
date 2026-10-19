@@ -42,7 +42,7 @@ export interface NextAction {
   readonly action: 'use' | 'refresh' | 'narrow' | 'stop';
   readonly label: string;
   readonly reason: string;
-  /** A slash command the user can run, when applicable (e.g. `/sfi-refresh`). */
+  /** A CLI command the user can run, when applicable (e.g. `sfi refresh`). */
   readonly command?: string;
 }
 
@@ -82,6 +82,20 @@ const classifyDisambiguation = (
   return 'type';
 };
 
+/** What `buildClarify` needs to know about the vault the resolve ran against. */
+export interface ClarifyVault {
+  readonly refreshedAt: string;
+  /** True for the synthetic `sfi demo` vault: no org behind it, so no `refresh` action is offered. */
+  readonly demo?: boolean;
+  /**
+   * True ONLY when the resolve was scoped to one or more metadata types AND
+   * every one of those types has COMPLETE coverage in the vault. Lets the
+   * `none` branch state a missing component is a false premise rather than a
+   * coverage gap.
+   */
+  readonly scopedCoverageComplete?: boolean;
+}
+
 /**
  * Build the conversation-ready next step from a resolve result + vault
  * freshness.
@@ -92,25 +106,28 @@ const classifyDisambiguation = (
  * - `none`      → no question. When `vault.scopedCoverageComplete` is true the
  *   query was scoped to a metadata family whose coverage is COMPLETE, so the
  *   absence is a DETERMINATE NEGATIVE ("no such component exists") and `stop`
- *   leads — `/sfi-refresh` is NOT offered first because a refresh cannot
+ *   leads — `refresh` is NOT offered first because a refresh cannot
  *   surface a component that does not exist (the false-premise honesty fix).
  *   Otherwise (coverage unknown/partial, or no type scope) the absence is
  *   inconclusive, so `refresh` leads (the component may be new, or the vault
- *   may be stale).
+ *   may be stale). On the demo vault (`vault.demo`) no `refresh` action is
+ *   offered at all: there is no org to pull from.
  */
 export const buildClarify = (
   query: string,
   result: ResolveResult,
-  vault: {
-    readonly refreshedAt: string;
-    /**
-     * True ONLY when the resolve was scoped to one or more metadata types AND
-     * every one of those types has COMPLETE coverage in the vault. Lets the
-     * `none` branch state a missing component is a false premise rather than a
-     * coverage gap.
-     */
-    readonly scopedCoverageComplete?: boolean;
-  },
+  vault: ClarifyVault,
+): ClarifyResult => {
+  const out = buildClarifyForOrg(query, result, vault);
+  return vault.demo === true
+    ? { ...out, nextActions: out.nextActions.filter((a) => a.action !== 'refresh') }
+    : out;
+};
+
+const buildClarifyForOrg = (
+  query: string,
+  result: ResolveResult,
+  vault: Omit<ClarifyVault, 'demo'>,
 ): ClarifyResult => {
   if (result.disposition === 'exact') {
     const top = result.candidates[0];
@@ -171,7 +188,7 @@ export const buildClarify = (
           action: 'refresh',
           label: 'Pull fresh metadata from the org',
           reason: `the vault was last refreshed ${vault.refreshedAt}; refresh if you expect newer components`,
-          command: '/sfi-refresh',
+          command: 'sfi refresh',
         },
       ],
     };
@@ -198,7 +215,7 @@ export const buildClarify = (
           action: 'refresh',
           label: 'Pull fresh metadata from the org',
           reason: `refresh only if you believe the component was created in the org AFTER the last refresh (${vault.refreshedAt}); a refresh cannot surface a component that does not exist`,
-          command: '/sfi-refresh',
+          command: 'sfi refresh',
         },
       ],
     };
@@ -210,7 +227,7 @@ export const buildClarify = (
         action: 'refresh',
         label: 'Pull fresh metadata from the org',
         reason: `nothing matched "${query}" in the current vault (refreshed ${vault.refreshedAt}); it may be new, or the vault may be stale`,
-        command: '/sfi-refresh',
+        command: 'sfi refresh',
       },
       {
         action: 'stop',

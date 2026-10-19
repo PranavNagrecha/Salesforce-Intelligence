@@ -35,7 +35,6 @@ import {
   type GraphStore,
 } from '@sf-intelligence/graph';
 
-import { classifyQuestion } from '../src/intent-router.js';
 import { detectRefusalShape } from '../src/refusal-gates.js';
 import type { ToolCandidate } from '../src/semantic-funnel.js';
 import type { Context } from '../src/server.js';
@@ -148,7 +147,7 @@ describe('router-v2 P4 — clarify hygiene + qualified-entity auto-resolve (fixt
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.executionBlocked).toBe(true);
-    const options = r.value.data.route.clarification?.options ?? [];
+    const options = r.value.data.clarification?.options ?? [];
     expect(options).toContain('CustomField:Case.Resolution_Code__c');
     expect(options).toContain('CustomField:Task.Resolution_Code__c');
   });
@@ -159,7 +158,7 @@ describe('router-v2 P4 — clarify hygiene + qualified-entity auto-resolve (fixt
     });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
-    const clarification = r.value.data.route.clarification;
+    const clarification = r.value.data.clarification;
     expect(clarification?.required).toBe(true);
     const options = clarification?.options ?? [];
     expect(options).toContain('CustomField:Grant_Record__c.SSN__c');
@@ -268,98 +267,6 @@ describe('router-v2 P4 — resolvePlaneTie', () => {
   });
 });
 
-// --- intent-pair conversions (blocked → clean) --------------------------------
-
-describe('router-v2 P4 — complementary intent pairs stack instead of blocking', () => {
-  it('"who can access the X object" runs both lenses, no clarification', () => {
-    const route = classifyQuestion('who can access the Disability__c object');
-    expect(route.clarification).toBeNull();
-    expect(route.tools).toContain('sfi.who_can_access_object');
-    expect(route.tools).toContain('sfi.object_access_audit');
-  });
-
-  it('"what happens if I change the type of X" stacks impact + simulation, no clarification', () => {
-    const route = classifyQuestion(
-      'what happens if I change the type of Opportunity.Amount from currency to text',
-    );
-    expect(route.clarification).toBeNull();
-    expect(route.tools.length).toBeGreaterThan(1);
-  });
-
-  it('"who last modified <named flow>" auto-picks the metadata stamp', () => {
-    const route = classifyQuestion('can u tell me who last modified the Application_Save_RT_Orch flow');
-    expect(route.intent).toBe('last-modified');
-    expect(route.clarification).toBeNull();
-  });
-
-  it('"who changed this?" (no component named) still clarifies runtime-vs-metadata', () => {
-    const route = classifyQuestion('who changed this?');
-    expect(route.intent).toBe('runtime-audit-trail');
-    expect(route.clarification?.required).toBe(true);
-  });
-});
-
-// --- needs-live reachability + vault precision guards -------------------------
-
-describe('router-v2 P4 — needs-live questions reach the live plane', () => {
-  const LIVE_CASES: ReadonlyArray<readonly [string, string]> = [
-    ['count Course_Exam__c records', 'record-count'],
-    ['count leads grouped by Program_of_Interest', 'group-count'],
-    ['count of Contacts by MailingState', 'group-count'],
-    ['whats the fill rate on Status__c on Application', 'field-population'],
-    ['how many opportunities have a blank Amount', 'field-population'],
-    ['Which users logged into the org in the last week?', 'inactive-users'],
-    // ENGINE-ARC §4: "who's in the X queue" retargeted from the generic
-    // group-count GROUP BY to the dedicated live_group_members roster arm.
-    ['whos in the Intake Team Queue', 'queue-group-member-roster'],
-    ['which picklist values on Case.Status are never used', 'picklist-usage'],
-    ['Give me the distribution of Case.Status values across all Cases.', 'picklist-usage'],
-    ['whats the most common Resolution_Code__c on closed Cases', 'picklist-usage'],
-    ['the counselor swears the flow fired yesterday, did Create_Advising_Case actually run', 'automation-fired'],
-    ['average number of Course Enrollments per student contact', 'field-aggregate'],
-    ['Which objects have grown the fastest in record count since last quarter?', 'storage-by-object'],
-    ['whats the most duplicated email domain in our Contacts', 'duplicate-check'],
-    ['can you see if lead 00Q5x000004abcd converted and when', 'sample-records'],
-    ['Give me a health snapshot of the org — data volume, limits, anything worrying.', 'org-health'],
-    ['how many records per record type on Case', 'group-count'],
-    ['How many students are enrolled this term?', 'record-count'],
-  ];
-
-  it.each(LIVE_CASES)('%s → %s (live/hybrid, liveRequired)', (q, intent) => {
-    const route = classifyQuestion(q);
-    expect(route.intent).toBe(intent);
-    expect(['live', 'hybrid']).toContain(route.plane);
-    expect(route.liveRequired).toBe(true);
-  });
-
-  const VAULT_NOT_HIJACKED: ReadonlyArray<readonly [string, string]> = [
-    // Declared schema stays vault even near the new live patterns.
-    ['what values are in the Status picklist', 'picklist-values'],
-    ['how many validation rules are on Case', 'metadata-count'],
-    ['how many custom objects do we have', 'metadata-count'],
-    // Schema-redundancy "duplicated fields" is NOT a live duplicate scan.
-    ['which fields on Contact are duplicated - same data stored twice', 'schema'],
-  ];
-
-  it.each(VAULT_NOT_HIJACKED)('%s stays %s on the vault plane', (q, intent) => {
-    const route = classifyQuestion(q);
-    expect(route.intent).toBe(intent);
-    expect(route.plane).toBe('vault');
-    expect(route.liveRequired).toBe(false);
-  });
-
-  it('metadata "empty queues" inventory keeps the vault scan primary (live never REQUIRED)', () => {
-    // ENGINE-ARC §4: the arm is hybrid now — empty_queues_and_groups stays the
-    // primary vault answer; live_group_members is an OPTIONAL runtime
-    // verification secondary. The not-hijacked spirit is unchanged: the
-    // question is answerable offline (liveRequired false, vault tool first).
-    const route = classifyQuestion('how many queues are empty with no members');
-    expect(route.intent).toBe('empty-queues-groups');
-    expect(route.tools[0]).toBe('sfi.empty_queues_and_groups');
-    expect(route.liveRequired).toBe(false);
-  });
-});
-
 // --- refusal-gate extensions (positives + must-NOT negatives) -----------------
 
 describe('router-v2 P4 — refusal-gate extensions', () => {
@@ -408,30 +315,5 @@ describe('router-v2 P4 — refusal-gate extensions', () => {
   ];
   it.each(MUST_NOT_GATE.map((q) => [q] as const))('%s routes normally (no refusal)', (q) => {
     expect(detectRefusalShape(q)).toBeNull();
-  });
-});
-
-// --- q522: code-literal search -------------------------------------------------
-
-describe('router-v2 P4 — q522 code-literal search', () => {
-  it('"does anything call System.debug…" routes to search_apex_source with the literal bound', () => {
-    const route = classifyQuestion(
-      'does anything call System.debug all over the place, like leftover debug logs in apex',
-    );
-    expect(route.intent).toBe('apex-search');
-    expect(route.tools).toContain('sfi.search_apex_source');
-    expect(route.suggestedArgs?.['query']).toBe('system.debug');
-  });
-
-  it('a real runtime debug-logs ask still lands on the audit-trail disclosure', () => {
-    const route = classifyQuestion('can you pull the debug logs from yesterday');
-    expect(route.intent).toBe('runtime-audit-trail');
-  });
-
-  it('"which apex class handles the Boomi integration for bulk loads" is a source grep', () => {
-    const route = classifyQuestion(
-      'Which apex class handles the Boomi integration for bulk Contact loads?',
-    );
-    expect(route.intent).toBe('apex-search');
   });
 });

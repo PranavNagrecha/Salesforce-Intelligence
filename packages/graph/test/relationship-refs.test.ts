@@ -110,6 +110,22 @@ describe('buildRelationshipMaps', () => {
     expect(maps.childward.get('enrolment__c.programme__c')).toBe('Enrolment__c');
   });
 
+  it('indexes a managed-package child relationship under its namespaced runtime spelling', () => {
+    // FAIL-BEFORE: a packaged lookup declares `relationshipName` WITHOUT its
+    // namespace (`Enrolments`), but every report-type `<table>` path, related
+    // list and SOQL spells it `pkg__Enrolments__r`, so 2,572 report-type columns
+    // on a real org fell through as unresolved.
+    const packaged = field('pkg__Enrolment__c', 'pkg__Programme__c', {
+      referenceTo: 'Programme__c',
+      relationshipName: 'Enrolments',
+    });
+    const maps = buildRelationshipMaps([packaged]);
+    expect(maps.childward.get('pkg__enrolments__r')).toBe('pkg__Enrolment__c');
+    expect(maps.childward.get('pkg__enrolments')).toBe('pkg__Enrolment__c');
+    // The un-prefixed spelling stays indexed too.
+    expect(maps.childward.get('enrolments')).toBe('pkg__Enrolment__c');
+  });
+
   it('drops an ambiguous child relationship name rather than picking one', () => {
     const rival = field('Withdrawal__c', 'Programme__c', {
       referenceTo: 'Programme__c',
@@ -535,5 +551,190 @@ describe('mintRelationshipTraversalEdges — DataMapper and FlexCard paths', () 
     expect(edges.map((e) => [e.fromId, e.toId])).toEqual([
       ['OmniUiCard:AcmeEnrolmentCard_1', 'CustomField:Programme__c.Status__c'],
     ]);
+  });
+});
+
+const reportType = (apiName: string, properties: Record<string, unknown>): Node => ({
+  id: `ReportType:${apiName}` as ComponentId,
+  type: 'ReportType',
+  apiName,
+  label: null,
+  parentId: null,
+  sourcePath: `reportTypes/${apiName}.reportType-meta.xml`,
+  lastModifiedDate: null,
+  lastModifiedBy: null,
+  apiVersion: null,
+  properties,
+});
+
+const fieldSet = (objectApiName: string, apiName: string, properties: Record<string, unknown>): Node => ({
+  id: `FieldSet:${objectApiName}.${apiName}` as ComponentId,
+  type: 'FieldSet',
+  apiName,
+  label: apiName,
+  parentId: `CustomObject:${objectApiName}` as ComponentId,
+  sourcePath: `objects/${objectApiName}/fieldSets/${apiName}.fieldSet-meta.xml`,
+  lastModifiedDate: null,
+  lastModifiedBy: null,
+  apiVersion: null,
+  properties,
+});
+
+describe('mintRelationshipTraversalEdges — report-type columns', () => {
+  // FAIL-BEFORE: the generic sweep minted `CustomField:<Lookup__c>.<Field>` and
+  // nothing for a `<table>` relationship path, so a report type built over a
+  // child object named none of that object's fields.
+  it('a column on the base table is a declared edge to that object’s field', () => {
+    const rt = reportType('Demo_Programmes', {
+      columnRefs: [{ table: 'Programme__c', fields: ['Status__c'] }],
+    });
+    const edges: Edge[] = [];
+    mintRelationshipTraversalEdges([LOOKUP, TARGET_FIELD, rt], edges);
+    expect(edges).toHaveLength(1);
+    expect(edges[0]).toMatchObject({
+      fromId: 'ReportType:Demo_Programmes',
+      toId: 'CustomField:Programme__c.Status__c',
+      edgeType: 'references',
+      confidence: 'declared',
+      properties: { referenceKind: 'reportTypeColumn', table: 'Programme__c' },
+    });
+  });
+
+  it('walks a `<table>` relationship path to the child object (both relationship spellings)', () => {
+    const rt = reportType('Demo_Programmes_with_Enrolments', {
+      columnRefs: [
+        { table: 'Programme__c.Enrolments', fields: ['Outcome__c'] },
+        { table: 'Programme__c.Enrolments__r', fields: ['Outcome__c'] },
+      ],
+    });
+    const edges: Edge[] = [];
+    mintRelationshipTraversalEdges([LOOKUP, CHILD_FIELD, rt], edges);
+    // One edge: the same (from, to, type) triple is not minted twice.
+    expect(edges.map((e) => [e.toId, e.confidence])).toEqual([
+      ['CustomField:Enrolment__c.Outcome__c', 'parsed'],
+    ]);
+    expect(rt.properties['unresolvedColumns']).toBeUndefined();
+  });
+
+  it('resolves a dotted `<field>` whose hop is spelled as the lookup FIELD (`Programme__c.Status__c`)', () => {
+    const rt = reportType('Demo_Enrolments', {
+      columnRefs: [{ table: 'Programme__c.Enrolments', fields: ['Programme__c.Status__c'] }],
+    });
+    const edges: Edge[] = [];
+    mintRelationshipTraversalEdges([LOOKUP, TARGET_FIELD, rt], edges);
+    expect(edges.map((e) => [e.toId, e.confidence])).toEqual([
+      ['CustomField:Programme__c.Status__c', 'parsed'],
+    ]);
+  });
+
+  it('records unresolvedColumns for a hop it cannot walk and mints nothing', () => {
+    const rt = reportType('Demo_Programmes_with_Owners', {
+      columnRefs: [
+        { table: 'Programme__c.Owner_Users', fields: ['Name'] },
+        { table: 'Programme__c', fields: ['Owner.Name', 'Status__c'] },
+      ],
+    });
+    const edges: Edge[] = [];
+    mintRelationshipTraversalEdges([LOOKUP, TARGET_FIELD, rt], edges);
+    expect(edges.map((e) => e.toId)).toEqual(['CustomField:Programme__c.Status__c']);
+    expect(rt.properties['unresolvedColumns']).toEqual([
+      'Programme__c.Owner.Name',
+      'Programme__c.Owner_Users.Name',
+    ]);
+  });
+
+  it('mints nothing for a column whose object resolves but whose field is not vaulted', () => {
+    const rt = reportType('Demo_Programmes', {
+      columnRefs: [{ table: 'Programme__c', fields: ['Nope__c'] }],
+    });
+    const edges: Edge[] = [];
+    mintRelationshipTraversalEdges([LOOKUP, TARGET_FIELD, rt], edges);
+    expect(edges).toEqual([]);
+    expect(rt.properties['unresolvedColumns']).toBeUndefined();
+  });
+});
+
+describe('mintRelationshipTraversalEdges — field-set relationship columns', () => {
+  // FAIL-BEFORE: `<displayedFields><field>Programme__r.Status__c</field>` minted
+  // `CustomField:Enrolment__c.Programme__r.Status__c`, an id no node has.
+  it('resolves a dotted displayed field onto the related object, as usedInLayout at parsed', () => {
+    const fs = fieldSet('Enrolment__c', 'Demo_Table', {
+      unresolvedTraversalRefs: ['Programme__r.Status__c', 'Nowhere__r.Status__c'],
+    });
+    const edges: Edge[] = [];
+    mintRelationshipTraversalEdges([LOOKUP, TARGET_FIELD, fs], edges);
+    expect(edges).toHaveLength(1);
+    expect(edges[0]).toMatchObject({
+      fromId: 'FieldSet:Enrolment__c.Demo_Table',
+      toId: 'CustomField:Programme__c.Status__c',
+      edgeType: 'usedInLayout',
+      confidence: 'parsed',
+      properties: { referenceKind: 'fieldSetRelationshipTraversal', traversalPath: 'Programme__r.Status__c' },
+    });
+  });
+});
+
+const bundle = (type: 'LightningComponentBundle' | 'AuraDefinitionBundle', apiName: string): Node => ({
+  id: `${type}:${apiName}` as ComponentId,
+  type,
+  apiName,
+  label: null,
+  parentId: null,
+  sourcePath: `${type === 'LightningComponentBundle' ? 'lwc' : 'aura'}/${apiName}`,
+  lastModifiedDate: null,
+  lastModifiedBy: null,
+  apiVersion: null,
+  properties: {},
+});
+
+describe('mintRelationshipTraversalEdges — Lightning page record traversals', () => {
+  it('resolves {!Record.Rel__r.Field} through the page object: visibility reads, fieldItem references', () => {
+    const page = flexiPage('Enrolment_Record_Page', {
+      sobjectType: 'Enrolment__c',
+      recordTraversalRefs: [
+        { path: 'Programme__r.Status__c', use: 'visibilityRule' },
+        { path: 'Programme__r.Status__c', use: 'fieldRef' },
+        { path: 'Owner.Name', use: 'visibilityRule' },
+      ],
+    });
+    const edges: Edge[] = [];
+    mintRelationshipTraversalEdges([LOOKUP, TARGET_FIELD, page], edges);
+    expect(
+      edges.map((e) => [e.edgeType, e.toId, e.confidence, e.properties['referenceKind'], e.properties['traversalPath']]),
+    ).toEqual([
+      ['readsFrom', 'CustomField:Programme__c.Status__c', 'parsed', 'visibilityRule', 'Record.Programme__r.Status__c'],
+      ['references', 'CustomField:Programme__c.Status__c', 'parsed', 'fieldRef', 'Record.Programme__r.Status__c'],
+    ]);
+    // `Owner` is a standard relationship the vault holds no lookup for: recorded, never minted.
+    expect(page.properties['unresolvedVisibilityRefs']).toEqual(['Record.Owner.Name']);
+  });
+
+  it('appends to unresolvedVisibilityRefs the extractor already recorded', () => {
+    const page = flexiPage('Enrolment_Record_Page', {
+      sobjectType: 'Enrolment__c',
+      unresolvedVisibilityRefs: ['Record.Gone__c'],
+      recordTraversalRefs: [{ path: 'Nowhere__r.X__c', use: 'visibilityRule' }],
+    });
+    mintRelationshipTraversalEdges([LOOKUP, page], []);
+    expect(page.properties['unresolvedVisibilityRefs']).toEqual(['Record.Gone__c', 'Record.Nowhere__r.X__c']);
+  });
+});
+
+describe('mintRelationshipTraversalEdges — Lightning page component placements', () => {
+  it('mints a declared references edge to whichever bundle the name resolves to, and records the rest', () => {
+    const page = flexiPage('Enrolment_Record_Page', {
+      sobjectType: 'Enrolment__c',
+      componentRefs: ['DemoPanel', 'demoCard', 'ghostCmp'],
+    });
+    const edges: Edge[] = [];
+    mintRelationshipTraversalEdges(
+      [bundle('LightningComponentBundle', 'demoCard'), bundle('AuraDefinitionBundle', 'DemoPanel'), page],
+      edges,
+    );
+    expect(edges.map((e) => [e.fromId, e.toId, e.edgeType, e.confidence, e.properties['referenceKind']])).toEqual([
+      ['FlexiPage:Enrolment_Record_Page', 'AuraDefinitionBundle:DemoPanel', 'references', 'declared', 'componentPlacement'],
+      ['FlexiPage:Enrolment_Record_Page', 'LightningComponentBundle:demoCard', 'references', 'declared', 'componentPlacement'],
+    ]);
+    expect(page.properties['unresolvedComponentRefs']).toEqual(['ghostCmp']);
   });
 });

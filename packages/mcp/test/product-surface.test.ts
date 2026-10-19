@@ -82,8 +82,9 @@ describe('product surface counts', () => {
     expect(surface.componentTypeCount).toBe(componentTypes);
     expect(surface.edgeTypeCount).toBe(edgeTypes);
     expect(componentTypes).toBeGreaterThan(50);
-    // CR-CAP-12 added the `hasMember` EdgeType (Group → member), 22 → 23.
-    expect(edgeTypes).toBe(23);
+    // CR-CAP-12 added `hasMember` (22 → 23); 0.8.0 added `subscribesToChange`
+    // (Change Data Capture subscription), 23 → 24.
+    expect(edgeTypes).toBe(24);
   });
 
   it('concept model counts match the built CONCEPTS / CONCEPT_RULES', () => {

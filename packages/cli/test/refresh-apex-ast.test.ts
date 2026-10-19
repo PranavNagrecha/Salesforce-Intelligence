@@ -103,6 +103,16 @@ const LITQUERY = `public class LitQuery {
   }
 }`;
 
+// APEX-CTOR-FIELD-WRITES: a class whose only writes are named-argument
+// constructors (`new Account(Id = …, Field = …)` + `update` / `Database.update`)
+// must land as a parsed writer, not a reader only.
+const CTORWRITER = `public class CtorWriter {
+  public void run(Account a) {
+    update new Account(Id = a.Id, Custom_Flag__c = true);
+    Database.update(new List<Account>{ new Account(Id = a.Id, Name = a.Name) });
+  }
+}`;
+
 const seed = async (): Promise<void> => {
   vaultRoot = join(cwd, 'org-kb');
   const paths = vaultPaths(vaultRoot);
@@ -126,6 +136,7 @@ const seed = async (): Promise<void> => {
     ['LowerSoql', LOWERSOQL],
     ['LowerTypes', LOWERTYPES],
     ['LitQuery', LITQUERY],
+    ['CtorWriter', CTORWRITER],
   ] as const) {
     await writeFile(join(dir, `${name}.cls`), body, 'utf8');
     await writeFile(join(dir, `${name}.cls-meta.xml`), meta, 'utf8');
@@ -290,6 +301,10 @@ describe('refresh apex-ast (DEFAULT ON)', () => {
     const ids = (await astEdges()).map((e) => `${e['from_id']}->${e['to_id']}:${e['edge_type']}`);
     expect(ids).toContain('ApexClass:LowerTypes->CustomField:Account.Name:writesTo');
     expect(ids).toContain('ApexClass:LowerTypes->CustomField:Account.Custom_Flag__c:writesTo');
+    // APEX-CTOR-FIELD-WRITES: constructor-shaped writes are parsed writesTo edges too.
+    expect(ids).toContain('ApexClass:CtorWriter->CustomField:Account.Custom_Flag__c:writesTo');
+    expect(ids).toContain('ApexClass:CtorWriter->CustomField:Account.Name:writesTo');
+    expect(ids).toContain('ApexClass:CtorWriter->CustomField:Account.Name:readsFrom');
     const opened = await openGraph(vaultPaths(vaultRoot).graphDb);
     if (!opened.ok) throw new Error(opened.error.message);
     try {
@@ -320,8 +335,8 @@ describe('refresh apex-ast (DEFAULT ON)', () => {
     if (!manifest.ok) throw new Error('manifest unreadable');
     expect(manifest.value.apexAst?.parseErrors).toBe(1);
     // Caller + Callee + Wrapper + ChildSub + SemiJoin + TwoCaller + LowerSoql
-    // + LowerTypes + LitQuery parse cleanly (Broken fails).
-    expect(manifest.value.apexAst?.filesParsed).toBe(9);
+    // + LowerTypes + LitQuery + CtorWriter parse cleanly (Broken fails).
+    expect(manifest.value.apexAst?.filesParsed).toBe(10);
   });
 
   it('lowercase inline SOQL lands on the vaulted field id — no dangling case-variant (R6-03)', { timeout: 30_000 }, async () => {

@@ -89,6 +89,7 @@ import { familyWasExtracted } from './absence-disclosure.js';
 import { readFactBlock, type FactsBlock } from './facts-block.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { clampedNodeScanLimit, fullScanTruncationNote } from './scan-cap.js';
+import { summarize } from './summarize-rows.js';
 
 /**
  * The ComponentTypes the tour enumerates when summarising the org's
@@ -291,6 +292,10 @@ export interface AutomationSummary {
   readonly flows: number;
   readonly apexTriggers: number;
   readonly activeRatio: number;
+  /** Automation items (all four types) with a known status that are active: the numerator of `activeRatio`. */
+  readonly activeCount: number;
+  /** Automation items (all four types) whose status was extracted: the denominator of `activeRatio`. */
+  readonly measuredCount: number;
   /**
    * Count of automation nodes (of any of the four types) whose
    * active/inactive status was NOT extracted — excluded from `activeRatio`
@@ -699,31 +704,23 @@ export const orgOverviewHandler = async (
 
   const automationCount = (type: ComponentType): number =>
     componentCounts[type] ?? 0;
-  let activeAutomationCount = 0;
-  let measuredAutomationCount = 0;
-  let activeStatusUnknownCount = 0;
-  for (const type of AUTOMATION_TYPES_FOR_SUMMARY) {
-    const nodes = nodesByType.get(type) ?? [];
-    for (const node of nodes) {
-      const status = automationActiveStatus(node);
-      if (!status.known) {
-        activeStatusUnknownCount += 1;
-        continue;
-      }
-      measuredAutomationCount += 1;
-      if (status.active) activeAutomationCount += 1;
-    }
-  }
+  // Numerator, denominator and ratio all come from the same filtered rows, so
+  // the rendered "N of M active" sentence cannot drift from `activeRatio`.
+  const automationStatuses = AUTOMATION_TYPES_FOR_SUMMARY.flatMap((type) =>
+    (nodesByType.get(type) ?? []).map(automationActiveStatus),
+  );
+  const measured = summarize(automationStatuses, (status) => status.known);
+  const active = summarize(measured.rows, (status) => status.active);
+  const measuredAutomationCount = measured.count;
   const automationSummary: AutomationSummary = {
     workflowRules: automationCount('WorkflowRule'),
     approvalProcesses: automationCount('ApprovalProcess'),
     flows: automationCount('Flow'),
     apexTriggers: automationCount('ApexTrigger'),
-    activeRatio:
-      measuredAutomationCount === 0
-        ? 0
-        : activeAutomationCount / measuredAutomationCount,
-    activeStatusUnknownCount,
+    activeRatio: measured.count === 0 ? 0 : active.count / measured.count,
+    activeCount: active.count,
+    measuredCount: measured.count,
+    activeStatusUnknownCount: measured.total - measured.count,
   };
 
   const frontendCount = (type: ComponentType): number =>

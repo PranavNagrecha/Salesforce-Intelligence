@@ -7,16 +7,24 @@ existing and a capability being usable, which is why this document is long: it
 covers how each stage works, **and what each stage does not do**.
 
 Audience: people wiring sf-intelligence into a host, and anyone changing the
-router. For what end users can ask see
+funnel. For what end users can ask see
 [guides/asking-questions.md](./guides/asking-questions.md); for env vars,
 [configuration.md](./configuration.md).
 
 The one-paragraph version: **the pipeline is good at putting the right tool in
 the shortlist (~90%) and no better than a coin flip at putting it first (~60%).**
 That is by design — `sfi.route_question` advises and the host LLM decides — and
-every number in §13 is a variation on it. Under the default `core` profile
+every number in §12 is a variation on it. Under the default `core` profile
 `sfi.route_question` is not advertised; a host runs it through
-`sfi.run_analysis { name: 'sfi.route_question', args: { question } }` (§7).
+`sfi.run_analysis { name: 'sfi.route_question', args: { question } }` (§6).
+
+**0.8.0 removed the regex intent router.** Until 0.7.x a 7,850-line table of
+hand-written intents sat beside the funnel and emitted a deterministic `route`
+(an `intent`, ordered `tools`, a `plan`, a `confidence`) that the shortlist was
+fused with. Measured on fresh questions it displaced correct funnel picks more
+often than it added them (§12), and `SFI_ROUTER_MODE=offline` let a host make it
+authoritative. Both are gone. The response has no `route` object; what follows
+describes what remains.
 
 ---
 
@@ -26,13 +34,12 @@ every number in §13 is a variation on it. Under the default `core` profile
 | --- | --- | --- | --- | --- |
 | 0 | Normalise | `semantic-funnel.ts` `tokenize()` | lowercase, strip punctuation, drop stopwords, light plural stem, phrase-synonym expansion **on the query only** | no lemmatiser, no spell-correction, no learned synonyms |
 | 1 | Refusal gates | `refusal-gates.ts` | fail closed by SHAPE before any matching — **7 kinds**, first-hit-wins | cannot judge whether an allowed question is answerable |
-| 2 | Deterministic intent | `intent-router.ts` | **275 rules producing 241 distinct intents**, each mapping to tools, plane, `suggestedArgs`, multi-step plans | silent on ~68% of fresh phrasings; see §13 |
-| 3 | Lexical funnel | `semantic-funnel.ts` | L2-normalised TF-IDF cosine over a per-tool document | no embeddings in any shipped install (§4) |
-| 4 | Candidate assembly | `tools/route-question.ts` | fuse regex + funnel, band confidence, attach `answers`/`category`, render | never runs a tool, never resolves a component |
-| 5 | Host decision | your LLM | pick, supply args, run, ground | — |
+| 2 | Lexical funnel | `semantic-funnel.ts` | L2-normalised TF-IDF cosine over a per-tool document | no embeddings in any shipped install (§3) |
+| 3 | Shortlist assembly | `tools/route-question.ts` | resolve the named component against the vault and bind it into each candidate's args, drop type-incompatible tools, de-crowd, mode-rerank, break a plane tie, stop on a simulation-vs-readout tie the question does not settle, attach `answers`, score the evidence bar | never runs a tool |
+| 4 | Host decision | your LLM | pick, supply args, run, ground | — |
 
-Stages 1-4 are deterministic and offline. No network, no model, no learned state.
-The same question always produces the same shortlist.
+Stages 1-3 are deterministic and offline. No network, no model, no learned state.
+The same question against the same vault always produces the same response.
 
 ---
 
@@ -43,9 +50,11 @@ returns, for one plain-language question:
 
 | Field | Authority | What it is |
 | --- | --- | --- |
-| `toolCandidates` | **Primary** | Meaning-ranked shortlist of `sfi.*` tools (offline TF-IDF over the tool catalog — no network, no embeddings service). Each row carries the tool, **`answers`** (the tool's one-line summary) and its **`category`**, its plane, whether it needs the live org, a confidence band, and `cosine` — the raw pre-fusion semantic score (`0` for rows inserted purely from a regex route hint), so you can tell real semantic support from rule assertion. |
-| `route` | **Advisory hint** | The deterministic route: an intent, ordered `route.tools` (with step ids and `dependsOn` edges for compound questions), plane, confidence, `suggestedArgs`, disclosures. A suggestion to inform your pick — never a command. |
-| `guidance` | Informative | One line stating the loop the host owns: read the candidates → resolve any named component → pick/sequence the tool(s) → run them → ground the answer in the ids they return. |
+| `toolCandidates` | **Primary** | Meaning-ranked shortlist of `sfi.*` tools (offline TF-IDF over the tool catalog). Each row carries the tool, **`answers`** (its one-line summary) and **`category`**, its `plane` and `liveRequired`, the funnel's `confidence` band, `score`, and — when the question named a component the vault contains — **`suggestedArgs`** (that component bound under the tool's own arg key) or **`missingArgs`** (required args still unbound). |
+| `guidance` | Informative | One line stating the loop the host owns: read the candidates → resolve any named component → pick/sequence the tool(s) → run them → ground the answer in the ids they return. Carries the live-plane consent disclosure when a leading candidate is `liveRequired`, and the `gap` note when there is one. |
+| `entityEvidence` | Informative | What the resolver found for the component the question named (§8). |
+| `gap` | Informative | Non-null when the shortlist is a guess (§4) or the ask was refused. |
+| `contextApplied` | Informative | What host-passed context changed (§10). |
 
 `answers` exists because the default tool profile is `core`, which advertises 16
 of 226 tools. For every other candidate the shortlist would otherwise name a tool
@@ -53,33 +62,22 @@ whose description is nowhere in your context, recoverable only by an
 `sfi.describe_analysis` round trip per candidate. The one-liner is the same text
 `sfi.list_analyses` renders, so you can pick without a second call — and, just as
 usefully, recognise a shortlist that contains no right answer. It does not affect
-ranking; candidate order and scores are identical with or without it.
+ranking.
 
-**The host LLM decides.** In the default hybrid mode you read the candidates
-and the hint, pick, run, and ground. Two things are *not* advisory:
+**The host LLM decides.** You read the candidates, pick, run, and ground. Two
+things are *not* advisory:
 
 - `executionBlocked: true` — a genuine ambiguity. Stop, ask the user
-  `route.clarification.question`, and resume with the exact
-  `clarificationId` + an offered selection (§9). Never invent an option.
-- `route.refusal` — a refusal shape. `route.tools` is empty by construction;
-  there is nothing to run (§8).
+  `clarification.question`, and resume with the exact `clarificationId` + an
+  offered selection (§7). Never invent an option.
+- `refusal` — a refusal shape. There is nothing to run (§6); candidates, when
+  listed, are transparency only.
 
-**Deterministic mode.** `SFI_ROUTER_MODE=offline` makes the deterministic
-route authoritative and omits candidates — for CI and hosts with no LLM in
-the loop. Refusal gates and clarifications behave identically in both modes.
-
-### Confidence semantics
-
-`route.confidence` is `high` / `medium` / `low` and encodes *how* the route
-was derived, not merely how well it scored:
-
-- `high` / `medium` — a deterministic intent matched (regex/plan vocabulary),
-  possibly downgraded by a premise warning (§10).
-- `low` — advisory by construction. A **`funnel-advisory`** route is always
-  `low`; treat it as the funnel's pick to verify, never a command.
-- A **context continuation** (§11) is capped at `medium`, never `high`.
-- A **refusal** (§8) reports `high` — confidence in the refusal itself, not in
-  any tool; `route.tools` is empty regardless.
+`confidence` on a row is the funnel's calibrated band for the shortlist as a
+whole (margin + coverage led, not raw score): `low` is the honest gap signal, not
+a truncation. A row inserted for a stated reason without funnel evidence — a tool
+inherited from host-passed context, a method tool bound from a `Class.method`
+reference — carries `cosine: 0`.
 
 ---
 
@@ -121,9 +119,7 @@ the 1,000-question authority set.** It was reverted. Changing tokenisation
 invalidates the tuning built on top of it; treat it as a corpus-wide migration,
 never a one-line fix.
 
----
-
-## 4. How a score is produced
+### How a score is produced
 
 L2-normalised **TF-IDF cosine** — not BM25, and not embeddings.
 
@@ -142,212 +138,190 @@ Two embedding paths exist and **neither runs in a shipped install**:
 | MiniLM hybrid (`embedding-funnel.ts`) | `SFI_EMBEDDINGS=1`, default off | `data/embedding-index.json` | **No** — `packages/mcp/package.json` declares `files: ["dist/src"]`, so `data/` is never packed |
 | Static embedding (`static-embed.ts`) | `SFI_STATIC_EMBED=1`, default off | 3 assets, **gitignored** (~8.5 MB) | **No** — absent from any clone and from CI |
 
-`embedding-funnel.ts` states the original cause plainly: it "was never wired into
-the shipped router because query embedding is ASYNC while the funnel candidate
-chain is SYNCHRONOUS". `static-embed.ts` was built to remove that obstacle —
-synchronous, sub-millisecond, no native dependency — and parked as "measured
-sub-bar lift".
-
 Regenerating the static assets and enabling the gate was re-measured for this
-document: **recall identical at every K**. The reason is visible in the raw
-embedding ranking — every tool vector lands inside a **0.51-0.56** cosine band. A distilled static model mean-pools its token rows, so a couple of
-hundred long, jargon-dense documents collapse to nearly the same point. The RRF
-fusion is deliberately asymmetric (`RRF_K_LEX = 10`, `RRF_K_EMBED = 60`) so the embedding can only
-promote a lexical near-miss, never displace a lexical hit — which is why turning
-it on changes so little.
+document: **recall identical at every K**. Every tool vector lands inside a
+**0.51-0.56** cosine band — a distilled static model mean-pools its token rows,
+so a couple of hundred long, jargon-dense documents collapse to nearly the same
+point. The RRF fusion is deliberately asymmetric (`RRF_K_LEX = 10`,
+`RRF_K_EMBED = 60`) so the embedding can only promote a lexical near-miss, never
+displace a lexical hit — which is why turning it on changes so little.
 
 **Do not treat "enable the embeddings" as an available fix.** The failure to beat
 is vector discrimination across long documents.
 
 ---
 
-### 4.1 The shortlist is not ordered by the score it prints
+## 4. Gaps — when nothing can be placed
 
-`route_question` emits each candidate's **lexical cosine** as `score`, but it
-orders the shortlist by a *different*, unemitted key: a candidate a deterministic
-rule NAMED is fused to `min(1, cosine + REGEX_BONUS)` (`REGEX_BONUS = 0.25`,
-`route-question.ts:1273`). So a rule-named tool with cosine `0.483` sits above a
-funnel-only tool with cosine `0.523`, and nothing in the payload says why.
+The funnel always returns its best eight when anything matches. The response
+carries `gap: { category: 'unrouted', note }` only when nothing can be placed
+honestly:
 
-Measured, on `"which orgs in our fleet have drifted most from the baseline?"`:
+- **empty shortlist** — no word of the question is in the tool catalog
+  ("zxqw plkj vbnm");
+- **pronoun-led fragment with no host context** — "does it call an invocable
+  apex at least?": the pronoun is unresolvable, and a cosine graze would dress
+  it up as a route;
+- a **gap-shaped follow-up** under host context (§10) gets its own category,
+  and a **refusal** (§6) carries the refusal's category.
 
-```
-1. sfi.fleet_find            0.4830      <- named by the funnel-advisory rule, fused 0.733
-2. sfi.fleet_drift_ranking   0.5230      <- funnel-only, fused 0.523
-```
+Thin evidence on a shortlist that does exist is **not** a gap. It is the rows'
+own `confidence: 'low'` — the funnel's calibrated band (margin + coverage led),
+which fires about twice as often on gap shortlists as on vault shortlists
+without truncating either — and the `guidance` repeats it as a LOW CONFIDENCE
+note. The former evidence bar (a height/breadth/coverage gate calibrated to
+decide whether a regex-unrouted question deserved an advisory upgrade) went with
+the regex: applied to every question it flagged short, perfectly clear asks
+("what custom objects do we have") as gaps. Its one durable finding stands —
+score height alone cannot separate a one-word collision ("the setup here — any
+opinions" → `live_setup_audit_trail` at 0.436) from a real question (signal
+floor 0.261); only breadth of support does — and a host that wants that
+discriminator can compute it from the returned scores.
 
-This is not a sorting bug — the order is the intended one, and the fusion is
-deliberate. It is a REPORTING gap: the ordering key is invisible, so a reader
-(human or host) sees a list that looks mis-sorted and cannot tell a rule-named
-candidate from a funnel-found one. If you are debugging "why is this tool first",
-check whether a rule named it before you touch a single funnel weight.
-
-Note the asymmetry this creates for any top-1 measurement that grades
-`route.tools[0]`: on an `unrouted` question that is the funnel-promotion
-fallback, NOT `candidates[0]`. A question can therefore be graded a miss while
-the shortlist ranks the correct tool first and the host answers correctly.
-
----
-
-## 5. Funnel-primary (`funnel-advisory`) routes
-
-When **no deterministic intent matches**, the router does not simply give up.
-If nothing else stopped the route — no pending clarification, and a clean
-premise (a question naming a component the resolver cannot find gets the
-premise disclosure instead, never an advisory route) — and the semantic
-funnel's evidence clears three source-constant gates (not env vars), the dead
-`unrouted` verdict is upgraded:
-
-- **height** — the top candidate scores at or above `FUNNEL_PRIMARY_MIN_SCORE =
-  0.26` (a pure cosine, uninflated by regex fusion bonuses);
-- **breadth** — the candidates at ranks 3-8 carry at least
-  `FUNNEL_MIN_EVIDENCE_BREADTH = 0.32` between them (a one-word collision lights
-  up one tool and leaves the tail near zero; a real question spreads support);
-- **coverage** — the corpus knows at least `CONF_MIN_COVERAGE = 0.34` of the
-  user's own words (breadth alone is fooled by one word common across tool
-  descriptions: "xyzzy quantum flibbertigibbet metadata" knows 1 word of 4).
-
-The upgraded route is:
-
-- `intent: 'funnel-advisory'`
-- `route.tools`: the top-3 funnel candidates
-- `confidence: 'low'` by construction
-- `reason` flagged `FUNNEL-DERIVED`
-
-Host behavior: treat it as an advisory pick — resolve the named component,
-run the top tool, ground the answer, and fall back to the next candidate if
-the output does not fit the question. Below the floor the question stays
-honestly `unrouted` with candidates still present for you to reason over.
+Host behavior on a gap or a low-confidence shortlist: run nothing whose
+`answers` does not fit the question, and say the capability is not built rather
+than substituting a lookalike. `logGap: true` appends a gapped question to the
+local gap log (`~/.sf-intelligence/question-gaps.jsonl`); off by default, and
+nothing leaves the machine either way.
 
 ---
 
-## 6. Candidate assembly
+## 5. Shortlist assembly
 
-`buildFunnelCandidates()` merges the deterministic route with the funnel ranking:
+`route-question.ts` refines the raw funnel in this order:
 
-- A tool named by the regex route but **not** surfaced by the funnel is INSERTED
-  with `cosine: 0` and a score of exactly `REGEX_BONUS = 0.25`.
-- `FUNNEL_PRIMARY_MIN_SCORE = 0.26` sits deliberately **one hundredth above** that
-  bonus, so a pure regex assertion can never by itself clear the advisory bar.
-  Every route-inserted row you see scoring `0.2500` is this mechanism.
-- `cosine` is the honest field: it is the raw pre-fusion semantic evidence, and
-  `0` means *none*. Downstream calibration must read `cosine`, never sniff the
-  `0.25` magic number.
-- `confidence: 'high'` on such a row means "a deterministic intent pinned this",
-  **not** "this scored well". Read the two fields together.
-- Rows are deduped by tool, sorted by score then name, and sliced to `k`.
-- Every row is then enriched with `answers` (the tool's one-liner) and
-  `category` — see §7. There are **two** emit sites, the normal return and the
-  refusal return; both are enriched.
+1. **De-crowd** — the two measured slot parasites `what_if_assign_permset` and
+   `what_if_revoke_permset` drop below every other row unless the question
+   carries a hypothetical marker or their own action verb. Pure reorder.
+2. **Mode rerank** — `mode: 'plan'` leads with the what_if/impact family,
+   `'assessment'` with the risk/readiness/coverage family.
+3. **Plane tie** — a vault-vs-live near-tie (within `MARGIN = 0.05`) is decided
+   by the question's own runtime-data language: "how many … right now" leads
+   live (with the consent disclosure), anything else leads vault. Never blocks.
+4. **Type filter** — when the named component resolved exactly, tools that
+   fail closed on that family are dropped (an Apex call graph over a Flow id,
+   the field-only access audit over an object).
+5. **Simulation tie** — top-1 and top-2 within `MARGIN`, one a change
+   simulation with a verdict (`safe_to_delete_field`, `what_if_*`) and one an
+   impact/usage readout, and the question does not say which it wants: stop
+   with a tool-choice clarification (§7). Every tool is read-only; a
+   what-breaks / impact question, or one that names the change ("delete",
+   "change", "rename"), never stops.
+6. **Binding** — the resolved component goes under each tool's OWN declared arg
+   key (`entity-arg-binding.ts` reads the registered schemas: `fieldId`,
+   `flowId`, `classApiName`, `objectApiName`, generic `componentId` …); a field
+   on an object-only tool binds its parent object; a quoted literal binds a
+   required `value`; "to <type>" binds a required enum. Unsure means unbound,
+   and `missingArgs` says so.
+7. **Hidden tools** never appear; with the live plane off, live-only rows sink
+   below every vault row (listed, never hidden — consent can be granted).
+8. Every row gets `answers` and a non-null `category`.
+
+Under the core profile the leading three rows also come as `invoke[]` calls:
+core tools direct, everything else as the `sfi.run_analysis` envelope.
 
 ---
 
-## 7. Tool profiles — and why rows carry `answers`
+## 6. Tool profiles, and refusal gates
 
 The default tool profile is `core`, which advertises **16 of 226** tools. Every
 other analysis is reached through `sfi.run_analysis` with a `name` and `args`,
-using `sfi.list_analyses` and `sfi.describe_analysis` as the catalog.
+using `sfi.list_analyses` and `sfi.describe_analysis` as the catalog. §2
+explains why every row therefore carries `answers`; measured over 50 questions,
+an LLM host's top-1 choice moved **39/50 to 42/50** with it, and none became
+wrong.
 
-This has a consequence people miss: a shortlist naming
-`sfi.guest_exposure_report` names a tool that is **not in the host's tool list and
-has no description in its context**. Recovering it costs an
-`sfi.describe_analysis` round trip per candidate, which no real host makes — so
-the host was being asked to choose between bare names.
+### Refusal gates — fail closed by shape
 
-Each candidate row therefore carries `answers`, the same one-liner
-`sfi.list_analyses` renders, and a populated `category`. Measured over 50
-questions, an LLM host's top-1 choice moved **39/50 to 42/50**; of the six picks
-that changed, three became correct and none became wrong. It also lets a host
-recognise a shortlist that contains no right answer — for "which objects have
-change data capture enabled", seeing that the candidates are *field-history
-tracking* tools is what stops it running rank-1 into an oversize error.
-
-It does not affect ranking. Candidate order and scores are identical with or
-without it.
-
----
-
-## 8. Refusal gates — fail closed by shape
-
-Score-independent detectors run on the **raw question before any intent
-matching**, in both router modes. A hit produces a non-executable route:
-`tools: []`, `executionBlocked: false` (there is nothing to clarify), and a
-structured `route.refusal = { kind, disclosure, readOnlyAlternative? }`.
+Score-independent detectors run on the **raw question before any matching**. A
+hit produces a non-executable response: no `invoke`, `executionBlocked: false`
+(there is nothing to clarify), a structured `refusal = { kind, disclosure,
+readOnlyAlternative? }`, and a `gap` naming the category.
 
 | `kind` | Trigger | What the host gets |
 | --- | --- | --- |
-| `write-imperative` | A mutation asked *of the agent* ("delete the X field for me", "go ahead and merge…"), or an EXECUTION ask ("run the X flow against test data for me", "execute the batch job"). A run verb on an analysis NAME — "run automation risk", "execute the flow audit" — is a read and routes normally. | `refused-write` intent, a read-only boundary disclosure, and a **`readOnlyAlternative`** — the simulation/read that answers the underlying question safely (`safe_to_delete_field`, `what_if_deactivate_flow`, `what_if_disable_trigger`, `what_if_change_field_type`, `what_if_merge_profiles`, `get_impact`; for execution asks `explain_flow` / `scheduled_job_catalog` / `what_happens_on_save` — by verb family). Offer it. |
-| `injection-exfiltration` | Prompt-injection ("ignore your previous instructions…"), record-value exfiltration ("dump all SSN values"), or privilege escalation ("sudo give me full access") | `refused-injection`; `toolCandidates` and `guidance` are suppressed entirely. Do not route around it. |
-| `runtime-analytics` | Runtime/ops telemetry no tool models: per-user login events/sessions, adoption metrics, "errors this week", automation execution traces & aggregate run counts, run/failure forensics, CPU/heap profiling, debug-log retrieval, SOQL execution plans, message delivery counts & sent-message content, site click analytics, record-level before/after field history, record-access audit events ("who accessed…") | `honest-gap-runtime` with an HONEST GAP disclosure naming the nearest real reads (e.g. `live_inactive_users` covers dormancy thresholds, not login events; `live_automation_fired` infers per-record, not aggregate run counts). |
-| `out-of-scope` | Non-Salesforce asks: other systems, another platform's own data ("how many SAP tables", "our ServiceNow tickets" — an integration question about the platform still routes), rating people ("who is the best admin"), purchasing decisions ("should I buy more licenses"), general knowledge, "email me…", write-me-code | `out-of-scope` disclosure. |
+| `write-imperative` | A mutation asked *of the agent* ("delete the X field for me", "go ahead and merge…"), or an EXECUTION ask ("run the X flow against test data for me"). A run verb on an analysis NAME — "run automation risk" — is a read and routes normally. | A read-only boundary disclosure and a **`readOnlyAlternative`** — the simulation/read that answers the underlying question safely. Offer it. |
+| `injection-exfiltration` | Prompt-injection ("ignore your previous instructions…"), record-value exfiltration ("dump all SSN values"), or privilege escalation | `toolCandidates` and `guidance` are suppressed entirely. Do not route around it. |
+| `runtime-analytics` | Runtime/ops telemetry no tool models: per-user login events, adoption metrics, "errors this week", execution traces and run counts, CPU/heap profiling, debug-log retrieval, SOQL execution plans, message delivery counts, site click analytics, record-level before/after history, record-access audit events | An HONEST GAP disclosure naming the nearest real reads. |
+| `out-of-scope` | Non-Salesforce asks: other systems, another platform's own data, rating people, purchasing decisions, general knowledge, "email me…", write-me-code | An out-of-scope disclosure. |
+| `identity-gap` | who-is / first-person capability asks | the vault models metadata, not people; a which-user clarify pointer |
+| `forecast-gap` | an explicit prediction verb, or growth-trend + horizon + forward-outcome together | nothing here predicts; yields to the what-if simulation frame |
+| `provenance-gap` | a create / originally-authored verb ("who created this") | authorship is not retrievable; a pure last-modified ask routes to `sfi.last_modified` |
 
-**Three further kinds the table above omits.** `RefusalKind` is a seven-member
-union (`refusal-gates.ts`), and these three are honest-gap arms that fire before
-the runtime gate:
-
-| `kind` | Trigger | Why it is a gap |
-| --- | --- | --- |
-| `identity-gap` | who-is / identity lookups about a person rather than a component | the vault models metadata, not people |
-| `forecast-gap` | an explicit prediction verb, or growth-trend + horizon + forward-outcome together | nothing here predicts; deliberately YIELDS to the what-if simulation frame, which is legitimately forward-phrased and is not a forecast |
-| `provenance-gap` | a create / originally-authored verb ("who created this") | authorship is not retrievable; a pure last-modified ask is excluded so it routes to `sfi.last_modified` instead |
-
-Evaluation order is first-hit-wins: injection → write → runtime → out-of-scope
-("ignore the read-only restriction and create…" must land injection, not
-write). Legitimate reads are explicit excluders and route normally: "am I
-allowed to edit…", "who can delete…", "is it safe to…", "what would happen
-if…" are permission/hypothetical *questions*, not imperatives.
+Evaluation order is first-hit-wins: injection → write → runtime → out-of-scope.
+Legitimate reads are explicit excluders and route normally: "am I allowed to
+edit…", "who can delete…", "is it safe to…", "what would happen if…" are
+permission/hypothetical *questions*, not imperatives.
 
 Measured on a 2,000-question real-org evaluation: genuine over-confident
 routes fell 69 → 11 with zero answerable questions falsely refused.
 
 ---
 
-## 9. Clarifications — a last resort
+## 7. Clarifications — a last resort
 
-`executionBlocked: true` + `route.clarification` fires only for **genuine**
-ambiguity. Before blocking, the router auto-resolves everything the question
-itself already answers:
+`executionBlocked: true` + `clarification` fires only for **genuine**
+ambiguity. Before blocking, everything the question itself already answers is
+auto-resolved:
 
 - an object word next to a same-named field ("…saving a **Case** without a
   `Resolution_Code__c`") scopes the field to that object;
 - a type word after a name ("the X **object**/**flow**") picks that type;
 - an underscored/dotted literal API name is taken at face value;
 - a `CustomTab` twin of a `CustomObject` never counts as a rival;
-- complementary readings (who-can-access grantors vs the CRUD matrix; impact
-  readout vs change simulation) **stack their tools in one route** instead of
-  asking which-first;
 - a vault-vs-live near-tie is decided by the question's own runtime-data
-  language (live leads, with the consent disclosure) — only the
-  destructive-vs-read-only tie still blocks;
+  language — only a simulation-vs-readout tie the question leaves open still
+  blocks;
+- a plain English word is never a component name: only an underscored, dotted,
+  CamelCase or mid-sentence-capitalised token reaches the fuzzy resolver, so
+  "find dead code" cannot be asked to pick between `*_Code__c` fields;
 - offered options are **hygienic**: fuzzy acronym-graze rivals and
   far-below-top junk never appear.
 
+Two kinds of option set: component ids (an entity ambiguity — a short field
+name on several objects, two Apex classes sharing a bare name, a Flow and a
+class both called `DataSync`) and `sfi.*` tool names (the simulation tie, or an
+explicit "what breaks AND is it actually running in production" two-plane ask).
+
 To resume: call again with the same question plus
 `clarificationResponse: { clarificationId, selection }` where `selection` is
-one of the offered options **verbatim**. Stale ids and invented selections
-are rejected.
-
-**Host note — the stacked `resolve` step.** Some routes prepend `sfi.resolve`
-to the tool list instead of blocking (e.g. two fuzzy same-meaning fields that
-are not literal same-name twins). Run that resolve step and honor its
-`ambiguous` disposition (ask the user to pick from its candidates) rather
-than skipping ahead to the analysis tool with a guessed id.
+one of the offered options **verbatim**. A component pick is looked up by exact
+id and bound into every candidate; a tool pick leads the shortlist and drops its
+rival. Stale ids and invented selections are rejected.
 
 ---
 
-## 10. Premise checks
+## 8. Entity evidence and premise checks
+
+The question's component phrase is extracted narrowly (a dotted or suffixed API
+name, an underscored token, a quoted or typed name — never the whole sentence)
+and resolved against the vault; a two-or-three-word question that names a
+component without asking anything ("payment object") is resolved as a whole.
+`entityEvidence` reports the query, the type hints the question's words
+implied, the disposition and the candidates.
 
 A question that names a component the resolver cannot find — disposition
-`none`, or a literal API reference none of the fuzzy candidates actually
-match — is **still routed** (the routed tools fail closed on the unknown id),
-but confidence is downgraded and `entityEvidence.warning` carries a premise
-disclosure ("no component matching '<name>' exists in the vault — verify the
-name"). Render the warning before any answer. A failed premise never earns a
-funnel-advisory upgrade (§5) or a context continuation (§11).
+`none`, or a literal API reference none of the fuzzy candidates actually match —
+is **still shortlisted** (the tools fail closed on the unknown id), but nothing
+is bound and `entityEvidence.warning` carries a premise disclosure ("no
+component matching '<name>' exists in the vault — verify the name"). Render the
+warning before any answer. A name the user gave the wrong type ("the X
+permission set" that is a validation rule) gets a TYPE CHECK and the real
+component. A failed existence probe (graph error) says PREMISE CHECK
+INCONCLUSIVE rather than passing silently.
 
 ---
 
-## 11. Conversation context (`context.previous`)
+## 9. What the funnel indexes is the only lever
+
+There is no intent table to add a phrasing to. To make a tool findable, change
+its document (§3): add ask-phrasings to `FUNNEL_UTTERANCES`, a `TOOL_KEYWORDS`
+overlay, or the description. Corpus edits shift every term's IDF, so measure
+(§12) before and after.
+
+---
+
+## 10. Conversation context (`context.previous`)
 
 The server stores **no conversation state**. The host may pass, per call, an
 optional description of the previous turn:
@@ -358,10 +332,9 @@ optional description of the previous turn:
   "context": {
     "previous": {
       "question": "what does the Case escalation flow do?",   // prior user question
-      "tool": "sfi.explain_flow",                             // first non-resolve tool you ran
+      "tool": "sfi.explain_flow",                             // the tool you ran
       "componentId": "Flow:Case_Escalation_Flow",             // exact id from entityEvidence
       "objectApiName": "Case",                                // from suggestedArgs, if any
-      "intent": "flow-explain",                               // optional
       "plane": "vault",                                       // optional
       "clarification": { "clarificationId": "…", "options": ["…"] } // only if the prior turn blocked
     }
@@ -370,25 +343,23 @@ optional description of the previous turn:
 ```
 
 **Build it from the previous response, never from memory:** `tool` = the
-first non-`resolve` entry of the prior `route.tools`; `componentId` = the
-prior `entityEvidence` exact-disposition id; `objectApiName` = the prior
-`suggestedArgs`; `clarification.clarificationId` / `clarification.options` =
-the prior `route.clarification`'s `id` and `options` verbatim. Never invent
-ids.
+candidate you ran; `componentId` = the prior `entityEvidence` exact-disposition
+id; `objectApiName` = the prior `suggestedArgs`; `clarification.clarificationId`
+/ `clarification.options` = the prior `clarification`'s `id` and `options`
+verbatim. Never invent ids.
 
 With context, terse follow-ups resolve four ways — each disclosed in
-`route.contextApplied = { kind, anaphor, … }` when (and only when) context
-actually changed the route:
+`contextApplied = { kind, anaphor, … }` when (and only when) context actually
+changed the response:
 
 1. **`entity-substitution`** — a pronoun/ellipsis follow-up whose own
    extraction finds no entity substitutes `previous.componentId` as the
-   entity. An **exact-id lookup, never fuzzy**.
-2. **`continuation`** — still unrouted after substitution, the route inherits
-   `previous.tool` as an advisory continuation: confidence **capped at
-   `medium`**; plane and `liveRequired` always from the live tool registry
-   (never trusted from `previous.plane`); the resolved type still gates the
-   inherited tool (a type-incompatible inheritance is swapped or dropped, not
-   routed into a guaranteed error).
+   entity. An **exact-id lookup, never fuzzy**; it binds into the candidates.
+2. **`continuation`** — the follow-up inherits `previous.tool` at the head of
+   the shortlist (`confidence: medium` when the entity resolved exact, `low`
+   otherwise, `cosine: 0`); plane and `liveRequired` come from the tool
+   registry, never from `previous.plane`; a type-incompatible inheritance is
+   not made.
 3. **`reparameterization`** — "what about on Contact?" re-runs
    `previous.tool` against the new target from the question itself. An
    ambiguous new entity still blocks with a clarification.
@@ -400,50 +371,37 @@ actually changed the route:
 
 Honesty under context:
 
-- Refusal gates run on the raw question **before** any context logic —
-  context never bypasses them and adds no executable path to a refused turn.
+- Refusal gates run on the raw question **before** any context logic.
 - **Gap detection precedes continuation**: a follow-up that is itself
-  gap-shaped — a normative judgment ("should they be able to?", "is it
-  normal?"), a delivery/export ask ("can I get it as a file?"), a probe of
-  the product's own capabilities ("does the tool trace…?"), or
-  deployment-status telemetry ("is it still pending?") — never inherits
-  `previous.tool`. It returns a non-executable `context-gap-followup` route
-  (`tools: []`, `gap` set) with an honest disclosure instead of an advisory
-  continuation that cannot answer the ask.
+  gap-shaped — a normative judgment ("should they be able to?"), a
+  delivery/export ask ("can I get it as a file?"), a probe of the product's own
+  capabilities, or deployment-status telemetry — never inherits
+  `previous.tool`. It returns `gap: { category: 'context-gap-followup' }` with
+  an honest disclosure.
 - A carried `componentId` that no longer resolves gets a context-specific
-  premise disclosure and never advisory-routes.
+  premise disclosure and is never bound.
 - Value validation is **fail-open**: an unregistered `tool` or malformed
-  `componentId` is skipped and noted in `contextApplied.ignored` — never a
-  hard error (shape errors still reject; unknown subfields are rejected by
-  the strict schema).
-- A **self-contained question ignores context** — no anaphor, or a confident
-  own route, returns a response identical to the no-context call. Omitting
-  `context` keeps behavior identical to previous releases.
-
-Measured on the 2,000-question real-org evaluation's follow-up replay
-(60 previously-failing follow-up turns, context built by a host exactly as
-above): 66.7% routed executable with context vs 21.7% without; 41 of 41
-self-contained follow-ups returned deep-equal output with context present
-vs absent.
+  `componentId` is skipped and noted in `contextApplied.ignored`.
+- A **self-contained question ignores context** — no anaphor returns a response
+  identical to the no-context call.
 
 ---
 
-## 12. Modes and knobs
+## 11. Modes and knobs
 
 | Knob | Kind | Effect |
 | --- | --- | --- |
-| `SFI_ROUTER_MODE=offline` | env | Deterministic route is authoritative; candidates omitted. Default (unset / anything else): hybrid. |
-| `mode: 'ask' \| 'plan' \| 'assessment'` | call param | Reranks candidates toward that family (`plan` → what_if/impact, `assessment` → risk/readiness/coverage) and tailors guidance. |
-| `logGap: true` | call param | Opt-in: append an unanswerable question to the local gap log (`~/.sf-intelligence/question-gaps.jsonl`). Off by default; nothing leaves the machine either way. |
-| `FUNNEL_PRIMARY_MIN_SCORE` (0.26), `EXPANSION_WEIGHT` (0.5) | source constants | The funnel-advisory score floor and the weighted-synonym-expansion weight. **Not env vars** — calibrated against the evaluation set; changing them re-opens the honesty gates. |
+| `mode: 'ask' \| 'plan' \| 'assessment'` | call param | Reranks candidates toward that family and tailors guidance. |
+| `logGap: true` | call param | Opt-in: append a gapped question to the local gap log. Off by default; nothing leaves the machine either way. |
+| `MARGIN` (0.05), `EXPANSION_WEIGHT` (0.5) | source constants | The near-tie margin and the weighted-synonym-expansion weight. **Not env vars** — calibrated against the evaluation set; changing them re-opens the honesty gates. |
 
-Additionally, and default-OFF: `SFI_EMBEDDINGS=1` and `SFI_STATIC_EMBED=1` (§4),
+Additionally, and default-OFF: `SFI_EMBEDDINGS=1` and `SFI_STATIC_EMBED=1` (§3),
 and `SFI_TOOL_PROFILE=full` to advertise the whole roster instead of the core
-spine (§7).
+spine (§6). There is no router mode.
 
 ---
 
-## 13. Measured behaviour
+## 12. Measured behaviour
 
 Two numbers describe routing, and they must always be quoted together with
 the K they were measured at:
@@ -456,9 +414,10 @@ A hand-written sample of a few dozen domain questions lands in the same
 place. The two numbers describe the same system at different K; quoting
 either without K is misleading.
 
-### What the deterministic layer contributes
+### Why the regex layer was deleted
 
-Measured on 300 fresh questions, raw funnel versus full pipeline:
+Measured on 300 fresh questions before the deletion, raw funnel versus funnel
+fused with the deterministic layer:
 
 | | raw funnel | + deterministic layer |
 | --- | --- | --- |
@@ -466,15 +425,14 @@ Measured on 300 fresh questions, raw funnel versus full pipeline:
 | top-3 | 242 (80.7%) | 248 (82.7%) |
 | top-8 | 269 (89.7%) | 276 (92.0%) |
 
-The regex layer fires on about a third of fresh questions and is right on most
-of those, yet nets **−3 at top-1** while adding **+7 at top-8**. Where it is
-right the funnel usually had it right already; where it is wrong it displaces a
-correct funnel top-1. **It earns its keep as a shortlist contributor, not as a
-decider.** On the phrasings it was written against it is never wrong, and on
-genuinely fresh phrasing it fires on about one question in seven: a lookup
-table, not a generaliser. A curated intent table is a perfectly good way to
-nail known phrasings, but a number measured on those same phrasings is tuning,
-not accuracy, and is never the product's routing accuracy.
+The regex layer fired on about a third of fresh questions and was right on most
+of those, yet netted **−3 at top-1** while adding **+7 at top-8**: where it was
+right the funnel usually had it right already; where it was wrong it displaced a
+correct funnel top-1. On the phrasings it was written against it was never
+wrong, and on genuinely fresh phrasing it fired on about one question in seven:
+a lookup table, not a generaliser. A number measured on those same phrasings is
+tuning, not accuracy. The +7 at top-8 is the one thing the deletion gives up;
+the funnel's utterance corpus is where that recall is recovered.
 
 ### Per-tool reachability
 
@@ -490,9 +448,8 @@ would be the defect, not the fix.
 
 ### Honest limits of these numbers
 
-- **The fresh corpus is template-generated** from a closed vocabulary (a few
-  dozen objects, fields, profiles, classes, flows and events), and many rows
-  are exact duplicates. It proves generalization beyond the tuning set and
+- **The fresh corpus is template-generated** from a closed vocabulary, and many
+  rows are exact duplicates. It proves generalization beyond the tuning set and
   nothing about real user phrasing; deduplicated, recall@8 drops by about five
   points.
 - **Grading accepts a tool family, not a tool.** Each row carries a short
@@ -501,25 +458,19 @@ would be the defect, not the fix.
   corpus.** The rest have no generalization coverage, and a measurement cannot
   regress what it never grades.
 - **The recall measurements stop at the raw funnel.** The list a host receives
-  is built by `buildFunnelCandidates`, which fuses the regex route, de-crowds
-  what-if families, applies the mode rerank and breaks plane ties before
-  slicing. A change that broke that fusion outright would not move either
-  recall number.
+  is built by `buildFunnelCandidates` plus the type filter and binding of §5. A
+  change that broke that assembly outright would not move either recall number.
 - Where a shortlist contains a *better* tool than the label, it is scored
   wrong.
 
 ---
 
-## 14. What routing does NOT do
+## 13. What routing does NOT do
 
 The list people most often assume wrongly:
 
 - **It never answers, and never runs a tool.** `route_question` returns a
-  shortlist and a hint. Nothing executes until the host executes it.
-- **It does not resolve the components a question names.** A question naming a
-  flow yields `sfi.explain_flow`, not that tool with its `flowId` filled in. The
-  host resolves (`sfi.resolve`) and supplies args. Some routes carry
-  `suggestedArgs`; most do not.
+  shortlist. Nothing executes until the host executes it.
 - **It does not guarantee rank-1.** Around 60% on fresh questions. Treat the
   shortlist as a shortlist.
 - **It does not use embeddings, semantic similarity, or any model.** It is
@@ -529,47 +480,34 @@ The list people most often assume wrongly:
   standing example, and it is unfixed.
 - **It does not learn.** No feedback loop, no usage weighting, no per-org
   adaptation. Identical input, identical output, forever.
-- **It does not know your vault.** Ranking is vault-independent — the same
-  shortlist for an empty org and a huge one. Only premise checks (§10) consult
-  the vault.
+- **Ranking does not know your vault.** The order is vault-independent — the
+  same shortlist for an empty org and a huge one. Only entity resolution and
+  premise checks (§8) consult the vault, and they change args and warnings, not
+  rank (except to drop a type-incompatible tool).
 - **A refusal is not a judgement about answerability.** Gates fire on the SHAPE
-  of the request (write imperative, injection, runtime telemetry, out of scope),
-  before any matching.
-- **`confidence: 'high'` is not a score.** It describes how the route was
-  derived (§6).
-- **The refusal gates can refuse a question the product has a tool for.** They run on
-  the raw string BEFORE any matching, so they cannot know a tool exists. Reproduced:
-  `build me a timeline from this Apex debug log` — the funnel ranks
-  `sfi.trace_debug_log` at **0.503**, far above the 0.26 floor, while
-  `detectRefusalShape` classifies the same string `write-imperative` and the route
-  returns `tools: []`. The verb, not the subject, is what the gate reads.
+  of the request, before any matching.
+- **The refusal gates can refuse a question the product has a tool for.** They
+  run on the raw string BEFORE any matching. Reproduced: `build me a timeline
+  from this Apex debug log` — the funnel ranks `sfi.trace_debug_log` at
+  **0.503**, while `detectRefusalShape` classifies the same string
+  `write-imperative`. The verb, not the subject, is what the gate reads.
 - **A dozen of the product's own funnel utterances are gated by its own refusal
-  detectors** (11 `write-imperative`, 1 `out-of-scope`). These are the phrasings the
-  corpus teaches the funnel to expect, so a user who asks exactly the way the product
-  advertises is refused. Among them:
-  `sfi.trace_debug_log` — "build me a timeline from this Apex debug log";
-  `sfi.what_if_merge_profiles` — "merge <A> into <B> — what are the collisions?" (a
-  SIMULATION question, which is the read-only alternative the write gate exists to
-  offer); `sfi.automation_collisions` — "is anything overwriting the field my flow just
-  set?"; `sfi.export_manifest` — "create a package.xml with all custom components".
-  Reproduce with `detectRefusalShape` over `FUNNEL_UTTERANCES`. **A new tool's utterances
-  should be run through the refusal gates as part of adding them.** The `runtime-analytics`
-  arm no longer fires on a PASTED log — "read this debug log and tell me which class ran"
-  routes — while a RETRIEVAL phrasing ("pull the debug log from yesterday's batch run")
-  is still refused, correctly: nothing here fetches a log from an org.
+  detectors** (11 `write-imperative`, 1 `out-of-scope`), so a user who asks
+  exactly the way the product advertises is refused. Reproduce with
+  `detectRefusalShape` over `FUNNEL_UTTERANCES`. **A new tool's utterances
+  should be run through the refusal gates as part of adding them.**
 - **It cannot rescue a tool that answers wrongly.** Perfect routing to a tool
   that reports "clean" because it never scanned anything still produces a wrong
-  answer. Routing quality and answer quality are independent axes, and only one
-  of them is this document's subject.
+  answer. Routing quality and answer quality are independent axes.
 
 ---
 
-## 15. Changing routing safely
+## 14. Changing routing safely
 
 **Definition of done for a new tool.** Ask-phrasings (`FUNNEL_UTTERANCES`) and
 a reachability check are part of the component, not follow-up work. A tool
 nothing can route to does not exist. Run the new phrasings through the refusal
-gates too (§14).
+gates too (§13).
 
 **Which number to move.** Report **@1 and @8**. Recall@8 is already around
 90%; a change that lifts @8 while flattening @1 has helped nobody.
@@ -587,12 +525,18 @@ this. If a disclosure must appear on several tools, route it through
 duplicate its own dependency's mostly steals routing from the dependency.
 Check what already covers the phrasing before adding.
 
+**Never add regex routing.** The deleted router is the measured proof that a
+hand-written phrasing table scores well on itself and nowhere else. Fix a
+misroute in the tool's description, utterances or arg aliases, and measure.
+
 **Routing quality is not defended by the public CI.** GitHub CI runs
-`pnpm eval:routing-gate`, a tripwire. The recall measurements above are run by
-hand before a release. Treat a green CI badge as saying nothing about routing.
+`pnpm eval:routing-gate`, a tripwire (every battery question gets a
+deterministic, non-empty shortlist of advertised tools). The recall measurements
+above are run by hand before a release. Treat a green CI badge as saying nothing
+about routing.
 
 **Two fixes already measured and refused** — do not re-attempt without new
-evidence: enabling the embeddings (§4), and correcting the plural stemmer (§3).
+evidence: enabling the embeddings (§3), and correcting the plural stemmer (§3).
 
 ---
 

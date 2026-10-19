@@ -93,14 +93,12 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
-import {
-  familyWasExtracted,
-  notExtractedFamilyDisclosure,
-} from './absence-disclosure.js';
+import { notExtractedFamilyDisclosure } from './absence-disclosure.js';
 import { annotationsBlockFor, type AnnotationsBlock } from './annotations.js';
 import { fieldNotFoundError } from './field-not-found-suggest.js';
 import { PICKLIST_DATA_TYPES } from './field-properties.js';
 import { objectIdCaseVariants, resolveFieldAlias } from './input-aliases.js';
+import { readRecordValues } from './lookup-record.js';
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import {
   normalizePicklistValues,
@@ -443,36 +441,6 @@ const readFieldApiName = (node: Node): string => node.apiName;
 const RECORD_VALUES_SENTINEL = 'values';
 
 /**
- * How readable one record's value list turned out to be. R1: the three states
- * are kept apart at the point of reading so the caller cannot collapse
- * NEVER-SCANNED into SCANNED-AND-CLEAN downstream.
- */
-type RecordValuesReadState = 'not-extracted' | 'unreadable' | 'read';
-
-/**
- * Read one CustomMetadataRecord's `values` list, reporting WHY it is
- * unusable when it is.
- *
- *   - no sentinel property → never extracted (the R1 law: the node not
- *     CARRYING the property, not an empty array, is what says "not checked");
- *   - sentinel present but not an array → a corrupt vault entry. The
- *     extractor guarantees an array, so a non-array is unreadable and
- *     contributes nothing — a blind spot, never a silent skip.
- *
- * An extracted, EMPTY array is a real answer and comes back as `read`.
- */
-const readRecordValueEntries = (
-  props: Readonly<Record<string, unknown>>,
-): { readonly state: RecordValuesReadState; readonly entries: readonly unknown[] } => {
-  if (!familyWasExtracted(props, RECORD_VALUES_SENTINEL)) {
-    return { state: 'not-extracted', entries: [] };
-  }
-  const raw = props[RECORD_VALUES_SENTINEL];
-  if (!Array.isArray(raw)) return { state: 'unreadable', entries: [] };
-  return { state: 'read', entries: raw as readonly unknown[] };
-};
-
-/**
  * Pull one record's value for a given field name out of an ALREADY-READ
  * `values` list. Returns `null` when the list has no matching entry for the
  * field — the extractor only emits an entry when the record's XML
@@ -547,7 +515,7 @@ export const collectRecordValues = async (
   const unreadable: string[] = [];
   for (const child of childrenResult.value) {
     if (child.type !== 'CustomMetadataRecord') continue;
-    const read = readRecordValueEntries(child.properties);
+    const read = readRecordValues(child);
     if (read.state === 'not-extracted') {
       notExtracted.push(child.id);
       continue;
@@ -556,7 +524,7 @@ export const collectRecordValues = async (
       unreadable.push(child.id);
       continue;
     }
-    const match = findValueForField(read.entries, fieldApiName);
+    const match = findValueForField(read.values, fieldApiName);
     if (match === null) continue;
     const recordLabelRaw = child.properties['label'];
     const recordLabel =

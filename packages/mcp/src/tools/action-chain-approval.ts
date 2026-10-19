@@ -45,9 +45,9 @@
  *
  *   - A STEP-level `approvalActions` / `rejectionActions` FieldUpdate names the
  *     field update by NAME only. The extractor emits field-level `writesTo`
- *     edges for PROCESS-level hook actions but not for step-level ones, and
- *     `WorkflowFieldUpdate` is not a modeled ComponentType, so the FIELD a step
- *     action writes is unresolvable from this vault.
+ *     edges for PROCESS-level hook actions but not for step-level ones, so
+ *     the FIELD a step action writes is not inlined here; the
+ *     `WorkflowFieldUpdate` node it names carries that `writesTo`.
  *   - `assignedApprover.whenMultipleApprovers` (unanimous vs first-response) is
  *     not captured by the extractor, so a multi-approver step cannot say which
  *     rule applies.
@@ -121,8 +121,8 @@ const ACTION_TARGET_TABLE: Readonly<
   FieldUpdate: {
     prefix: 'WorkflowFieldUpdate',
     scopedByObject: true,
-    componentType: 'unresolved',
-    modeled: false,
+    componentType: 'WorkflowFieldUpdate',
+    modeled: true,
   },
   Task: {
     prefix: 'WorkflowTask',
@@ -151,7 +151,7 @@ const ACTION_TARGET_TABLE: Readonly<
 };
 
 const STEP_FIELD_UPDATE_UNRESOLVED =
-  'A step-level FieldUpdate action names the field update by NAME only. The extractor emits a field-level `writesTo` edge for PROCESS-level hook actions (initial submission / final approval / final rejection / recall) but NOT for step-level approve / reject actions, and `WorkflowFieldUpdate` is not a ComponentType this product models — so the FIELD this action writes is UNRESOLVED. That is a hole in this answer, NOT a finding that the action writes nothing. Read the field update in the object\'s `workflows/{Object}.workflow-meta.xml` `<fieldUpdates>` collection.';
+  'A step-level FieldUpdate action names the field update by NAME only. The extractor emits a field-level `writesTo` edge for PROCESS-level hook actions (initial submission / final approval / final rejection / recall) but NOT for step-level approve / reject actions, so the FIELD this action writes is not inlined in this step. That is a hole in this answer, NOT a finding that the action writes nothing: the `WorkflowFieldUpdate:{Object}.{name}` component listed here carries the `writesTo` edge to that field (`sfi.get_edges` on it, or `sfi.get_component` for its `field` / `operation` / `value`).';
 
 const MULTI_APPROVER_UNRESOLVED =
   'This step assigns MORE THAN ONE approver, so Salesforce applies the step\'s `whenMultipleApprovers` rule — unanimous (every approver must approve) or first-response (the first response decides). That element is NOT captured by this product\'s ApprovalProcess extractor, so which rule applies here is UNRESOLVED. Do not assume unanimous.';

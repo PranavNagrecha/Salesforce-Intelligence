@@ -82,6 +82,7 @@ import { resolveExistingObjectScope } from './input-aliases.js';
 import { expandRoleSubordinates, ROLE_PREFIX } from './role-hierarchy.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { fullScanTruncationNote } from './scan-cap.js';
+import { renderSharingPredicate } from './sharing-predicate.js';
 
 /** Per-scan cap on the number of objects covered. */
 const OBJECT_SCAN_CAP = 50;
@@ -197,22 +198,6 @@ const stringProp = (
   return typeof v === 'string' && v.length > 0 ? v : fallback;
 };
 
-/**
- * The record-match predicate of a criteria-based sharing rule, mirroring
- * `why_cant_user_see_record`'s criteria step so both consumers describe the
- * criteria path the same way. Prefers the explicit `booleanFilter`, falls back
- * to the criteria-item count, then to an honest "unspecified".
- */
-const criteriaPredicate = (
-  properties: Readonly<Record<string, unknown>>,
-): string => {
-  const bf = properties['booleanFilter'];
-  if (typeof bf === 'string' && bf.length > 0) return bf;
-  const count = properties['criteriaItemCount'];
-  if (typeof count === 'number' && count > 0) return `${count} criteria item(s)`;
-  return 'unspecified criteria';
-};
-
 /** Rule families that are criteria-shaped (carry a predicate). */
 const PREDICATE_RULE_TYPES: ReadonlySet<string> = new Set([
   'criteria',
@@ -232,7 +217,7 @@ const ruleCriteriaCell = (
   properties: Readonly<Record<string, unknown>>,
 ): string => {
   if (!PREDICATE_RULE_TYPES.has(ruleType)) return '—';
-  const predicate = criteriaPredicate(properties);
+  const predicate = renderSharingPredicate({ properties });
   const siteName = properties['siteName'];
   if (ruleType === 'guest' && typeof siteName === 'string' && siteName.length > 0) {
     return `site '${siteName}': ${predicate}`;

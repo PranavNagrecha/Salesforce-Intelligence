@@ -1,20 +1,22 @@
 {
   "graphMetrics": {
     "components": {
-      "previous": 141,
-      "current": 141,
+      "previous": 142,
+      "current": 142,
       "delta": 0
     },
     "edges": {
-      "previous": 361,
-      "current": 361,
-      "delta": 0
+      "previous": 364,
+      "current": 377,
+      "delta": 13
     }
   },
   "componentDeltas": {},
-  "edgeDeltas": {},
+  "edgeDeltas": {
+    "writesTo": 13
+  },
   "highlights": [
-    "Graph 0 components, 0 edges since the last refresh.",
+    "Graph 0 components, +13 edges since the last refresh.",
     "No new Flows, fields, or Apex — nothing flagged for review."
   ]
 }

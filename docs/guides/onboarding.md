@@ -9,7 +9,9 @@ repo for the org they want to understand.
 > you don't have them — use the CLI equivalents instead: `sfi init` for
 > `/sfi-init`, `sfi refresh` for `/sfi-refresh`, `sfi status` / `sfi doctor` for
 > `/sfi-status`, and just ask your MCP client a question (the `sfi.*` tools)
-> rather than `/sfi-onboard`. See [`installation.md`](./installation.md) and
+> rather than `/sfi-onboard`. Installed from the Claude Code marketplace, the
+> commands are namespaced: `/sf-intelligence:sfi-onboard`, `/sf-intelligence:sfi-status`.
+> See [`installation.md`](./installation.md) and
 > [`asking-questions.md`](./asking-questions.md).
 
 ## What the user does

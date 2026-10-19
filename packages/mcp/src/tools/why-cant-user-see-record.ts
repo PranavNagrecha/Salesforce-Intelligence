@@ -126,8 +126,9 @@
  *   5. **CriteriaSharingRule** — similar enumeration but
  *      `ruleType === 'criteria'`. Criteria require record-level data to
  *      evaluate (the booleanFilter is over field values, not metadata),
- *      so this stage always returns `unknown` with the rule's
- *      `booleanFilter` (or `criteriaItemCount`) surfaced in the reason.
+ *      so this stage always returns `unknown` with the rule's filter
+ *      (`criteriaItems`, substituted into any `booleanFilter` custom
+ *      logic) surfaced in the reason.
  *
  *   6. **TerritoryAndGuestRules** — a real per-rule
  *      enumeration over the attached guest / territory / territoryGroup
@@ -220,6 +221,7 @@ import {
   type MutingObjectFlag,
 } from './permission-set-group.js';
 import { clampedNodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
+import { renderSharingPredicate } from './sharing-predicate.js';
 
 /**
  * The set of OWD values that imply records are private and access
@@ -1911,9 +1913,9 @@ const evaluateOwnerSharingRules = async (
  * Evaluate the CriteriaSharingRule stage. Emits one step per
  * criteria-typed rule attached to the target object. Always
  * `unknown` because criteria are over record-level field values and
- * this has no record-level data. The reason cites the rule's
- * `booleanFilter` (or `criteriaItemCount` if no boolean filter is
- * set) so the admin can see what predicate would have to hold.
+ * this has no record-level data. The reason cites the rule's filter
+ * (`renderSharingPredicate`) so the admin can see what predicate would
+ * have to hold.
  */
 const evaluateCriteriaSharingRules = (
   rules: readonly Node[],
@@ -1933,14 +1935,7 @@ const evaluateCriteriaSharingRules = (
   }
   const steps: AccessReasoningStep[] = [];
   for (const rule of criteriaRules) {
-    const booleanFilter = rule.properties['booleanFilter'];
-    const criteriaItemCount = rule.properties['criteriaItemCount'];
-    const predicate =
-      typeof booleanFilter === 'string' && booleanFilter.length > 0
-        ? booleanFilter
-        : typeof criteriaItemCount === 'number' && criteriaItemCount > 0
-          ? `${criteriaItemCount} criteria item(s)`
-          : 'unspecified criteria';
+    const predicate = renderSharingPredicate(rule);
     const ruleAccess =
       typeof rule.properties['accessLevel'] === 'string'
         ? (rule.properties['accessLevel'] as string)
@@ -2015,14 +2010,7 @@ const evaluateTerritoryAndGuestRules = (
       typeof rule.properties['accessLevel'] === 'string'
         ? (rule.properties['accessLevel'] as string)
         : 'Read';
-    const booleanFilter = rule.properties['booleanFilter'];
-    const criteriaItemCount = rule.properties['criteriaItemCount'];
-    const predicate =
-      typeof booleanFilter === 'string' && booleanFilter.length > 0
-        ? booleanFilter
-        : typeof criteriaItemCount === 'number' && criteriaItemCount > 0
-          ? `${criteriaItemCount} criteria item(s)`
-          : 'unspecified criteria';
+    const predicate = renderSharingPredicate(rule);
     // The site (guest) or shared target (territory) name, when present.
     const siteName = rule.properties['siteName'];
     const sharedToName = rule.properties['sharedToName'];
@@ -3190,7 +3178,7 @@ export const whyCantUserSeeRecordHandler = async (
 
   // Stages 4 + 5: SharingRules. Fetch all rules once, then split by
   // ruleType. Owner rules are evaluated for membership match; criteria
-  // rules always report `unknown` with the booleanFilter in the reason.
+  // rules always report `unknown` with the rule's filter in the reason.
   const rulesResult = await fetchSharingRules(ctx, componentId);
   if (!rulesResult.ok) {
     return err({

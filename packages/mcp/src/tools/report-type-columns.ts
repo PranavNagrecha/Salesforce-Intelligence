@@ -1,11 +1,14 @@
 /**
- * REPORT-TYPE COLUMNS — the one reader of custom ReportType `<columns>`.
+ * REPORT-TYPE COLUMNS — the one source-file reader of custom ReportType `<columns>`.
  *
- * The extractor stamps every ReportType node `columnsModeled: false`: a field
- * that is only an explicit column of a custom report type has NO inbound edge.
- * `unused_fields_deep`, `safe_to_delete_field` and `field_360` all need that
- * fact, and when each read it (or did not) on its own they gave three verdicts
- * for the same field (ADM-5). They now share this scan.
+ * Since 0.8.0 the graph carries a `references` edge (`referenceKind:
+ * 'reportTypeColumn'`) for every column the import-time relationship resolver
+ * could attribute to a vaulted field, including columns on a `<table>`
+ * relationship path and lookup-traversal fields; what it could not walk is on
+ * the ReportType node's `unresolvedColumns`. This scan predates that edge and
+ * re-reads the same columns from source so `unused_fields_deep`,
+ * `safe_to_delete_field` and `field_360` keep one shared answer (ADM-5); a
+ * report type it names for a direct column is the same one the edge names.
  *
  * Read from the retrieved report-type source files; bounded and disclosed.
  */
@@ -148,7 +151,7 @@ export const reportTypesWithColumn = (
  * for deletion. Same wording everywhere so the tools cannot drift.
  */
 export const reportTypeColumnNote = (reportTypeIds: readonly string[]): string =>
-  `Explicit column of ${reportTypeIds.length} custom report type(s) (${reportTypeIds.slice(0, 5).join(', ')}${reportTypeIds.length > 5 ? ', …' : ''}), read from report-type source (no graph edge exists for it). Deleting the field removes that column and breaks saved reports that show, filter or group on it — check those reports before deleting.`;
+  `Explicit column of ${reportTypeIds.length} custom report type(s) (${reportTypeIds.slice(0, 5).join(', ')}${reportTypeIds.length > 5 ? ', …' : ''}), read from report-type source (the same use the \`reportTypeColumn\` graph edge carries). Deleting the field removes that column and breaks saved reports that show, filter or group on it — check those reports before deleting.`;
 
 /**
  * The per-field tools' disclosure when the scan could not fully answer for

@@ -61,6 +61,7 @@ export type {
   ApexVisibility,
   ParseApexStructureOptions,
 } from './apex-structure.js';
+export { apexPlatformClassName } from './apex-platform-classes.js';
 export { scanApexSource } from './apex-scanner.js';
 export type {
   ApexScannerError,

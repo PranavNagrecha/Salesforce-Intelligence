@@ -169,6 +169,8 @@ describe('runDoctor', () => {
       // Absent log = "not used yet", NOT a passing routing audit.
       expect(g?.detail).toContain('no route-gap log yet');
       expect(g?.detail).toContain('machine-global');
+      // The file really lives under ~/.sf-intelligence/ (route-gaps.ts), not ~/.sfi/.
+      expect(g?.detail).toContain('~/.sf-intelligence/question-gaps.jsonl');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
@@ -202,11 +204,13 @@ describe('runDoctor', () => {
       );
       const report = await runDoctor({ cwd, exec: connectedStub, gapLogFile: logFile });
       const g = find(report, 'Route gaps');
-      expect(g?.status).toBe('warn'); // informational — never a fail
+      // Informational: a count of past questions is not a problem to fix, and
+      // there is no regex router left to add an "intent" or "gold case" to.
+      expect(g?.status).toBe('info');
       expect(g?.detail).toContain('3 question');
       expect(g?.detail).toContain('machine-global');
       expect(g?.detail).toContain('folder-access ×2');
-      expect(g?.fix).toContain('question-gaps.jsonl');
+      expect(g?.fix).toBeUndefined();
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
@@ -406,6 +410,30 @@ describe('runDoctor', () => {
     }
   });
 
+  it('Org auth: when `sf` does not answer within the timeout, says so instead of telling the user to re-authenticate', async () => {
+    const cwd = await makeTempCwd();
+    try {
+      await mkdir(join(cwd, 'org-kb', 'meta'), { recursive: true });
+      await writeFile(
+        join(cwd, 'org-kb', 'meta', 'config.json'),
+        JSON.stringify({ targetOrg: 'MyOrg', vaultRoot: '.' }),
+        'utf8',
+      );
+      // What execFile rejects with when the native timeout fires.
+      const hungStub: DoctorExec = async (_binary, args) => {
+        if (args.includes('--version')) return { stdout: '@salesforce/cli/2.0.0 darwin' };
+        throw Object.assign(new Error('spawn sf ETIMEDOUT'), { killed: true, signal: 'SIGTERM' });
+      };
+      const report = await runDoctor({ cwd, exec: hungStub });
+      const auth = find(report, 'Org auth');
+      expect(auth?.status).toBe('fail');
+      expect(auth?.detail).toMatch(/sf did not answer in \d+ s/);
+      expect(auth?.fix).not.toContain('Re-authenticate');
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
   it('default `sf` runner passes a timeout + SIGTERM so a hung child cannot wedge doctor', async () => {
     // Drive the DEFAULT runner (no injected exec). `sf --version` may or may not
     // resolve on the box, but either way doctor must complete deterministically
@@ -432,9 +460,10 @@ describe('runDoctor', () => {
       expect(text).toContain('sfi doctor');
       expect(text).toContain('Vault');
       expect(text).toContain('↳');
-      // SYNTH-04 — doctor surfaces the grounding reminder.
-      expect(text).toContain('synthesize_answer');
-      expect(text).toContain('hallucinatedIds');
+      // Doctor talks to the person at the terminal; agent instructions belong
+      // in the server instructions, not here.
+      expect(text).not.toContain('synthesize_answer');
+      expect(text).not.toContain('hallucinatedIds');
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }

@@ -28,15 +28,15 @@ evidence in the vault" — NEVER "nothing uses this".
 ## Overview
 
 This skill is the conversational interface to the `sf-intelligence`
-vault. The flow: **call `sfi.run_analysis` with `{ "name": "sfi.route_question", "args": { … } }` first** — in the default hybrid
-mode it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick
-from) plus a suggested plane (`vault` | `live` | `hybrid` | `unknown`) and a
-regex `route` as a HINT — then **pick the tool(s)** from the candidates,
+vault. The flow: **call `sfi.run_analysis` with `{ "name": "sfi.route_question", "args": { … } }` first** — it
+returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from), each
+row naming its plane (`vault` | `live` | `hybrid`) and carrying any component the
+call resolved as `suggestedArgs` — then **pick the tool(s)** from the candidates,
 **resolve** any named component, **check live consent** if the live plane is
 needed, **execute** the tools, and **use the `rendered` field** when a tool
-returns one. Pick from the candidates rather than from feel; the `route` is a
-hint, not a command, and the seven-intent table below is the detail for
-executing each route. Always cite canonical component IDs in the answer.
+returns one. Pick from the candidates rather than from feel; the seven-intent
+table below is the detail for executing each kind of question. Always cite
+canonical component IDs in the answer.
 
 The vault is the source of truth. The user is asking about *their* org,
 not a generic Salesforce org. General Salesforce knowledge tells you
@@ -102,23 +102,26 @@ Defer to another skill or to general knowledge when:
 ## Route first (the front door)
 
 Before the manual classification below, run **`sfi.route_question`** through `sfi.run_analysis`
-(`{ "name": "sfi.route_question", "args": { "question": "<verbatim>" } }`). It returns `plane` (`vault` | `live` | `hybrid` | `unknown`),
-the ordered `sfi.*` `tools`, `needsResolve` (resolve a named component first?),
-`liveRequired` (needs the opt-in live plane?), and a `gap` when no dedicated tool
-exists yet. Then:
+(`{ "name": "sfi.route_question", "args": { "question": "<verbatim>" } }`). It returns
+`toolCandidates`: ranked rows each naming the tool, its plane (`vault` | `live` |
+`hybrid`), `liveRequired` (needs the opt-in live plane?), `answers` (what the
+tool does), `suggestedArgs` (a component the call resolved from the question,
+bound under the tool's own argument) and `missingArgs` (required arguments you
+must still supply); plus a `gap` when the shortlist is a guess. Then:
 
-1. If `needsResolve`, `sfi.resolve` the component and act on its disposition.
-2. If `liveRequired` and the live plane is off, **do not infer from the vault** —
-   offer to enable it once: `sfi.live_consent { grant: true }` (read-only,
-   persists per org). Proceed live only after consent / `SFI_LIVE_PLANE_ENABLED=1`
-   / `liveEnabled: true`.
-3. Execute the `tools` in order. When a result carries a **`rendered`** field,
+1. If a row carries `missingArgs`, `sfi.resolve` the component and act on its
+   disposition.
+2. If the leading candidate is `liveRequired` and the live plane is off, **do not
+   infer from the vault** — offer to enable it once: `sfi.live_consent { grant: true }`
+   (read-only, persists per org). Proceed live only after consent /
+   `SFI_LIVE_PLANE_ENABLED=1` / `liveEnabled: true`.
+3. Execute the tool(s) you picked. When a result carries a **`rendered`** field,
    use it as the prose/table answer and keep its provenance + freshness stamp.
-4. On `plane: 'unknown'` (or a `gap`), say the capability isn't built yet — the
-   question is logged for the backlog — and offer the closest thing. Never invent.
+4. On a `gap` (or no row that fits), say the capability isn't built yet and
+   offer the closest thing. Never invent.
 
 The seven-intent table below is the fallback when you pick a tool by hand, and
-the reference for what each route does.
+the reference for what each kind of question needs.
 
 ## Classify the intent
 

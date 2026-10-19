@@ -1827,3 +1827,76 @@ export const parseTypeFilter = (
   }
   return supported.size === 0 ? null : supported;
 };
+
+/** `source` of the edges {@link resolveDynamicDispatchEdges} mints. */
+export const DYNAMIC_DISPATCH_SOURCE = 'dynamic-dispatch-resolver';
+
+/**
+ * P21-MOAT-apex-frameworks: join a Custom Metadata-fed dispatcher to the
+ * classes its records name. A dispatcher `Type.forName(row.Handler__c)` has a
+ * variable operand the scanner cannot resolve, so the class carries
+ * `unresolvedDynamicDispatch` and an edge to the `CustomObject:X__mdt` it reads
+ * (SOQL `readsFrom` or `X__mdt.getAll()` `references`). The record extractor
+ * already resolved each `*Class__c` / `*Handler__c` cell into
+ * `CustomMetadataRecord -> ApexClass:{value}`. Where BOTH hold, the dispatcher
+ * gets one heuristic `references` edge per named class
+ * (`mechanism: 'Type.forName'`, `via: 'CustomMetadataRecord'`), so a trigger
+ * calling the dispatcher reaches every handler. A dispatcher reading no Custom
+ * Metadata, or a reader with no unresolved `Type.forName`, gets nothing: the
+ * operand is never guessed.
+ *
+ * Pure transform; the SAME array when no class dispatches dynamically.
+ */
+export const resolveDynamicDispatchEdges = (
+  results: readonly ExtractionResult[],
+): readonly ExtractionResult[] => {
+  const dispatches = (n: Node): boolean =>
+    (n.type === 'ApexClass' || n.type === 'ApexTrigger') &&
+    typeof n.properties['unresolvedDynamicDispatch'] === 'number' &&
+    n.properties['unresolvedDynamicDispatch'] > 0;
+  if (!results.some((r) => r.nodes.some(dispatches))) return results;
+
+  // CustomObject:X__mdt (lower-cased) -> ApexClass ids its records' cells name.
+  const classesByType = new Map<string, Set<string>>();
+  for (const r of results) {
+    for (const n of r.nodes) {
+      if (n.type !== 'CustomMetadataRecord' || n.parentId === null) continue;
+      const key = n.parentId.toLowerCase();
+      const named = classesByType.get(key) ?? new Set<string>();
+      for (const e of r.edges) {
+        if (e.fromId === n.id && e.edgeType === 'references' && e.toId.startsWith('ApexClass:')) named.add(e.toId);
+      }
+      classesByType.set(key, named);
+    }
+  }
+
+  return results.map((r) => {
+    const dispatcher = r.nodes.find(dispatches);
+    if (dispatcher === undefined) return r;
+    const own = r.edges.filter((e) => e.fromId === dispatcher.id);
+    const held = new Set(own.map((e) => e.toId.toLowerCase()));
+    const added: Edge[] = [];
+    // Original-cased type api names, each once (a type read by SOQL and by
+    // `getAll()` holds two edges).
+    const types = new Map(own.filter((e) => /^CustomObject:.+__mdt$/i.test(e.toId)).map((e) => [e.toId.toLowerCase(), e.toId]));
+    for (const [key, typeId] of types) {
+      for (const toId of [...(classesByType.get(key) ?? [])].sort()) {
+        if (held.has(toId.toLowerCase())) continue;
+        held.add(toId.toLowerCase());
+        added.push({
+          fromId: dispatcher.id,
+          toId,
+          edgeType: 'references',
+          confidence: 'heuristic',
+          source: DYNAMIC_DISPATCH_SOURCE,
+          properties: {
+            mechanism: 'Type.forName',
+            via: 'CustomMetadataRecord',
+            customMetadataType: typeId.slice('CustomObject:'.length),
+          },
+        });
+      }
+    }
+    return added.length === 0 ? r : { ...r, edges: [...r.edges, ...added] };
+  });
+};

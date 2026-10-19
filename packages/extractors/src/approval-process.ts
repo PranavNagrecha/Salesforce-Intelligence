@@ -711,7 +711,7 @@ const loadObjectWorkflowMaps = async (
  * `fieldUpdateMap` loaded from the sibling workflow file. This is
  * KEEP-the-`references`-ADD-the-`writesTo`, mirroring workflow-rule.ts: the
  * `references` edge still points at the `WorkflowFieldUpdate:{Object}.{name}`
- * scaffolding node; the new `writesTo` points at the real `CustomField` so
+ * node the workflow extractor mints; the `writesTo` points at the real `CustomField` so
  * field-change-impact tools see the ApprovalProcess as a writer.
  */
 const hookListEdges = (

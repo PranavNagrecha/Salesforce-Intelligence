@@ -33,7 +33,7 @@
     "@sf-intelligence/core": "workspace:*",
     "@sf-intelligence/parsers": "workspace:*",
     "@sf-intelligence/patterns": "workspace:*",
-    "fast-xml-parser": "^4.4.0"
+    "fast-xml-parser": "^5.11.2"
   },
   "devDependencies": {
     "eslint-import-resolver-typescript": "^3.6.3",

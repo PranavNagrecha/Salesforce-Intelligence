@@ -23,6 +23,9 @@ properties:
   lineCount: 80
   modifiers:
     - private
+  platformCalls:
+    System: 2
+    Test: 2
   qualityIssues: []
   sharingModel: null
   sourceBytes: 2120
@@ -54,6 +57,7 @@ type: ApexClass
 | isTest | `true` |
 | lineCount | `80` |
 | modifiers | `private` |
+| platformCalls | `[object Object]` |
 | qualityIssues | `` |
 | sharingModel | `null` |
 | sourceBytes | `2120` |
@@ -163,8 +167,10 @@ private class ProjectTriggerHandlerTest {
 | --- | --- | --- |
 | `CustomObject:Project__c` | heuristic | apex-scanner |
 
-### writesTo (outgoing, 1)
+### writesTo (outgoing, 3)
 
 | Target | Confidence | Producer |
 | --- | --- | --- |
+| `CustomField:Project__c.Contract_Value__c` | parsed | apex-ast |
+| `CustomField:Project__c.Permit_Approved__c` | parsed | apex-ast |
 | `CustomField:Project__c.Status__c` | parsed | apex-ast |

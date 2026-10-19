@@ -27,7 +27,7 @@ dependencies, then escalate to source grep only if the vault is thin.
 The vault is the cache; the retrieved source under `org-kb/source/` is
 cold storage. Both are served by the same MCP server.
 
-The graph covers **103 component types** and **23 edge types** — objects
+The graph covers **104 component types** and **24 edge types** — objects
 and fields, validation rules, Flows, Apex classes and triggers, layouts,
 profiles and permission sets, the sharing tier (roles, groups, queues,
 sharing rules), record types and UI surfaces, legacy automation, LWC /
@@ -73,7 +73,7 @@ advertised and directly invokable — the spine `sfi.resolve`,
 `sfi.org_card` and `sfi.capabilities`) still exists; it is reached through the
 catalog gateway:
 
-1. `sfi.list_analyses` — browse names (optional)
+1. `sfi.list_analyses` — find the tool from any words of the question (`query`; rows rank by `matchedTerms`), optional
 2. `sfi.describe_analysis` — confirm args (optional)
 3. **`sfi.run_analysis`** — `{ "name": "sfi.<tool>", "args": { … } }`
 
@@ -85,29 +85,31 @@ advertised roster only when the operator sets `SFI_TOOL_PROFILE=full`.
 ## Start here: route the question
 
 For any non-trivial question, run **`sfi.route_question`** through `sfi.run_analysis`
-first (`{ "name": "sfi.route_question", "args": { "question": "<verbatim>" } }`). In the default hybrid mode it returns
+first (`{ "name": "sfi.route_question", "args": { "question": "<verbatim>" } }`). It returns
 a meaning-ranked **`toolCandidates`** shortlist (which YOU pick from) and a
-**`guidance`** planner line, plus a suggested plane (`vault` | `live` | `hybrid`
-| `unknown`) and a regex `route` as a HINT (`tools`, `needsResolve` — resolve a
-named component first?, `liveRequired` — is the live plane needed?, and a `gap`
-when no dedicated tool exists). YOU decide which candidate(s) to run; the `route`
-informs, it does not command. (`SFI_ROUTER_MODE=offline` omits candidates and
-makes the route authoritative for no-LLM hosts.) Then orchestrate:
+**`guidance`** planner line. Each row names its plane (`vault` | `live` |
+`hybrid`), whether it needs the live org (`liveRequired`), what the tool answers
+(`answers`), and any component the call resolved from the question bound under
+that tool's own argument (`suggestedArgs`); `missingArgs` names required
+arguments you must still supply. A `gap` means the shortlist is a guess; an
+`entityEvidence.warning` means a named component is not in the vault. YOU
+decide which candidate(s) to run. Then orchestrate:
 
 1. **Freshness** — first org-touching turn → `sfi.health_check` (Step 1 below).
-2. **Resolve** — if `needsResolve`, run `sfi.resolve` and act on its disposition
-   (Step 2). Never guess a canonical ID.
-3. **Consent** — if `liveRequired` and the live plane is off, do NOT infer from
-   the vault. Offer to enable it once via the gateway:
+2. **Resolve** — if a row carries `missingArgs` (or the question names a
+   component with no `suggestedArgs`), run `sfi.resolve` and act on its
+   disposition (Step 2). Never guess a canonical ID.
+3. **Consent** — if the leading candidate is `liveRequired` and the live plane
+   is off, do NOT infer from the vault. Offer to enable it once via the gateway:
    `sfi.run_analysis { "name": "sfi.live_consent", "args": { "grant": true } }`
    (read-only, persists per org). Proceed live only after consent /
    `SFI_LIVE_PLANE_ENABLED=1`.
 4. **Execute** — pick the tool(s) from the `toolCandidates` (or follow
    `route_question.invoke`). Core tools: call directly. Non-core: call
-   `sfi.run_analysis` with `{ "name", "args" }`. When neither the candidates nor
-   the route place the question (`plane: 'unknown'` or a `gap`), say the
-   capability isn't built yet — the question is logged — and offer the closest
-   thing. Never fabricate.
+   `sfi.run_analysis` with `{ "name", "args" }`. When the candidates do not
+   place the question (a `gap`, or no row fits), say the capability isn't
+   built yet — the question is logged only with `logGap: true` — and offer
+   the closest thing. Never fabricate.
 5. **Render** — when a tool result carries a **`rendered`** field (live answers,
    `resolve`, `org_overview`, `route_question`), use it as the prose/table
    answer and keep the provenance + freshness stamp it carries.
@@ -178,10 +180,14 @@ memory.** Act on the disposition:
   > "I found several fields that look like 'email' — which did you mean:
   > `Email__c` on `Account`, `Email__c` on `Contact`, or
   > `Alternate_Email__c` on `Lead`?"
-- **`none`** — nothing matched confidently. **Do not fabricate a
-  match.** Offer the response's `nextActions`: pull fresh metadata from
-  the org (`/sfi-refresh`) in case the component is new, or stop /
-  rephrase. Name the last-refresh time so the user can judge staleness.
+- **`none`** — nothing matched confidently. `candidates` is empty; any
+  `lookalikes` are weak near-misses the resolver rejected, so you may say
+  "did you mean…" but never present one as the component asked about.
+  **Do not fabricate a match.** Offer the response's `nextActions`: pull
+  fresh metadata from the org (`sfi refresh`, or `/sfi-refresh` when the
+  plugin is installed) in case the component is new, or stop / rephrase.
+  The demo vault has no org behind it, so no refresh action is offered
+  there. Name the last-refresh time so the user can judge staleness.
 
 Resolution is always `heuristic` — a high score is string similarity,
 not proof. If the user already gave an exact canonical ID
@@ -210,7 +216,10 @@ Step 2 and resolve again.
 
 ### Step 4 — walk edges or subgraph
 
-For "what uses X" questions, call `sfi.find_component_usages` (core). For a
+For "what uses X" questions, call `sfi.find_component_usages` (core). Every
+referrer row carries `status` (active / inactive / obsolete / draft / unknown)
+and `summary.referrerStatus` counts them: say which writers are live, and never
+call an obsolete or draft Flow a collision with an active one. For a
 raw edge walk, run `sfi.get_edges` (one-hop) or `sfi.get_subgraph` (multi-hop) through `sfi.run_analysis`.
 Specify `direction` when the
 question is directional ("what uses X" = `direction: 'in'`).
@@ -303,8 +312,13 @@ reading the vault, not guessing from training data.
 Before you deliver any answer that names org artifacts, **build your prose
 ONLY from what the tools returned, then pass it through
 `sfi.synthesize_answer`** — `sfi.run_analysis` with
-`{ "name": "sfi.synthesize_answer", "args": { "question", "draft" } }`. It returns `hallucinatedIds`
-— every canonical ID in your draft that **no tool** returned. If
+`{ "name": "sfi.synthesize_answer", "args": { "input", "question", "draft" } }`,
+where `input` is **required**: the JSON the earlier `sfi.*` calls returned
+(several results go in one array). Without it there is nothing to ground
+against and the whole answer is `GROUNDING NOT VERIFIED`, so never call it
+before you have tool results. It returns `hallucinatedIds`
+— every canonical ID in your draft that **no tool** returned (an ID with a
+space in its name, such as a layout or profile, is matched whole). If
 `hallucinatedIds` is non-empty, **strip those IDs before answering**: an ID
 the tools never produced is a fabrication, even if it "looks right". This is
 the cascade contract — *tools → `synthesize_answer` → prose* — and it is how

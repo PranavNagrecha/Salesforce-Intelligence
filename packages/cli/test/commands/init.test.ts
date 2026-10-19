@@ -38,7 +38,8 @@ describe('runInit', () => {
         createdAt: string;
       };
       expect(config.targetOrg).toBe('foo');
-      expect(config.vaultRoot).toBe(root);
+      // Relative, so the committed config works from a teammate's clone.
+      expect(config.vaultRoot).toBe('.');
       expect(config.version).toMatch(/^\d+\.\d+\.\d+$/);
       expect(typeof config.createdAt).toBe('string');
       // ISO-8601 timestamp ends with `Z`.
@@ -49,10 +50,18 @@ describe('runInit', () => {
       expect(versionTxt).toMatch(/^\d+\.\d+\.\d+\n$/);
       expect(versionTxt).toBe(`${config.version}\n`);
 
-      // .gitignore created with the two entries.
-      const gitignore = await readFile(join(cwd, '.gitignore'), 'utf8');
+      // .gitignore: regenerable trees, plus everything under meta/ that holds
+      // org data (profile-name-map, annotations, demand queue, history and
+      // retrieval ledgers) and snapshots/. Only the three committable meta
+      // files are let back in.
+      const gitignore = (await readFile(join(cwd, '.gitignore'), 'utf8')).split('\n');
       expect(gitignore).toContain('org-kb/source/');
       expect(gitignore).toContain('org-kb/graph/');
+      expect(gitignore).toContain('org-kb/meta/*');
+      expect(gitignore).toContain('!org-kb/meta/manifest.json');
+      expect(gitignore).toContain('!org-kb/meta/config.json');
+      expect(gitignore).toContain('!org-kb/meta/version.txt');
+      expect(gitignore).toContain('org-kb/snapshots/');
       expect(result.value.gitignoreUpdated).toBe(true);
     } finally {
       await rm(cwd, { recursive: true, force: true });

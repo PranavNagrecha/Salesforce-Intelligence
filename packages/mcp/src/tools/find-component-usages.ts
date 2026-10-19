@@ -9,7 +9,10 @@
  *   1. GRAPH tier — incoming dependency edges to the target, EXCLUDING access
  *      grants (`grantedBy`) and structural parent edges (`parentOf`) because
  *      access is not usage. Grouped by referrer type, each edge carrying its
- *      `confidence` (declared / parsed / heuristic).
+ *      `confidence` (declared / parsed / heuristic) and the referrer's own
+ *      `status` (active / inactive / obsolete / draft / unknown, from the one
+ *      shared `referrerStatus` reading of the node's status/active property) —
+ *      an Obsolete Flow writer must never read like a second live writer.
  *   2. GREP supplement (`text-match` tier) — a literal search of the Apex source
  *      AND the frontend bundle source (LWC / Aura / Visualforce; bounded to the
  *      bundle directories) for the component's api name, catching references the
@@ -40,7 +43,13 @@ import type {
   Node,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
-import { getNodeById, listEdges, searchNodes, type GraphStore } from '@sf-intelligence/graph';
+import {
+  getNodeById,
+  listEdges,
+  listNodesByIds,
+  searchNodes,
+  type GraphStore,
+} from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -59,6 +68,7 @@ import {
 } from './flow-field-writers-scan.js';
 import { unmodeledReferrerKinds, unsearchedReferrerKinds } from './referrer-coverage.js';
 import { grepVaultSource, searchApexSourceHandler } from './search-apex-source.js';
+import { referrerStatus, type ReferrerStatus } from './soe-active.js';
 
 /**
  * Incoming edge types that are NOT usage — access grants + structural parentage.
@@ -204,6 +214,21 @@ export interface GraphReferrer {
   readonly referrerId: ComponentId;
   readonly viaEdge: string;
   readonly confidence: string;
+  /**
+   * The referrer's own run state (see `referrerStatus`): `obsolete` / `draft`
+   * Flows and `inactive` rules do not run, so two writers are not a collision
+   * when one of them is not live. `unknown` = no activation property on this
+   * type (Layout, LWC, ReportType) or no node row (phantom) — never a default.
+   */
+  readonly status: ReferrerStatus;
+}
+
+/** A supplemental Flow-writer row; `status` as on {@link GraphReferrer}. */
+export interface SupplementalWriterRow {
+  readonly flowId: ComponentId;
+  readonly apiName: string;
+  readonly mechanism: SupplementalFlowFieldWriter['mechanism'];
+  readonly status: ReferrerStatus;
 }
 
 /** Incoming referrers grouped by the referrer's component type. */
@@ -287,11 +312,7 @@ export interface SupplementalFlowWritersSection {
    * unresolvable one goes to {@link objectUnverified}. Capped at
    * `GRAPH_REFERRER_SAMPLE` rows — see {@link sampleTruncated}.
    */
-  readonly writers: readonly {
-    readonly flowId: ComponentId;
-    readonly apiName: string;
-    readonly mechanism: SupplementalFlowFieldWriter['mechanism'];
-  }[];
+  readonly writers: readonly SupplementalWriterRow[];
   /**
    * ROW count, not Flow count — the scan emits one row per matching
    * `<assignToReference>` / `<inputAssignments>` occurrence, so a Flow that
@@ -334,11 +355,7 @@ export interface SupplementalFlowWritersSection {
    * distinction was never drawn".
    */
   readonly objectUnverified: {
-    readonly writers: readonly {
-      readonly flowId: ComponentId;
-      readonly apiName: string;
-      readonly mechanism: SupplementalFlowFieldWriter['mechanism'];
-    }[];
+    readonly writers: readonly SupplementalWriterRow[];
     /** ROW count of unresolved-object name matches. */
     readonly count: number;
     /** DISTINCT Flows behind {@link count}. */
@@ -415,6 +432,11 @@ export interface FindComponentUsagesOutput {
     readonly graphReferrerCount: number;
     /** DISTINCT referring components across all types — the human-facing number. */
     readonly distinctReferrerCount: number;
+    /**
+     * DISTINCT referrers per run state (sums to `distinctReferrerCount`), so
+     * "N writers" can be weighed by how many of them are live.
+     */
+    readonly referrerStatus: Readonly<Record<ReferrerStatus, number>>;
     readonly grepMatchCount: number;
     /**
      * DISTINCT Flows found writing this field by the supplemental source scan
@@ -622,6 +644,19 @@ const isSelfMatch = (matchPath: string, ownSourcePath: string): boolean => {
   return false;
 };
 
+/** One batched node read; an id with no node row (phantom) reads `unknown`. */
+const statusByIds = async (
+  graph: GraphStore,
+  ids: readonly ComponentId[],
+): Promise<Result<(id: string) => ReferrerStatus, McpError>> => {
+  const nodes = await listNodesByIds(graph, ids);
+  if (!nodes.ok) {
+    return err({ kind: 'internal', message: `graph query failed: ${nodes.error.message}` });
+  }
+  const byId = new Map(nodes.value.map((n) => [n.id as string, referrerStatus(n)]));
+  return ok((id) => byId.get(id) ?? 'unknown');
+};
+
 export const findComponentUsagesHandler = async (
   ctx: Context,
   input: FindComponentUsagesInput,
@@ -694,11 +729,27 @@ export const findComponentUsagesHandler = async (
   // stay answerable — surfaced in the separate `grantedBy` section below.
   const grantEdges = incomingEdges.filter((e) => e.edgeType === 'grantedBy');
 
+  // Every distinct referrer's status rides on its rows, and the summary counts
+  // referrers per status — never a defaulted active.
+  const referrerIds = [...new Set(usageEdges.map((e) => e.fromId))];
+  const statusRes = await statusByIds(ctx.graph, referrerIds);
+  if (!statusRes.ok) return statusRes;
+  const statusOf = statusRes.value;
+  const referrerStatusCounts: Record<ReferrerStatus, number> = {
+    active: 0, inactive: 0, obsolete: 0, draft: 0, unknown: 0,
+  };
+  for (const id of referrerIds) referrerStatusCounts[statusOf(id)] += 1;
+
   const byType = new Map<string, GraphReferrer[]>();
   for (const e of usageEdges) {
     const rt = typeOf(e.fromId);
     const list = byType.get(rt) ?? [];
-    list.push({ referrerId: e.fromId, viaEdge: e.edgeType, confidence: e.confidence });
+    list.push({
+      referrerId: e.fromId,
+      viaEdge: e.edgeType,
+      confidence: e.confidence,
+      status: statusOf(e.fromId),
+    });
     byType.set(rt, list);
   }
   const graphReferrers: ReferrerGroup[] = [...byType.entries()]
@@ -825,16 +876,23 @@ export const findComponentUsagesHandler = async (
   }
   const distinctOf = (rows: readonly SupplementalFlowFieldWriter[]): number =>
     new Set(rows.map((r) => r.componentId)).size;
-  const toRow = (w: SupplementalFlowFieldWriter): {
-    flowId: ComponentId;
-    apiName: string;
-    mechanism: SupplementalFlowFieldWriter['mechanism'];
-  } => ({ flowId: w.componentId, apiName: w.apiName, mechanism: w.mechanism });
-
   let supplementalFlowWriters: SupplementalFlowWritersSection | undefined;
   if (flowWriterScan !== null) {
     const confirmedSample = confirmedWriters.slice(0, GRAPH_REFERRER_SAMPLE);
     const unverifiedSample = unverifiedWriters.slice(0, GRAPH_REFERRER_SAMPLE);
+    // The scan reads Flow SOURCE and knows nothing of status; the sampled rows
+    // get it from their nodes so an Obsolete writer never reads as live.
+    const flowStatus = await statusByIds(
+      ctx.graph,
+      [...confirmedSample, ...unverifiedSample].map((w) => w.componentId),
+    );
+    if (!flowStatus.ok) return flowStatus;
+    const toRow = (w: SupplementalFlowFieldWriter): SupplementalWriterRow => ({
+      flowId: w.componentId,
+      apiName: w.apiName,
+      mechanism: w.mechanism,
+      status: flowStatus.value(w.componentId),
+    });
     supplementalFlowWriters = {
       tier: 'source-scan',
       writers: confirmedSample.map(toRow),
@@ -906,7 +964,10 @@ export const findComponentUsagesHandler = async (
   const boundaries: string[] = [
     'Graph referrers are the modeled incoming dependency edges (access grants `grantedBy` and structural `parentOf` are EXCLUDED — access is not usage); each carries edge `confidence` (declared / parsed / heuristic).',
     `\`graphReferrerCount\` and each group's \`count\` are EDGE counts, not component counts: one referrer contributes one edge per relationship it has to the target (a Flow that reads, writes AND triggers on an object counts 3). ${graphReferrerCount} edge(s) here come from ${distinctReferrerCount} distinct component(s) — quote \`distinctReferrerCount\` / \`distinctReferrers\` to a human, and note the 25-row \`sample\` cap is on ROWS, so a group with multi-edge referrers shows fewer than 25 distinct components.`,
-    'The grep supplement is a literal text match on the api name across Apex AND frontend bundle source — LWC, Aura, Visualforce ($Label / $Resource / @salesforce module references) — (`text-match` tier): it can OVER-match (a substring / a different component sharing the name) and UNDER-match (dynamically built references). Treat it as leads, not proof.',
+    `Referrer status, counted over the ${distinctReferrerCount} distinct component(s) from each referrer's own status/active property: ${referrerStatusCounts.active} active, ${referrerStatusCounts.inactive} inactive, ${referrerStatusCounts.obsolete} obsolete, ${referrerStatusCounts.draft} draft, ${referrerStatusCounts.unknown} unknown. An obsolete or draft Flow and an inactive rule do not run, so weigh "N writers" by the active ones; \`unknown\` is a type with no activation flag (Layout, LWC, ReportType, a field) or a phantom referrer, never a defaulted active.`,
+    grepRan
+      ? 'The grep supplement is a literal text match on the api name across Apex AND frontend bundle source — LWC, Aura, Visualforce ($Label / $Resource / @salesforce module references) — (`text-match` tier): it can OVER-match (a substring / a different component sharing the name) and UNDER-match (dynamically built references). Treat it as leads, not proof.'
+      : 'The grep supplement did not run (`includeGrep: false`, or an api name under 3 characters), so `grepMatchCount: 0` is an UNCHECKED zero — the graph tier is the only evidence here.',
   ];
   if (isLabel) {
     boundaries.push(
@@ -940,7 +1001,7 @@ export const findComponentUsagesHandler = async (
     const u = supplementalFlowWriters.objectUnverified;
     if (supplementalFlowWriters.count > 0) {
       boundaries.push(
-        `${supplementalFlowWriters.distinctWriters} Flow(s) write this field through a path that mints no graph edge — an SObject-variable \`<assignToReference>\`, or a \`<recordCreates>\`/\`<recordUpdates>\` \`<inputAssignments>\` block whose own \`<object>\`/\`<inputReference>\` RESOLVES TO \`${fieldParts?.object ?? targetApiName}\` — reconstructed from Flow source by \`flow-field-writers-scan\` (the same scan \`sfi.safe_to_delete_field\` runs per field), across ${supplementalFlowWriters.count} write site(s): \`count\` is a ROW count, \`distinctWriters\` is the Flow count. This is still SOURCE PATTERN MATCHING, not an execution proof, and it does NOT partition Active automation from Obsolete/Draft Flows — use \`sfi.safe_to_delete_field\` or \`sfi.why_field_changed\` for the runnable/status split before acting.`,
+        `${supplementalFlowWriters.distinctWriters} Flow(s) write this field through a path that mints no graph edge — an SObject-variable \`<assignToReference>\`, or a \`<recordCreates>\`/\`<recordUpdates>\` \`<inputAssignments>\` block whose own \`<object>\`/\`<inputReference>\` RESOLVES TO \`${fieldParts?.object ?? targetApiName}\` — reconstructed from Flow source by \`flow-field-writers-scan\` (the same scan \`sfi.safe_to_delete_field\` runs per field), across ${supplementalFlowWriters.count} write site(s): \`count\` is a ROW count, \`distinctWriters\` is the Flow count. This is still SOURCE PATTERN MATCHING, not an execution proof; each row's \`status\` (from the Flow's own node) says whether that writer is active, obsolete or draft.`,
       );
     } else if (u.count === 0 && !supplementalFlowWriters.truncated) {
       boundaries.push(
@@ -1043,6 +1104,7 @@ export const findComponentUsagesHandler = async (
       summary: {
         graphReferrerCount,
         distinctReferrerCount,
+        referrerStatus: referrerStatusCounts,
         grepMatchCount: grepMatches.length,
         supplementalFlowWriterCount,
         supplementalFlowWriterUnverifiedCount:

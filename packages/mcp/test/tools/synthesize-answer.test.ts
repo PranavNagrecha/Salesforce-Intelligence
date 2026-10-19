@@ -147,8 +147,28 @@ describe('synthesizeAnswerHandler', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.citations).toEqual([]);
-    expect(r.value.data.caveats).toEqual([]);
     expect(r.value.data.bullets).toEqual([]);
+    // PROSE-FROM-ROWS: with no evidence the headline is the GROUNDING NOT
+    // VERIFIED block, never "Grounded in the supplied tool output: 0 ...".
+    expect(r.value.data.summary).toMatch(/^GROUNDING NOT VERIFIED/);
+    expect(r.value.data.summary).not.toContain('Grounded in');
+    expect(r.value.data.summary).toContain('pass the prior sfi.* tool result(s) as `input`');
+    expect(r.value.data.caveats.filter((c) => /GROUNDING NOT VERIFIED/.test(c))).toHaveLength(1);
+  });
+
+  it('a bare call is rejected by the schema: `input` is required', () => {
+    expect(synthesizeAnswerInputSchema.safeParse({}).success).toBe(false);
+    expect(synthesizeAnswerInputSchema.safeParse({ question: 'q' }).success).toBe(false);
+    expect(synthesizeAnswerInputSchema.safeParse({ input: {} }).success).toBe(true);
+    expect(synthesizeAnswerInputSchema.safeParse({ input: null }).success).toBe(true);
+  });
+
+  it('an empty {} input with a question keeps the question but not the grounded headline', async () => {
+    const r = await synthesizeAnswerHandler(ctx, { input: {}, question: 'Is X dead?' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.summary).toMatch(/^Q: Is X dead\? — GROUNDING NOT VERIFIED/);
+    expect(r.value.data.summary).not.toContain('Grounded in');
   });
 
   // 0.1.17 FAIL-CLOSED grounding. End-user repro: a false draft with NO `input`
@@ -168,6 +188,7 @@ describe('synthesizeAnswerHandler', () => {
     expect(
       r.value.data.caveats.some((c) => /GROUNDING NOT VERIFIED/.test(c)),
     ).toBe(true);
+    expect(r.value.data.summary).not.toContain('Grounded in');
   });
 
   it('fails closed: a draft with an empty {} or [] input is never grounded', async () => {
@@ -1795,5 +1816,101 @@ describe('synthesizeAnswerHandler — cap honesty', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.caveats.filter((c) => c === dup).length).toBe(1);
+  });
+});
+
+// =============================================================================
+// PROSE-FROM-ROWS (5): canonical ids whose api name contains a space —
+// `Layout:Case.Some Layout`, `Profile:Custom Sales Profile` — were rejected by
+// the no-whitespace id regexes, so a draft that copied them verbatim out of a
+// tool result was accused of hallucinating them (273 of 274 layouts on a real
+// vault). The vault's own id index now says what an id is; the regex only
+// covers ids the index does not hold.
+// =============================================================================
+describe('synthesize_answer — ids with spaces are recognised through the vault id index', () => {
+  let sDir: string;
+  let sStore: GraphStore;
+  let sCtx: Context;
+
+  const SOME_LAYOUT = 'Layout:Case.Some Layout';
+  const OTHER_LAYOUT = 'Layout:Case.Other Layout';
+  const SALES_PROFILE = 'Profile:Custom Sales Profile';
+
+  const node = (id: string, type: Node['type'], apiName: string): Node => ({
+    id: id as Node['id'],
+    type,
+    apiName,
+    label: null,
+    parentId: null,
+    sourcePath: 'unused',
+    lastModifiedDate: null,
+    lastModifiedBy: null,
+    apiVersion: null,
+    properties: {},
+  });
+
+  beforeAll(async () => {
+    sDir = mkdtempSync(join(tmpdir(), 'sfi-mcp-synth-spaced-'));
+    const opened = await openGraph(join(sDir, 'g.duckdb'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    sStore = opened.value;
+    const seed: ExtractionResult = {
+      nodes: [
+        node('CustomObject:Case', 'CustomObject', 'Case'),
+        node(SOME_LAYOUT, 'Layout', 'Case.Some Layout'),
+        node(OTHER_LAYOUT, 'Layout', 'Case.Other Layout'),
+        node(SALES_PROFILE, 'Profile', 'Custom Sales Profile'),
+      ],
+      edges: [],
+    };
+    const imp = await importExtractionResults(sStore, [seed]);
+    if (!imp.ok) throw new Error(`seed import failed: ${imp.error.message}`);
+    sCtx = { vaultRoot: sDir, manifest: FIXTURE_MANIFEST, graph: sStore };
+  });
+
+  afterAll(async () => {
+    await closeGraph(sStore);
+    rmSync(sDir, { recursive: true, force: true });
+  });
+
+  const input = {
+    layouts: [{ id: SOME_LAYOUT, object: 'CustomObject:Case' }],
+    visibleTo: SALES_PROFILE,
+  };
+
+  it('cites a spaced id present in the input and grounds a draft that names it', async () => {
+    const r = await synthesizeAnswerHandler(sCtx, {
+      input,
+      draft: `The field sits on ${SOME_LAYOUT} and is visible to ${SALES_PROFILE}.`,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const ids = r.value.data.citations.map((c) => c.id);
+    expect(ids).toContain(SOME_LAYOUT);
+    expect(ids).toContain(SALES_PROFILE);
+    expect(r.value.data.citations.find((c) => c.id === SOME_LAYOUT)?.apiName).toBe('Case.Some Layout');
+    expect(r.value.data.groundedIds).toEqual([SOME_LAYOUT, SALES_PROFILE]);
+    expect(r.value.data.hallucinatedIds).toEqual([]);
+  });
+
+  it('flags a spaced id the vault knows but the input never carried, by its FULL id', async () => {
+    const r = await synthesizeAnswerHandler(sCtx, {
+      input,
+      draft: `It is also placed on ${OTHER_LAYOUT}.`,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.hallucinatedIds).toEqual([OTHER_LAYOUT]);
+    expect(r.value.data.groundedIds).toEqual([]);
+  });
+
+  it('still flags an id-shaped token the vault does not know (regex fallback, unchanged)', async () => {
+    const r = await synthesizeAnswerHandler(sCtx, {
+      input,
+      draft: 'See Layout:Case.Ghost Layout and Flow:Ghost.',
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.hallucinatedIds).toEqual(['Flow:Ghost', 'Layout:Case.Ghost']);
   });
 });

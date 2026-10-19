@@ -10,10 +10,13 @@
  *   - `dispatchesAsync` → enqueued Queueable / Schedulable / Batchable
  *     / `@future` job
  *   - `sendsEmail` → email template invocation
+ *   - `references` → `NamedCredential:` (the `callout:{NamedCredential}`
+ *     endpoint literal the Apex extractor mints) → callout
  *
  * (`callsApex` edges drive the reachability walk but are NOT surfaced as
- * effects — the caller wants the EFFECTS, not the call chain; HTTP callouts
- * are out of scope per the disclosure.)
+ * effects — the caller wants the EFFECTS, not the call chain. A callout to a
+ * literal or runtime-built URL mints no edge and is still unseen; the
+ * disclosure says so.)
  *
  * **Composition model**:
  *   1. BFS downstream over `callsApex` from the root, bounded by
@@ -22,12 +25,11 @@
  *      themselves are not surfaced — the caller wants the EFFECTS,
  *      not the chain).
  *   2. For each reachable class, list outgoing `writesTo`,
- *      `dispatchesAsync`, and `sendsEmail` edges. Each one becomes a
- *      `DownstreamEffect` entry categorised by edgeType.
+ *      `dispatchesAsync`, `sendsEmail` and NamedCredential `references`
+ *      edges. Each one becomes a `DownstreamEffect` entry.
  *   3. Categorisation: `field-write` for `writesTo`, `async-dispatch`
- *      for `dispatchesAsync`, `email` for `sendsEmail`. Callouts are
- *      NOT a separate edge type (no `Apex.Http.send` extractor
- *      yet); the disclosure surfaces this gap explicitly.
+ *      for `dispatchesAsync`, `email` for `sendsEmail`, `callout` for a
+ *      `references` edge whose target is a `NamedCredential:`.
  *
  * **CustomObject root (RTG-04)**:
  *   When a `CustomObject:` id is passed instead of an Apex id, the tool
@@ -59,6 +61,7 @@
 import type {
   ComponentId,
   ComponentType,
+  Edge,
   EdgeType,
   McpError,
   McpResponse,
@@ -105,18 +108,13 @@ const TRIGGERS_ON_AUTOMATION_TYPES = new Set<ComponentType>([
 const PARENTED_AUTOMATION_TYPES = new Set<ComponentType>(['ApprovalProcess']);
 
 /**
- * Verbatim honesty disclosure. Method-level call resolution is
- * deferred; callouts are out of scope until a later version ships an
- * `Apex.Http.send` recognizer.
- */
-/**
- * Appended to the disclosure when the effects list is EMPTY
- * with Apex email, HTTP callouts,
- * and record deletes invisible to the three modeled effect edges, an empty
- * list is "no MODELED effects" — never "this code has no side effects".
+ * Appended to the disclosure when the effects list is EMPTY: with Apex email,
+ * literal-URL callouts and record deletes invisible to the modeled effect
+ * edges, an empty list is "no MODELED effects" — never "this code has no side
+ * effects".
  */
 const EMPTY_EFFECTS_NOTE =
-  ' EMPTY effects list = no MODELED effects found — NOT "this code has no side effects": Apex email (Messaging.sendEmail), HTTP callouts, and DML deletes are all invisible to the modeled effect edges, so a class doing any of those reports zero effects here. Read the class source before concluding it is side-effect-free.';
+  ' EMPTY effects list = no MODELED effects found — NOT "this code has no side effects": Apex email (Messaging.sendEmail), HTTP callouts to a literal or runtime-built URL, and DML deletes are all invisible to the modeled effect edges, so a class doing any of those reports zero effects here. Read the class source before concluding it is side-effect-free.';
 
 /**
  * Appended whenever the `callsApex` BFS exits with classes still unexpanded at
@@ -150,13 +148,14 @@ const unresolvedEffectsNote = (count: number): string =>
   ' They are EXCLUDED from `effects` and from every `summary` counter, so treat the counts as a LOWER BOUND.';
 
 const DOWNSTREAM_DISCLOSURE =
-  'downstream_effects walks downstream callsApex from the root. Optional `method` narrows the root\'s DIRECT outgoing calls to edges whose `methods[]` (P4-C5) include that target method — e.g. `method: "deleteRecord"` follows only callees invoked via `deleteRecord` from the root class; deeper hops are unfiltered (their methods belong to other targets). The CALLER-side method (which method of the root body performs each call) is available on AST-extracted callsApex edges via `callerMethods` (surfaced by call_graph) but downstream_effects does NOT surface it here. HTTP callouts (Http.send, HTTPRequest invocation) are NOT recognized as effects. Of the three effect edges, only field writes and async dispatch originate from Apex; the `sendsEmail` edge is DECLARATIVE-only (WorkflowRule / ApprovalProcess / AutoResponseRule / AssignmentRule / EscalationRule → EmailTemplate), so Apex email via `Messaging.sendEmail()` is INVISIBLE here — an Apex-rooted walk reports email:0 even for a class that sends email. DML record deletes are likewise not modeled. The async-dispatch category now includes CLASS-GRANULAR `@future` edges (CR-CAP-09, `properties.dispatchMechanism: "future"`, `granularity: "class"`, heuristic): they fire when the called class has SOME `@future` method, not necessarily the invoked one, so async-dispatch may OVER-attribute a `@future` hop to a synchronous call. Cross-check the class source for `Messaging.sendEmail`, deletes, and callouts before treating the effect list as complete.';
+  'downstream_effects walks downstream callsApex from the root. Optional `method` narrows the root\'s DIRECT outgoing calls to edges whose `methods[]` (P4-C5) include that target method — e.g. `method: "deleteRecord"` follows only callees invoked via `deleteRecord` from the root class; deeper hops are unfiltered (their methods belong to other targets). The CALLER-side method (which method of the root body performs each call) is available on AST-extracted callsApex edges via `callerMethods` (surfaced by call_graph) but downstream_effects does NOT surface it here. A `callout` effect is a `callout:{NamedCredential}` endpoint literal in the class source (the `references` edge to the NamedCredential, heuristic); an HTTP callout to a literal or runtime-built URL mints no edge and is NOT listed. Of the four effect categories, field writes, async dispatch and callouts originate from Apex; the `sendsEmail` edge is DECLARATIVE-only (WorkflowRule / ApprovalProcess / AutoResponseRule / AssignmentRule / EscalationRule → EmailTemplate), so Apex email via `Messaging.sendEmail()` is INVISIBLE here — an Apex-rooted walk reports email:0 even for a class that sends email. DML record deletes are likewise not modeled. The async-dispatch category now includes CLASS-GRANULAR `@future` edges (CR-CAP-09, `properties.dispatchMechanism: "future"`, `granularity: "class"`, heuristic): they fire when the called class has SOME `@future` method, not necessarily the invoked one, so async-dispatch may OVER-attribute a `@future` hop to a synchronous call. Cross-check the class source for `Messaging.sendEmail`, deletes, and literal-URL callouts before treating the effect list as complete.';
 
 /** Side-effect categories surfaced in the output. */
 export type DownstreamEffectCategory =
   | 'field-write'
   | 'async-dispatch'
-  | 'email';
+  | 'email'
+  | 'callout';
 
 /**
  * Zod schema for the `sfi.downstream_effects` tool input.
@@ -218,6 +217,7 @@ export interface DownstreamEffectsSummary {
   readonly fieldWrite: number;
   readonly asyncDispatch: number;
   readonly email: number;
+  readonly callout: number;
 }
 
 /**
@@ -399,11 +399,14 @@ const collectReachableClasses = async (
   return ok({ visited, expanded, unexplored: new Set(frontier) });
 };
 
-/** Translate an edge type into its effect category, or null when it isn't a tracked effect. */
-const categoryOf = (edgeType: EdgeType): DownstreamEffectCategory | null => {
-  if (edgeType === 'writesTo') return 'field-write';
-  if (edgeType === 'dispatchesAsync') return 'async-dispatch';
-  if (edgeType === 'sendsEmail') return 'email';
+/** Translate an edge into its effect category, or null when it isn't a tracked effect. */
+const categoryOf = (edge: Edge): DownstreamEffectCategory | null => {
+  if (edge.edgeType === 'writesTo') return 'field-write';
+  if (edge.edgeType === 'dispatchesAsync') return 'async-dispatch';
+  if (edge.edgeType === 'sendsEmail') return 'email';
+  // The Apex extractor's `callout:{NamedCredential}` reference; any other
+  // `references` target (a label, a field) is a dependency, not an effect.
+  if (edge.edgeType === 'references' && edge.toId.startsWith('NamedCredential:')) return 'callout';
   return null;
 };
 
@@ -444,7 +447,7 @@ const collectEffectsForClasses = async (
   const targetIds: ComponentId[] = [];
   for (const entry of entries) {
     for (const edge of edgeBatch.value.get(entry.id) ?? []) {
-      if (categoryOf(edge.edgeType) === null) continue;
+      if (categoryOf(edge) === null) continue;
       targetIds.push(edge.toId);
     }
   }
@@ -456,7 +459,7 @@ const collectEffectsForClasses = async (
   const unresolved: DownstreamEffect[] = [];
   for (const entry of entries) {
     for (const edge of edgeBatch.value.get(entry.id) ?? []) {
-      const category = categoryOf(edge.edgeType);
+      const category = categoryOf(edge);
       if (category === null) continue;
       const target = targetById.get(edge.toId);
       // Sparse-graph / unresolved-target case: the apex-scanner emits
@@ -554,12 +557,14 @@ const buildSummary = (
   let fieldWrite = 0;
   let asyncDispatch = 0;
   let email = 0;
+  let callout = 0;
   for (const e of effects) {
     if (e.category === 'field-write') fieldWrite += 1;
     else if (e.category === 'async-dispatch') asyncDispatch += 1;
     else if (e.category === 'email') email += 1;
+    else if (e.category === 'callout') callout += 1;
   }
-  return { fieldWrite, asyncDispatch, email };
+  return { fieldWrite, asyncDispatch, email, callout };
 };
 
 /**
@@ -588,8 +593,8 @@ const resolveApiNames = async (
 /**
  * The `sfi.downstream_effects` MCP tool. Walks downstream `callsApex`
  * from the root class, then surfaces the writesTo / dispatchesAsync /
- * sendsEmail edges of every reachable class as categorised side
- * effects.
+ * sendsEmail / NamedCredential-references edges of every reachable class
+ * as categorised side effects.
  *
  * When given a `CustomObject:` root (RTG-04), discovers automation via
  * `triggersOn` and `parentOf`, collects declarative effects per firer,

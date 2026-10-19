@@ -17,7 +17,10 @@
  *   3. **System god-mode** — `ViewAllData` / `ModifyAllData` on a profile
  *      or permission set (read / modify every record of every object).
  *   4. **Sharing rules** — the `sharedWith` targets (roles / groups) of
- *      the owner and criteria sharing rules on this object. When a
+ *      the owner and criteria sharing rules on this object. A criteria /
+ *      guest / territory row's `detail` quotes the rule's filter through
+ *      `renderSharingPredicate` (`criteriaItems` substituted into any
+ *      `booleanFilter` custom logic). When a
  *      target is a public Group, its members (walked transitively through
  *      nested groups via `hasMember`) are each listed as their own granter
  *      row, not just the group; a dangling member (e.g. a Territory) is listed
@@ -90,6 +93,7 @@ import { paginateLegacy } from './page-cursor.js';
 import { toolLocalPayloadBudgetBytes } from './response-budget.js';
 import { expandRoleSubordinates, ROLE_PREFIX } from './role-hierarchy.js';
 import { clampedNodeScanLimit, scanHitCap, scanTruncationNote } from './scan-cap.js';
+import { renderSharingPredicate } from './sharing-predicate.js';
 import {
   SHARING_USER_ENUMERATION_NOT_AVAILABLE,
   USER_ASSIGNMENT_NOT_IN_VAULT,
@@ -921,8 +925,7 @@ export const whoCanAccessObjectHandler = async (
             ? 'territory-sharing-rule'
             : 'owner-sharing-rule';
     // Criteria / guest / territory rules carry a predicate; owner rules do not.
-    const predicate =
-      ruleType === 'owner' ? '' : stringProp(rule.properties, 'booleanFilter');
+    const predicate = ruleType === 'owner' ? '' : renderSharingPredicate(rule);
     const siteName = ruleType === 'guest' ? stringProp(rule.properties, 'siteName') : '';
     const targetsResult = await listEdges(ctx.graph, rule.id, {
       direction: 'out',
@@ -947,11 +950,11 @@ export const whoCanAccessObjectHandler = async (
         sourceRuleId: rule.id,
         detail:
           ruleType === 'criteria'
-            ? `criteria sharing rule ${rule.id} (${accessLevel}) shares records matching \`${predicate || '(predicate not extracted)'}\``
+            ? `criteria sharing rule ${rule.id} (${accessLevel}) shares records matching \`${predicate}\``
             : ruleType === 'guest'
-              ? `guest sharing rule ${rule.id} (${accessLevel}) shares records matching \`${predicate || '(predicate not extracted)'}\` with the${siteName ? ` '${siteName}'` : ''} Experience Cloud site guest user (record-level + requester context required)`
+              ? `guest sharing rule ${rule.id} (${accessLevel}) shares records matching \`${predicate}\` with the${siteName ? ` '${siteName}'` : ''} Experience Cloud site guest user (record-level + requester context required)`
               : ruleType === 'territory' || ruleType === 'territoryGroup'
-                ? `${ruleType} sharing rule ${rule.id} (${accessLevel}) shares records matching \`${predicate || '(predicate not extracted)'}\` by territory assignment (record-level + territory context required)`
+                ? `${ruleType} sharing rule ${rule.id} (${accessLevel}) shares records matching \`${predicate}\` by territory assignment (record-level + territory context required)`
                 : `owner sharing rule ${rule.id} (${accessLevel}) shares this user/group's owned records`,
       });
       // A rule shared with a Group also reaches every member that

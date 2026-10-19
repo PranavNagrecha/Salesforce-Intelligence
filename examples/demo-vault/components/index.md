@@ -1,12 +1,12 @@
 ---
 generatedBy: sf-intelligence-vault-index
-totalComponents: 141
+totalComponents: 142
 typesIndexed: 42
 ---
 
 # SfIntelligence vault
 
-This is the index for the Salesforce org's knowledge vault. 141 components across 42 types are indexed below.
+This is the index for the Salesforce org's knowledge vault. 142 components across 42 types are indexed below.
 
 ## ApexClass (5)
 
@@ -16,8 +16,9 @@ This is the index for the Salesforce org's knowledge vault. 141 components acros
 - [`ApexClass:ProjectTriggerHandler`](./ApexClass/ProjectTriggerHandler.md) — ProjectTriggerHandler
 - [`ApexClass:ProjectTriggerHandlerTest`](./ApexClass/ProjectTriggerHandlerTest.md) — ProjectTriggerHandlerTest
 
-## ApexTrigger (1)
+## ApexTrigger (2)
 
+- [`ApexTrigger:Demo_ProjectChangeTrigger`](./ApexTrigger/Demo_ProjectChangeTrigger.md) — Demo_ProjectChangeTrigger
 - [`ApexTrigger:ProjectTrigger`](./ApexTrigger/ProjectTrigger.md) — ProjectTrigger
 
 ## ApprovalProcess (1)

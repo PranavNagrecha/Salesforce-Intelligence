@@ -33,6 +33,15 @@
  *     are NEVER classified as unused regardless of how many callers they
  *     have. Tests are independently valuable; flagging an uncalled test
  *     as "unused" would be a misleading signal.
+ *   - ApexClass liveness: a zero-inbound class is judged by the SAME
+ *     predicate `find_dead_code` uses (`entryKindsFor` +
+ *     `staticallyReferencedApex` in `apex-reachability.ts`). A REST resource,
+ *     Aura/Invocable class, Queueable/Batchable/Schedulable job, framework
+ *     subclass, Callable / namespaced-interface implementation (registered in
+ *     a Custom Metadata cell or managed code) or a class named only by a
+ *     static type reference has zero inbound edges BY CONSTRUCTION; it is
+ *     reported under `uncertain` with its reasons, never as unused, and never
+ *     counted in `byType`.
  *   - Entry-point special-case: Flows, ApexTriggers, ValidationRules, and
  *     WorkflowRules fire on their own (DML / schedule / platform event) via
  *     OUTGOING `triggersOn` / `firesWhen` edges, so the incoming-edge
@@ -57,7 +66,8 @@
  * components are "definitively unused". Each entry carries a per-type
  * `invisibleReferencesNote` that names the categories of reference
  * the v1.x extractors cannot see — dynamic SOQL (`SELECT
- * {fieldName}`), reflective Apex (`Type.forName`), permission-set
+ * {fieldName}`), reflective Apex (`Type.forName` on a variable; a literal
+ * or Custom Metadata-fed operand IS an edge), permission-set
  * assignments (user-level, not metadata), sub-flow references via
  * `Flow.Interview.createInterview`, etc. A `risky` verdict for these
  * tools always means "spot-check before deleting".
@@ -96,6 +106,11 @@ import { z } from 'zod';
 
 import type { Context } from '../server.js';
 
+import {
+  type ApexLivenessReason,
+  entryKindsFor,
+  staticallyReferencedApex,
+} from './apex-reachability.js';
 import {
   assertUsageCompleteness,
   offlineTrust,
@@ -314,6 +329,19 @@ export interface UnusedComponent {
   readonly invisibleReferencesNote: string;
 }
 
+/**
+ * A zero-inbound ApexClass the shared liveness predicate rescued. The same
+ * class is `uncertain` in `find_dead_code`; `reasons` are its entry-point /
+ * registration kinds, or `static-type-usage` for a grep hit.
+ */
+export interface UncertainComponent {
+  readonly id: ComponentId;
+  readonly type: ComponentType;
+  readonly apiName: string;
+  readonly label: string;
+  readonly reasons: readonly ApexLivenessReason[];
+}
+
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface UnusedComponentsOutput {
   /**
@@ -329,6 +357,12 @@ export interface UnusedComponentsOutput {
     readonly mode: 'default' | 'scoped';
   };
   readonly components: readonly UnusedComponent[];
+  /**
+   * ApexClass rows with zero inbound usage edges that the liveness predicate
+   * shared with `find_dead_code` rescued (see {@link UncertainComponent}).
+   * Present only when non-empty; never counted in `byType`.
+   */
+  readonly uncertain?: readonly UncertainComponent[];
   /** Per-type unused-instance counts (FULL counts, not truncated). */
   readonly byType: Readonly<Record<string, number>>;
   /** True when the global slice was trimmed to `limit`. */
@@ -491,7 +525,7 @@ const UNUSED_REQUIRED_COVERAGE: readonly string[] = [
 const INVISIBLE_REFERENCES_NOTES: Readonly<Record<string, string>> =
   Object.freeze({
     ApexClass:
-      'Dynamic Apex (Type.forName), reflective dispatch, and Tooling API references are invisible to the v1.x scanner; spot-check before deleting.',
+      'A `Type.forName` with a literal class name or fed from a Custom Metadata cell IS a heuristic usage edge (`mechanism: Type.forName`); `Type.forName` on any other variable (counted on the dispatcher as `unresolvedDynamicDispatch`), reflective dispatch, and Tooling API references are invisible; spot-check before deleting.',
     ApexTrigger:
       'Listed only because its status is Inactive — active triggers are excluded since they fire on every DML event regardless of incoming references. An inactive trigger does not execute, but confirm it is not pending reactivation before deleting.',
     CustomField:
@@ -803,6 +837,8 @@ const scanType = async (
   Result<
     {
       readonly components: readonly UnusedComponent[];
+      /** ApexClass only: zero-inbound rows the shared liveness predicate rescued. */
+      readonly uncertain: readonly UncertainComponent[];
       /**
        * How many instances of this type exist IN THE VAULT (before any object
        * scope). Zero means NOTHING WAS SCANNED, so a `byType` count of 0 is an
@@ -871,6 +907,7 @@ const scanType = async (
   }
 
   const out: UnusedComponent[] = [];
+  const uncertain: UncertainComponent[] = [];
   let analyticsExcluded = 0;
   for (const node of nodes) {
     // Test-class exemption per the spec.
@@ -886,6 +923,14 @@ const scanType = async (
       unused = isUnusedFromEdges(incomingByNode.get(node.id) ?? []);
     }
     if (!unused) continue;
+    // DEAD-ONE-PREDICATE: the kinds `find_dead_code` maps to `uncertain`.
+    if (type === 'ApexClass') {
+      const reasons = entryKindsFor(node, { isRoot: true });
+      if (reasons.length > 0) {
+        uncertain.push({ id: node.id, type: node.type, apiName: node.apiName, label: node.label ?? '', reasons });
+        continue;
+      }
+    }
     // UNUSED-FIELD-IGNORES-THE-REPORT-INDEX-ITS-SIBLING-READS. The fold does
     // not emit an analytics -> field EDGE, so the incoming-edge verdict above
     // is structurally blind to report/dashboard usage; the stamp on the node
@@ -903,8 +948,19 @@ const scanType = async (
       invisibleReferencesNote: note,
     });
   }
+  // DEAD-ONE-PREDICATE, second half: the static type-name grep find_dead_code
+  // runs before certifying death. Only the zero-inbound classes are grepped.
+  const staticallyUsed =
+    type === 'ApexClass'
+      ? await staticallyReferencedApex(ctx, out.map((c) => ({ componentId: c.id, apiName: c.apiName })))
+      : new Map<ComponentId, string>();
+  for (const c of out) {
+    if (!staticallyUsed.has(c.id)) continue;
+    uncertain.push({ id: c.id, type: c.type, apiName: c.apiName, label: c.label, reasons: ['static-type-usage'] });
+  }
   return ok({
-    components: [...out].sort(compareById),
+    components: out.filter((c) => !staticallyUsed.has(c.id)).sort(compareById),
+    uncertain: uncertain.sort((a, b) => (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)),
     vaultInstances: allNodes.length,
     analyticsExcluded,
   });
@@ -1053,6 +1109,7 @@ export const unusedComponentsHandler = async (
   const object = objectScopeResult.value?.object ?? null;
 
   const allUnused: UnusedComponent[] = [];
+  const allUncertain: UncertainComponent[] = [];
   const byType: Record<string, number> = {};
   // UNUSED-FIELD-IGNORES-THE-REPORT-INDEX-ITS-SIBLING-READS: which scanned
   // types were adjudicated against the folded report/dashboard index, and how
@@ -1101,6 +1158,7 @@ export const unusedComponentsHandler = async (
     }
     byType[type] = result.value.components.length;
     allUnused.push(...result.value.components);
+    allUncertain.push(...result.value.uncertain);
     // UNUSED-FIELD-IGNORES-THE-REPORT-INDEX-ITS-SIBLING-READS: record the
     // per-type adjudication for EVERY consulted type, including the ones the
     // index named nothing in — "consulted, removed 0" and "never consulted"
@@ -1261,6 +1319,7 @@ export const unusedComponentsHandler = async (
   const fixedPayloadBytes = Buffer.byteLength(
     JSON.stringify({
       appliedScope: { types: [...types], object, mode: scoped ? 'scoped' : 'default' },
+      ...(allUncertain.length > 0 ? { uncertain: allUncertain } : {}),
       byType,
       truncated: true,
       ...(coverageCaveat !== undefined ? { coverageCaveat } : {}),
@@ -1299,6 +1358,7 @@ export const unusedComponentsHandler = async (
         mode: scoped ? 'scoped' : 'default',
       },
       components,
+      ...(allUncertain.length > 0 ? { uncertain: allUncertain } : {}),
       byType,
       truncated,
       ...(isPaged ? { limit, offset } : {}),

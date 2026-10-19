@@ -421,6 +421,10 @@ const FORECAST_HORIZON =
   /\b(?:next\s+(?:quarter|term|month|fiscal\s+year|year)|by\s+(?:the\s+)?end\s+of\s+next\b|in\s+(?:12\s+months|two\s+quarters|\d+\s+(?:months|quarters|years))|next\s+term)\b/i;
 const FORECAST_OUTCOME =
   /\bwill\s+(?:we|it|this|our|migrating|rolling|the)\b|\b(?:hit|exceed|run\s+out|breach|reach)\b|\bhow\s+many\b|\bhow\s+likely\b|\bwe'?ll\b|\bwhere\s+will\b/i;
+// A future STATE ask ("what will my org look like next year") — a horizon
+// plus "what/how will … look/be"; no trend premise needed. "what will break
+// if" is a simulation, not a state, so only look/be count.
+const FORECAST_FUTURE_STATE = /\b(?:what|how)\s+will\b[^.?!]{0,40}\b(?:look|be)\b/i;
 // A growth premise + a STRONG forward-limit outcome ("will … hit/exceed/run
 // out/breach") is a forecast even without an explicit next-period horizon
 // (q4435 "given current data growth, will the trigger hit limits?").
@@ -678,8 +682,22 @@ const runtimeDisclosure = (topic: string): string =>
 // 2.4 — out of scope (not this org's Salesforce metadata).
 // ---------------------------------------------------------------------------
 
-const EXTERNAL_SYSTEM =
-  /\b(sharepoint|jira|confluence|google\s+drive|onedrive|slack\s+workspace|s3\s+bucket)\b/i;
+/**
+ * Deny-list of asks that are never about this org's Salesforce metadata.
+ * `foreignSystem`: a system that is never Salesforce, bare ("PostgreSQL",
+ * "Kubernetes", "Tableau Server" — never bare "tableau": Tableau CRM is
+ * Salesforce), or a platform that also appears in legitimate integration
+ * questions ("which named credential calls SAP", the `live_access_oracle`
+ * tool) followed by one of ITS native nouns ("SAP tables", "Oracle schemas").
+ * `sentiment`: what people think, feel or like — the vault holds metadata, not
+ * opinions.
+ */
+const OUT_OF_SCOPE_LEXICON = {
+  foreignSystem:
+    /\b(sharepoint|jira|confluence|google\s+(?:drive|sheets?)|onedrive|slack\s+workspace|s3\s+buckets?|postgres(?:ql)?|mysql|mongodb|mongo\s+db|kubernetes|k8s|docker|azure\s+devops|tableau\s+(?:server|desktop)|snowflake\s+warehouses?)\b|\b((?:sap|oracle|workday|servicenow|netsuite|sql\s+server|aws|azure|github|gitlab|hubspot|zendesk|dynamics\s+365)\s+(?:tables?|schemas?|databases?|instances?|tickets?|incidents?|modules?|transactions?|indexes|collections?|pods?|buckets?|repositor(?:y|ies)|pull\s+requests?|pipelines?|lambdas?|clusters?|deals?|contacts?))\b/i,
+  sentiment:
+    /\bwhat\s+do\s+you\s+think\b|\bwhat\s+do\s+(?:my\s+\w+|our\s+\w+|the\s+\w+|users?|people|admins?|reps?|they)\s+(?:think|feel)\s+(?:of|about)\b|\bopinions?\b|\b(?:satisfied|happy|unhappy|frustrated)\s+with\b|\bfeel\s+about\b|\b(?:users?|people|team|admins?|reps?|they)\s+(?:like|love|hate)\s+the\b/i,
+};
 // Password/session/sharing/IP policies are REAL profile metadata (the
 // profile-login-security route) — only organizational-governance policy asks
 // gate here.
@@ -692,14 +710,13 @@ const POLICY_ASK =
 const RETENTION_POLICY_ASK = /\bretention\s+(?:polic(?:y|ies)|schedule|rules?)\b/i;
 const CONSENT_PROCESS_ASK =
   /\bhow\s+do(?:es)?\s+(?:students?|users?|customers?|people|contacts?)\s+consent\b/i;
-const OPINION_ASK = /\bwhat\s+do\s+you\s+think\b/i;
 const SHOULD_WE = /\bshould\s+we\b/i;
 // "should we" only gates WITHOUT a metadata object in sight — "should we split
 // the Admin profile" is a real (routable) org question.
 const METADATA_NOUN =
   /\b(?:field|object|flow|trigger|class|profile|permission|layout|validation|record\s+type|apex|report|dashboard|picklist|component|rule)\b|__(?:c|mdt|e|x|b|kav)\b/i;
 // Battery RIGHT techDebt family: "what should we clean up" is the org-wide
-// tech-debt ask (intent-router tech-debt rule), not an org-decision opinion.
+// tech-debt ask (sfi.tech_debt_score), not an org-decision opinion.
 const TECH_DEBT_CLEANUP_ASK =
   /\b(?:clean\s*up|cleanup|tech(?:nical)?\s+debt|org\s+risk)\b/i;
 const DELIVERY_ASK = /\bemail\s+me\b|\bsend\s+(?:this|it)\s+to\b|\bpost\s+(?:this\s+|it\s+)?to\s+slack\b/i;
@@ -718,12 +735,6 @@ const DRAFT_DOCUMENT_ASK =
 // guidance, not this org's metadata.
 const CAREER_ASK = /\bhow\s+do\s+i\s+become\b/i;
 
-// Another platform's OWN artifacts — "how many SAP tables do we have", "our
-// ServiceNow tickets". Only the platform + one of its native nouns gates, so an
-// integration question about the platform ("which named credential calls SAP")
-// stays routed.
-const OTHER_PLATFORM_DATA =
-  /\b(sap|oracle|workday|servicenow|netsuite|postgres(?:ql)?|mysql|snowflake|sql\s+server)\s+(?:tables?|schemas?|databases?|instances?|tickets?|modules?|transactions?)\b/i;
 // Rating PEOPLE ("who is the best admin at my company") — an opinion about
 // people, not metadata. "best practice" asks are not gated.
 const PEOPLE_RATING_ASK =
@@ -851,7 +862,8 @@ export const detectRefusalShape = (question: string): RefusalShape | null => {
     const isForecast =
       FORECAST_VERB.test(q) ||
       (FORECAST_TREND.test(q) && FORECAST_HORIZON.test(q) && FORECAST_OUTCOME.test(q)) ||
-      (FORECAST_TREND.test(q) && FORECAST_STRONG_OUTCOME.test(q));
+      (FORECAST_TREND.test(q) && FORECAST_STRONG_OUTCOME.test(q)) ||
+      (FORECAST_FUTURE_STATE.test(q) && FORECAST_HORIZON.test(q));
     if (isForecast) {
       return { kind: 'forecast-gap', disclosure: FORECAST_DISCLOSURE };
     }
@@ -878,13 +890,13 @@ export const detectRefusalShape = (question: string): RefusalShape | null => {
   }
 
   // 4 — out of scope.
-  const externalSystem = EXTERNAL_SYSTEM.exec(q)?.[1];
-  const otherPlatform = OTHER_PLATFORM_DATA.exec(q)?.[1];
+  const foreign = OUT_OF_SCOPE_LEXICON.foreignSystem.exec(q);
+  const foreignSystem = foreign?.[1] ?? foreign?.[2];
   const outOfScopeTopic =
-    externalSystem !== undefined
-      ? `"${externalSystem}"`
-      : otherPlatform !== undefined
-        ? `Another platform's own data ("${otherPlatform}")`
+    foreignSystem !== undefined
+      ? `Another system's own data ("${foreignSystem}")`
+      : OUT_OF_SCOPE_LEXICON.sentiment.test(q)
+        ? 'An opinion or sentiment (what people think or feel)'
       : PEOPLE_RATING_ASK.test(q)
         ? 'An opinion about people'
       : PURCHASE_ASK.test(q)
@@ -897,9 +909,7 @@ export const detectRefusalShape = (question: string): RefusalShape | null => {
           ? 'A consent process (organizational governance, not org metadata)'
           : POLICY_ASK.test(q)
             ? 'Org policy authorship'
-            : OPINION_ASK.test(q)
-              ? 'An opinion'
-              : DELIVERY_ASK.test(q)
+            : DELIVERY_ASK.test(q)
                 ? 'Message delivery'
                 : WRITE_CODE_ASK.test(q)
                   ? 'Code generation'

@@ -322,7 +322,7 @@ export interface Field360Summary {
    * curated deletion vocabulary and do reach these edges.
    */
   readonly unclassifiedReferrerCount?: number;
-  /** ADM-5: custom ReportTypes listing this field as a column (no graph edge exists for it). */
+  /** ADM-5: custom ReportTypes listing this field as a direct column (source cross-check of the `reportTypeColumn` edge). */
   readonly reportTypeColumns?: readonly string[];
 }
 
@@ -1409,7 +1409,7 @@ export const field360Handler = async (
     restated.suppressedConditionCount,
     unclassified.length + unresolvedReferrerCount,
   );
-  // ADM-5: a custom ReportType column mints no edge. Read it with the scan
+  // ADM-5: cross-check the `reportTypeColumn` edge against source with the scan
   // safe_to_delete_field and unused_fields_deep share, so a column-only field
   // never reads `low` here while the delete tools say `review`.
   const reportTypeScan = await scanReportTypeColumns(ctx);

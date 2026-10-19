@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import type { ExtractionResult, Node, VaultManifest } from '@sf-intelligence/contracts';
+import { DEMO_ORG_ALIAS, type ExtractionResult, type Node, type VaultManifest } from '@sf-intelligence/contracts';
 import {
   closeGraph,
   importExtractionResults,
@@ -102,6 +102,29 @@ describe('resolveHandler', () => {
     if (!r.ok) return;
     expect(r.value.data.disposition).toBe('none');
     expect(r.value.data.candidates).toEqual([]);
+  });
+
+  it('on none with weak near-misses: candidates is empty and the near-misses ride under lookalikes, labelled as non-matches', async () => {
+    const r = await resolveHandler(ctx, { query: 'pay' }); // base 0.72 on Payment__c / Payment_Status__c: below the none threshold, above zero
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.disposition).toBe('none');
+    expect(d.candidates).toEqual([]);
+    expect(d.lookalikes?.length ?? 0).toBeGreaterThan(0);
+    expect(d.disclosure).toContain('lookalikes');
+    expect(d.disclosure).toContain('not matches');
+    expect(d.rendered).toContain('sfi refresh');
+    expect(d.rendered).not.toContain('/sfi-refresh');
+  });
+
+  it('on the demo vault: none offers no refresh action and the rendering does not suggest one', async () => {
+    const demoCtx: Context = { ...ctx, manifest: { ...FIXTURE_MANIFEST, sourceOrg: DEMO_ORG_ALIAS } };
+    const r = await resolveHandler(demoCtx, { query: 'zzzqqq' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.nextActions.map((a) => a.action)).toEqual(['stop']);
+    expect(r.value.data.rendered).not.toContain('refresh');
   });
 
   it('returns disposition none for impossible no-match phrasing', async () => {

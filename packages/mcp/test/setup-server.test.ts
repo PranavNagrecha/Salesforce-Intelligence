@@ -27,7 +27,7 @@ const baseState = (over: Partial<SetupState> = {}): SetupState => ({
   cwd: '/home/someone/Documents',
   expectedVaultRoot: '/home/someone/Documents/org-kb',
   bindSource: 'default ./org-kb',
-  authedOrgs: ['Acme-Prod', 'Acme-UAT'],
+  authedOrgCount: 2,
   version: '0.3.2',
   ...over,
 });
@@ -41,21 +41,41 @@ describe('setupStatusPayload', () => {
     expect(data['status']).toBe('setup-required');
   });
 
-  it('names the authed orgs so the user can pick one — but never picks one itself (FR-02)', () => {
-    const data = setupStatusPayload(baseState()).data as Record<string, unknown>;
-    expect(data['authenticatedOrgs']).toEqual(['Acme-Prod', 'Acme-UAT']);
-    // FAIL-BEFORE: `authedOrgs[0]` (just the first row of `sf org list`) was
-    // threaded into the init/refresh commands as if the user had chosen it.
+  /**
+   * This payload is read by the model, so it is the one setup surface that
+   * leaves the machine. FAIL-BEFORE: `authenticatedOrgs` carried every alias
+   * (and username) from `sf org list` to the model provider the moment a
+   * `--vault` path had a typo. The count says the `sf` CLI works and a choice
+   * exists; the default org is the one alias the user already chose. Nothing
+   * else is named — the terminal `sfi init` lists the aliases to the person.
+   */
+  it('tells the assistant how many orgs are authenticated, and only the default by name', () => {
+    const data = setupStatusPayload(baseState({ authedOrgCount: 3, defaultOrg: 'Acme-UAT' })).data as Record<
+      string,
+      unknown
+    >;
+    expect(data['authenticatedOrgCount']).toBe(3);
+    expect(data['defaultOrg']).toBe('Acme-UAT');
+    expect(data).not.toHaveProperty('authenticatedOrgs');
+    expect(Object.values(data).some((v) => Array.isArray(v) && v.includes('Acme-UAT'))).toBe(false);
     const text = (data['nextSteps'] as readonly string[]).join('\n');
-    expect(text).not.toContain('Acme-Prod');
-    expect(text).toContain('--target-org <your-org-alias>');
-  });
-
-  it('names the sf default org as a labelled hint, not a choice (FR-02)', () => {
-    const data = setupStatusPayload(baseState({ defaultOrg: 'Acme-UAT' })).data as Record<string, unknown>;
-    const text = (data['nextSteps'] as readonly string[]).join('\n');
+    // FR-02: the default is a labelled hint, never threaded in as the choice.
     expect(text).toContain('--target-org <your-org-alias>');
     expect(text).toContain('your sf default org is `Acme-UAT`');
+    expect(text.match(/Acme-/g)).toHaveLength(1);
+  });
+
+  it('with no sf default org, the assistant gets the count and nothing named', () => {
+    const data = setupStatusPayload(baseState({ authedOrgCount: 3 })).data as Record<string, unknown>;
+    expect(data['authenticatedOrgCount']).toBe(3);
+    expect(data['defaultOrg']).toBeUndefined();
+    expect(data).not.toHaveProperty('authenticatedOrgs');
+    const text = (data['nextSteps'] as readonly string[]).join('\n');
+    expect(text).not.toContain('Acme-');
+    expect(text).not.toContain('authenticatedOrgs');
+    // The alias is picked where the list is shown: the terminal.
+    expect(text).toContain('--target-org <your-org-alias>');
+    expect(text).toMatch(/3 orgs?/);
   });
 
   it('never suggests pinning the path it already searched (FR-02)', () => {
@@ -99,7 +119,7 @@ describe('setupStatusPayload', () => {
     // `vault-missing` means config.json exists — init already ran, and telling
     // them to re-run it invites re-binding a repo that is already bound.
     const data = setupStatusPayload(
-      baseState({ reason: 'vault-missing', authedOrgs: ['Acme-Prod'] }),
+      baseState({ reason: 'vault-missing', authedOrgCount: 1 }),
     ).data as Record<string, unknown>;
     const text = (data['nextSteps'] as readonly string[]).join('\n');
     expect(text).toContain('refresh');
@@ -156,7 +176,7 @@ describe('setupStatusPayload', () => {
   });
 
   it('falls back to a placeholder rather than inventing an org alias', () => {
-    const data = setupStatusPayload(baseState({ authedOrgs: [] })).data as Record<
+    const data = setupStatusPayload(baseState({ authedOrgCount: 0 })).data as Record<
       string,
       unknown
     >;
@@ -280,7 +300,8 @@ describe('createSetupServer over a real MCP transport', () => {
       (result.content as readonly { text: string }[])[0]!.text,
     ) as { data: Record<string, unknown> };
     expect(body.data['status']).toBe('setup-required');
-    expect(body.data['authenticatedOrgs']).toEqual(['Acme-Prod', 'Acme-UAT']);
+    expect(body.data['authenticatedOrgCount']).toBe(2);
+    expect(body.data).not.toHaveProperty('authenticatedOrgs');
     // Text-only, like the vault server: the envelope is sent once.
     expect(result.structuredContent).toBeUndefined();
     await client.close();

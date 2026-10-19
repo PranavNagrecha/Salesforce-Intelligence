@@ -133,8 +133,8 @@ afterAll(async () => {
 describe('censusQualityScanCoverage', () => {
   it('counts the KEY, not the findings — an empty array IS a scan', () => {
     expect(censusQualityScanCoverage(seed.nodes)).toEqual([
-      { type: 'ApexClass', nodes: 1, scanned: 1 },
-      { type: 'ApexTrigger', nodes: 2, scanned: 1 },
+      { type: 'ApexClass', candidates: 1, scanned: 1 },
+      { type: 'ApexTrigger', candidates: 2, scanned: 1 },
     ]);
   });
 
@@ -181,7 +181,7 @@ describe('crud_fls_audit — a trigger this vault never scanned', () => {
     // property that is not there. What changed is that the zero is explained.
     expect(result.value.data.totalFindingCount).toBe(0);
     expect(result.value.data.qualityScanCoverage).toEqual([
-      { type: 'ApexTrigger', nodes: 1, scanned: 0 },
+      { type: 'ApexTrigger', candidates: 1, scanned: 0 },
     ]);
     expect(result.value.data.boundaries.join(' ')).toContain('NOT SCANNED IN THIS VAULT');
   });
@@ -204,8 +204,8 @@ describe('crud_fls_audit — a trigger this vault never scanned', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     const coverage = result.value.data.qualityScanCoverage ?? [];
-    expect(coverage).toContainEqual({ type: 'ApexTrigger', nodes: 2, scanned: 1 });
-    expect(coverage).toContainEqual({ type: 'ApexClass', nodes: 1, scanned: 1 });
+    expect(coverage).toContainEqual({ type: 'ApexTrigger', candidates: 2, scanned: 1 });
+    expect(coverage).toContainEqual({ type: 'ApexClass', candidates: 1, scanned: 1 });
     expect(result.value.data.boundaries.join(' ')).toContain('1 of 2 ApexTrigger');
   });
 });
@@ -226,7 +226,7 @@ describe('code_quality_audit — what it does not cover', () => {
     if (!result.ok) return;
     expect(result.value.data.qualityScanCoverage).toContainEqual({
       type: 'ApexTrigger',
-      nodes: 2,
+      candidates: 2,
       scanned: 1,
     });
   });
@@ -260,7 +260,7 @@ describe('code_quality_audit — what it does not cover', () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.data.qualityScanCoverage).toEqual([
-      { type: 'ApexClass', nodes: 1, scanned: 1 },
+      { type: 'ApexClass', candidates: 1, scanned: 1 },
     ]);
   });
 

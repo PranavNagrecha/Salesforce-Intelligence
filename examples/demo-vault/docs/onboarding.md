@@ -1,4 +1,4 @@
-<!-- onboarding handbook · generated 2026-10-17T16:10:41.658Z · source 937e69c4140fa1b350bf5c90b68d850e6b314bf005122976ccf07520ce92cb33 -->
+<!-- onboarding handbook · generated 2026-10-19T15:38:20.376Z · source 6a2c6d9c4d0d4bc81daaa254d55294106dd62dbca8fd32c57659e2cd8cd57fa9 -->
 # Welcome to demo-org
 
 ## What This Org Does
@@ -18,7 +18,7 @@ Total Flows: 3
 
 ## Common Workflows
 
-Automations extracted: 1 workflow rules, 3 flows, 1 apex triggers.
+Automations extracted: 1 workflow rules, 3 flows, 2 apex triggers.
 Active ratio: 1.00
 
 ## How Security Works
@@ -82,7 +82,7 @@ Key Contacts data depends on the Tooling API enrichment pass. Run `sfi refresh -
 
 ## Boundaries
 
-Generated from offline vault on 2026-10-17T16:10:41.527Z; missing real-time data, debug logs, runtime metrics.
+Generated from offline vault on 2026-10-19T15:38:20.243Z; missing real-time data, debug logs, runtime metrics.
 
 Section confidence is inherited from the source edges; spot-check heuristic entries before treating as authoritative.
 

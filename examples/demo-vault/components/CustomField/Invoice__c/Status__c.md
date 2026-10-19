@@ -99,8 +99,9 @@ Lifecycle status of the invoice.
 | --- | --- | --- |
 | `SharingRule:Invoice__c.Share_Invoices_To_Finance` | declared | sharing-rule-extractor |
 
-### writesTo (incoming, 1)
+### writesTo (incoming, 2)
 
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `ApexClass:PaymentService` | parsed | apex-ast |
+| `ApexClass:PaymentServiceTest` | parsed | apex-ast |

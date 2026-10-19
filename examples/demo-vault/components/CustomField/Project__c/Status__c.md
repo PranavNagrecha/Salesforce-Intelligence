@@ -94,7 +94,7 @@ type: CustomField
 | --- | --- | --- |
 | `CustomObject:Project__c` | declared | custom-field-extractor |
 
-### readsFrom (incoming, 5)
+### readsFrom (incoming, 6)
 
 | Source | Confidence | Producer |
 | --- | --- | --- |
@@ -103,6 +103,7 @@ type: CustomField
 | `ApexClass:ProjectTriggerHandlerTest` | parsed | apex-ast |
 | `ConditionalContext:Flow:Project_On_Approve.condition-0` | declared | condition-extractor |
 | `ConditionalContext:ValidationRule:Project__c.Complete_Requires_Permit.condition-0` | parsed | condition-extractor |
+| `LightningComponentBundle:projectSummaryCard` | declared | lwc-extractor |
 
 ### references (incoming, 5)
 
@@ -124,6 +125,6 @@ type: CustomField
 
 | Source | Confidence | Producer |
 | --- | --- | --- |
+| `ApexClass:PaymentServiceTest` | parsed | apex-ast |
 | `ApexClass:ProjectTriggerHandlerTest` | parsed | apex-ast |
 | `Flow:Installation_On_Complete` | parsed | flow-extractor |
-| `LightningComponentBundle:projectSummaryCard` | declared | lwc-extractor |

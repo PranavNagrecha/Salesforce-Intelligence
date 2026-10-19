@@ -832,6 +832,100 @@ describe('enterprise metadata extractors', () => {
     }
   });
 
+  // FLEXI-REFS: a Lightning page's visibility rules and component placements are
+  // references. Single-segment `{!Record.F}` resolves through `sobjectType` here;
+  // relationship paths and bundle names are parked for import-time resolution,
+  // where the relationship map and the bundle nodes exist. No `Record.*` phantom
+  // id is ever minted. Generic `Demo_` fixtures.
+  it('visibility rules read the page object field; traversals, fieldItem paths and placements are parked, never guessed', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Demo_Widget_Record_Page.flexipage-meta.xml');
+      await writeFile(
+        path,
+        `<FlexiPage xmlns="http://soap.sforce.com/2006/04/metadata">
+    <sobjectType>Demo_Widget__c</sobjectType>
+    <type>RecordPage</type>
+    <flexiPageRegions>
+        <componentInstances>
+            <componentInstance>
+                <componentName>demoWidgetCard</componentName>
+                <visibilityRule>
+                    <criteria>
+                        <leftValue>{!Record.Demo_Flag__c}</leftValue>
+                        <operator>EQUAL</operator>
+                        <rightValue>true</rightValue>
+                    </criteria>
+                    <criteria>
+                        <leftValue>{!Record.Demo_Parent__r.Demo_Status__c}</leftValue>
+                        <operator>NE</operator>
+                        <rightValue>Closed</rightValue>
+                    </criteria>
+                </visibilityRule>
+            </componentInstance>
+        </componentInstances>
+        <componentInstances>
+            <componentInstance><componentName>c:DemoAuraCard</componentName></componentInstance>
+        </componentInstances>
+        <componentInstances>
+            <componentInstance><componentName>flexipage:column</componentName></componentInstance>
+        </componentInstances>
+        <componentInstances>
+            <componentInstance><componentName>force:highlightsPanel</componentName></componentInstance>
+        </componentInstances>
+        <itemInstances>
+            <fieldInstance><fieldItem>Record.Demo_Parent__r.Demo_Code__c</fieldItem></fieldInstance>
+        </itemInstances>
+    </flexiPageRegions>
+</FlexiPage>`,
+      );
+      const result = await extractFlexiPage(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      const visibility = result.value.edges.filter(
+        (e) => e.properties['referenceKind'] === 'visibilityRule',
+      );
+      expect(visibility.map((e) => [e.edgeType, e.toId, e.confidence])).toEqual([
+        ['readsFrom', 'CustomField:Demo_Widget__c.Demo_Flag__c', 'parsed'],
+      ]);
+      const toIds = result.value.edges.map((e) => e.toId);
+      expect(toIds.filter((id) => id.startsWith('CustomField:Record.'))).toEqual([]);
+      expect(toIds.filter((id) => /Bundle:/.test(id))).toEqual([]);
+      const node = result.value.nodes[0]!;
+      expect(node.properties['recordTraversalRefs']).toEqual([
+        { path: 'Demo_Parent__r.Demo_Code__c', use: 'fieldRef' },
+        { path: 'Demo_Parent__r.Demo_Status__c', use: 'visibilityRule' },
+      ]);
+      expect(node.properties['componentRefs']).toEqual(['DemoAuraCard', 'demoWidgetCard']);
+      expect(node.properties['standardComponents']).toBe(2);
+      expect(node.properties['unresolvedVisibilityRefs']).toBeUndefined();
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('records a visibility token it cannot scope on the node instead of minting an id', async () => {
+    const dir = await makeTemp();
+    try {
+      const path = join(dir, 'Demo_App_Page.flexipage-meta.xml');
+      await writeFile(
+        path,
+        '<FlexiPage><type>AppPage</type><visibilityRule><criteria>' +
+          '<leftValue>{!Record.Demo_Flag__c}</leftValue><operator>EQUAL</operator><rightValue>true</rightValue>' +
+          '</criteria></visibilityRule></FlexiPage>',
+      );
+      const result = await extractFlexiPage(path);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.edges.filter((e) => e.toId.startsWith('CustomField:'))).toEqual([]);
+      expect(result.value.nodes[0]!.properties['unresolvedVisibilityRefs']).toEqual([
+        'Record.Demo_Flag__c',
+      ]);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it('captures FlexiPage sobjectType / pageType / masterLabel + object edge', async () => {
     const dir = await makeTemp();
     try {
@@ -962,7 +1056,8 @@ describe('enterprise metadata extractors', () => {
     <sections>
         <columns><field>Name</field><table>Account</table></columns>
         <columns><field>Industry</field><table>Account</table></columns>
-        <columns><field>Email</field><table>Contacts</table></columns>
+        <columns><field>Email</field><table>Account.Contacts</table></columns>
+        <columns><field>Demo_Owner__c.Name</field><table>Account.Contacts.pkg__Related_Items__r</table></columns>
         <masterLabel>Account Columns</masterLabel>
     </sections>
 </ReportType>`,
@@ -980,9 +1075,20 @@ describe('enterprise metadata extractors', () => {
         'Contacts',
         'pkg__Related_Items__r',
       ]);
-      // Column COUNT with the honest coverage caveat (per-column identity deferred).
-      expect(node.properties['columnCount']).toBe(3);
-      expect(node.properties['columnsModeled']).toBe(false);
+      // Columns grouped by their `<table>` path, parked for the import-time
+      // relationship resolver (the only layer that can walk `Account.Contacts`).
+      expect(node.properties['columnCount']).toBe(4);
+      expect(node.properties['columnsModeled']).toBeUndefined();
+      expect(node.properties['columnRefs']).toEqual([
+        { table: 'Account', fields: ['Name', 'Industry'] },
+        { table: 'Account.Contacts', fields: ['Email'] },
+        { table: 'Account.Contacts.pkg__Related_Items__r', fields: ['Demo_Owner__c.Name'] },
+      ]);
+      // FAIL-BEFORE: the generic sweep minted `CustomField:Demo_Owner__c.Name`
+      // (a lookup FIELD as the object) and `CustomField:Account.Contacts` (a
+      // relationship path) — ids no node has. The extractor mints no field edge
+      // itself; resolution happens where every object is visible.
+      expect(result.value.edges.filter((e) => e.toId.startsWith('CustomField:'))).toEqual([]);
       // A declared edge to the base object (so object blast-radius sees it).
       expect(result.value.edges).toContainEqual(
         expect.objectContaining({

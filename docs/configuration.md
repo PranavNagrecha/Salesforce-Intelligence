@@ -345,21 +345,18 @@ org-wide default exactly as it did before the selector existed — the unscoped
 response is byte-identical. You opt into narrowing; you never inherit a
 different answer by leaving scope off.
 
-## Router mode
+## Routing
 
-`sfi.route_question` defaults to **hybrid** mode: the meaning-ranked
-`toolCandidates` are the primary output and the deterministic `route` is a
-non-authoritative hint — the host LLM decides. See
-[`routing.md`](./routing.md) for the full host contract (advisory routes,
-refusal gates, clarifications, the `context.previous` param).
+`sfi.route_question` returns the semantic funnel's meaning-ranked
+`toolCandidates`; the host LLM decides which to run. There is no router mode:
+the regex intent router and its `SFI_ROUTER_MODE=offline` fallback were removed
+in 0.8.0 (routing was already the host's job). See [`routing.md`](./routing.md)
+for the host contract (shortlist, refusal gates, clarifications, the
+`context.previous` param).
 
-| Variable | Default | Purpose |
-| --- | --- | --- |
-| `SFI_ROUTER_MODE` | *(unset — hybrid)* | `offline` makes the deterministic route authoritative and omits candidates — for CI and no-LLM hosts. Refusal gates and clarifications behave identically in both modes. |
-
-The funnel-advisory score floor (`FUNNEL_PRIMARY_MIN_SCORE = 0.26` in
-`packages/mcp/src/tools/route-question.ts`) and the synonym-expansion weight
-(`EXPANSION_WEIGHT = 0.5` in `packages/mcp/src/semantic-funnel.ts`) are
+The near-tie margin (`MARGIN = 0.05` in `packages/mcp/src/tools/route-question.ts`)
+and the synonym-expansion weight (`EXPANSION_WEIGHT = 0.5` in
+`packages/mcp/src/semantic-funnel.ts`) are
 **source constants, not env vars** — they are calibrated against the routing
 evaluation and changing them re-opens the honesty gates.
 
@@ -369,7 +366,7 @@ Two opt-in layers can fuse the lexical TF-IDF candidates with an embedding
 ranking. **Both are off by default; the shipped path is lexical-only and most
 installs need nothing here.** With both gates unset the funnel output is
 byte-identical to the pure lexical shortlist, and the honesty/refusal decision
-and the `route.tools` deterministic plan are never affected either way.
+is never affected either way.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
@@ -777,8 +774,9 @@ holds it. Precedence: the flag, then `SFI_VAULT`, then `./org-kb`. A named path
 with no vault is an error, never a silent fall-back. The route-gap log is
 machine-wide, so `gaps report` counts every vault unless `--vault` names one.
 
-A vault's `meta/config.json` records its own folder as `vaultRoot`. A config
-naming a different folder came with a copied or moved vault; every command that
+A vault's `meta/config.json` records `"vaultRoot": "."` (its own folder, so the
+committed config works from any clone). A config naming a different absolute
+folder came with a copied or moved vault; every command that
 writes to the vault refuses it (it would write to the other vault) and prints
 the one-line fix.
 

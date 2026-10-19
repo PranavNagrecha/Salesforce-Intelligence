@@ -13,10 +13,18 @@
  * an explicit caveat with the dropped/trimmed counts: a synthesis over
  * truncated data must never read absence as evidence.
  *
- * It is a pure transform: it reads ONLY the supplied `input`, never the graph
- * or the live org, so it can never add a fact that was not handed to it. Prose
- * wording is still the caller's job (mirroring the `explain_*` "Claude composes
- * prose" convention); this tool guarantees the GROUNDING, not the sentences.
+ * It adds no fact: every citation, caveat and bullet comes from the supplied
+ * `input`, never from the graph or the live org. The graph is read for ONE
+ * thing — the vault's list of component ids whose api name contains a space
+ * (`Layout:Case.Some Layout`, `Profile:Custom Sales Profile`) — so those ids
+ * are recognised as ids instead of being cut at the space and accused of
+ * fabrication (273 of 274 layouts on a real vault were). Prose wording is
+ * still the caller's job (mirroring the `explain_*` "Claude composes prose"
+ * convention); this tool guarantees the GROUNDING, not the sentences.
+ *
+ * With no evidence in `input` there is nothing to ground, so the whole answer
+ * is the GROUNDING NOT VERIFIED block — never a "Grounded in …: 0 cited"
+ * headline.
  */
 
 import type {
@@ -28,6 +36,7 @@ import type {
   Remediation,
 } from '@sf-intelligence/contracts';
 import { ok, type Result } from '@sf-intelligence/core';
+import { listNodeIdentities } from '@sf-intelligence/graph';
 import { z } from 'zod';
 
 import type { Context } from '../server.js';
@@ -279,10 +288,20 @@ const DISCLOSURE =
  *     against the source so hallucinated ids surface before the user sees them.
  */
 export const synthesizeAnswerInputSchema = z.object({
-  input: z.unknown(),
+  // `z.unknown()` accepts a missing key; the refine makes the host pass SOMETHING.
+  // `: boolean` keeps TS from inferring a type predicate that would narrow `unknown`.
+  input: z.unknown().refine((v): boolean => v !== undefined, {
+    message: '`input` is required: pass the JSON returned by the prior sfi.* tool call(s).',
+  }),
   question: z.string().optional(),
   draft: z.string().optional(),
 });
+
+/** The whole answer when `input` carries no evidence. */
+const GROUNDING_NOT_VERIFIED =
+  'GROUNDING NOT VERIFIED: no evidence was supplied in `input`, so nothing was cited ' +
+  'or checked. Do NOT present an answer as grounded — pass the prior sfi.* tool ' +
+  'result(s) as `input` and call again.';
 
 export type SynthesizeAnswerInput = z.infer<typeof synthesizeAnswerInputSchema>;
 
@@ -359,6 +378,9 @@ export interface SynthesizeAnswerOutput {
 
 interface Collected {
   readonly ids: Set<string>;
+  /** Vault ids containing whitespace, longest first; the regexes cannot see these. */
+  readonly spacedIds: readonly string[];
+  readonly spacedIdSet: ReadonlySet<string>;
   readonly caveats: string[];
   readonly bullets: string[];
   readonly provenances: Set<string>;
@@ -443,7 +465,7 @@ const collect = (value: unknown, key: string | null, out: Collected): void => {
     // capping it here would make an id the caller copied verbatim out of this
     // very payload come back flagged as fabricated. Only the PUBLISHED
     // `citations` list is capped, and it says so when it is.
-    if (CANONICAL_ID_WHOLE.test(value)) {
+    if (CANONICAL_ID_WHOLE.test(value) || out.spacedIdSet.has(value)) {
       out.ids.add(value);
     }
     if (key !== null && PROVENANCE_KEY.test(key) && value.trim().length > 0) {
@@ -941,6 +963,42 @@ const collectInterpretations = (value: unknown): CollectedInterpretations => {
 };
 
 /**
+ * Every canonical id in a prose `text`: the vault's spaced ids first (longest
+ * first, each removed once found so the regex cannot re-capture its prefix as
+ * `Layout:Case.Some`), then the regex for every other id-shaped token.
+ */
+const extractIds = (text: string, spacedIds: readonly string[]): string[] => {
+  const found = new Set<string>();
+  let rest = text;
+  for (const id of spacedIds) {
+    if (rest.includes(id)) {
+      found.add(id);
+      rest = rest.split(id).join(' ');
+    }
+  }
+  for (const id of rest.match(CANONICAL_ID_INLINE) ?? []) found.add(id);
+  return [...found];
+};
+
+/**
+ * The vault's ids whose api name contains whitespace, longest first. A graph
+ * read failure yields none: the regexes then stand alone, as before.
+ * shortcut: only whitespace ids come from the index and the regex covers the
+ * rest (an id with another char outside `[A-Za-z0-9_./-]` is still cut there);
+ * the id list is read on every call and capped at IDENTITY_SCAN_MAX rows —
+ * move to a per-vault cached full index when a measured id class or call
+ * latency asks for it.
+ */
+const spacedVaultIds = async (ctx: Context): Promise<readonly string[]> => {
+  const r = await listNodeIdentities(ctx.graph);
+  if (!r.ok) return [];
+  return r.value
+    .map((n) => n.id as string)
+    .filter((id) => /\s/.test(id))
+    .sort((a, b) => b.length - a.length || (a < b ? -1 : 1));
+};
+
+/**
  * Flag "X is deprecated"-class draft claims with no backing annotation. A
  * claim is grounded when the source carries an annotation entry for that id
  * whose value mentions deprecation (any key — `status: deprecated` is the
@@ -949,6 +1007,7 @@ const collectInterpretations = (value: unknown): CollectedInterpretations => {
 const findUngroundedDeprecationClaims = (
   draft: string,
   annotationEntries: ReadonlyMap<string, ReadonlySet<string>>,
+  spacedIds: readonly string[],
 ): UngroundedAnnotationClaim[] => {
   const claims: UngroundedAnnotationClaim[] = [];
   // Sentence split on terminators followed by whitespace/end — a bare '.'
@@ -956,7 +1015,7 @@ const findUngroundedDeprecationClaims = (
   // split would sever the id from its claim.
   for (const sentence of draft.split(/(?:[!?\n]|\.(?=\s|$))+/)) {
     if (!/\bdeprecat/i.test(sentence)) continue;
-    for (const id of new Set(sentence.match(CANONICAL_ID_INLINE) ?? [])) {
+    for (const id of extractIds(sentence, spacedIds)) {
       const entries = annotationEntries.get(id);
       const grounded =
         entries !== undefined &&
@@ -1002,8 +1061,11 @@ export const synthesizeAnswerHandler = async (
   ctx: Context,
   input: SynthesizeAnswerInput,
 ): Promise<Result<McpResponse<SynthesizeAnswerOutput>, McpError>> => {
+  const spacedIds = await spacedVaultIds(ctx);
   const out: Collected = {
     ids: new Set<string>(),
+    spacedIds,
+    spacedIdSet: new Set(spacedIds),
     caveats: [],
     bullets: [],
     provenances: new Set<string>(),
@@ -1235,7 +1297,7 @@ export const synthesizeAnswerHandler = async (
       !Array.isArray(source) &&
       Object.keys(source as Record<string, unknown>).length === 0);
   if (input.draft !== undefined) {
-    const draftIds = [...new Set(input.draft.match(CANONICAL_ID_INLINE) ?? [])];
+    const draftIds = extractIds(input.draft, out.spacedIds);
     groundedIds = draftIds.filter((id) => out.ids.has(id)).sort();
     hallucinatedIds = draftIds.filter((id) => !out.ids.has(id)).sort();
 
@@ -1248,6 +1310,7 @@ export const synthesizeAnswerHandler = async (
     ungroundedAnnotationClaims = findUngroundedDeprecationClaims(
       input.draft,
       annotationEntries,
+      out.spacedIds,
     );
 
     // I3c ABSENCE-AS-FACT GUARD. Scan the draft for absence assertions. An
@@ -1270,22 +1333,19 @@ export const synthesizeAnswerHandler = async (
     // never come back grounded:true — that silently rubber-stamps whatever the
     // host wrote (e.g. a "safe to delete, nothing references it" claim the vault
     // never supported). Certify only when there was something to certify against.
-    if (evidenceEmpty) {
-      grounded = false;
-      out.caveats.unshift(
-        'GROUNDING NOT VERIFIED: no evidence was supplied in `input`, so the ' +
-          'draft was not checked against any tool output. Do NOT present it as ' +
-          'grounded — pass the prior sfi.* tool result(s) as `input` and retry.',
-      );
-    }
+    if (evidenceEmpty) grounded = false;
   }
+  // No evidence, with or without a draft: the NOT VERIFIED block is the whole
+  // answer, in the headline and in the caveats a host reads.
+  if (evidenceEmpty) out.caveats.unshift(GROUNDING_NOT_VERIFIED);
 
   const qPrefix =
     input.question !== undefined && input.question.trim().length > 0
       ? `Q: ${input.question.trim()} — `
       : '';
-  const summary =
-    `${qPrefix}Grounded in the supplied tool output: ` +
+  const summary = evidenceEmpty
+    ? `${qPrefix}${GROUNDING_NOT_VERIFIED}`
+    : `${qPrefix}Grounded in the supplied tool output: ` +
     `${citations.length} component(s) cited` +
     (citationsTruncated
       ? ` (of ${citationsTotal} — citation list truncated)`
@@ -1376,7 +1436,7 @@ export const synthesizeAnswerHandler = async (
   // An id mentioned INSIDE a cause/fix/next string (or a supplementary note) but
   // not independently cited (the whole-id grounding) is an ungrounded reference.
   const idsInText = (text: string | null): string[] =>
-    text === null ? [] : [...new Set(text.match(CANONICAL_ID_INLINE) ?? [])].filter((id) => !out.ids.has(id));
+    text === null ? [] : extractIds(text, out.spacedIds).filter((id) => !out.ids.has(id));
   const orphanComponentIds = [
     ...new Set([
       ...idsInText(likelyCause),

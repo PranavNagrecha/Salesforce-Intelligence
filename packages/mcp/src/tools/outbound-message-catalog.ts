@@ -79,6 +79,7 @@ const MAX_ENUMERATED_GAP_OBJECTS = 10;
 const MODELED_WORKFLOW_NODE_TYPES = [
   'WorkflowRule',
   'WorkflowAlert',
+  'WorkflowFieldUpdate',
   'OutboundMessage',
 ] as const;
 
@@ -86,9 +87,9 @@ const MODELED_WORKFLOW_NODE_TYPES = [
  * Id prefixes of the workflow ACTION families that are serialized inside a
  * `.workflow-meta.xml` alongside `<outboundMessages>`.
  *
- * READ THIS BEFORE CHANGING THE PREDICATE BELOW. `WorkflowFieldUpdate:` and
- * `WorkflowTask:` are NOT `ComponentType`s — no extractor mints a node for
- * them, so EVERY reference to one dangles on EVERY vault, by design. An
+ * READ THIS BEFORE CHANGING THE PREDICATE BELOW. `WorkflowTask:` is NOT a
+ * `ComponentType` — no extractor mints a node for it, so EVERY reference to
+ * one dangles on EVERY vault, by design. An
  * unresolved reference is therefore NOT on its own evidence of a gap; treating
  * it as one would raise a blind-spot warning on a perfectly covered org. What
  * these ids are used for here is only their OBJECT prefix: they name the
@@ -173,7 +174,7 @@ export interface OutboundMessageCoverageGap {
   /**
    * How many DISTINCT unresolved workflow-action ids stand behind that object
    * list. Counts only ids whose object is in the list above, so a
-   * dangling-BY-DESIGN `WorkflowFieldUpdate:` on a fully-modeled object never
+   * dangling-BY-DESIGN `WorkflowTask:` on a fully-modeled object never
    * inflates it.
    */
   readonly unresolvedWorkflowReferenceCount: number;
@@ -489,7 +490,7 @@ const workflowActionIdToObject = (id: string): string | null => {
  *
  * NEEDED minus HELD is the set this scan has no positive evidence of having
  * read. The subtraction is what keeps the check honest: an unresolved
- * `WorkflowFieldUpdate:` alone would flag every vault ever built, because that
+ * `WorkflowTask:` alone would flag every vault ever built, because that
  * family is dangling BY DESIGN.
  */
 const measureCoverageGap = async (

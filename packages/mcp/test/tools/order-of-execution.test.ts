@@ -1194,7 +1194,7 @@ describe('orderOfExecutionHandler', () => {
     expect(flowSteps.length).toBe(0);
   });
 
-  it('populates the conditional field on Flow steps that have a firesWhen edge', async () => {
+  it('a Flow step whose only firesWhen context is a decision is NOT gated by it (SAVE-ENTRY-CONDITION)', async () => {
     const result = await orderOfExecutionHandler(ctx, {
       objectApiName: 'MixedObj',
     });
@@ -1202,20 +1202,18 @@ describe('orderOfExecutionHandler', () => {
     if (!result.ok) return;
     const insertSoe = allEvents(result.value.data).insert.soe;
     const flowStep = insertSoe.find((s) => s.componentId === MIXED_FLOW);
-    expect(flowStep?.conditional?.conditionContextId).toBe(MIXED_FLOW_COND);
-    expect(flowStep?.conditional?.expression).toBe(
-      'MixedObj.Status equals Open',
-    );
-    // INVARIANT (unchanged): the condition's extracted field reference is
-    // surfaced. FIX 15 (3) STRENGTHENED it — `fieldRefs` is now grounded-only,
-    // so this id is guaranteed to name a real node and to be safe to cite.
-    expect(flowStep?.conditional?.fieldRefs).toHaveLength(1);
-    expect(flowStep?.conditional?.refGrounding).toEqual({
-      checked: true,
-      grounded: 1,
-      ungrounded: 0,
+    // MixedFlow's one context is `kind: 'flow-decision'`. Before, it was shown
+    // as the step's gate; a decision inside a flow is not what makes it run.
+    expect(flowStep?.conditional).toBeUndefined();
+    expect(flowStep?.entryCriteria).toEqual({
+      none: true,
+      text: 'no entry criteria: runs on every save',
     });
-    expect(flowStep?.conditional?.ungroundedRefs).toBeUndefined();
+    expect(flowStep?.branches).toEqual({
+      count: 1,
+      expressions: ['MixedObj.Status equals Open'],
+    });
+    expect(MIXED_FLOW_COND.endsWith('.condition-0')).toBe(true);
   });
 
   it('per-event summary.conditionalSteps matches the number of conditional steps', async () => {

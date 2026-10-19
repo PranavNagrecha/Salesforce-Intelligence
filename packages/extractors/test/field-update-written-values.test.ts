@@ -68,8 +68,9 @@ const WORKFLOW = `<?xml version="1.0"?>
   </rules>
 </Workflow>`;
 
-const writesOf = (edges: readonly { edgeType: string; toId: string; properties: Record<string, unknown> }[], toId: string) =>
-  edges.filter((e) => e.edgeType === 'writesTo' && e.toId === toId);
+// The firer's own writesTo (rule or approval process); the field update node's writesTo is a separate edge.
+const writesOf = (edges: readonly { edgeType: string; fromId: string; toId: string; properties: Record<string, unknown> }[], toId: string) =>
+  edges.filter((e) => e.edgeType === 'writesTo' && !e.fromId.startsWith('WorkflowFieldUpdate:') && e.toId === toId);
 
 describe('FAIL-BEFORE/PASS-AFTER: field updates carry their written value', () => {
   it('stamps literal, formula, checkbox, and blanking updates, and keeps both values of a field updated twice', async () => {

@@ -514,6 +514,128 @@ const buildOutboundMessageNodes = (
   return { nodes, edges };
 };
 
+/** One `<fieldUpdates>` definition in a workflow file (A03 / C04). */
+export interface WorkflowFieldUpdateDefinition {
+  /** The `<fullName>` a rule's (or approval process's) action names. */
+  readonly name: string;
+  readonly field: string | null;
+  readonly operation: string | null;
+  /** Present only on a cross-object update: the relationship it writes through. */
+  readonly targetObject: string | null;
+  /** The `<formula>` / `<literalValue>` / `<lookupValue>` it sets, when the XML names one. */
+  readonly value: string | null;
+  /** True when a `<rules>` action (immediate or time-triggered) in the SAME file names this update. */
+  readonly referencedByWorkflowRule: boolean;
+  /**
+   * `<reevaluateOnChange>`: when true and the update changes the field's value,
+   * Salesforce re-evaluates every workflow rule on the object. False when the
+   * element is absent (the platform default).
+   */
+  readonly reevaluateOnChange: boolean;
+}
+
+/**
+ * Every `<fieldUpdates>` definition of a parsed workflow root, flagged with
+ * whether any rule in the file (immediate or time-triggered action) names it.
+ * One reader for the node builder and {@link listWorkflowFieldUpdates}.
+ */
+const readFieldUpdateDefinitions = (
+  rootObj: Record<string, unknown>,
+): readonly WorkflowFieldUpdateDefinition[] => {
+  const used = new Set<string>();
+  for (const rule of toArray(rootObj['rules'])) {
+    if (typeof rule !== 'object' || rule === null) continue;
+    const r = rule as Record<string, unknown>;
+    for (const action of [...toArray(r['actions']), ...timeTriggerActions(r)]) {
+      if (typeof action !== 'object' || action === null) continue;
+      const a = action as Record<string, unknown>;
+      if (optionalString(a, 'type') === 'FieldUpdate') {
+        const name = optionalString(a, 'name');
+        if (name !== null) used.add(name);
+      }
+    }
+  }
+  const reevaluate = new Set<string>();
+  for (const raw of toArray(rootObj['fieldUpdates'])) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const fu = raw as Record<string, unknown>;
+    const name = optionalString(fu, 'fullName');
+    if (name === null) continue;
+    if (optionalString(fu, 'reevaluateOnChange')?.toLowerCase() === 'true') reevaluate.add(name);
+  }
+  return [...buildFieldUpdateTargetMap(rootObj)].map(([name, t]) => ({
+    name,
+    field: t.field,
+    operation: t.operation,
+    targetObject: t.targetObject,
+    value: t.value,
+    referencedByWorkflowRule: used.has(name),
+    reevaluateOnChange: reevaluate.has(name),
+  }));
+};
+
+/**
+ * Promote each `<fieldUpdates>` entry to a `WorkflowFieldUpdate` node, the
+ * same way `<alerts>` and `<outboundMessages>` are promoted. Until now the
+ * rule's `references WorkflowFieldUpdate:{Object}.{name}` edge pointed at
+ * nothing, so a file holding only field updates counted as "no modeled
+ * workflow component" and `endpoint_catalog` warned that its outbound
+ * messages were unscanned.
+ *
+ * One node per entry with a `<fullName>`, carrying the definition verbatim
+ * (`field`, `operation`, `targetObject`, `value`, `reevaluateOnChange`,
+ * `referencedByWorkflowRule`). `parentOf` from the object as for alerts. A
+ * same-object update additionally `writesTo` the field it sets, with the
+ * written value, under exactly the guard the rule's own `writesTo` uses: a
+ * cross-object update (`<targetObject>`) names a relationship this vault
+ * cannot resolve offline, so it mints the node and no `writesTo`.
+ */
+const buildWorkflowFieldUpdateNodes = (
+  rootObj: Record<string, unknown>,
+  objectApiName: string,
+  parentId: string,
+  path: string,
+): { readonly nodes: readonly Node[]; readonly edges: readonly Edge[] } => {
+  const nodes: Node[] = [];
+  const edges: Edge[] = [];
+  for (const def of readFieldUpdateDefinitions(rootObj)) {
+    const id = `WorkflowFieldUpdate:${objectApiName}.${def.name}`;
+    nodes.push({
+      id,
+      type: 'WorkflowFieldUpdate',
+      apiName: `${objectApiName}.${def.name}`,
+      label: def.name,
+      parentId,
+      sourcePath: path,
+      lastModifiedDate: null,
+      lastModifiedBy: null,
+      apiVersion: null,
+      properties: { ...def },
+    });
+    edges.push({
+      fromId: parentId,
+      toId: id,
+      edgeType: 'parentOf',
+      confidence: 'declared',
+      source: EXTRACTOR_SOURCE,
+      properties: {},
+    });
+    if (def.field !== null && def.targetObject === null && isWellFormedFieldRef(def.field)) {
+      edges.push({
+        fromId: id,
+        toId: def.field.includes('.')
+          ? `CustomField:${def.field}`
+          : `CustomField:${objectApiName}.${def.field}`,
+        edgeType: 'writesTo',
+        confidence: 'parsed',
+        source: EXTRACTOR_SOURCE,
+        properties: { operation: def.operation, ...fieldUpdateValueProperties(def) },
+      });
+    }
+  }
+  return { nodes, edges };
+};
+
 /**
  * Convert a slash-separated EmailTemplate reference (e.g.,
  * `Sales/WelcomeEmail`) to its canonical id form (`Sales.WelcomeEmail`).
@@ -708,8 +830,8 @@ const edgesForAction = (
   // to the CustomField the update SETS — mirroring `flow.ts`'s
   // `buildInputAssignmentEdges`. This is KEEP-the-`references`-ADD-the-
   // `writesTo`: the `references` above points at the
-  // `WorkflowFieldUpdate:{Object}.{name}` scaffolding node (which several
-  // consumers and the change-impact metadata-blocker branch rely on); the
+  // `WorkflowFieldUpdate:{Object}.{name}` node (which several consumers and
+  // the change-impact metadata-blocker branch rely on); the
   // new `writesTo` points at the actual `CustomField:{Object}.{field}` so
   // that field-change-impact tools see the WorkflowRule as a writer. The
   // target field is NOT on the `<actions>` child (it carries only
@@ -1067,8 +1189,8 @@ const buildRule = (
  * `WorkflowAlert:{ObjectApiName}.{name}` AND a `sendsEmail` to
  * `EmailTemplate:{Folder}.{Name}` when the named alert's `<template>`
  * resolves inside this file. `FieldUpdate` actions likewise emit two
- * edges: the `references` to `WorkflowFieldUpdate:{ObjectApiName}.{name}`
- * scaffolding node AND a FIELD-level `writesTo` to the
+ * edges: the `references` to the `WorkflowFieldUpdate:{ObjectApiName}.{name}`
+ * node AND a FIELD-level `writesTo` to the
  * `CustomField:{ObjectApiName}.{field}` the update SETS (the target field
  * is read from this file's sibling `<fieldUpdates>` collection via
  * {@link buildFieldUpdateTargetMap}, mirroring `flow.ts`'s
@@ -1105,15 +1227,14 @@ const buildRule = (
  * (`process_builder_migration_candidates`) already reads them via
  * `propertyNumber` and silently defaulted them to 0 before this emit.
  *
- * `<alerts>`, `<fieldUpdates>`, `<tasks>`, and `<outboundMessages>`
- * collections under the root are not promoted to NODES — they appear
- * only as dangling-by-design `references` targets named by consuming
- * rules. The `<fieldUpdates>` collection is additionally CONSULTED (not
- * promoted) to resolve each FieldUpdate action's target field for the
- * field-level `writesTo` edge described above. A file with `<Workflow>`
- * root but zero `<rules>` children is the documented happy path for
- * objects whose action scaffolding outlives its consuming rules; it
- * yields zero nodes and zero edges.
+ * `<alerts>`, `<fieldUpdates>` and `<outboundMessages>` under the root are
+ * promoted to `WorkflowAlert` / `WorkflowFieldUpdate` / `OutboundMessage`
+ * nodes (each `parentOf` the object; a same-object field update also
+ * `writesTo` its field). `<tasks>` is not: a `WorkflowTask:` reference
+ * dangles by design. A file with `<Workflow>` root but zero `<rules>`
+ * children is the documented happy path for objects whose action
+ * definitions outlive their consuming rules; it yields the definition
+ * nodes and no rule.
  *
  * Returns an `ExtractorError` for any of the documented failure modes:
  * `file-not-found`, `parse-error`, or `malformed-input` (wrong root,
@@ -1214,28 +1335,14 @@ export const extractWorkflowRule = async (
   const om = buildOutboundMessageNodes(rootObj, objectApiName, parentId, path);
   nodes.push(...om.nodes);
   edges.push(...om.edges);
+  // promote `<fieldUpdates>` entries to WorkflowFieldUpdate nodes (same
+  // orphan-collection rule: emitted with or without consuming `<rules>`).
+  const fu = buildWorkflowFieldUpdateNodes(rootObj, objectApiName, parentId, path);
+  nodes.push(...fu.nodes);
+  edges.push(...fu.edges);
   return ok({ nodes, edges });
 };
 
-/** One `<fieldUpdates>` definition in a workflow file (A03 / C04). */
-export interface WorkflowFieldUpdateDefinition {
-  /** The `<fullName>` a rule's (or approval process's) action names. */
-  readonly name: string;
-  readonly field: string | null;
-  readonly operation: string | null;
-  /** Present only on a cross-object update: the relationship it writes through. */
-  readonly targetObject: string | null;
-  /** The `<formula>` / `<literalValue>` / `<lookupValue>` it sets, when the XML names one. */
-  readonly value: string | null;
-  /** True when a `<rules>` action (immediate or time-triggered) in the SAME file names this update. */
-  readonly referencedByWorkflowRule: boolean;
-  /**
-   * `<reevaluateOnChange>`: when true and the update changes the field's value,
-   * Salesforce re-evaluates every workflow rule on the object. False when the
-   * element is absent (the platform default).
-   */
-  readonly reevaluateOnChange: boolean;
-}
 
 /**
  * Every field update a workflow file DEFINES, flagged with whether any rule in
@@ -1261,35 +1368,5 @@ export const listWorkflowFieldUpdates = (xml: string): readonly WorkflowFieldUpd
   }
   const root = unwrapSingle(parsed['Workflow']);
   if (typeof root !== 'object' || root === null) return [];
-  const rootObj = root as Record<string, unknown>;
-  const used = new Set<string>();
-  for (const rule of toArray(rootObj['rules'])) {
-    if (typeof rule !== 'object' || rule === null) continue;
-    const r = rule as Record<string, unknown>;
-    for (const action of [...toArray(r['actions']), ...timeTriggerActions(r)]) {
-      if (typeof action !== 'object' || action === null) continue;
-      const a = action as Record<string, unknown>;
-      if (optionalString(a, 'type') === 'FieldUpdate') {
-        const name = optionalString(a, 'name');
-        if (name !== null) used.add(name);
-      }
-    }
-  }
-  const reevaluate = new Set<string>();
-  for (const raw of toArray(rootObj['fieldUpdates'])) {
-    if (typeof raw !== 'object' || raw === null) continue;
-    const fu = raw as Record<string, unknown>;
-    const name = optionalString(fu, 'fullName');
-    if (name === null) continue;
-    if (optionalString(fu, 'reevaluateOnChange')?.toLowerCase() === 'true') reevaluate.add(name);
-  }
-  return [...buildFieldUpdateTargetMap(rootObj)].map(([name, t]) => ({
-    name,
-    field: t.field,
-    operation: t.operation,
-    targetObject: t.targetObject,
-    value: t.value,
-    referencedByWorkflowRule: used.has(name),
-    reevaluateOnChange: reevaluate.has(name),
-  }));
+  return readFieldUpdateDefinitions(root as Record<string, unknown>);
 };

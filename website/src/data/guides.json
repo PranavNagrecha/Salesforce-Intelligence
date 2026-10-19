@@ -137,6 +137,15 @@
       "text": "Generate one from your org’s real metadata instead of a spreadsheet that goes stale."
     },
     {
+      "href": "/blog/sf-intelligence-0-8-0",
+      "section": "blog",
+      "kind": "release",
+      "date": "2026-10-19",
+      "home": false,
+      "title": "0.8.0: trust the verdict",
+      "text": "No new tools. Save-order answers are right on trigger-framework orgs, dead-code and deletion verdicts stop inventing confidence, caveats print only when the check could not run, and the regex router is gone."
+    },
+    {
       "href": "/blog/sf-intelligence-0-7-0",
       "section": "blog",
       "kind": "release",

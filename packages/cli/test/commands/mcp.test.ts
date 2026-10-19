@@ -63,7 +63,7 @@ describe('prepareMcp', () => {
     const cwd = await makeTempCwd();
     try {
       // Inject an empty org probe so the test never shells out to `sf`.
-      const result = await prepareMcp({ cwd, listOrgs: async () => [] });
+      const result = await prepareMcp({ cwd, listOrgs: async () => ({ ok: true, orgs: [] }) });
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.error.kind).toBe('no-vault');
@@ -75,48 +75,62 @@ describe('prepareMcp', () => {
     }
   });
 
-  it('names authed orgs when a human is watching a terminal', async () => {
+  it('counts the authed orgs on stderr and names only the sf default', async () => {
+    // stderr is a LOG FILE when a host launches the server (Claude Desktop's
+    // mcp-server-*.log, Claude Code's debug log), and the error's fields reach
+    // setup mode, whose payload goes to the model. Neither gets the alias
+    // list: the count proves the `sf` CLI works and a choice exists, and the
+    // default org is the one alias the user already chose.
     const cwd = await makeTempCwd();
     try {
       const result = await prepareMcp({
         cwd,
-        discloseOrgNames: true,
-        listOrgs: async () => ['Acme-Prod', 'Acme-UAT'],
+        listOrgs: async () => ({
+          ok: true,
+          orgs: [
+            { alias: 'Acme-Prod', isDefault: false },
+            { alias: 'Acme-UAT', isDefault: true },
+            { username: 'admin@acme.example', isDefault: false },
+          ],
+        }),
       });
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.error.kind).toBe('no-vault');
-        expect(result.error.message).toContain('2 org(s)');
-        expect(result.error.message).toContain('Acme-Prod');
-        expect(result.error.message).toContain('Acme-UAT');
+        expect(result.error.message).toContain('3 org(s)');
+        expect(result.error.message).toContain('`Acme-UAT`');
+        expect(result.error.message).not.toContain('Acme-Prod');
+        expect(result.error.message).not.toContain('admin@acme.example');
         // Trust posture: never auto-pick / guess an org.
         expect(result.error.message).toContain('never');
+        expect(result.error.authedOrgCount).toBe(3);
+        expect(result.error.defaultOrg).toBe('Acme-UAT');
+        expect(result.error).not.toHaveProperty('authedOrgs');
       }
     } finally {
       await rm(cwd, { recursive: true, force: true });
     }
   });
 
-  it('WITHHOLDS org aliases by default — this message becomes a host log file', async () => {
-    // When an MCP host launches the server, stderr is captured to a file on
-    // disk (Claude Desktop's mcp-server-*.log, Claude Code's debug log). A list
-    // of an organisation's Salesforce org aliases should not persist there just
-    // because the user had not run `sfi init` yet. The count still proves the
-    // `sf` CLI works and a choice exists; the assistant reads the actual names
-    // in-band from `sfi.setup_status`, which is carried on `authedOrgs` below.
+  it('with no sf default, the error carries the count and no name at all', async () => {
     const cwd = await makeTempCwd();
     try {
       const result = await prepareMcp({
         cwd,
-        listOrgs: async () => ['Acme-Prod', 'Acme-UAT'],
+        listOrgs: async () => ({
+          ok: true,
+          orgs: [
+            { alias: 'Acme-Prod', isDefault: false },
+            { alias: 'Acme-UAT', isDefault: false },
+          ],
+        }),
       });
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.error.message).toContain('2 org(s)');
-        expect(result.error.message).not.toContain('Acme-Prod');
-        expect(result.error.message).not.toContain('Acme-UAT');
-        // Withheld from the LOG, not lost: setup mode still gets the real list.
-        expect(result.error.authedOrgs).toEqual(['Acme-Prod', 'Acme-UAT']);
+        expect(result.error.message).not.toContain('Acme-');
+        expect(result.error.authedOrgCount).toBe(2);
+        expect(result.error.defaultOrg).toBeUndefined();
       }
     } finally {
       await rm(cwd, { recursive: true, force: true });
@@ -126,7 +140,7 @@ describe('prepareMcp', () => {
   it('degrades gracefully when no orgs are authed', async () => {
     const cwd = await makeTempCwd();
     try {
-      const result = await prepareMcp({ cwd, listOrgs: async () => [] });
+      const result = await prepareMcp({ cwd, listOrgs: async () => ({ ok: true, orgs: [] }) });
       expect(result.ok).toBe(false);
       if (!result.ok) {
         expect(result.error.message).not.toContain('org(s)');
@@ -199,7 +213,7 @@ describe('prepareMcp', () => {
     try {
       const { vaultRoot } = await seedVault(vaultHome, 'with-manifest');
       // Default resolution from the empty launch dir finds nothing...
-      const def = await prepareMcp({ cwd: launchCwd, listOrgs: async () => [] });
+      const def = await prepareMcp({ cwd: launchCwd, listOrgs: async () => ({ ok: true, orgs: [] }) });
       expect(def.ok).toBe(false);
       // ...but the explicit override binds the real vault regardless of cwd.
       const result = await prepareMcp({ cwd: launchCwd, vaultRoot });
@@ -219,7 +233,7 @@ describe('prepareMcp', () => {
   it('mentions the --vault escape hatch in the no-vault message', async () => {
     const cwd = await makeTempCwd();
     try {
-      const result = await prepareMcp({ cwd, listOrgs: async () => [] });
+      const result = await prepareMcp({ cwd, listOrgs: async () => ({ ok: true, orgs: [] }) });
       expect(result.ok).toBe(false);
       if (!result.ok) expect(result.error.message).toContain('--vault');
     } finally {

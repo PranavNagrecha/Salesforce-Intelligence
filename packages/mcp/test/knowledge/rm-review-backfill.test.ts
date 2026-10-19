@@ -123,3 +123,55 @@ describe('rule:access/profile-field-grant-provenance — proof (+ EC-16 fromType
     expect(interpret(ruleById('rule:access/profile-field-grant-provenance'), slice, COMPLETE, PERMSET)).toEqual([]);
   });
 });
+
+describe('{0} writer slot binds the component that writes — never the field it writes (RM-MIXED-DML-ROOT-GATE)', () => {
+  const FLOW = 'Flow:Ns__ProvisionUserAfterSave';
+  const USER_FIELD_A = 'CustomField:User.Ns__Region__c';
+  const USER_FIELD_B = 'CustomField:User.Ns__Tier__c';
+
+  it('rule:apex/mixed-dml-setup-write on a Flow root names the FLOW as the writer and cites it', () => {
+    const slice: GroundedSlice = {
+      nodes: [
+        node(FLOW, 'Flow', { status: 'Active', triggerType: 'RecordAfterSave' }),
+        node(USER_FIELD_A, 'CustomField'),
+        node(USER_FIELD_B, 'CustomField'),
+      ],
+      edges: [
+        edge(FLOW, USER_FIELD_A, 'writesTo', 'parsed'),
+        edge(FLOW, USER_FIELD_B, 'writesTo', 'parsed'),
+      ],
+    };
+    const out = interpret(ruleById('rule:apex/mixed-dml-setup-write'), slice, COMPLETE, FLOW);
+    expect(out).toHaveLength(1);
+    // The real-vault defect: "CustomField:A writes setup object data at CustomField:B" with no Flow cited.
+    expect(out[0]!.claim.startsWith(`${FLOW} writes setup object data at ${USER_FIELD_A}`)).toBe(true);
+    expect(out[0]!.groundedIn[0]).toBe(FLOW);
+    expect(out[0]!.groundedIn).toContain(USER_FIELD_A);
+  });
+
+  it('rule:automation/validation-gates-rollup-stale does NOT fire when a FORMULA FIELD (not a ValidationRule) references the roll-up', () => {
+    const FORMULA = 'CustomField:Ns__Deal__c.Ns__Score__c';
+    const ROLLUP = 'CustomField:Ns__Deal__c.Ns__LineTotal__c';
+    const slice: GroundedSlice = {
+      nodes: [
+        node(FORMULA, 'CustomField', { isFormula: true }),
+        node(ROLLUP, 'CustomField', { dataType: 'Summary' }),
+      ],
+      edges: [edge(FORMULA, ROLLUP, 'references', 'parsed')],
+    };
+    expect(interpret(ruleById('rule:automation/validation-gates-rollup-stale'), slice, COMPLETE, ROLLUP)).toEqual([]);
+    expect(interpret(ruleById('rule:automation/validation-gates-rollup-stale'), slice, COMPLETE, FORMULA)).toEqual([]);
+  });
+
+  it('rule:code-quality/bulkification-gap-trigger-reachable does NOT fire on a FLOW root that calls the leaky class', () => {
+    const CLS = 'ApexClass:Ns__LeakyHandler';
+    const slice: GroundedSlice = {
+      nodes: [
+        node(FLOW, 'Flow', { status: 'Active' }),
+        node(CLS, 'ApexClass', { qualityIssues: [{ rule: 'soql-in-loop' }] }),
+      ],
+      edges: [edge(FLOW, CLS, 'callsApex', 'parsed')],
+    };
+    expect(interpret(ruleById('rule:code-quality/bulkification-gap-trigger-reachable'), slice, COMPLETE, FLOW)).toEqual([]);
+  });
+});

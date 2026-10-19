@@ -17,6 +17,11 @@ import type { Edge, Node } from '@sf-intelligence/contracts';
  *                              knowable from the formula's own file.
  *   `relatedListFieldRefs`     on a FlexiPage or Layout — related-list columns,
  *                              which are BARE field names on the RELATED object.
+ *   `recordTraversalRefs`      on a FlexiPage — `{!Record.<Rel>.<Field>}` in a
+ *                              visibility rule or a dotted `<fieldItem>`.
+ *   `componentRefs`            on a FlexiPage — the org's own bundles the page
+ *                              places by bare name; LWC or Aura is decided by
+ *                              which bundle node exists.
  *   `unresolvedTraversalRefs`  on a ConditionalContext — the relationship-shaped
  *                              refs a Flow decision, record-trigger filter, or
  *                              validation-rule formula mentions
@@ -24,10 +29,21 @@ import type { Edge, Node } from '@sf-intelligence/contracts';
  *                              is a per-file function whose only object context
  *                              is the parent object api name, so it cannot know
  *                              that `Parent__r` reaches another object.
+ *   `unresolvedTraversalRefs`  on a FieldSet — a dotted displayed/available
+ *                              field (`Account__r.Name`), on the related object.
+ *   `columnRefs`               on a ReportType — `{ table, fields }` per
+ *                              `<table>` path. The path (`Base.Children__r`) is
+ *                              walked CHILDWARD to the object the columns live
+ *                              on; a dotted field (`Owner__c.Name`) is a lookup
+ *                              traversal spelled with the lookup FIELD api name,
+ *                              walked parentward from there. What cannot be
+ *                              walked is recorded on `unresolvedColumns`.
  *
- * All three used to be dropped, which is why a field read only through a
- * traversal, or shown only in a dynamic related list, could report zero
- * referrers and be certified deletable.
+ * All of these used to be dropped or minted as ids no node has
+ * (`CustomField:<Lookup__c>.<Field>`, `CustomField:<Base>.<Rel__r>`), which is
+ * why a field read only through a traversal, shown only in a dynamic related
+ * list, or exposed only through a report type built over its object could
+ * report zero referrers and be certified deletable.
  *
  * The honesty rule this module keeps: **resolve or drop, never guess.** A
  * traversal whose relationship cannot be mapped to a vaulted object mints no
@@ -35,9 +51,12 @@ import type { Edge, Node } from '@sf-intelligence/contracts';
  * resolves would be worse than the absence, because it would present as
  * evidence. Nothing here invents a target.
  *
- * **Confidence tier — the same rationale for BOTH branches.** Every edge this
- * module mints is `parsed`, never `declared`, because every one of them is a
- * scrape plus a join:
+ * **Confidence tier — the same rationale for every traversal branch.** Every
+ * traversal edge this module mints is `parsed`, never `declared`, because every
+ * one of them is a scrape plus a join. The two `declared` exceptions name their
+ * target outright with no hop at all: a report-type column on its own `<table>`
+ * (`<table>Account</table><field>Name</field>`) and a Lightning page component
+ * placement, where `componentName` is the bundle name:
  *
  *   formula traversals      the tokenizer PARSED `Parent__r.Field__c` out of a
  *                           formula body, then the relationship map INFERRED
@@ -120,6 +139,14 @@ export const resolveRelatedListChildObject = (
   maps: RelationshipMaps,
 ): string | undefined => maps.childward.get(relatedListApiName.toLowerCase());
 
+type Emit = (
+  fromId: string,
+  toId: string,
+  confidence: Edge['confidence'],
+  edgeType: Edge['edgeType'],
+  properties: Record<string, unknown>,
+) => void;
+
 interface MintRelatedListColumnsOptions {
   readonly edgeType: Edge['edgeType'];
   readonly referenceKind: string;
@@ -134,13 +161,7 @@ const mintRelatedListColumnEdges = (
   related: unknown,
   maps: RelationshipMaps,
   fieldIds: ReadonlySet<string>,
-  emit: (
-    fromId: string,
-    toId: string,
-    confidence: Edge['confidence'],
-    edgeType: Edge['edgeType'],
-    properties: Record<string, unknown>,
-  ) => void,
+  emit: Emit,
   options: MintRelatedListColumnsOptions,
   unresolvedRelatedLists: string[],
 ): void => {
@@ -216,12 +237,21 @@ export const buildRelationshipMaps = (
     // `{ChildObject}.{LookupField}` (`Invoice__c.Project__c`). That spelling is
     // derived from this very node (its owning object and api name), so it is
     // indexed too — never parsed out of the layout token by splitting on a dot.
+    // A packaged lookup (`pkg__Programme__c`) declares its `relationshipName`
+    // WITHOUT the namespace (`Enrolments`), while every consumer — report-type
+    // `<table>` paths, related lists, SOQL — spells it `pkg__Enrolments__r`.
+    // Index the namespaced spelling too, derived from the field's own prefix.
     const relationshipName = node.properties['relationshipName'];
     const classicSpelling = `${owningObject}.${fieldApiName}`;
-    const childKeys: string[] =
-      typeof relationshipName === 'string' && relationshipName.length > 0
-        ? [relationshipName, `${relationshipName}__r`, classicSpelling]
-        : [classicSpelling];
+    const nameParts = fieldApiName.split('__');
+    const namespace = nameParts.length === 3 ? nameParts[0] : undefined;
+    const childKeys: string[] = [classicSpelling];
+    if (typeof relationshipName === 'string' && relationshipName.length > 0) {
+      childKeys.push(relationshipName, `${relationshipName}__r`);
+      if (namespace !== undefined && !relationshipName.startsWith(`${namespace}__`)) {
+        childKeys.push(`${namespace}__${relationshipName}`, `${namespace}__${relationshipName}__r`);
+      }
+    }
     {
       for (const key of childKeys) {
         const lower = key.toLowerCase();
@@ -253,6 +283,10 @@ export const buildRelationshipMaps = (
  * `Parent__r.Status__c` on Enrollment__c   -> Account (say), field `Status__c`
  * `A__r.B__r.Code__c`   on Enrollment__c   -> two hops, then `Code__c`
  *
+ * A hop spelled as the lookup FIELD (`Owner__c.Name`, the report-type column
+ * spelling) is read as its relationship (`Owner__r`); a formula never spells a
+ * hop `__c`, so the rewrite is inert for every other caller.
+ *
  * Returns `null` when any hop cannot be resolved — a standard relationship whose
  * object was never retrieved (`Owner.Name`, `CreatedBy.Manager.LastName`) fails
  * here, and failing is correct: the vault has no node to point at.
@@ -267,7 +301,7 @@ const resolveTraversalTarget = (
   let current = owningObject;
   for (const hop of segments.slice(0, -1)) {
     const next = maps.parentward.get(
-      `${current.toLowerCase()}|${hop.toLowerCase()}`,
+      `${current.toLowerCase()}|${hop.toLowerCase().replace(/__c$/, '__r')}`,
     );
     if (next === undefined) return null;
     current = next;
@@ -275,6 +309,99 @@ const resolveTraversalTarget = (
   const field = segments[segments.length - 1];
   if (field === undefined || field.length === 0) return null;
   return `CustomField:${current}.${field}`;
+};
+
+/**
+ * Walk a report-type `<table>` path (`Base.Children__r.Grandchildren`) to the
+ * object its columns live on. The first segment is an object api name; each
+ * further segment is a child relationship name, resolved through the same
+ * childward index related lists use. `null` when any hop is unknown.
+ */
+const resolveTablePathObject = (table: string, maps: RelationshipMaps): string | null => {
+  const [base, ...hops] = table.split('.');
+  if (base === undefined || base.length === 0) return null;
+  let current = base;
+  for (const hop of hops) {
+    const next = resolveRelatedListChildObject(hop, maps);
+    if (next === undefined) return null;
+    current = next;
+  }
+  return current;
+};
+
+/** Append sorted, deduplicated values to a string-array node property. */
+const recordUnresolved = (node: Node, property: string, values: readonly string[]): void => {
+  if (values.length === 0) return;
+  const props = node.properties as Record<string, unknown>;
+  const existing = Array.isArray(props[property]) ? (props[property] as string[]) : [];
+  props[property] = [...new Set([...existing, ...values])].sort();
+};
+
+/**
+ * FLEXI-REFS: `{!Record.<Rel>.<Field>}` in a visibility rule or a dotted
+ * `<fieldItem>` on a Lightning page, parked by the FlexiPage extractor as
+ * `recordTraversalRefs: {path, use}` because the relationship map lives here.
+ * A visibility rule READS the field (`readsFrom`), a field item references it;
+ * both `parsed` like every other traversal. An unresolved visibility token is
+ * recorded on the page as `unresolvedVisibilityRefs` (joining any the extractor
+ * recorded itself) and an unresolved field item as `unresolvedFieldRefs`.
+ */
+const mintFlexiPageRecordTraversals = (
+  node: Node,
+  maps: RelationshipMaps,
+  emit: Emit,
+): void => {
+  const refs = node.properties['recordTraversalRefs'];
+  const owningObject = node.properties['sobjectType'];
+  if (!Array.isArray(refs) || typeof owningObject !== 'string' || owningObject.length === 0) return;
+  const unresolved: Record<'visibilityRule' | 'fieldRef', string[]> = { visibilityRule: [], fieldRef: [] };
+  for (const ref of refs) {
+    if (typeof ref !== 'object' || ref === null) continue;
+    const { path, use } = ref as { path?: unknown; use?: unknown };
+    if (typeof path !== 'string' || (use !== 'visibilityRule' && use !== 'fieldRef')) continue;
+    const toId = resolveTraversalTarget(path, owningObject, maps);
+    const traversalPath = `Record.${path}`;
+    if (toId === null) {
+      unresolved[use].push(traversalPath);
+      continue;
+    }
+    emit(node.id, toId, 'parsed', use === 'visibilityRule' ? 'readsFrom' : 'references', {
+      referenceKind: use,
+      traversalPath,
+    });
+  }
+  recordUnresolved(node, 'unresolvedVisibilityRefs', unresolved.visibilityRule);
+  recordUnresolved(node, 'unresolvedFieldRefs', unresolved.fieldRef);
+};
+
+/**
+ * FLEXI-REFS: a Lightning page places the org's own LWC and Aura bundles by bare
+ * `componentName`; the extractor cannot tell which bundle type holds the name,
+ * so it parks `componentRefs` and the edge is minted here onto the bundle node
+ * that exists. `declared`: `componentName` names its target outright, and the
+ * only join is which of two node sets holds it. A name neither holds (a bundle
+ * outside the retrieve) is recorded as `unresolvedComponentRefs`.
+ */
+const mintFlexiPageComponentPlacements = (
+  node: Node,
+  nodeIds: ReadonlySet<string>,
+  emit: Emit,
+): void => {
+  const refs = node.properties['componentRefs'];
+  if (!Array.isArray(refs)) return;
+  const unresolved: string[] = [];
+  for (const name of refs) {
+    if (typeof name !== 'string' || name.length === 0) continue;
+    const toId = [`LightningComponentBundle:${name}`, `AuraDefinitionBundle:${name}`].find((id) =>
+      nodeIds.has(id),
+    );
+    if (toId === undefined) {
+      unresolved.push(name);
+      continue;
+    }
+    emit(node.id, toId, 'declared', 'references', { referenceKind: 'componentPlacement' });
+  }
+  recordUnresolved(node, 'unresolvedComponentRefs', unresolved);
 };
 
 /** Extractor `source` marker on every edge this module mints. */
@@ -295,10 +422,9 @@ export const mintRelationshipTraversalEdges = (
   edges: Edge[],
 ): void => {
   const maps = buildRelationshipMaps(nodes);
-  const fieldIds = new Set<string>();
-  for (const node of nodes) {
-    if (node.type === 'CustomField') fieldIds.add(node.id);
-  }
+  // Every resolved target must be a vaulted node: a CustomField for the
+  // traversal branches, a Lightning bundle for page placements.
+  const nodeIds = new Set<string>(nodes.map((node) => node.id));
 
   // Dedup against what the per-file extractors ALREADY emitted, keyed on the
   // same (from, to, type) triple the graph is keyed on. A field can legitimately
@@ -319,7 +445,7 @@ export const mintRelationshipTraversalEdges = (
     edgeType: Edge['edgeType'],
     properties: Record<string, unknown>,
   ): void => {
-    if (!fieldIds.has(toId)) return;
+    if (!nodeIds.has(toId)) return;
     // The dedup key carries the edge TYPE — the same triple the graph is keyed
     // on — so a `readsFrom` minted here is never suppressed by an unrelated
     // `references` already present on the same pair, or vice versa.
@@ -381,6 +507,66 @@ export const mintRelationshipTraversalEdges = (
       }
     }
 
+    // ── Field-set relationship columns ──────────────────────────────────────
+    // `field-set.ts` parks a dotted `<field>` (`Programme__r.Status__c`) here
+    // instead of minting `CustomField:{Object}.{Rel__r}.{Field}`.
+    if (node.type === 'FieldSet') {
+      const refs = node.properties['unresolvedTraversalRefs'];
+      const owningObject = objectApiNameOf(node.parentId);
+      if (Array.isArray(refs) && owningObject !== null) {
+        for (const ref of refs) {
+          if (typeof ref !== 'string') continue;
+          const toId = resolveTraversalTarget(ref, owningObject, maps);
+          if (toId === null) continue; // resolve or drop, never guess
+          emit(node.id, toId, 'parsed', 'usedInLayout', {
+            referenceKind: 'fieldSetRelationshipTraversal',
+            traversalPath: ref,
+          });
+        }
+      }
+      continue;
+    }
+
+    // ── Report-type columns ─────────────────────────────────────────────────
+    // `extractReportTypeDetail` parks `{ table, fields }` per `<table>` path.
+    // The path is walked childward to the column object; a dotted field is a
+    // lookup traversal from there. A hop that cannot be walked is recorded on
+    // `unresolvedColumns` as `{table}.{field}` and mints nothing.
+    if (node.type === 'ReportType') {
+      const refs = node.properties['columnRefs'];
+      const unresolvedColumns = new Set<string>();
+      if (Array.isArray(refs)) {
+        for (const entry of refs) {
+          if (typeof entry !== 'object' || entry === null) continue;
+          const { table, fields } = entry as { table?: unknown; fields?: unknown };
+          if (typeof table !== 'string' || table.length === 0 || !Array.isArray(fields)) continue;
+          const object = resolveTablePathObject(table, maps);
+          for (const field of fields) {
+            if (typeof field !== 'string' || field.length === 0) continue;
+            const toId =
+              object === null
+                ? null
+                : field.includes('.')
+                  ? resolveTraversalTarget(field, object, maps)
+                  : `CustomField:${object}.${field}`;
+            if (toId === null) {
+              unresolvedColumns.add(`${table}.${field}`);
+              continue;
+            }
+            const hopped = table.includes('.') || field.includes('.');
+            emit(node.id, toId, hopped ? 'parsed' : 'declared', 'references', {
+              referenceKind: 'reportTypeColumn',
+              table,
+            });
+          }
+        }
+      }
+      if (unresolvedColumns.size > 0) {
+        (node.properties as Record<string, unknown>)['unresolvedColumns'] = [...unresolvedColumns].sort();
+      }
+      continue;
+    }
+
     // ── DataMapper / FlexCard relationship paths ────────────────────────────
     // The OmniDataTransform extractor parks `alias:Parent__r.Field__c` (an
     // Extract mapping row) or a dotted Load output here, and the FlexCard
@@ -412,11 +598,13 @@ export const mintRelationshipTraversalEdges = (
         node.id,
         node.properties['relatedListFieldRefs'],
         maps,
-        fieldIds,
+        nodeIds,
         emit,
         { edgeType: 'references', referenceKind: 'relatedListFieldAlias' },
         [],
       );
+      mintFlexiPageRecordTraversals(node, maps, emit);
+      mintFlexiPageComponentPlacements(node, nodeIds, emit);
       continue;
     }
 
@@ -427,7 +615,7 @@ export const mintRelationshipTraversalEdges = (
         node.id,
         node.properties['relatedListFieldRefs'],
         maps,
-        fieldIds,
+        nodeIds,
         emit,
         { edgeType: 'usedInLayout', referenceKind: 'layoutRelatedListColumn' },
         unresolvedRelatedLists,

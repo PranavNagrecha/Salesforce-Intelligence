@@ -538,7 +538,8 @@ const buildImpactDisclosure = (params: {
   readonly slimmedCount: number;
   readonly byteTrimmed: boolean;
   readonly rootIsObject: boolean;
-  readonly rootIsField: boolean;
+  /** The `unwalked-referrer-class` kinds soundness named for this root (empty = none). */
+  readonly unwalkedReferrerClasses: readonly string[];
   readonly walkedEdges: number;
   readonly omittedEdgeTypes: readonly string[];
   readonly omittedReferrerTypes: readonly string[];
@@ -568,15 +569,13 @@ const buildImpactDisclosure = (params: {
     : '';
   const reportNote = formatFoldedReportUsageNote(params.reportUsage);
 
-  // D3-soundness-overclaim: for a CustomField / CustomObject root, the walk only
-  // sees referrers modeled as incoming edges. Name the referrer classes that are
-  // NOT edge-modeled (and so NOT walked) so "no referrers" is never read as
-  // certainty — mirrors the structured `soundness.blindSpots` disclosure.
+  // D3-soundness-overclaim: the walk only sees referrers modeled as incoming
+  // edges. Name the kinds soundness found NOT edge-modeled for THIS root on THIS
+  // vault (never a fixed list) so "no referrers" is never read as certainty.
   const referrerBlindNote =
-    params.rootIsField || params.rootIsObject
-      ? ' This walk covers only edge-modeled referrers; roll-up source coupling,' +
-        ' layout placement, flow decision/filter reads, and tab/app membership are' +
-        ' NOT modeled as incoming edges and were NOT walked (see' +
+    params.unwalkedReferrerClasses.length > 0
+      ? ` This walk covers only edge-modeled referrers; ${params.unwalkedReferrerClasses.join(', ')}` +
+        ' are NOT modeled as incoming edges on this vault and were NOT walked (see' +
         ' `soundness.blindSpots`) — treat "no referrers" as "not checked", not' +
         ' proven none.'
       : '';
@@ -973,13 +972,13 @@ export const getImpactHandler = async (
   // any oversized property value (Profile grant matrices etc.).
   // Soundness from the FULL (pre-slim) nodes so the dynamic-apex signal in
   // properties.qualityIssues is read intact, before payload slimming.
-  // D3-soundness-overclaim: for a CustomField / CustomObject root, whole classes
-  // of referrer (roll-ups, layout placement, flow decision/filter reads, tab/app
-  // membership) are structurally NOT modeled as incoming edges, so this walk is
-  // blind to them — `soundnessForImpactWalk` downgrades `complete`/`full` and
-  // names the un-walked classes rather than implying a completeness it can't have.
+  // D3-soundness-overclaim: referrer kinds not modeled as incoming edges on this
+  // vault (a CustomObject's layouts / tabs / roll-ups / conditions, a pre-0.3.0
+  // vault's field roll-ups and conditions) are invisible to this walk —
+  // `soundnessForImpactWalk` downgrades `complete`/`full` and names the un-walked
+  // kinds rather than implying a completeness it can't have.
   // Derive the root type from the id prefix (robust when the root node row is
-  // absent, e.g. an unknown field), mirroring the `rootIsObject` disclosure below.
+  // absent, e.g. an unknown field), as the `rootIsObject` disclosure does.
   // The referrer kinds the walk cannot see come from the ONE shared table
   // (`referrer-coverage.ts`), keyed by the id prefix and refined by the root
   // node's own properties when it is in the slice.
@@ -1085,7 +1084,8 @@ export const getImpactHandler = async (
   const disclosure = buildImpactDisclosure({
     componentId: input.componentId,
     rootIsObject: rootId.startsWith('CustomObject:'),
-    rootIsField: rootId.startsWith('CustomField:'),
+    unwalkedReferrerClasses:
+      soundness.blindSpots.find((b) => b.kind === 'unwalked-referrer-class')?.referrerClasses ?? [],
     hops,
     truncated: finalTruncated,
     nodeCount: budgeted.nodes.length,

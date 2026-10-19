@@ -531,3 +531,93 @@ describe('order_of_execution reentry + shared event matchers', () => {
     expect(ids).toContain('Flow:Widget_After_NoType');
   });
 });
+
+describe('CHECK-BEFORE-CAVEAT: notModeled prints a clause only when the check cannot run, with the count', () => {
+  it('FAIL-BEFORE/PASS-AFTER: no Process Builder flows, no approvals, no time triggers → none of those clauses', async () => {
+    const r = await whatHappensOnSaveHandler(ctx, { objectApiName: 'Gadget__c', event: 'update' });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const text = r.value.data.reentry?.notModeled ?? '';
+    expect(text).not.toContain('Process Builder');
+    expect(text).not.toContain('approval');
+    expect(text).not.toContain('time-triggered');
+    // Analysis limits stay, labelled as the tool's, never as a vault gap.
+    expect(text).toContain('Not analysed by this tool');
+    expect(text).not.toContain('Not listed:');
+  });
+
+  describe('with one of each present', () => {
+    let pbDir: string;
+    let pbGraph: GraphStore;
+    let pbCtx: Context;
+
+    beforeAll(async () => {
+      pbDir = mkdtempSync(join(tmpdir(), 'sfi-reentry-pb-'));
+      const opened = await openGraph(join(pbDir, 'g.db'));
+      if (!opened.ok) throw new Error(opened.error.message);
+      pbGraph = opened.value;
+      const seedPb = {
+        nodes: [
+          node({ id: 'CustomObject:Demo_Thing__c', type: 'CustomObject', apiName: 'Demo_Thing__c' }),
+          node({ id: 'CustomField:Demo_Thing__c.Demo_Stamp__c', type: 'CustomField', apiName: 'Demo_Stamp__c' }),
+          // Process Builder: a Flow whose processType is Workflow. The extractor
+          // does not link it to its object, so it has no triggersOn edge.
+          node({ id: 'Flow:Demo_PB_Process', type: 'Flow', apiName: 'Demo_PB_Process', properties: { processType: 'Workflow', status: 'Active' } }),
+          node({ id: 'Flow:Demo_PB_Retired', type: 'Flow', apiName: 'Demo_PB_Retired', properties: { processType: 'Workflow', status: 'Obsolete' } }),
+          node({ id: 'Flow:Demo_Plain_Auto', type: 'Flow', apiName: 'Demo_Plain_Auto', properties: { processType: 'AutoLaunchedFlow', status: 'Active' } }),
+          node({
+            id: 'ApprovalProcess:Demo_Thing__c.Demo_Approval',
+            type: 'ApprovalProcess',
+            apiName: 'Demo_Thing__c.Demo_Approval',
+            parentId: 'CustomObject:Demo_Thing__c',
+            properties: { active: true },
+          }),
+          node({
+            id: 'WorkflowRule:Demo_Thing__c.Demo_Later',
+            type: 'WorkflowRule',
+            apiName: 'Demo_Thing__c.Demo_Later',
+            parentId: 'CustomObject:Demo_Thing__c',
+            properties: { active: true, triggerType: 'onAllChanges' },
+          }),
+        ],
+        edges: [
+          edge('CustomObject:Demo_Thing__c', 'ApprovalProcess:Demo_Thing__c.Demo_Approval', 'parentOf'),
+          edge('WorkflowRule:Demo_Thing__c.Demo_Later', 'CustomObject:Demo_Thing__c', 'triggersOn'),
+          // The rule's only field update is time-triggered: a later, separate save.
+          edge('WorkflowRule:Demo_Thing__c.Demo_Later', 'CustomField:Demo_Thing__c.Demo_Stamp__c', 'writesTo', { operation: 'Literal', timeTriggered: true }),
+          edge('WorkflowRule:Demo_Thing__c.Demo_Later', 'WorkflowFieldUpdate:Demo_Thing__c.Demo_Stamp_Later', 'references', { actionType: 'FieldUpdate', timeTriggered: true }, 'declared'),
+        ],
+        warnings: [],
+      } as unknown as ExtractionResult;
+      const imported = await importExtractionResults(pbGraph, [seedPb]);
+      if (!imported.ok) throw new Error(imported.error.message);
+      pbCtx = { vaultRoot: pbDir, manifest: MANIFEST, graph: pbGraph } as Context;
+    });
+
+    afterAll(async () => {
+      await closeGraph(pbGraph);
+      rmSync(pbDir, { recursive: true, force: true });
+    });
+
+    it('FAIL-BEFORE/PASS-AFTER: each clause carries its count (active Process Builder flows org-wide, approvals and time triggers on this object)', async () => {
+      const r = await whatHappensOnSaveHandler(pbCtx, { objectApiName: 'Demo_Thing__c', event: 'update' });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const reentry = r.value.data.reentry;
+      expect(reentry?.writeBacks).toEqual([]);
+      const text = reentry?.notModeled ?? '';
+      expect(text).toContain('1 active Process Builder process');
+      expect(text).toContain('1 approval process');
+      expect(text).toContain('1 time-triggered workflow field update');
+    });
+
+    it('order_of_execution shares the same clause builder', async () => {
+      const r = await orderOfExecutionHandler(pbCtx, { objectApiName: 'Demo_Thing__c', events: ['update'] });
+      expect(r.ok).toBe(true);
+      if (!r.ok) return;
+      const text = r.value.data.reentry?.notModeled ?? '';
+      expect(text).toContain('1 active Process Builder process');
+      expect(text).toContain('1 approval process');
+    });
+  });
+});

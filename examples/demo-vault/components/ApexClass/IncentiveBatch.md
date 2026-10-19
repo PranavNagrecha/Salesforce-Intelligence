@@ -22,6 +22,9 @@ properties:
   lineCount: 54
   modifiers:
     - public
+  platformCalls:
+    Database: 1
+    System: 1
   qualityIssues:
     - confidence: heuristic
       explanation: "Hardcoded Salesforce ID literal 'a01000000000001' — IDs differ between sandbox/production. Replace with a Custom Setting, Custom Metadata, or Schema.GlobalDescribe lookup."
@@ -82,6 +85,7 @@ type: ApexClass
 | isTest | `false` |
 | lineCount | `54` |
 | modifiers | `public` |
+| platformCalls | `[object Object]` |
 | qualityIssues | `[object Object],[object Object],[object Object],[object Object],[object Object],[object Object]` |
 | sharingModel | `with sharing` |
 | sourceBytes | `1863` |
@@ -171,3 +175,9 @@ public with sharing class IncentiveBatch implements Database.Batchable<SObject> 
 | Target | Confidence | Producer |
 | --- | --- | --- |
 | `CustomObject:Project__c` | heuristic | apex-scanner |
+
+### writesTo (outgoing, 1)
+
+| Target | Confidence | Producer |
+| --- | --- | --- |
+| `CustomField:Project__c.Id` | parsed | apex-ast |

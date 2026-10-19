@@ -976,6 +976,49 @@ describe('shell-injection hardening of the `sf` exec path', () => {
     }
   });
 
+  // INIT-RELATIVE-VAULTROOT — a committed config must work from a teammate's
+  // clone, so `vaultRoot` is relative to the folder the config lives in.
+  it('loadVaultConfig resolves a relative vaultRoot (".") against the vault folder itself', async () => {
+    const cwd = await makeTempCwd();
+    try {
+      const metaDir = join(cwd, 'org-kb', 'meta');
+      await mkdir(metaDir, { recursive: true });
+      await writeFile(
+        join(metaDir, 'config.json'),
+        JSON.stringify({ targetOrg: 'MyOrg', vaultRoot: '.', version: '0.1.0', createdAt: '2026-05-27T00:00:00.000Z' }),
+        'utf8',
+      );
+      const r = await loadVaultConfig(cwd);
+      expect(r.ok).toBe(true);
+      if (r.ok) expect(r.value.vaultRoot).toBe(join(cwd, 'org-kb'));
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+    }
+  });
+
+  it('loadVaultConfig still fails closed when the config names a DIFFERENT absolute vault', async () => {
+    const cwd = await makeTempCwd();
+    const other = await makeTempCwd();
+    try {
+      const metaDir = join(cwd, 'org-kb', 'meta');
+      await mkdir(metaDir, { recursive: true });
+      await writeFile(
+        join(metaDir, 'config.json'),
+        JSON.stringify({ targetOrg: 'MyOrg', vaultRoot: join(other, 'org-kb'), version: '0.1.0', createdAt: '2026-05-27T00:00:00.000Z' }),
+        'utf8',
+      );
+      const r = await loadVaultConfig(cwd);
+      expect(r.ok).toBe(false);
+      if (!r.ok) {
+        expect(r.error).toContain('copied or moved');
+        expect(r.error).toContain('"."');
+      }
+    } finally {
+      await rm(cwd, { recursive: true, force: true });
+      await rm(other, { recursive: true, force: true });
+    }
+  });
+
   // TEST C — even a metachar value reaches `sf` as ONE inert argv element, never
   // a shell. Drive runSf with a stub execFile and assert the argv shape.
   it('runSf spawns the bare `sf` binary with the raw value as a single argv element (never a shell)', async () => {

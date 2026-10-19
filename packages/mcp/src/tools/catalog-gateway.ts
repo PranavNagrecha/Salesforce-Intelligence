@@ -46,6 +46,8 @@ import { toolProfile } from './tool-profile.js';
 
 const DEFAULT_LIST_LIMIT = 50;
 const MAX_LIST_LIMIT = 200;
+/** A `query` returns at most this many ranked rows. */
+const QUERY_TOP_K = 8;
 
 /** Coarse, name-derived category — a navigation aid, not a taxonomy. */
 export const analysisCategory = (name: string): string => {
@@ -70,7 +72,11 @@ export const oneLiner = (description: string): string => {
 
 export const listAnalysesInputSchema = z.object({
   category: z.string().optional(),
-  /** Keep only analyses whose name or one-liner contains EVERY word (case-insensitive). */
+  /**
+   * Rank analyses by how many of the query's terms (funnel tokenizer: stop
+   * words dropped, light plural stem) appear in the name or one-liner; return
+   * the top 8 with `matchedTerms` per row. An exact tool name ranks first.
+   */
   query: z.string().min(1).optional(),
   limit: z.number().int().min(1).max(MAX_LIST_LIMIT).optional(),
   offset: z.number().int().min(0).optional(),
@@ -85,6 +91,8 @@ export interface AnalysisListEntry {
   readonly name: string;
   readonly oneLiner: string;
   readonly category: string;
+  /** Query-filtered call only: the query terms this row matched (its rank key). */
+  readonly matchedTerms?: readonly string[];
 }
 
 export interface ListAnalysesOutput {
@@ -110,7 +118,10 @@ export interface ListAnalysesOutput {
    * unfiltered call, keeping that response byte-identical to its prior shape.
    */
   readonly appliedCategory?: string;
-  /** The `query` filter that was applied (present only on a query-filtered call). */
+  /**
+   * The `query` filter that was applied (present only on a query-filtered
+   * call). Rows are then the top 8 by matched-term count (name hits first).
+   */
   readonly appliedQuery?: string;
 }
 
@@ -188,19 +199,44 @@ export const listAnalysesHandler = async (
   }
   const byCategory =
     appliedCategory === undefined ? all : all.filter((a) => a.category === appliedCategory);
-  // E: a `query` filter — every word must appear in the name or one-liner.
+  // CATALOG-SEARCH-ANY-TERM: rank by ANY matching term. Requiring every word
+  // returned 0 rows for a question-shaped query ("fields written by
+  // automation") and the host fell back to reading Apex by hand. The query is
+  // tokenized by the funnel's tokenizer (one stop-word list, one plural stem);
+  // each row's rank is the number of distinct terms found in its name or
+  // one-liner, then how many of those sit in the name; an exact tool name
+  // ranks first and roster order breaks remaining ties.
   const appliedQuery = input.query?.trim();
-  const queryWords = (appliedQuery ?? '')
-    .toLowerCase()
-    .split(/[\s_.]+/)
-    .filter((w) => w.length > 0);
+  const queryWords =
+    appliedQuery === undefined
+      ? []
+      : [...new Set((await import('../semantic-funnel.js')).tokenize(appliedQuery))];
+  const exactName = (
+    appliedQuery === undefined || appliedQuery.startsWith('sfi.') ? appliedQuery : `sfi.${appliedQuery}`
+  )?.toLowerCase();
+  // A query of only stop words ranks nothing: an empty list, never the catalog.
   const filtered =
-    queryWords.length === 0
+    appliedQuery === undefined
       ? byCategory
-      : byCategory.filter((a) => {
-          const hay = `${a.name.replace(/_/g, ' ')} ${a.oneLiner}`.toLowerCase();
-          return queryWords.every((w) => hay.includes(w));
-        });
+      : byCategory
+          .map((a) => {
+            const words = a.name.replace(/_/g, ' ');
+            const hay = `${words} ${a.oneLiner}`.toLowerCase();
+            const hits = queryWords.filter((w) => hay.includes(w));
+            // The stem and its plural both hit; keep the plural only.
+            const matchedTerms = hits.filter((w) => !hits.includes(`${w}s`));
+            const nameHits = matchedTerms.filter((w) => words.includes(w)).length;
+            return { ...a, matchedTerms, exact: a.name.toLowerCase() === exactName, nameHits };
+          })
+          .filter((a) => a.matchedTerms.length > 0)
+          .sort(
+            (x, y) =>
+              Number(y.exact) - Number(x.exact) ||
+              y.matchedTerms.length - x.matchedTerms.length ||
+              y.nameHits - x.nameHits,
+          )
+          .slice(0, QUERY_TOP_K)
+          .map(({ exact: _exact, nameHits: _nameHits, ...a }) => a);
 
   // Resolve the resume offset (echoed cursor wins over explicit offset);
   // a stale/forged cursor (changed `category`, different tool, or refreshed
@@ -212,7 +248,7 @@ export const listAnalysesHandler = async (
   // (`core` page 1, `CORE` page 2) is the same filter, not a forged one.
   const fingerprint = argsFingerprint({
     ...(appliedCategory !== undefined ? { category: appliedCategory } : {}),
-    ...(queryWords.length > 0 ? { query: queryWords.join(' ') } : {}),
+    ...(appliedQuery !== undefined ? { query: queryWords.join(' ') } : {}),
   });
   let offset = input.offset ?? 0;
   if (input.cursor !== undefined) {
@@ -250,7 +286,7 @@ export const listAnalysesHandler = async (
       offset,
       categories,
       ...(appliedCategory !== undefined ? { appliedCategory } : {}),
-      ...(queryWords.length > 0 && appliedQuery !== undefined ? { appliedQuery } : {}),
+      ...(appliedQuery !== undefined ? { appliedQuery } : {}),
       next: 'Call sfi.describe_analysis { name } for one tool’s full input schema, then sfi.run_analysis { name, args } to execute it — identical output to calling the tool directly.',
       ...(emitCursor ? { nextCursor: paged.nextCursor as string, pageInfo: paged.pageInfo } : {}),
     },

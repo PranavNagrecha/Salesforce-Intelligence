@@ -65,14 +65,11 @@ lookalike tool). Terse follow-ups ("does it fire on delete too?") work when
 the host passes the optional `context.previous` param — the server keeps no
 conversation memory. Full host contract in [`../routing.md`](../routing.md).
 
-For broad **discovery** questions the shortlist also carries
-`suggestedArgs` — the argument the first recommended tool needs to run — so
-the ask answers in one hop instead of erroring on a missing parameter.
-"Duplicate rules on `Lead`" leads to `sfi.list_components` with
-`{ type: 'DuplicateRule' }`; "what OmniScripts exist?" lists the
-OmniStudio sub-family; "CPQ dependencies" leads with the org-wide
-`sfi.cpq_dependency_map`. Questions that need a parent (e.g. "what fields
-does `Account` have?") still name the component to resolve first.
+When the question names a component the vault contains, each shortlist
+row carries `suggestedArgs` — that component bound under the tool's own
+argument — so the ask answers in one hop instead of erroring on a missing
+parameter; `missingArgs` names what the host must still supply. A name the
+vault does not contain gets a premise warning instead of a guessed id.
 
 ## 1. Well-supported question categories
 

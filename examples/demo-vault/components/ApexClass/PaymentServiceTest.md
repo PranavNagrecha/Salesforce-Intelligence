@@ -23,6 +23,9 @@ properties:
   lineCount: 57
   modifiers:
     - private
+  platformCalls:
+    Date: 1
+    Test: 2
   qualityIssues: []
   sharingModel: null
   sourceBytes: 1548
@@ -54,6 +57,7 @@ type: ApexClass
 | isTest | `true` |
 | lineCount | `57` |
 | modifiers | `private` |
+| platformCalls | `[object Object]` |
 | qualityIssues | `` |
 | sharingModel | `null` |
 | sourceBytes | `1548` |
@@ -144,3 +148,14 @@ private class PaymentServiceTest {
 | --- | --- | --- |
 | `CustomObject:Invoice__c` | heuristic | apex-scanner |
 | `CustomObject:Project__c` | heuristic | apex-scanner |
+
+### writesTo (outgoing, 6)
+
+| Target | Confidence | Producer |
+| --- | --- | --- |
+| `CustomField:Invoice__c.Amount__c` | parsed | apex-ast |
+| `CustomField:Invoice__c.Due_Date__c` | parsed | apex-ast |
+| `CustomField:Invoice__c.Project__c` | parsed | apex-ast |
+| `CustomField:Invoice__c.Status__c` | parsed | apex-ast |
+| `CustomField:Project__c.Contract_Value__c` | parsed | apex-ast |
+| `CustomField:Project__c.Status__c` | parsed | apex-ast |

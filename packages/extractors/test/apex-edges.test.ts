@@ -282,6 +282,38 @@ describe('buildApexScannerEdges — EventBus.subscribe → listensTo (P3b)', () 
     const result = buildApexScannerEdges(source, 'ApexClass:CdcSub');
     expect(result.edges.some((e) => e.edgeType === 'listensTo')).toBe(false);
   });
+
+  it('mints a heuristic subscribesToChange edge for a resolved Change Event channel (never listensTo)', () => {
+    const source =
+      "public class Demo_CdcSub { void run() { EventBus.subscribe('Demo_Channel__ChangeEvent', this); } }";
+    const result = buildApexScannerEdges(source, 'ApexClass:Demo_CdcSub');
+    const subscribes = result.edges.filter((e) => e.edgeType === 'subscribesToChange');
+    expect(subscribes).toHaveLength(1);
+    expect(subscribes[0]?.toId).toBe('CustomObject:Demo_Channel__ChangeEvent');
+    expect(subscribes[0]?.confidence).toBe('heuristic');
+    expect(subscribes[0]?.properties).toMatchObject({
+      mechanism: 'eventBusSubscribe',
+      changeEventName: 'Demo_Channel__ChangeEvent',
+    });
+    expect(result.unresolvedSubscriptions).toBe(0);
+  });
+
+  it('resolves the /data/ CDC channel form to the Change Event', () => {
+    const source =
+      "public class Demo_CdcSub { void run() { EventBus.subscribe('/data/Demo_Channel__ChangeEvent', this); } }";
+    const result = buildApexScannerEdges(source, 'ApexClass:Demo_CdcSub');
+    const subscribes = result.edges.filter((e) => e.edgeType === 'subscribesToChange');
+    expect(subscribes).toHaveLength(1);
+    expect(subscribes[0]?.toId).toBe('CustomObject:Demo_Channel__ChangeEvent');
+  });
+
+  it('counts a dynamic / computed channel as unresolvedSubscriptions and mints NO edge', () => {
+    const source =
+      'public class Demo_DynSub { void run() { String chan = pick(); EventBus.subscribe(chan, this); EventBus.subscribe(other(), this); } }';
+    const result = buildApexScannerEdges(source, 'ApexClass:Demo_DynSub');
+    expect(result.unresolvedSubscriptions).toBe(2);
+    expect(result.edges.some((e) => e.edgeType === 'subscribesToChange' || e.edgeType === 'listensTo')).toBe(false);
+  });
 });
 
 // NAMED-CREDENTIAL-APEX-CALLOUT-UNGRAPHED: `callout:{NamedCredential}` endpoint
@@ -326,5 +358,132 @@ describe('buildApexScannerEdges — callout:NamedCredential → references (NAME
     expect(
       result.edges.some((e) => e.toId === 'NamedCredential:Ghost_NC'),
     ).toBe(false);
+  });
+});
+
+describe('buildApexScannerEdges — literal Type.forName → references (P21-MOAT-apex-frameworks)', () => {
+  it('emits a heuristic references edge for a string-literal operand, tagged mechanism Type.forName', () => {
+    const source =
+      "public class Demo_Dispatcher { void run() { Object h = Type.forName('Demo_Handler').newInstance(); } }";
+    const result = buildApexScannerEdges(source, 'ApexClass:Demo_Dispatcher');
+    const edge = result.edges.find((e) => e.toId === 'ApexClass:Demo_Handler');
+    expect(edge).toBeDefined();
+    expect(edge?.edgeType).toBe('references');
+    expect(edge?.confidence).toBe('heuristic');
+    expect(edge?.properties['mechanism']).toBe('Type.forName');
+    expect(result.unresolvedDynamicDispatch).toBe(0);
+  });
+
+  it('resolves the two-argument same-namespace form Type.forName(\'\', \'Name\')', () => {
+    const source =
+      "public class Demo_Dispatcher { void run() { Type t = Type.forName('', 'Demo_Handler'); } }";
+    const result = buildApexScannerEdges(source, 'ApexClass:Demo_Dispatcher');
+    expect(result.edges.some((e) => e.toId === 'ApexClass:Demo_Handler')).toBe(true);
+  });
+
+  it('mints NO edge for a variable operand and counts it as unresolvedDynamicDispatch', () => {
+    const source =
+      'public class Demo_Dispatcher { void run(String name) { Object h = Type.forName(name).newInstance(); } }';
+    const result = buildApexScannerEdges(source, 'ApexClass:Demo_Dispatcher');
+    expect(result.edges.some((e) => e.properties['mechanism'] === 'Type.forName')).toBe(false);
+    expect(result.unresolvedDynamicDispatch).toBe(1);
+  });
+
+  it('ignores a commented-out Type.forName (no edge, not counted)', () => {
+    const source =
+      "public class Demo_Dispatcher { void run() { // Type.forName('Demo_Ghost').newInstance();\n /* Type.forName(name) */ Integer x = 1; } }";
+    const result = buildApexScannerEdges(source, 'ApexClass:Demo_Dispatcher');
+    expect(result.edges.some((e) => e.toId === 'ApexClass:Demo_Ghost')).toBe(false);
+    expect(result.unresolvedDynamicDispatch).toBe(0);
+  });
+});
+
+describe('buildApexScannerEdges — platform classes are never ApexClass targets (NO-MINTED-PLATFORM-IDS)', () => {
+  const source = [
+    'public class Demo_Caller {',
+    '  void run(List<Account> recs) {',
+    "    Type t = Type.forName('Demo_Helper');",
+    '    Database.update(recs);',
+    '    Database.insert(recs);',
+    '    Map<String, Schema.SObjectType> g = Schema.getGlobalDescribe();',
+    '    PageReference p = ApexPages.currentPage();',
+    "    PageReference q = new PageReference('/home');",
+    '    Demo_Helper.run(recs);',
+    '  }',
+    '}',
+  ].join('\n');
+
+  it('mints exactly one callsApex (to the local class) and counts the platform calls', () => {
+    const result = buildApexScannerEdges(source, 'ApexClass:Demo_Caller');
+    const calls = result.edges.filter((e) => e.edgeType === 'callsApex').map((e) => e.toId);
+    expect(calls).toEqual(['ApexClass:Demo_Helper']);
+    // One count per distinct platform method called (the scanner dedups by
+    // class + method), keyed by the platform class's canonical spelling.
+    expect(result.platformCalls).toEqual({ ApexPages: 1, Database: 2, Schema: 1, Type: 1 });
+  });
+
+  it('never mints an ApexClass edge of any kind to a platform class', () => {
+    const result = buildApexScannerEdges(source, 'ApexClass:Demo_Caller');
+    const apexTargets = result.edges
+      .filter((e) => e.toId.startsWith('ApexClass:'))
+      .map((e) => e.toId);
+    // `new PageReference(...)` is not a user-class instantiation either.
+    expect(apexTargets.every((id) => id === 'ApexClass:Demo_Helper')).toBe(true);
+  });
+
+  it('is case-insensitive and keys the count by the canonical spelling (WOW-10)', () => {
+    const result = buildApexScannerEdges(
+      "public class Demo_Lower { void run(Account a) { system.debug('x'); Boolean b = string.isBlank(a.Name); database.insert(a); } }",
+      'ApexClass:Demo_Lower',
+    );
+    expect(result.edges.filter((e) => e.edgeType === 'callsApex')).toEqual([]);
+    expect(result.platformCalls).toEqual({ Database: 1, String: 1, System: 1 });
+  });
+
+  it('is empty when nothing platform is called', () => {
+    const result = buildApexScannerEdges(
+      'public class Demo_Plain { void run() { Demo_Helper.run(); } }',
+      'ApexClass:Demo_Plain',
+    );
+    expect(result.platformCalls).toEqual({});
+  });
+});
+
+describe('buildApexScannerEdges — sObject-named receivers are never ApexClass targets (NO-MINTED-PLATFORM-IDS)', () => {
+  const source = [
+    'public class Demo_Describer {',
+    '  void run() {',
+    '    Schema.SObjectType t = Account.getSObjectType();',
+    '    Contact c = new Contact(LastName = \'x\');',
+    '    List<ContentVersion> v = [SELECT Id FROM ContentVersion];',
+    '    Schema.SObjectType cv = ContentVersion.getSObjectType();',
+    '    Schema.SObjectType o = Opportunity.sObjectType;',
+    '    Demo_Helper.run(v);',
+    '  }',
+    '}',
+  ].join('\n');
+
+  it('reroutes a static call or `new` on a standard object, or an object this file queries, to the CustomObject node', () => {
+    const result = buildApexScannerEdges(source, 'ApexClass:Demo_Describer');
+    const apexTargets = result.edges.filter((e) => e.toId.startsWith('ApexClass:')).map((e) => e.toId);
+    expect(apexTargets).toEqual(['ApexClass:Demo_Helper']);
+    const objectRefs = result.edges
+      .filter((e) => e.edgeType === 'references' && e.toId.startsWith('CustomObject:'))
+      .map((e) => `${e.toId}:${String(e.properties['mechanism'])}`);
+    expect(objectRefs).toEqual([
+      'CustomObject:Account:apexStaticObjectRef',
+      'CustomObject:Contact:instantiation',
+      'CustomObject:ContentVersion:apexStaticObjectRef',
+      'CustomObject:Opportunity:apexStaticObjectRef',
+    ]);
+  });
+
+  it('reroutes a Change Event receiver the same way', () => {
+    const result = buildApexScannerEdges(
+      'public class Demo_Cdc { void run() { Object h = AccountChangeEvent.getSObjectType(); } }',
+      'ApexClass:Demo_Cdc',
+    );
+    expect(result.edges.some((e) => e.toId.startsWith('ApexClass:'))).toBe(false);
+    expect(result.edges.map((e) => e.toId)).toContain('CustomObject:AccountChangeEvent');
   });
 });

@@ -66,7 +66,8 @@ needed to resolve names, fetch a component and reach everything else.
    the LLM-facing surface: short tool descriptions that carry the question
    they answer, the `answers` one-liner on every catalog row and shortlist
    row, argument aliases, and errors that say what to do. The deterministic
-   router (`intent-router.ts`) is advisory and is not grown.
+   router (`intent-router.ts`) is advisory and is not grown. (0.8.0: it was
+   deleted; `sfi.route_question` returns the semantic funnel's shortlist only.)
 6. **The roster is derived, never hand-mirrored.** `eval/product-manifest.json`
    carries `tools.profiles.core`; the docs gate pins every hand-written core
    count to it, and the skill-gateway check fails on any skill or doc that

@@ -24,6 +24,8 @@
 import type { ComponentId, Edge, Node } from '@sf-intelligence/contracts';
 import { getNodeById, listEdges, type GraphStore } from '@sf-intelligence/graph';
 
+import { referrerStatus } from './soe-active.js';
+
 /** The referrer's declared run state, when the vault records one. */
 export interface ReferrerRunState {
   /** `false` = recorded as not running; `null` = not recorded. */
@@ -48,16 +50,16 @@ export const referrerRunState = (edge: Edge, fromNode: Node): ReferrerRunState =
   return ownRunState(fromNode);
 };
 
-/** A node's own declared run state (Flow `status`; `active` / `isActive`). */
+/**
+ * A node's own declared run state, read by the shared `referrerStatus` helper;
+ * `status` keeps the node's raw `status` string when it has one.
+ */
 const ownRunState = (node: Node): ReferrerRunState => {
-  const props = node.properties;
-  const status = props['status'];
-  if (typeof status === 'string' && status.length > 0) {
-    return { active: status === 'Active', status };
-  }
-  const active = boolProp(props['active']) ?? boolProp(props['isActive']);
-  if (active === null) return { active: null };
-  return { active, status: active ? 'Active' : 'Inactive' };
+  const state = referrerStatus(node);
+  if (state === 'unknown') return { active: null };
+  const raw = node.properties['status'];
+  const active = state === 'active';
+  return { active, status: typeof raw === 'string' ? raw : active ? 'Active' : 'Inactive' };
 };
 
 /**

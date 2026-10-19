@@ -16,15 +16,13 @@
  *   2. a what_if family OUTSIDE the active set is NEVER demoted, even
  *      untriggered;
  *   3. an action/hypothetical question keeps every what_if at its rank;
- *   4. a `fromRoute` what_if is NEVER demoted (the regex route is a plan);
- *   5. the unrouted funnel-primary pure-cosine invariant is untouched
- *      (demotion is a pure reorder — scores/cosines never move);
- *   6. the ACTIVE families' action lexicons stay in lockstep with the
+ *   4. the pure-cosine invariant is untouched (demotion is a pure reorder —
+ *      scores/cosines never move);
+ *   5. the ACTIVE families' action lexicons stay in lockstep with the
  *      what_if utterance corpus they were derived from.
  */
 
 import { FUNNEL_UTTERANCES } from '../../src/funnel-utterances.js';
-import { classifyQuestion } from '../../src/intent-router.js';
 import type { ToolCandidate } from '../../src/semantic-funnel.js';
 import {
   DECROWD_ACTIVE_FAMILIES,
@@ -49,8 +47,6 @@ const cand = (
   confidence: 'medium',
   ...over,
 });
-
-const NO_ARGS = new Map<string, Readonly<Record<string, unknown>>>();
 
 describe('DECROWD_ACTIVE_FAMILIES — measured scope', () => {
   it('is exactly the two counterfactually priced tools (widening REQUIRES a fresh traces replay)', () => {
@@ -138,36 +134,19 @@ describe('demoteUntriggeredWhatIfs — unit contract', () => {
       'sfi.what_if_assign_permset', // demoted: no assign-family verb, no marker
     ]);
   });
-
-  it('fromRoute what_if is never demoted, even on a trigger-less question', () => {
-    const routed = shortlist.map((c) =>
-      c.tool === 'sfi.what_if_assign_permset' ? { ...c, fromRoute: true } : c,
-    );
-    const out = demoteUntriggeredWhatIfs(routed, plainRead);
-    // assign (fromRoute) holds rank 2; revoke (non-route) still drops to the tail.
-    expect(out.map((c) => c.tool)).toEqual([
-      'sfi.unassigned_permission_sets',
-      'sfi.what_if_assign_permset',
-      'sfi.effective_permissions',
-      'sfi.permission_risk_report',
-      'sfi.live_user_permsets',
-      'sfi.what_if_revoke_permset',
-    ]);
-  });
 });
 
 describe('router de-crowd — end-to-end through buildFunnelCandidates', () => {
-  it('plain-read question: every non-route ACTIVE what_if ranks below every other candidate', () => {
+  it('plain-read question: every ACTIVE what_if ranks below every other candidate', () => {
     const q = 'which permission sets does this user have';
-    const route = classifyQuestion(q);
-    const cands = buildFunnelCandidates(route, q, NO_ARGS, undefined);
+    const cands = buildFunnelCandidates(q, undefined);
     expect(cands.length).toBeGreaterThan(0);
     const lastNonDemotable = cands.reduce(
       (last, c, i) => (!DECROWD_ACTIVE_FAMILIES.has(c.tool) ? i : last),
       -1,
     );
     for (const [i, c] of cands.entries()) {
-      if (DECROWD_ACTIVE_FAMILIES.has(c.tool) && c.fromRoute !== true) {
+      if (DECROWD_ACTIVE_FAMILIES.has(c.tool)) {
         expect(i).toBeGreaterThan(lastNonDemotable);
       }
     }
@@ -178,10 +157,8 @@ describe('router de-crowd — end-to-end through buildFunnelCandidates', () => {
 
   it('action question: the what_if candidate keeps a leading rank (no demotion)', () => {
     const q = 'what happens if I assign the Marketing permission set to this user';
-    const route = classifyQuestion(q);
-    expect(route.intent).toBe('permset-assign-impact');
-    const cands = buildFunnelCandidates(route, q, NO_ARGS, undefined);
-    // Fused + never demoted: the routed what_if leads.
+    const cands = buildFunnelCandidates(q, undefined);
+    // Never demoted: the triggered what_if leads.
     const rank = cands.findIndex((c) => c.tool === 'sfi.what_if_assign_permset');
     expect(rank).toBeGreaterThanOrEqual(0);
     expect(rank).toBeLessThan(3);
@@ -191,14 +168,11 @@ describe('router de-crowd — end-to-end through buildFunnelCandidates', () => {
     }
   });
 
-  it('unrouted funnel-primary invariant untouched: pure cosines, no fromRoute, demotion only reorders', () => {
+  it('pure-cosine invariant untouched: demotion only reorders', () => {
     const q = 'are the naming conventions in this org consistent or a total free-for-all';
-    const route = classifyQuestion(q);
-    expect(route.intent).toBe('unrouted');
-    const cands = buildFunnelCandidates(route, q, NO_ARGS, undefined);
+    const cands = buildFunnelCandidates(q, undefined);
     expect(cands.length).toBeGreaterThan(0);
     for (const c of cands) {
-      expect(c.fromRoute).not.toBe(true);
       expect(c.cosine).toBe(c.score); // scores never mutated by the demotion
     }
   });

@@ -285,9 +285,9 @@ export interface CodeQualityAuditOutput {
   readonly totalCount: number;
   readonly summary: CodeQualityAuditSummary;
   /**
-   * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Per-type count of nodes read vs
+   * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Per-type count of `candidates` (nodes this tool read, not the org total) vs
    * nodes that actually carry a `qualityIssues` scan. A type whose `scanned` is
-   * below its `nodes` returned "not checked", never "clean".
+   * below its `candidates` returned "not checked", never "clean".
    *
    * D-3: emitted UNCONDITIONALLY, including on a class-scoped call. It used to
    * be org-wide only, which left the single-class clean answer — `issues: []`

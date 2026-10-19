@@ -522,6 +522,24 @@ describe('scanLwcHtml — component markup field bindings (V6-6)', () => {
     expect(result.value.unresolvedFieldBindings).toEqual([]);
   });
 
+  it('classifies record-form field lists by form mode, not by tag alone', () => {
+    const cases: readonly [string, 'read' | 'write'][] = [
+      ['<lightning-record-form object-api-name="Demo_Obj__c" fields="Demo_Field__c" mode="readonly"></lightning-record-form>', 'read'],
+      ['<lightning-record-view-form object-api-name="Demo_Obj__c" fields="Demo_Field__c"></lightning-record-view-form>', 'read'],
+      ['<lightning-record-form object-api-name="Demo_Obj__c" fields="Demo_Field__c" mode="edit"></lightning-record-form>', 'write'],
+      ['<lightning-record-form object-api-name="Demo_Obj__c" fields="Demo_Field__c"></lightning-record-form>', 'write'],
+      ['<lightning-record-edit-form object-api-name="Demo_Obj__c" fields="Demo_Field__c"></lightning-record-edit-form>', 'write'],
+    ];
+    for (const [tag, type] of cases) {
+      const result = scanLwcHtml(`<template>${tag}</template>`);
+      expect(result.ok).toBe(true);
+      if (!result.ok) return;
+      expect(result.value.fieldAccesses, tag).toEqual([
+        expect.objectContaining({ type, object: 'Demo_Obj__c', field: 'Demo_Field__c' }),
+      ]);
+    }
+  });
+
   it('emits markup-qualified access for Object.Field without enclosing object', () => {
     const html = `<template>
   <lightning-input-field field-name="Demo_Obj__c.Demo_Qualified__c"></lightning-input-field>

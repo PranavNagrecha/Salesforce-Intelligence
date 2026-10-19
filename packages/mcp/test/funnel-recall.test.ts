@@ -128,6 +128,49 @@ describe('funnel recall (CI guard)', () => {
   });
 });
 
+describe('funnel honesty — advertised tools are reachable', () => {
+  it('who_can_access_object leads its own advertised question', () => {
+    for (const q of ['Who can access Account?', 'who can see Contact records']) {
+      expect(semanticCandidates(q, 8)[0]?.tool).toBe('sfi.who_can_access_object');
+    }
+    const top3 = semanticCandidates('which profiles and permission sets can read Case', 8).slice(0, 3).map((c) => c.tool);
+    expect(top3).toContain('sfi.who_can_access_object');
+  });
+
+  it('live markers put a live tool in the shortlist for a right-now question', () => {
+    const top8 = (q: string) => semanticCandidates(q, 8).map((c) => c.tool);
+    expect(top8('How many custom objects do we have and how many records does each hold?')).toContain('sfi.live_storage_by_object');
+    expect(top8('which reports are actually used right now')).toContain('sfi.live_report_usage');
+    expect(top8('how many Accounts are there currently')).toContain('sfi.live_count');
+  });
+});
+
+describe('funnel honesty — confidence comes from absolute evidence', () => {
+  it.each([
+    'the the the and and but',
+    'what is 2 plus 2',
+    'is my org good or bad',
+    'what will my Salesforce org look like next year',
+  ])('weak evidence reads low: %s', (q) => {
+    expect(semanticCandidates(q, 8)[0]?.confidence).toBe('low');
+  });
+
+  it.each([
+    'which permission sets are assigned to nobody',
+    'what fires when an account gets saved',
+    'find dead apex nobody calls',
+    'list every outbound endpoint',
+    'write an admin handbook for this org',
+    'how much technical debt is in here',
+    'how many open opportunities do we have',
+    'which paid licenses sit unused',
+    'walk me through what the onboarding flow does',
+    'who subscribes to the order event',
+  ])('a real question stays medium or high: %s', (q) => {
+    expect(semanticCandidates(q, 8)[0]?.confidence).not.toBe('low');
+  });
+});
+
 /**
  * router-v2 P3 — blind-spot phrasings. SYNTHETIC analogs (generic entities
  * only) of the labeled funnel-blind misses from the 2K eval diagnosis, biased
@@ -1248,5 +1291,31 @@ describe('funnel ranking — Arc-2 build-all concept:group-role-subordinates-tra
   it.each(ARC2_BB_GROUP_ROLE_SUBORDINATES_TRANSITIVE_MEMBERSHIP)('ranks sfi.interpret in the top-5 for: %s', (q) => {
     const top5 = semanticCandidates(q, 5).map((c) => c.tool);
     expect(top5, `top-5 was: ${top5.join(', ')}`).toContain('sfi.interpret');
+  });
+});
+
+/**
+ * FUNNEL-SAFE-DELETE (0.8.0) — a delete-shaped FIELD question leads with the
+ * deletion-verdict tool, not with the generic edge walk. Measured on the demo
+ * vault after the regex router was deleted: "can I safely delete
+ * Invoice__c.Amount__c?" ranked `sfi.safe_to_delete_field` 11th and "What
+ * breaks if I delete Invoice__c.Amount__c?" led with `sfi.get_impact` (a fine
+ * second, the wrong first for a delete question). `get_impact` stays an accepted
+ * neighbour in the top-3; the "safely delete" phrasings must lead outright.
+ * Paraphrases, not corpus echoes — the fix lives in funnel-utterances.ts.
+ */
+const SAFE_DELETE_LEAD: ReadonlyArray<{ q: string; within: number }> = [
+  { q: 'can I safely delete Invoice__c.Amount__c?', within: 1 },
+  { q: 'is it safe to remove this field', within: 1 },
+  { q: 'What breaks if I delete Invoice__c.Amount__c?', within: 3 },
+  { q: 'what depends on this field before I delete it', within: 3 },
+  { q: 'delete this custom field, what will break', within: 3 },
+];
+
+describe('funnel recall — delete-shaped field questions lead with safe_to_delete_field (FUNNEL-SAFE-DELETE)', () => {
+  it.each(SAFE_DELETE_LEAD)('ranks sfi.safe_to_delete_field within the top-$within for: $q', ({ q, within }) => {
+    const tools = semanticCandidates(q, 8).map((c) => c.tool);
+    const rank = tools.indexOf('sfi.safe_to_delete_field') + 1;
+    expect(rank > 0 && rank <= within, `expected rank ≤ ${within}, got rank ${rank || '>8'}: ${tools.join(', ')}`).toBe(true);
   });
 });

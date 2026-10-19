@@ -195,7 +195,7 @@ describe('typed-absence adoption (roster-universal drift gate)', () => {
   // deliberately, and never by an agent passing through on other work — which is
   // the whole reason it is a shared file that fails loudly rather than a comment
   // asking to be respected.
-  const BASELINE = 82;
+  const BASELINE = 81;
 
   it('the hand-rolled-predicate count may only shrink (ratchet)', () => {
     const violations: string[] = [];

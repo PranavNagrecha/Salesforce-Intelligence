@@ -21,6 +21,8 @@ properties:
   lineCount: 44
   modifiers:
     - public
+  platformCalls:
+    Date: 1
   qualityIssues:
     - confidence: heuristic
       explanation: "SOQL query without WITH SECURITY_ENFORCED / USER_MODE — field-level security not enforced on the result. Add the clause, sanitize the result with Security.stripInaccessible(AccessType.READABLE, …), or check Schema.sObjectType.X.fields.Y.isAccessible() before reading."
@@ -66,6 +68,7 @@ type: ApexClass
 | isTest | `false` |
 | lineCount | `44` |
 | modifiers | `public` |
+| platformCalls | `[object Object]` |
 | qualityIssues | `[object Object],[object Object],[object Object]` |
 | sharingModel | `with sharing` |
 | sourceBytes | `1487` |
@@ -146,8 +149,12 @@ public with sharing class PaymentService {
 | --- | --- | --- |
 | `CustomObject:Payment__c` | heuristic | apex-scanner |
 
-### writesTo (outgoing, 1)
+### writesTo (outgoing, 5)
 
 | Target | Confidence | Producer |
 | --- | --- | --- |
 | `CustomField:Invoice__c.Status__c` | parsed | apex-ast |
+| `CustomField:Payment__c.Amount__c` | parsed | apex-ast |
+| `CustomField:Payment__c.Invoice__c` | parsed | apex-ast |
+| `CustomField:Payment__c.Method__c` | parsed | apex-ast |
+| `CustomField:Payment__c.Payment_Date__c` | parsed | apex-ast |

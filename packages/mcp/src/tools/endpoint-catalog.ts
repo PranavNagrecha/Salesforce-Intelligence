@@ -52,7 +52,15 @@
  *      an Experience/Lightning page is permitted to load from.
  *      `endpointUrl` is likewise a REQUIRED element.
  *
- * Categories 6 and 7 are AUTHORIZATIONS, not proven callsites — the
+ *   8. **Stored values** — URL-shaped (`scheme://...`) values in the
+ *      `values` rows of CustomMetadataRecord / CustomSettingRecord nodes,
+ *      read with the same reader `sfi.lookup_record` uses. The record id is
+ *      the source and `field` names the column. `storedEndpointsScan` says
+ *      how many records were read and how many carry no extracted values.
+ *
+ * Categories 6, 7 and 8 are not proven callsites — an allowlist entry is an
+ * authorization and a stored value is data some code MAY read; categories 6
+ * and 7 specifically mean the
  * host is reachable, not necessarily reached. That distinction is
  * stated verbatim in `disclosure` and the entries carry their own
  * `endpointKind` so `summary.byKind` keeps them separable from a
@@ -76,8 +84,8 @@
  *     certificate. The URL surfaces this catalog does NOT enumerate are named
  *     in the TYPED `notCovered[]` field (Apex literals passed to
  *     `HttpRequest.setEndpoint`, URLs in LWC/Aura/Visualforce markup,
- *     ConnectedApp callback URLs, WebLink targets, URLs stored as Custom
- *     Setting / Custom Metadata data). An EMPTY `boundaries[]` used to be the
+ *     ConnectedApp callback URLs, WebLink targets, Custom Setting / Custom
+ *     Metadata rows written at runtime). An EMPTY `boundaries[]` used to be the
  *     signal that nothing was omitted, which inverted the signal precisely
  *     when the answer was most incomplete.
  *   - Each category surfaces a `direction` field (inbound | outbound)
@@ -116,6 +124,7 @@ import {
   scanApexCallouts,
 } from './apex-callouts.js';
 import { firstNonEmpty } from './input-aliases.js';
+import { readRecordValues } from './lookup-record.js';
 import { namedCredentialReferences } from './named-credential-references.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { clampedNodeScanLimit, fullScanTruncationNote } from './scan-cap.js';
@@ -168,7 +177,8 @@ export type EndpointKind =
   | 'named-credential'
   | 'omni-rest'
   | 'remote-site'
-  | 'csp-trusted-site';
+  | 'csp-trusted-site'
+  | 'stored-value';
 
 /**
  * One endpoint entry.
@@ -184,6 +194,8 @@ export interface EndpointEntry {
   readonly sourceComponentId: ComponentId;
   readonly url: string | null;
   readonly namedCredential?: string | null;
+  /** For `stored-value` entries only: the record column holding the URL. */
+  readonly field?: string;
   /**
    * For `named-credential` entries only: the count of inbound
    * `references` edges that point at this NamedCredential node (an
@@ -289,6 +301,25 @@ export interface EndpointCatalogOutput {
    * `endpointUrl` verbatim as `url`, `isActive` carried.
    */
   readonly cspTrustedSites: readonly EndpointEntry[];
+  /**
+   * URL-shaped values stored in Custom Metadata / Custom Setting rows the
+   * vault holds, one entry per (record, field). Data some code MAY read, not a
+   * proven callout; the record id is `sourceComponentId` and `field` the
+   * column. Empty is a SCANNED zero — see {@link storedEndpointsScan}.
+   */
+  readonly storedEndpoints: readonly EndpointEntry[];
+  /**
+   * What the stored-value scan covered. `recordsNotExtracted` counts records
+   * whose values could not be read: a refresh predating the record-values
+   * extractor (no `values` property) or a corrupt entry. Their URLs are a
+   * blind spot until a re-refresh. `scanned` is false only when the vault has
+   * records and NONE could be read.
+   */
+  readonly storedEndpointsScan: {
+    readonly scanned: boolean;
+    readonly recordsRead: number;
+    readonly recordsNotExtracted: number;
+  };
   readonly summary: {
     /**
      * The total across the enumerated families BELOW — not "every URL in the
@@ -346,7 +377,7 @@ export interface EndpointCatalogOutput {
  * Verbatim honesty disclosure surfaced ALWAYS in the response.
  */
 const ENDPOINT_CATALOG_DISCLOSURE =
-  'URLs are captured verbatim from the source metadata; this tool does NOT probe, does NOT validate, and does NOT confirm that the destination exists or that the system is currently reachable. Runtime registrations (e.g., a NamedCredential resolved via custom metadata at runtime) may carry a stored URL that differs from the actual production destination. `remoteSiteSettings` and `cspTrustedSites` are ALLOWLIST authorizations — a host the org is PERMITTED to reach, which is not evidence that any code reaches it — so read them via `summary.byKind` rather than as callsites. `summary.totalEndpoints` totals the families enumerated in this response ONLY; it is NOT a certificate that the org has no other URLs. Read `notCovered[]` before treating this as the complete external surface.';
+  'URLs are captured verbatim from the source metadata; this tool does NOT probe, does NOT validate, and does NOT confirm that the destination exists or that the system is currently reachable. Runtime registrations (e.g., a NamedCredential resolved via custom metadata at runtime) may carry a stored URL that differs from the actual production destination. `remoteSiteSettings` and `cspTrustedSites` are ALLOWLIST authorizations — a host the org is PERMITTED to reach, which is not evidence that any code reaches it — so read them via `summary.byKind` rather than as callsites. `storedEndpoints` are URL-shaped values in Custom Metadata / Custom Setting rows the vault holds — data some code MAY read, not a proven callout; rows written at runtime are not in the vault. `summary.totalEndpoints` totals the families enumerated in this response ONLY; it is NOT a certificate that the org has no other URLs. Read `notCovered[]` before treating this as the complete external surface.';
 
 /**
  * URL surfaces this catalog does not model, named verbatim in `notCovered[]`
@@ -363,7 +394,7 @@ const UNCOVERED_URL_SURFACES: readonly string[] = [
   'Apex callout targets computed at runtime: string literals and constants in the `setEndpoint(` argument are folded into `resolution.literalPrefix` and each custom metadata / custom label / custom setting part is named (with the values the vault holds), but a part read from a variable, parameter or method call stays `unresolved`, a host or credential running to the end of the literal part is named with `nameMayContinue` (the runtime part could extend it), and a site whose literal part is cut off mid-name (`\'https://api.\' + x`) stays `dynamic` with no host; `Http.send` to an endpoint set elsewhere is not traced. Read the call site with `sfi.search_apex_source(\'setEndpoint\')`.',
   'URLs embedded in LWC / Aura / Visualforce markup, and in static resources — not parsed for URLs.',
   'ConnectedApp OAuth callback URLs and WebLink / custom-button targets — modeled as node properties but NOT part of this URL axis; `sfi.integration_map` returns ConnectedApps as first-class rows.',
-  'URLs stored in Custom Setting / Custom Metadata row values — the vault holds those values, but this catalog does not yet scan them for URLs (Apex `setEndpoint` folding already names CMDT/CS/label parts when they appear in source).',
+  'Custom Setting / Custom Metadata rows written at runtime (records created or edited in the org after the refresh, and custom-setting data that is not in the retrieved source) — `storedEndpoints` lists only the row values the vault holds.',
 ];
 
 /** ARCH-08: row cap on `apexCallouts` (the count and host flags stay complete). */
@@ -665,6 +696,52 @@ const collectAllowlistFamily = async (
   });
 };
 
+/** `scheme://` at the start of a trimmed value; a masked `***` or a bare host never matches. */
+const URL_SHAPED = /^[a-z][a-z0-9+.-]*:\/\//i;
+
+/**
+ * Collect every URL-shaped value stored in a Custom Metadata / Custom Setting
+ * row. Reads each record through `readRecordValues` — the one reader of the
+ * `values` family — so a record without the property counts as NOT extracted
+ * instead of as a record with no URL.
+ */
+const collectStoredEndpoints = async (
+  ctx: Context,
+): Promise<Result<CollectedCategory & { readonly recordsRead: number; readonly recordsNotExtracted: number }, string>> => {
+  const nodesResult = await scanAllNodesOfTypes(ctx.graph, [
+    'CustomMetadataRecord',
+    'CustomSettingRecord',
+  ]);
+  if (!nodesResult.ok) return err(nodesResult.error.message);
+  const entries: EndpointEntry[] = [];
+  let recordsRead = 0;
+  let recordsNotExtracted = 0;
+  for (const node of nodesResult.value.nodes as readonly Node[]) {
+    const read = readRecordValues(node);
+    if (read.state !== 'read') {
+      recordsNotExtracted += 1;
+      continue;
+    }
+    recordsRead += 1;
+    for (const value of read.values) {
+      if (typeof value.value !== 'string' || !URL_SHAPED.test(value.value.trim())) continue;
+      entries.push({
+        endpointKind: 'stored-value',
+        direction: 'outbound',
+        sourceComponentId: node.id,
+        field: value.field,
+        url: value.value.trim(),
+      });
+    }
+  }
+  return ok({
+    entries,
+    incompleteTypes: nodesResult.value.incompleteTypes,
+    recordsRead,
+    recordsNotExtracted,
+  });
+};
+
 /**
  * Deterministic entry comparator: sourceComponentId ASC, then url
  * ASC (nulls first). Stable across runs.
@@ -772,6 +849,13 @@ export const endpointCatalogHandler = async (
       message: `graph query failed: ${cspResult.error}`,
     });
   }
+  const storedResult = await collectStoredEndpoints(ctx);
+  if (!storedResult.ok) {
+    return err({
+      kind: 'internal',
+      message: `graph query failed: ${storedResult.error}`,
+    });
+  }
 
   // ARCH-08: Lightning controllers and invocable actions are the org's own UI /
   // flow surface, not integration entry points.
@@ -784,6 +868,7 @@ export const endpointCatalogHandler = async (
   const omniRest = [...omniRestResult.value.entries].sort(compareEntries);
   const remoteSites = [...remoteSiteResult.value.entries].sort(compareEntries);
   const cspSites = [...cspResult.value.entries].sort(compareEntries);
+  const stored = [...storedResult.value.entries].sort(compareEntries);
 
   // Residual full-scan cap across the five categories. Empty in the normal
   // case; when it fires, `summary.totalEndpoints` is an undercount and must not
@@ -796,6 +881,7 @@ export const endpointCatalogHandler = async (
     ...omniRestResult.value.incompleteTypes,
     ...remoteSiteResult.value.incompleteTypes,
     ...cspResult.value.incompleteTypes,
+    ...storedResult.value.incompleteTypes,
   ];
   // ALWAYS-ON scope boundary first. `boundaries: []` used to mean "nothing was
   // omitted", which is the reading that let a certified `totalEndpoints: 34`
@@ -859,7 +945,8 @@ export const endpointCatalogHandler = async (
     namedCred.length +
     omniRest.length +
     remoteSites.length +
-    cspSites.length;
+    cspSites.length +
+    stored.length;
 
   // DERIVED from the emitted rows, never from a parallel tally — a hand-kept
   // second count is how `totalEndpoints` and the arrays drift apart.
@@ -872,6 +959,7 @@ export const endpointCatalogHandler = async (
     ...omniRest,
     ...remoteSites,
     ...cspSites,
+    ...stored,
   ]) {
     byKind[entry.endpointKind] = (byKind[entry.endpointKind] ?? 0) + 1;
   }
@@ -888,6 +976,14 @@ export const endpointCatalogHandler = async (
       referencedNamedCredentials,
       remoteSiteSettings: remoteSites,
       cspTrustedSites: cspSites,
+      storedEndpoints: stored,
+      storedEndpointsScan: {
+        scanned:
+          storedResult.value.recordsRead > 0 ||
+          storedResult.value.recordsNotExtracted === 0,
+        recordsRead: storedResult.value.recordsRead,
+        recordsNotExtracted: storedResult.value.recordsNotExtracted,
+      },
       summary: {
         totalEndpoints: inboundCount + outboundCount,
         inboundCount,

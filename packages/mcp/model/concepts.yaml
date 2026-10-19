@@ -91,7 +91,7 @@ concepts:
     kind: automation-collision
     severity: high
     label: Writing a setup object risks MIXED_DML with non-setup DML
-    summary: 'Salesforce forbids mixing DML on setup objects (User, Group, PermissionSet, UserRole, Profile, and similar) with DML on non-setup (business) objects in the SAME synchronous transaction — the runtime throws MIXED_DML_OPERATION. An Apex class or trigger that writes a setup object is therefore a MIXED_DML risk surface whenever it (or a caller in the same transaction) also writes a business object. The offline claim is STRUCTURAL: it is grounded only in a `writesTo` edge whose target object is in a curated, org-agnostic setup-object name set. It does NOT prove that a particular transaction actually mixes both kinds of DML, nor that every call path hits the setup write.'
+    summary: 'Salesforce forbids mixing DML on setup objects (User, Group, PermissionSet, UserRole, Profile, and similar) with DML on non-setup (business) objects in the SAME synchronous transaction — the runtime throws MIXED_DML_OPERATION. An Apex class, trigger, or Flow that writes a setup object is therefore a MIXED_DML risk surface whenever it (or a caller in the same transaction) also writes a business object. The offline claim is STRUCTURAL: it is grounded only in a `writesTo` edge whose target object is in a curated, org-agnostic setup-object name set. It does NOT prove that a particular transaction actually mixes both kinds of DML, nor that every call path hits the setup write.'
 
   concept:automation-collision:
 

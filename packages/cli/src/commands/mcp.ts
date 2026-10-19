@@ -21,7 +21,7 @@ import { vaultPaths } from '@sf-intelligence/vault';
 import { Command } from 'commander';
 
 import { readCliPackageVersion } from '../package-version.js';
-import { listAuthenticatedOrgs, orgLabels } from '../sf-org-list.js';
+import { listAuthenticatedOrgs, type OrgListResult } from '../sf-org-list.js';
 import { resolveVaultOption } from '../vault-option.js';
 
 /**
@@ -60,40 +60,24 @@ export interface McpStartupError {
    */
   readonly vaultRoot: string;
   /**
-   * Org aliases we can name in the setup guidance: every authed org when no
-   * vault exists yet, or just the vault's bound org once one does. Empty when
-   * the `sf` CLI is absent or failed — setup mode then falls back to a
-   * placeholder rather than inventing an alias.
+   * How many orgs the local `sf` CLI is authenticated to, probed only when no
+   * vault exists yet (once a vault exists the org is already chosen). A count,
+   * never the aliases: this reaches the host's log file and, through setup
+   * mode, the model. `0` when the `sf` CLI is absent or failed — setup mode
+   * then falls back to a placeholder rather than inventing an alias.
    */
-  readonly authedOrgs: readonly string[];
-  /** The sf CLI's default org, when known — setup mode names it as a hint, never adopts it. */
+  readonly authedOrgCount?: number;
+  /** The sf CLI's default org, when known — the one alias the user already chose; named as a hint, never adopted. */
   readonly defaultOrg?: string;
 }
 
-/** Probe the authed Salesforce orgs (alias or username). Injectable for tests. */
-export type ListOrgs = () => Promise<readonly string[]>;
+/** Probe the authed Salesforce orgs from the local `sf` login store. Injectable for tests. */
+export type ListOrgs = () => Promise<OrgListResult>;
 
 /** Options accepted by `prepareMcp`. `cwd` is explicit for test determinism. */
 export interface PrepareMcpOptions {
   /** Working directory where `org-kb/` is expected. */
   readonly cwd: string;
-  /**
-   * Whether the no-vault message may NAME the authenticated orgs, rather than
-   * only counting them.
-   *
-   * The names are genuinely useful — the user has to pick one — but this
-   * message is written to stderr, and when an MCP host launches the server
-   * that stream is a LOG FILE on disk (`mcp-server-sf-intelligence.log` and
-   * friends), where a list of an organisation's Salesforce org aliases then
-   * persists indefinitely. So names are opt-in: the CLI passes `true` only
-   * when stderr is a TTY (a human running `sfi mcp` in a terminal, where the
-   * text is transient). Host-launched servers get the count, and the assistant
-   * reads the full list in-band from `sfi.setup_status` instead — the channel
-   * the person actually asked a question on.
-   *
-   * Defaults to `false`: the conservative branch is the one that ships.
-   */
-  readonly discloseOrgNames?: boolean;
   /**
    * Explicit vault root, overriding `cwd/org-kb`. Lets a multi-org host bind
    * each project to the right vault (`sfi mcp --vault <path>`) instead of
@@ -152,16 +136,10 @@ export const prepareMcp = async (
   const paths = vaultPaths(vaultRoot);
 
   if (!(await pathExists(paths.config))) {
-    let orgs: readonly string[];
-    let defaultOrg: string | undefined;
-    if (opts.listOrgs !== undefined) {
-      orgs = await opts.listOrgs();
-    } else {
-      const listed = await listAuthenticatedOrgs();
-      orgs = listed.ok ? orgLabels(listed.orgs) : [];
-      const d = listed.ok ? listed.orgs.find((o) => o.isDefault) : undefined;
-      defaultOrg = d?.alias ?? d?.username;
-    }
+    const listed = await (opts.listOrgs ?? listAuthenticatedOrgs)();
+    const orgs = listed.ok ? listed.orgs : [];
+    const d = orgs.find((o) => o.isDefault);
+    const defaultOrg = d?.alias ?? d?.username;
     const where = opts.vaultRoot !== undefined ? ` at ${vaultRoot}` : '';
     const base = `No vault${where}. Run \`sfi init\` followed by \`sfi refresh\`, or point \`sfi mcp --vault <path>\` at an existing org-kb.`;
     // Make the dead-end actionable: say how many orgs are authed so the user
@@ -170,16 +148,15 @@ export const prepareMcp = async (
     // orgs authed that risks querying the wrong one, and the product never
     // guesses which org a question is about.
     //
-    // The ALIASES are withheld unless `discloseOrgNames` is set, because this
-    // string lands in the host's MCP log file (see the option's doc comment).
-    // The names are not lost: `sfi.setup_status` returns them over MCP, in-band,
-    // to the assistant that was asked for help.
-    const names = opts.discloseOrgNames === true
-      ? `: ${orgs.slice(0, 8).join(', ')}${orgs.length > 8 ? ', …' : ''}`
-      : '';
+    // The count, not the aliases: this string lands in the host's MCP log file
+    // (`mcp-server-sf-intelligence.log` and friends), and the same fields feed
+    // `sfi.setup_status`, which the model reads. The only alias named is the sf
+    // default org, which the user already chose. The terminal `sfi init` lists
+    // the aliases to the person.
     const hint =
       orgs.length > 0
-        ? ` You are authenticated to ${orgs.length} org(s)${names}.` +
+        ? ` You are authenticated to ${orgs.length} org(s)` +
+          `${defaultOrg !== undefined ? ` (your sf default org is \`${defaultOrg}\`)` : ''}.` +
           ` Run \`sfi init\` to pick the one you want and build` +
           ` its knowledge base — live answers attach to a vault's org, so the product never` +
           ` guesses which of your orgs to query.`
@@ -188,22 +165,19 @@ export const prepareMcp = async (
       kind: 'no-vault',
       message: base + hint,
       vaultRoot,
-      authedOrgs: orgs,
+      authedOrgCount: orgs.length,
       ...(defaultOrg !== undefined ? { defaultOrg } : {}),
     });
   }
 
   const ctxResult = await buildContext(vaultRoot);
   if (!ctxResult.ok) {
-    // A config exists, so the org is already chosen — name THAT one in the
-    // setup guidance rather than re-listing every authed org (which would
-    // invite the user to re-bind a repo that is already bound).
-    const boundOrg = await readBoundOrg(paths.config).catch(() => null);
+    // A config exists, so the org is already chosen — setup guidance tells the
+    // user to refresh, not to re-list orgs and re-bind a repo that is bound.
     return err({
       kind: 'buildContext-failed',
       message: ctxResult.error.message,
       vaultRoot,
-      authedOrgs: boundOrg !== null ? [boundOrg] : [],
     });
   }
 
@@ -331,9 +305,6 @@ export const registerMcpCommand = (program: Command): void => {
       );
       const prepared = await prepareMcp({
         cwd: process.cwd(),
-        // A TTY means a human is watching this scroll past in their own
-        // terminal; anything else means a host is capturing it to a log file.
-        discloseOrgNames: process.stderr.isTTY === true,
         ...(boundVault !== undefined ? { vaultRoot: boundVault } : {}),
       });
       if (!prepared.ok) {
@@ -351,7 +322,7 @@ export const registerMcpCommand = (program: Command): void => {
           cwd: process.cwd(),
           expectedVaultRoot: prepared.error.vaultRoot,
           bindSource,
-          authedOrgs: prepared.error.authedOrgs,
+          ...(prepared.error.authedOrgCount !== undefined ? { authedOrgCount: prepared.error.authedOrgCount } : {}),
           ...(prepared.error.defaultOrg !== undefined ? { defaultOrg: prepared.error.defaultOrg } : {}),
           version: readCliPackageVersion(),
         });

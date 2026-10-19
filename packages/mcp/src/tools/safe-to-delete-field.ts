@@ -465,7 +465,7 @@ export interface SafeToDeleteFieldOutput {
    * population) so "review" never arrives with no stated cause.
    */
   readonly reviewBecause?: string;
-  /** ADM-5: custom ReportTypes listing this field as a column (no graph edge exists for it). */
+  /** ADM-5: custom ReportTypes listing this field as a direct column (source cross-check of the `reportTypeColumn` edge). */
   readonly reportTypeColumns?: readonly string[];
   /**
    * Every delete category checked, INCLUDING the empty ones, with its referrer
@@ -1708,7 +1708,7 @@ const coreSafeToDeleteFieldHandler = async (
     aggregateVerdict(reasoning),
     coverageCaveat,
   );
-  // ADM-5: a custom ReportType column mints no edge; read it from source with
+  // ADM-5: cross-check the `reportTypeColumn` edge against source; read it with
   // the scan unused_fields_deep and field_360 share, so the three agree.
   const reportTypeScan = objectApi !== null ? await scanReportTypeColumns(ctx) : null;
   const reportTypeColumnIds =

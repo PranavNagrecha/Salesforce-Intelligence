@@ -380,7 +380,7 @@ destination reachability separately.
 
 ### 5. `sfi.endpoint_catalog` — unified URL inventory
 
-The URL-axis composite. Composes four categories into one
+The URL-axis composite. Composes these categories into one
 response:
 
 | Category | Source | Direction |
@@ -389,6 +389,7 @@ response:
 | `outboundMessages` | OutboundMessage `endpointUrl` properties | outbound |
 | `externalDataSources` | ExternalDataSource `endpoint` properties | outbound |
 | `namedCredentials` | NamedCredential `url` properties | outbound |
+| `storedEndpoints` | URL-shaped values in Custom Metadata / Custom Setting rows (record id + `field`); data some code may read, not a proven callout | outbound |
 
 ```json
 {}
@@ -492,8 +493,8 @@ offline vault.
 
 ### `sfi.endpoint_catalog` — universal URL disclaimer (verbatim)
 
-> URLs are captured verbatim across four categories
-> (`inboundApis`, `outboundMessages`, `externalDataSources`,
+> URLs are captured verbatim across every category
+> (`inboundApis`, `outboundMessages`, `externalDataSources`, `storedEndpoints`,
 > `namedCredentials`). sf-intelligence does NOT probe, does NOT validate,
 > and does NOT confirm any destination exists or is reachable.
 
@@ -696,4 +697,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from); each row names its plane and carries any component it resolved as `suggestedArgs`. **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

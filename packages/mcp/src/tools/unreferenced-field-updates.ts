@@ -26,7 +26,7 @@ const SUFFIX = '.workflow-meta.xml';
 
 /** One field-update definition that names the field but nothing fires. */
 export interface UnreferencedFieldUpdate {
-  /** `WorkflowFieldUpdate:{Object}.{name}` (scaffolding id, not a vault node). */
+  /** `WorkflowFieldUpdate:{Object}.{name}` — the field update's own node id. */
   readonly id: string;
   /** Object whose workflow file defines it. */
   readonly definedOn: string;

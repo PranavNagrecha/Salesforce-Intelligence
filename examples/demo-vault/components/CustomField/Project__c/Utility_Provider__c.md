@@ -59,7 +59,7 @@ type: CustomField
 | --- | --- | --- |
 | `CustomObject:Project__c` | declared | custom-field-extractor |
 
-### writesTo (incoming, 1)
+### readsFrom (incoming, 1)
 
 | Source | Confidence | Producer |
 | --- | --- | --- |

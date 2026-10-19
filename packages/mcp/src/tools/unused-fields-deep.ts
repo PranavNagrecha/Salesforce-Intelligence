@@ -1315,10 +1315,10 @@ const sortCleanupFindings = (
 //     the per-field tool returned `blocking` for fields this tool was listing
 //     at `high` confidence on the same vault, in the same session.
 //
-//   PLANE 2 — ReportType `<columns>`. The ReportType family IS retrieved and IS
-//     modelled, but the extractor deliberately defers the per-column
-//     `<field>`/`<table>` identity graph and stamps every ReportType node with
-//     `columnsModeled: false` (see `packages/extractors/src/enterprise-metadata.ts`).
+//   PLANE 2 — ReportType `<columns>`. Since 0.8.0 a column the import-time
+//     relationship resolver attributes to a vaulted field IS an edge
+//     (`referenceKind: 'reportTypeColumn'`); this source re-read is the shared
+//     ADM-5 cross-check and still names the report type for a direct column.
 //     That is a TYPED "never scanned" marker sitting in the graph, and the
 //     eight-tier walk ignored it: a field that is an explicit column of a
 //     custom report type had zero inbound edges and read as dead. This is NOT
@@ -1427,7 +1427,7 @@ const scanSupplementalUsagePlanes = async (
   const rtScan = await scanReportTypeColumns(ctx);
   if (rtScan.status === 'failed') {
     disclosures.push(
-      'the supplemental ReportType column cross-check could NOT run on this call (the ReportType node walk failed). Every ReportType node carries `columnsModeled: false` — the extractor does not model per-column `<field>`/`<table>` identity — so a field used only as a custom report-type column has ZERO inbound edges and may be listed here as unused.',
+      'the supplemental ReportType column cross-check could NOT run on this call (the ReportType node walk failed). A column the import-time resolver could not attribute to a vaulted field (see the ReportType node\'s `unresolvedColumns`) has no inbound edge, so a field used only through such a column may be listed here as unused.',
     );
   } else if (rtScan.status === 'no-report-types') {
     disclosures.push(
@@ -1439,7 +1439,7 @@ const scanSupplementalUsagePlanes = async (
       reportTypeColumnHits.add(candidate.id);
       addHit(
         candidate.id,
-        `${candidate.id} — an explicit COLUMN of a custom ReportType (read from the retrieved report-type source; every ReportType node carries \`columnsModeled: false\`, so this usage exists in no edge). Deleting the field removes that column from the report type and from every saved report that shows, filters or groups on it.`,
+        `${candidate.id} — an explicit COLUMN of a custom ReportType (read from the retrieved report-type source; the same use the \`reportTypeColumn\` graph edge carries). Deleting the field removes that column from the report type and from every saved report that shows, filters or groups on it.`,
       );
     }
     if (rtScan.incomplete) {

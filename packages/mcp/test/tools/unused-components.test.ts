@@ -1,6 +1,6 @@
 /// <reference types="vitest/globals" />
 
-import { mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -18,6 +18,7 @@ import {
 } from '@sf-intelligence/graph';
 
 import type { Context } from '../../src/server.js';
+import { findDeadCodeHandler } from '../../src/tools/find-dead-code.js';
 import {
   unusedComponentsHandler,
   unusedComponentsInputSchema,
@@ -1460,5 +1461,97 @@ describe('unusedComponentsHandler — the folded report/dashboard index is consu
     expect(r.value.data.coverageCaveat?.message ?? '').not.toMatch(
       /report\/dashboard field-usage index/i,
     );
+  });
+});
+
+// =============================================================================
+// DEAD-ONE-PREDICATE — unused_components judges ApexClass through the SAME
+// liveness predicate find_dead_code uses. A REST resource, a scheduled job, a
+// Callable handler registered only in a Custom Metadata cell, or a class named
+// only by a static type reference has zero inbound edges BY CONSTRUCTION; it is
+// `uncertain` in find_dead_code and must never be "unused" here.
+// =============================================================================
+describe('unused_components — one liveness predicate shared with find_dead_code', () => {
+  const REST = 'ApexClass:Demo_RestEndpoint';
+  const SCHED = 'ApexClass:Demo_NightlyJob';
+  const CMDT = 'ApexClass:Demo_CmdtHandler';
+  const STATIC = 'ApexClass:Demo_StaticOnly';
+  const PLAIN = 'ApexClass:Demo_PlainOrphan';
+  const FACTORY = 'ApexClass:Demo_Factory';
+  // P21-MOAT-apex-frameworks: a framework subclass the factory instantiates
+  // through a RESOLVED `Type.forName('Demo_DispatchedHandler')` — an inbound
+  // edge, so it is in use: neither "unused" nor rescued-as-uncertain.
+  const DISPATCHED = 'ApexClass:Demo_DispatchedHandler';
+
+  // Every class but DISPATCHED has ZERO inbound edges — the point of the
+  // fixture. The CMDT registration is a `$$Demo_CmdtHandler.run$$` template in
+  // a `Demo_` custom metadata cell: the extractor mints no edge for it, the
+  // class declares `Callable`, which is the signal the predicate reads.
+  const seed: ExtractionResult = {
+    nodes: [
+      makeNode({ id: REST, apiName: 'Demo_RestEndpoint', properties: { isRestResource: true } }),
+      makeNode({ id: SCHED, apiName: 'Demo_NightlyJob', properties: { isSchedulable: true, implements: ['Schedulable'] } }),
+      makeNode({ id: CMDT, apiName: 'Demo_CmdtHandler', properties: { implements: ['Callable'] } }),
+      makeNode({ id: STATIC, apiName: 'Demo_StaticOnly' }),
+      makeNode({ id: PLAIN, apiName: 'Demo_PlainOrphan' }),
+      makeNode({ id: FACTORY, apiName: 'Demo_Factory' }),
+      makeNode({ id: DISPATCHED, apiName: 'Demo_DispatchedHandler', properties: { superclass: 'pkg.TriggerRunnable' } }),
+    ],
+    edges: [
+      makeEdge({ fromId: FACTORY, toId: DISPATCHED, edgeType: 'references', confidence: 'heuristic', source: 'apex-scanner', properties: { mechanism: 'Type.forName' } }),
+    ],
+  };
+
+  let dir: string;
+  let st: GraphStore;
+  let c: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-unused-liveness-'));
+    const opened = await openGraph(join(dir, 'g.db'));
+    if (!opened.ok) throw new Error(opened.error.message);
+    st = opened.value;
+    const imported = await importExtractionResults(st, [seed]);
+    if (!imported.ok) throw new Error(imported.error.message);
+    // Production source naming Demo_StaticOnly only as a type (no edge minted).
+    const classesDir = join(dir, 'source', 'classes');
+    mkdirSync(classesDir, { recursive: true });
+    writeFileSync(
+      join(classesDir, 'Demo_Factory.cls'),
+      'public class Demo_Factory {\n  public static List<Demo_StaticOnly> rows() { return new List<Demo_StaticOnly>(); }\n}',
+    );
+    writeFileSync(join(classesDir, 'Demo_StaticOnly.cls'), 'public class Demo_StaticOnly {}');
+    c = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: st };
+  });
+
+  afterAll(async () => {
+    await closeGraph(st);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('rescues the REST resource, the scheduled job, the CMDT-registered Callable and the statically-referenced class, and says why', async () => {
+    const r = await unusedComponentsHandler(c, { types: ['ApexClass'] });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.value.data.components.map((x) => x.id).sort()).toEqual([FACTORY, PLAIN].sort());
+    expect(r.value.data.byType['ApexClass']).toBe(2);
+    const reasons = Object.fromEntries((r.value.data.uncertain ?? []).map((u) => [u.id, u.reasons]));
+    expect(reasons).toEqual({
+      [REST]: ['rest-resource'],
+      [SCHED]: ['schedulable'],
+      [CMDT]: ['callable-dispatch'],
+      [STATIC]: ['static-type-usage'],
+    });
+  });
+
+  it('AGREEMENT: every "unused" class is definitely_dead and every rescued class is uncertain in find_dead_code', async () => {
+    const uc = await unusedComponentsHandler(c, { types: ['ApexClass'] });
+    const fdc = await findDeadCodeHandler(c, { types: ['ApexClass'], includeUncertain: true, limit: 500 });
+    expect(uc.ok && fdc.ok).toBe(true);
+    if (!uc.ok || !fdc.ok) return;
+    const verdict = new Map(fdc.value.data.candidates.map((x) => [x.componentId as string, x.verdict]));
+    for (const u of uc.value.data.components) expect(verdict.get(u.id), u.id).toBe('definitely_dead');
+    for (const u of uc.value.data.uncertain ?? []) expect(verdict.get(u.id), u.id).toBe('uncertain');
+    expect(uc.value.data.uncertain?.length).toBe(4);
   });
 });

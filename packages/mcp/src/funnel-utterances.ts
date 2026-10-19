@@ -589,6 +589,8 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'what does the CronTrigger registry look like right now?',
   ],
   'sfi.live_storage_by_object': [
+    'how many records does each object hold?',
+    'record count per custom object',
     'which objects are taking up the most storage?',
     'how much data storage is the Case object using?',
     'show me storage consumption broken down by object',
@@ -639,6 +641,10 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'are we over or under our license count?',
     'which license types do we have and how many are used?',
     'how many Salesforce licenses are actually being used vs assigned?',
+    'how many licenses are unused or reclaimable?',
+    'which unused licenses could we reclaim?',
+    'license usage by license type',
+    'how many licenses are assigned right now?',
   ],
   // ENGINE-ARC §2a — assignment rosters (holders of a grantor). Vocabulary is
   // the HOLDER direction (who has / assigned to / roster / everyone with);
@@ -980,6 +986,9 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'open the guest profile access report',
   ],
   'sfi.who_can_access_object': [
+    'which profiles and permission sets can read Account?',
+    'which profiles and permission sets can read Opportunity?',
+    'which profiles and permission sets can read Case?',
     'who can access the Order object?',
     'which profiles and perm sets give read access to Case?',
     'who can see custom object <ObjectName>?',
@@ -1183,6 +1192,14 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'look up Order number 1234',
     'fetch the record for this Opportunity',
     'what are the values in the <MetadataRecord__mdt> custom metadata record?',
+    // FUNNEL-CMDT-AND-TYPO: record VALUES asked as "<Type> <RecordName>" — the
+    // type and record developer names, often with no `__mdt` suffix and no
+    // "record" noun. Without this band "values in X" reads as picklist values.
+    'what values are in <Config__mdt> <RecordName>?',
+    'what values does the <RecordName> record of <Config__mdt> hold?',
+    'show me the field values stored on the custom metadata record <Config__mdt>.<RecordName>',
+    'what is configured in the <RecordName> custom metadata record?',
+    'read the values of the <RecordName> record in the <Config__mdt> custom metadata type',
   ],
   'sfi.explain_field': [
     'what does the External_Id__c field on Contact mean?',
@@ -1221,6 +1238,23 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'show me if <Field__c> is safe to delete',
     'pull up the impact analysis for deleting <Field__c>',
     'open the safe-to-delete check for <Field__c>',
+    // FUNNEL-SAFE-DELETE (0.8.0): the "safely delete <Object>.<Field__c>" and
+    // "what breaks if I delete this field" phrasings ranked this tool 11th —
+    // its own words were "safe to", never "safely", and the field-delete
+    // "what breaks" question belonged to get_impact alone.
+    'can I safely delete this custom field?',
+    'can I safely delete <Object>.<Field__c>?',
+    'is it safe to delete the <Field__c> custom field, or does something still depend on it?',
+    'what breaks if I delete this field?',
+    'what breaks if I delete <Object>.<Field__c>?',
+    'what depends on this field before I delete it?',
+    'before I delete this custom field, what still depends on it?',
+    'delete this custom field — what will break?',
+    'safely delete <Field__c> — will anything break?',
+    'can I delete <Field__c> safely, or does something still reference it?',
+    'which custom fields on <Object> can I safely delete?',
+    'is <Field__c> safely deletable, or is it still referenced somewhere?',
+    'can we safely drop this custom field from <Object>?',
   ],
   'sfi.unused_components': [
     'which components in this org are not used anywhere?',
@@ -2975,6 +3009,9 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
     'which flows invoke <ComponentName>?',
     'where is this custom label used?',
     'what uses the <PermSet> permission set — show me all assignments and references',
+    // Custom metadata TYPE usage lives in a card (FIND_COMPONENT_USAGES_CARDS),
+    // not here: in this long document five lines cannot lift `mdt` above the
+    // short lookup_record document that also says it.
     // R3 reverse custom-permission grant band (DIAGNOSIS-R3 §2 rank 5): who
     // holds / which perm sets turn on / which profiles enable a custom
     // permission — the reverse lookup shipped in 0.1.19; the vocabulary here.
@@ -3156,6 +3193,44 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
 };
 
 /**
+ * The advertised `who_can_access_object` questions, scored as a card (see
+ * semantic-funnel TOOL_CONCEPT_CARDS): the tool's retrieval document is a
+ * 500-token reference, so the two words of "Who can access Account?" are
+ * diluted in it and the shorter `object_access_audit` document out-ranked it
+ * on "access" alone. A card is vectorised on its own length, so the bare
+ * question leads without padding the document; one card per shape, so each
+ * shape's own words carry its weight.
+ */
+export const WHO_CAN_ACCESS_OBJECT_CARDS: Readonly<Record<string, readonly string[]>> = {
+  'who-can-access': [
+    'who can access Account?',
+    'who can access Contact?',
+    'who can access the Opportunity object?',
+    'who can see Lead?',
+    'who can see Case?',
+  ],
+  // No "which profiles and permission sets can read X" card: a card that short
+  // becomes a magnet for every permission-set question (measured: it pushed
+  // sfi.interpret and sfi.find_component_usages out of their top-K). That
+  // shape lives in the tool's utterances and reaches the top-3 from there.
+};
+
+/**
+ * How a person says "the org as it is now, not the vault snapshot". Appended
+ * to every `sfi.live_*` tool's index document by semantic-funnel buildToolDocs
+ * (one shared list, not thirty hand edits), so "right now", "actually",
+ * "currently", "live" and "records" pull a live tool over its vault sibling.
+ * Not part of any tool's own utterances: the self-recall gate measures a
+ * tool's own vocabulary.
+ */
+export const LIVE_MARKERS: readonly string[] = [
+  // One compact line of words vault documents rarely use: a longer set, or a
+  // common word like "records", shifts term weights corpus-wide and measurably
+  // reorders vault rows on the gold set.
+  'right now, actually, currently, live in the org today',
+];
+
+/**
  * ARC-2 grow-forever funnel — per-concept CARDS for sfi.interpret.
  *
  * Each key is a reasoning concept; each value is a small, self-contained set of
@@ -3174,6 +3249,25 @@ export const FUNNEL_UTTERANCES: Readonly<Record<string, readonly string[]>> = {
  */
 export const LIST_COMPONENTS_TYPE_CARDS: Readonly<Record<string, readonly string[]>> = {
   'family:omnistudio': OMNISTUDIO_INVENTORY_ASKS,
+};
+
+/**
+ * Custom metadata TYPE usage — "which classes read from <Type>__mdt?" — scored
+ * as a card (semantic-funnel TOOL_CONCEPT_CARDS). The tool's base document is
+ * one of the longest in the corpus, so added utterances barely move its term
+ * shares, while the short `lookup_record` and `explain_field` documents say
+ * `__mdt` once and out-rank it; "read" alone leads to the CRUD/FLS audit. The
+ * card carries the shape on its own length. One card, five lines: a shorter
+ * card is a magnet for every "which classes" question.
+ */
+export const FIND_COMPONENT_USAGES_CARDS: Readonly<Record<string, readonly string[]>> = {
+  'custom-metadata-type-usage': [
+    'which classes read from <Config__mdt>?',
+    'what Apex reads the <Config__mdt> custom metadata type?',
+    'where is the <Config__mdt> custom metadata type referenced — which code queries it?',
+    'which flows or classes use records of the <Config__mdt> type?',
+    'does anything query <Config__mdt>, or is the custom metadata type unused?',
+  ],
 };
 
 export const INTERPRET_CONCEPT_CARDS: Readonly<Record<string, readonly string[]>> = {

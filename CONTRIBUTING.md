@@ -77,7 +77,6 @@ you can verify from a public clone with no private vaults or harness.
 | Handler `packages/mcp/src/tools/<tool-name>.ts` | Implementation | Yes — compile / unit test |
 | `packages/mcp/src/tools/roster.ts` (`V01_TOOLS`) | Advertised schema | Yes — `pnpm doc-sync` / build |
 | `packages/mcp/src/tools/tool-dispatch.ts` switch arm | Runtime invoke | Yes — unit / e2e smoke |
-| `packages/mcp/src/intent-router.ts` grandfather list (if not funnel-routable yet) | "every tool is router-reachable or grandfathered" test | Yes — that package test |
 | `packages/mcp/test/server.test.ts` expected name list (order-sensitive) | Roster drift test | Yes — that test |
 | `packages/mcp/test/tools/<tool-name>.test.ts` | Per-tool coverage | Yes — unit test |
 | Funnel-recall gold row in `packages/mcp/test/funnel-recall.test.ts` | Definition of done for routing | Partly — in-repo test yes; authoritative recall harnesses are maintainer-only |

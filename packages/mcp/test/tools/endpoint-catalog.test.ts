@@ -398,6 +398,9 @@ describe('endpointCatalogHandler', () => {
       expect(d.referencedNamedCredentials).toEqual([]);
       expect(d.remoteSiteSettings).toEqual([]);
       expect(d.cspTrustedSites).toEqual([]);
+      // No rows is a SCANNED zero, not an unchecked one.
+      expect(d.storedEndpoints).toEqual([]);
+      expect(d.storedEndpointsScan).toEqual({ scanned: true, recordsRead: 0, recordsNotExtracted: 0 });
       expect(d.summary.byKind).toEqual({});
       // An empty ORG still gets the scope boundary — the disclosure is about
       // what the tool does not look at, never about what it happened to find.
@@ -1047,11 +1050,114 @@ describe('endpointCatalogHandler — the total is never certified as every URL i
     const notCovered = r.value.data.notCovered.join(' ');
     expect(notCovered).toContain('setEndpoint');
     expect(notCovered).toContain('Apex');
-    // Vault holds Custom Setting / Custom Metadata values; this tool does not
-    // yet scan those rows for URLs — never claim the vault lacks the values.
-    expect(notCovered).toMatch(/Custom Setting|Custom Metadata/);
-    expect(notCovered).toMatch(/vault holds/);
+    // Stored Custom Setting / Custom Metadata row values ARE scanned now
+    // (`storedEndpoints`); only rows written at runtime stay out of reach.
+    expect(notCovered).not.toMatch(/does not yet scan/);
     expect(notCovered).not.toMatch(/holds the metadata, not the row values/);
+    expect(notCovered).toMatch(/Custom Setting|Custom Metadata/);
+    expect(notCovered).toMatch(/runtime/);
+    expect(notCovered).toMatch(/storedEndpoints/);
+  });
+});
+
+// FAIL-BEFORE/PASS-AFTER: the vault already held URL-shaped Custom Metadata /
+// Custom Setting row values, and the catalog said so in a caveat instead of
+// listing them.
+describe('endpointCatalogHandler — URLs stored in Custom Metadata / Custom Setting rows', () => {
+  const CMDT_PRIMARY = 'CustomMetadataRecord:Demo_Endpoint__mdt.Primary';
+  const CMDT_LEGACY = 'CustomMetadataRecord:Demo_Endpoint__mdt.Legacy';
+  const CS_DEFAULT = 'CustomSettingRecord:Demo_Config__c.Default';
+
+  const storedSeed: ExtractionResult = {
+    nodes: [
+      makeNode({
+        id: CMDT_PRIMARY,
+        type: 'CustomMetadataRecord',
+        apiName: 'Demo_Endpoint__mdt.Primary',
+        properties: {
+          valuesCount: 3,
+          values: [
+            { field: 'Demo_Url__c', value: 'https://example.invalid/api', valueType: 'string', isMasked: false },
+            { field: 'Demo_Timeout__c', value: '30', valueType: 'string', isMasked: false },
+            { field: 'Demo_Key__c', value: '***', valueType: 'string', isMasked: true },
+          ],
+        },
+      }),
+      // A record from a refresh that predates the record-values extractor:
+      // no `values` property at all. Counted as not extracted, never as "no URL".
+      makeNode({
+        id: CMDT_LEGACY,
+        type: 'CustomMetadataRecord',
+        apiName: 'Demo_Endpoint__mdt.Legacy',
+        properties: {},
+      }),
+      makeNode({
+        id: CS_DEFAULT,
+        type: 'CustomSettingRecord',
+        apiName: 'Demo_Config__c.Default',
+        properties: {
+          valuesCount: 1,
+          values: [
+            { field: 'Demo_Host__c', value: 'sftp://files.example.invalid/drop', valueType: 'string', isMasked: false },
+          ],
+        },
+      }),
+    ],
+    edges: [],
+  };
+
+  let dir: string;
+  let store: GraphStore;
+  let ctx: Context;
+
+  beforeAll(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'sfi-mcp-endpoint-stored-'));
+    const opened = await openGraph(join(dir, 'stored.db'));
+    if (!opened.ok) throw new Error(`openGraph failed: ${opened.error.message}`);
+    store = opened.value;
+    const imp = await importExtractionResults(store, [storedSeed]);
+    if (!imp.ok) throw new Error(`seed import failed: ${imp.error.message}`);
+    ctx = { vaultRoot: dir, manifest: FIXTURE_MANIFEST, graph: store };
+  });
+
+  afterAll(async () => {
+    await closeGraph(store);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('lists a URL-shaped CMDT / custom-setting value under storedEndpoints with the record id and field', async () => {
+    const r = await endpointCatalogHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.storedEndpoints).toEqual([
+      {
+        endpointKind: 'stored-value',
+        direction: 'outbound',
+        sourceComponentId: CMDT_PRIMARY,
+        field: 'Demo_Url__c',
+        url: 'https://example.invalid/api',
+      },
+      {
+        endpointKind: 'stored-value',
+        direction: 'outbound',
+        sourceComponentId: CS_DEFAULT,
+        field: 'Demo_Host__c',
+        url: 'sftp://files.example.invalid/drop',
+      },
+    ]);
+    expect(d.storedEndpointsScan).toEqual({ scanned: true, recordsRead: 2, recordsNotExtracted: 1 });
+    expect(d.summary.byKind['stored-value']).toBe(2);
+    expect(d.summary.totalEndpoints).toBe(2);
+  });
+
+  it('a non-URL value and a masked value are not endpoints', async () => {
+    const r = await endpointCatalogHandler(ctx, {});
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const fields = r.value.data.storedEndpoints.map((e) => e.field);
+    expect(fields).not.toContain('Demo_Timeout__c');
+    expect(fields).not.toContain('Demo_Key__c');
   });
 
   it('the disclosure says an allowlist entry is an authorization, not a proven callout', async () => {

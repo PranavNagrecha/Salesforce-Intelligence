@@ -35,14 +35,14 @@ const userMessage = (text: string): GetPromptResult['messages'][number] => ({
 });
 
 const GENERATOR_PREAMBLE = `You are driving sf-intelligence documentation generators. Rules:
-- Confirm vault freshness with \`sfi.health_check\` first; if degraded/unhealthy or stale, stop and ask for \`/sfi-refresh\` (or \`/sfi-init\` if missing).
+- Confirm vault freshness with \`sfi.health_check\` first; if degraded/unhealthy or stale, stop and ask for \`sfi refresh\` (or \`sfi init\` if missing).
 - Call the named \`sfi.generate_*\` tool; surface the returned markdown with its Q125 freshness footer intact (\`generatedAt\` + \`sourceTreeHash\`).
 - Cite canonical component ids; disclose per-section confidence (\`declared\` / \`parsed\` / \`heuristic\`) and verbatim \`boundaries[]\`.
 - Generators compose existing graph queries into structured markdown — they do not invent narrative beyond scaffolding.
 - Read-only: never modify org metadata.`;
 
 const PLAYBOOK_PREAMBLE = `You are running an sf-intelligence admin playbook — a named, repeatable tool batch that folds into ONE report. Rules:
-1. Confirm freshness first: \`sfi.health_check\` once at the start; if \`status\` is degraded/unhealthy or \`freshness.stale\` is true, stop and route to \`/sfi-refresh\` (or \`/sfi-init\` when the vault is missing).
+1. Confirm freshness first: \`sfi.health_check\` once at the start; if \`status\` is degraded/unhealthy or \`freshness.stale\` is true, stop and route to \`sfi refresh\` (or \`sfi init\` when the vault is missing).
 2. Live steps need the opt-in live plane. If off, run offline steps, then offer \`sfi.live_consent { grant: true }\` and re-run live steps — never infer live facts from the vault.
 3. Cite canonical component ids; stamp provenance (\`offline_snapshot\` / \`live_org\`) and confidence. Use any tool's \`rendered\` field verbatim when present.
 4. Single-fact questions belong on \`sfi.route_question\`, not a playbook.`;

@@ -626,7 +626,7 @@ describe('governorLimitRisksHandler — QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS', 
     if (!r.ok) return;
     expect(r.value.data.classes).toEqual([]);
     expect(r.value.data.qualityScanCoverage).toEqual([
-      { type: 'ApexTrigger', nodes: 1, scanned: 0 },
+      { type: 'ApexTrigger', candidates: 1, scanned: 0 },
     ]);
     const joined = r.value.data.boundaries.join(' ');
     expect(joined).toContain('NOT SCANNED IN THIS VAULT');
@@ -653,7 +653,7 @@ describe('governorLimitRisksHandler — QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS', 
     if (!r.ok) return;
     expect(r.value.data.classes).toEqual([]);
     expect(r.value.data.qualityScanCoverage).toEqual([
-      { type: 'ApexClass', nodes: 1, scanned: 1 },
+      { type: 'ApexClass', candidates: 1, scanned: 1 },
     ]);
     const joined = r.value.data.boundaries.join(' ');
     expect(joined).not.toContain('NOT SCANNED IN THIS VAULT');
@@ -739,7 +739,7 @@ describe('governorLimitRisksHandler — FIX 6 clean-scope disclosure', () => {
     if (!r.ok) return;
     expect(r.value.data.qualityScanCoverage.length).toBeGreaterThan(0);
     for (const c of r.value.data.qualityScanCoverage) {
-      expect(c.scanned).toBe(c.nodes);
+      expect(c.scanned).toBe(c.candidates);
     }
   });
 });

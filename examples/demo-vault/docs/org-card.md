@@ -1,13 +1,13 @@
 ---
-generatedAt: 2026-10-17T16:10:41.527Z
+generatedAt: 2026-10-19T15:38:20.243Z
 kind: org-card
-refreshedAt: 2026-10-17T16:10:41.527Z
-sourceTreeHash: 937e69c4140fa1b350bf5c90b68d850e6b314bf005122976ccf07520ce92cb33
+refreshedAt: 2026-10-19T15:38:20.243Z
+sourceTreeHash: 6a2c6d9c4d0d4bc81daaa254d55294106dd62dbca8fd32c57659e2cd8cd57fa9
 ---
 
 # Org card — demo-org
 
-Offline snapshot of one Salesforce org. Source-tree hash `937e69c4140fa1b350bf5c90b68d850e6b314bf005122976ccf07520ce92cb33`; vault refreshed 2026-10-17T16:10:41.527Z. Answers ground in THIS snapshot — verify freshness with `sfi.health_check` before trusting time-sensitive claims.
+Offline snapshot of one Salesforce org. Source-tree hash `6a2c6d9c4d0d4bc81daaa254d55294106dd62dbca8fd32c57659e2cd8cd57fa9`; vault refreshed 2026-10-19T15:38:20.243Z. Answers ground in THIS snapshot — verify freshness with `sfi.health_check` before trusting time-sensitive claims.
 
 ## Coverage & blind spots
 
@@ -17,7 +17,7 @@ Coverage status: **partial** — 42 metadata families retrieved.
 
 ## Scale
 
-141 components, 361 dependency edges.
+142 components, 377 dependency edges.
 
 | Type | Count |
 | --- | --- |
@@ -29,13 +29,13 @@ Coverage status: **partial** — 42 metadata families retrieved.
 | Flow | 3 |
 | Profile | 3 |
 | ValidationRule | 3 |
+| ApexTrigger | 2 |
 | Group | 2 |
 | Layout | 2 |
 | PermissionSet | 2 |
 | Queue | 2 |
 | RecordType | 2 |
 | SharingRule | 2 |
-| ApexTrigger | 1 |
 | ApprovalProcess | 1 |
 | AuthProvider | 1 |
 | Bot | 1 |
@@ -89,7 +89,7 @@ Inbound dependency edges per object (structural containment excluded), over 13 s
 | Automation | Total | Active |
 | --- | --- | --- |
 | Flow | 3 | 3 |
-| ApexTrigger | 1 | 1 |
+| ApexTrigger | 2 | 2 |
 | WorkflowRule | 1 | 1 |
 | ApprovalProcess | 1 | 1 |
 

@@ -16,7 +16,9 @@ One command serves a built-in **synthetic demo org** ("Verdant Energy," a fictio
 claude mcp add --transport stdio --scope user sf-intelligence-demo -- npx -y sf-intelligence demo
 ```
 
-Any other MCP client — same registration as the "real org" block below, except `"args": ["-y", "sf-intelligence", "demo"]` and **no `--vault`**: `sfi demo` manages its own cached vault under `~/.sf-intelligence/demo`. Ask it *"what happens when I save a Project?"* or *"what breaks if I delete `Invoice__c.Amount__c`?"*. When you're ready for your own org, keep reading.
+Any other MCP client — same registration as the "real org" block below, except `"args": ["-y", "sf-intelligence", "demo"]` and **no `--vault`**: `sfi demo` manages its own cached vault under `~/.sf-intelligence/demo`. Ask it *"what happens when I save a Project?"*, *"what breaks if I delete `Invoice__c.Amount__c`?"*, *"why can't an Installer see an Invoice?"* or *"which Apex has governor-limit risk?"*. When you're ready for your own org, keep reading.
+
+In Claude Code the package also installs as a plugin (skills plus the `/sfi-*` commands, namespaced `/sf-intelligence:sfi-onboard` and so on when installed from the marketplace); in Claude Code run `/plugin marketplace add PranavNagrecha/Salesforce-Intelligence` then `/plugin install sf-intelligence@sf-intelligence`.
 
 ## Register the MCP server (your real org)
 

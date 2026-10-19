@@ -333,10 +333,12 @@ surface their own boundaries in responses.
   quarter" still belongs in SOQL / hosted MCP / a BI tool.
 - **Partial Apex and Flow semantics.** Default ANTLR AST pass yields
   `confidence: parsed` edges for resolved reads/writes and calls; heuristic
-  recall covers gaps. Dynamic SOQL, reflection, `Type.forName`, cross-method
-  dataflow, managed-package internals stay thin. Flow conditions are listed,
-  not evaluated. SAST findings are `heuristic`; what-if inherits the weakest
-  edge on the path.
+  recall covers gaps. A `Type.forName` with a literal class name, or fed from
+  a Custom Metadata cell that names a class, becomes a heuristic edge; a
+  `Type.forName` on any other variable is counted on the class, never
+  guessed. Dynamic SOQL, reflection, cross-method dataflow, managed-package
+  internals stay thin. Flow conditions are listed, not evaluated. SAST
+  findings are `heuristic`; what-if inherits the weakest edge on the path.
 - **Scale: certified to 50,000 components** on a synthetic import path
   (`docs/reports/scale-certification.md`); CI gates a 10k import budget.
   Graph traversal / ILIKE search at extreme scale are capped per tool, not

@@ -882,6 +882,24 @@ describe('integrationMapHandler (martech connectors — Finding #44)', () => {
     rmSync(martechDir, { recursive: true, force: true });
   });
 
+  // PROSE-FROM-ROWS: the note said "Active RemoteSiteSettings ... N in this org"
+  // with N counting every row, inactive ones included. The number in the
+  // sentence is now the length of the active row set the sentence describes.
+  it('calloutAuthorizationNote counts only the ACTIVE RemoteSiteSettings and names the inactive one apart', async () => {
+    const result = await integrationMapHandler(martechCtx, {});
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const d = result.value.data;
+    const active = d.remoteSiteSettings.filter((n) => n.properties['isActive'] === true);
+    expect(d.remoteSiteSettings.length).toBe(3);
+    expect(active.length).toBe(2);
+    const note = d.calloutAuthorizationNote ?? '';
+    expect(note).toContain(`${active.length} of ${d.remoteSiteSettings.length} in this org are active`);
+    expect(note).not.toContain('— 3 in this org');
+    expect(note).toContain('1 inactive');
+    expect(note).toContain('Marketo_Legacy_Off');
+  });
+
   it('surfaces the InstalledPackage namespace match with the friendly product name', async () => {
     const result = await integrationMapHandler(martechCtx, {});
     expect(result.ok).toBe(true);
@@ -1425,7 +1443,7 @@ describe('integrationMapHandler (full category scan — G2)', () => {
     // Every one of the 5 fits under limit: 8, so nothing is trimmed.
     expect(d.remoteSiteSettings.length).toBe(5);
     expect(d.truncatedCategories).toEqual([]);
-    expect(d.calloutAuthorizationNote).toContain('5 in this org');
+    expect(d.calloutAuthorizationNote).toContain('5 of 5 in this org are active');
   });
 
   it('names the true total when the payload IS trimmed', async () => {
@@ -1441,7 +1459,7 @@ describe('integrationMapHandler (full category scan — G2)', () => {
     });
     // The derived fields still read the COMPLETE set behind the trim.
     expect(d.martechConnectors.length).toBe(1);
-    expect(d.calloutAuthorizationNote).toContain('5 in this org');
+    expect(d.calloutAuthorizationNote).toContain('5 of 5 in this org are active');
     expect(d.calloutAuthorizationNote).toContain('ZZ_Marketo');
   });
 });

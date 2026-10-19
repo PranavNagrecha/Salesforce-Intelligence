@@ -241,7 +241,7 @@ export interface GovernorLimitRisksOutput {
   /** Per-rule counter across the FULL matched set. */
   readonly byRule: Readonly<Record<string, number>>;
   /**
-   * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Per-type count of nodes read vs
+   * QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS. Per-type count of `candidates` (nodes this tool read, not the org total) vs
    * nodes that actually carry a `qualityIssues` scan.
    *
    * D-3: emitted UNCONDITIONALLY. It used to appear only when some node in

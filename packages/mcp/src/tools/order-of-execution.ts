@@ -51,7 +51,6 @@ import type {
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
   type GraphStore,
-  getNodeById,
   listEdges,
   listEdgesForNodes,
   listNodesByIds,
@@ -88,6 +87,10 @@ import {
 import { flowMatchesEvent, triggerMatchesEvent, workflowMatchesEvent } from './soe-event-match.js';
 import { classifyAfterSaveFlowTiming, flowStepFacts } from './soe-flow-timing.js';
 import {
+  buildFrameworkHandlerSteps,
+  type SoeFrameworkRegistration,
+} from './soe-framework-handlers.js';
+import {
   AUTOMATION_PHASES,
   type BoundableStep,
   computePhasesOmitted,
@@ -113,6 +116,13 @@ import {
   rollupScanTruncationNote,
   type RollupRecalcStep,
 } from './soe-rollup-recalc.js';
+import {
+  type SoeNoEntryCriteria,
+  type SoeStepBranches,
+  type SoeStepCondition,
+  type SoeUngroundedRef,
+  surfaceStepCondition,
+} from './soe-step-condition.js';
 import { annotateSoeTriggerBypass } from './soe-trigger-bypass-annotate.js';
 import { type SoeHandlerEffects } from './soe-trigger-effects.js';
 import {
@@ -146,23 +156,12 @@ export type SoeEvent = (typeof SOE_EVENTS)[number];
 
 
 /**
- * One reference a condition mentions that names NO component in this vault.
- * NEVER citable. FIX 15 (3).
+ * The step gate and its ungrounded-ref shape are defined ONCE in
+ * `soe-step-condition.ts`, beside the helper that surfaces the gate for both
+ * save-order tools. Re-exported so this module's public type surface is
+ * unchanged.
  */
-export interface SoeUngroundedRef {
-  /** The verbatim id the extractor recorded — kept so the mention is not lost. */
-  readonly raw: string;
-  /**
-   * Why it is not grounded:
-   *   - `relationship-traversal` — the leading segment is a RELATIONSHIP name
-   *     (`<Rel>__r`), not an object api name. No refresh can ever create it.
-   *   - `not-in-vault` — the id is well-formed and its object IS vaulted, but
-   *     the field itself was not retrieved. A refresh may close it.
-   *   - `not-a-field-reference` — the symbol is a Flow element/variable or a
-   *     non-vaulted object, not a field reference in the object sense.
-   */
-  readonly reason: 'relationship-traversal' | 'not-in-vault' | 'not-a-field-reference';
-}
+export type { SoeStepCondition, SoeUngroundedRef };
 
 /**
  * Verbatim disclosure for a composition that carries ungrounded condition
@@ -303,32 +302,6 @@ export const groundStepConditions = async (
 };
 
 /** Same SoeStepCondition shape as `what_happens_on_save`. */
-export interface SoeStepCondition {
-  readonly conditionContextId: ComponentId;
-  readonly expression: string;
-  /**
-   * GROUNDED ONLY. Every id here names a real node in this vault and is safe
-   * to cite. FIX 15 (3): before this, a ref the extractor recorded but that
-   * named NO component was republished here as a citable component id.
-   */
-  readonly fieldRefs: readonly ComponentId[];
-  /**
-   * Refs the condition mentions that do NOT name a component. NEVER citable.
-   * Omitted when every ref grounded. See {@link SOE_UNGROUNDED_REFS_NOTE}.
-   */
-  readonly ungroundedRefs?: readonly SoeUngroundedRef[];
-  /**
-   * So an empty `fieldRefs` is readable as CHECKED. `checked: false` means the
-   * single grounding query FAILED — the counts are then UNCHECKED zeros and
-   * `fieldRefs` is the raw extractor record, not a verified list.
-   */
-  readonly refGrounding: {
-    readonly checked: boolean;
-    readonly grounded: number;
-    readonly ungrounded: number;
-  };
-}
-
 /** Same SoeStepAction shape as `what_happens_on_save`. */
 export interface SoeStepAction {
   readonly kind: string;
@@ -352,10 +325,20 @@ export interface SoeStep {
   readonly componentId: ComponentId;
   readonly componentType: ComponentType;
   readonly apiName: string;
+  /**
+   * The ConditionalContext gate. For a Flow step this is the flow's `<start>`
+   * ENTRY criteria (`kind: 'flow-recordtrigger'`), never an inner decision.
+   */
   readonly conditional?: SoeStepCondition;
+  /** Flow steps only: the flow declares NO entry criteria; `conditional` is absent. */
+  readonly entryCriteria?: SoeNoEntryCriteria;
+  /** Flow steps only: the inner `<decisions>` rules (count + first two expressions). */
+  readonly branches?: SoeStepBranches;
   readonly actions: readonly SoeStepAction[];
   /** ApexTrigger steps only: the handler chain walked and any bypass switch it reads. */
   readonly handlerEffects?: SoeHandlerEffects;
+  /** ApexClass steps only: a framework-registered handler, conditional on a registration record the vault does not hold. */
+  readonly conditionalOn?: SoeFrameworkRegistration;
   /** Flow steps: declared Flow Trigger Order (omitted when none). */
   readonly triggerOrder?: number;
   /** Flow steps: fires only on the save that CHANGES the record to meet its entry criteria. */
@@ -731,36 +714,6 @@ export type OrderOfExecutionInput = z.infer<typeof orderOfExecutionInputSchema>;
 // fetchers below still mirror `what-happens-on-save.ts`.
 // ---------------------------------------------------------------------------
 
-const surfaceFirstCondition = async (
-  ctx: Context,
-  firerId: ComponentId,
-): Promise<Result<SoeStepCondition | undefined, string>> => {
-  const edgesResult = await listEdges(ctx.graph, firerId, {
-    direction: 'out',
-    edgeType: 'firesWhen',
-  });
-  if (!edgesResult.ok) return err(edgesResult.error.message);
-  const firstEdge = edgesResult.value[0];
-  if (firstEdge === undefined) return ok(undefined);
-  const conditionNodeResult = await getNodeById(ctx.graph, firstEdge.toId);
-  if (!conditionNodeResult.ok) return err(conditionNodeResult.error.message);
-  if (conditionNodeResult.value === null) return ok(undefined);
-  const conditionNode = conditionNodeResult.value;
-  const expression = conditionNode.properties['expression'];
-  const rawFieldRefs = conditionNode.properties['fieldRefs'];
-  const fieldRefs: readonly ComponentId[] = Array.isArray(rawFieldRefs)
-    ? rawFieldRefs.filter((v): v is ComponentId => typeof v === 'string')
-    : [];
-  return ok({
-    conditionContextId: conditionNode.id,
-    expression: typeof expression === 'string' ? expression : '',
-    fieldRefs,
-    // Provisional: `groundStepConditions` runs ONE batched probe over the whole
-    // composition and rewrites this. Until then nothing is claimed.
-    refGrounding: { checked: false, grounded: 0, ungrounded: 0 },
-  });
-};
-
 /**
  * A firer's save-time actions: its outgoing edges except the structural
  * `parentOf` / `triggersOn` / `firesWhen`. The ONE implementation —
@@ -817,11 +770,11 @@ const buildStep = async (
   phase: SoePhase,
   stepIndex: number,
 ): Promise<Result<SoeStep, string>> => {
-  const conditionResult = await surfaceFirstCondition(ctx, firer.id);
+  const conditionResult = await surfaceStepCondition(ctx.graph, firer);
   if (!conditionResult.ok) return err(conditionResult.error);
   const actionsResult = await buildFirerActions(ctx, firer.id);
   if (!actionsResult.ok) return err(actionsResult.error);
-  const base: Omit<SoeStep, 'conditional'> = {
+  const base: SoeStep = {
     phase,
     stepIndex,
     componentId: firer.id,
@@ -846,11 +799,7 @@ const buildStep = async (
         }
       : {}),
   };
-  return ok(
-    conditionResult.value === undefined
-      ? base
-      : { ...base, conditional: conditionResult.value },
-  );
+  return ok({ ...base, ...conditionResult.value });
 };
 
 const fetchParentedFirers = async (
@@ -1071,6 +1020,15 @@ const composeForEvent = async (
       stepIndex += 1;
     }
   }
+  // SAVE-REGISTERED-HANDLERS. Org subclasses of a managed trigger-framework
+  // base that touch this object (shared with what_happens_on_save): run by the
+  // package's trigger only if a registration record names them — conditional.
+  const frameworkHandlers = await buildFrameworkHandlerSteps(ctx, objectApiName, [event]);
+  if (!frameworkHandlers.ok) return err(frameworkHandlers.error);
+  for (const handler of frameworkHandlers.value.before) {
+    soe.push({ phase: 'pre-save-triggers', stepIndex, ...handler });
+    stepIndex += 1;
+  }
 
   // pre-save-validation. Custom validation rules run AFTER before
   // triggers. ValidationRules don't fire on delete/undelete.
@@ -1166,6 +1124,10 @@ const composeForEvent = async (
       afterTriggers.push(firer);
       stepIndex += 1;
     }
+  }
+  for (const handler of frameworkHandlers.value.after) {
+    soe.push({ phase: 'after-triggers', stepIndex, ...handler });
+    stepIndex += 1;
   }
 
   // post-save-assignment. Assignment / auto-response rules run immediately
@@ -1301,7 +1263,9 @@ const composeForEvent = async (
     stepIndex += 1;
   }
 
-  const conditionalSteps = soe.filter((s) => s.conditional !== undefined).length;
+  const conditionalSteps = soe.filter(
+    (s) => s.conditional !== undefined || s.conditionalOn !== undefined,
+  ).length;
   const activeComponents = soe.filter((s) => s.phase !== 'save').length;
 
   return ok({
@@ -1728,7 +1692,12 @@ export const orderOfExecutionHandler = async (
     // `attachEnvelopeHonesty`'s rebuild-from-base keeps it on every pass
     // instead of dropping it. Always appended: a zero census must read as
     // CHECKED, and a failed probe must read as NOT CHECKED.
-    disclosure: buildSoePrimaryDisclosure(objectModeled, receiverVerification, handlerEnriched),
+    disclosure: buildSoePrimaryDisclosure(
+      objectModeled,
+      receiverVerification,
+      handlerEnriched,
+      Object.values(byEvent).some((ev) => ev.soe.some((s) => s.conditionalOn !== undefined)),
+    ),
   };
 
   // The org-wide Summary-field scan behind post-save-rollup-recalc hit the

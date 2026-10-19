@@ -97,6 +97,7 @@ import {
   applyReportDashboardPersistence,
   parseTypeFilter,
   renderVault,
+  resolveDynamicDispatchEdges,
   resolveRecordFilterPathEdges,
   resolveRestrictionRuleProfileEdges,
   SUPPORTED_TYPES,
@@ -1365,6 +1366,10 @@ const runRefreshBody = async (opts: RunRefreshOptions): Promise<RefreshResult> =
       `Apex AST: ${astResult.filesParsed} file(s) parsed, ${astResult.edgesAdded} parsed edge(s) added, ${astResult.parseErrors} fallback(s) to scanner.`,
     );
   }
+  // A dispatcher's `Type.forName(row.Handler__c)` names its classes through the
+  // Custom Metadata records it reads: join them (after the AST pass, so every
+  // `CustomObject:X__mdt` read the dispatcher holds is in place).
+  walked = { ...walked, results: resolveDynamicDispatchEdges(walked.results) };
   progress(`Extracted ${walked.results.length} component file(s); building graph...`);
 
   // P5-incremental-refresh: persist the freshly-walked cache for next time.
@@ -3677,19 +3682,19 @@ export const loadVaultConfig = async (cwd: string): Promise<Result<VaultConfig, 
     return err(`Vault config 'targetOrg' is not a valid org alias: ${configPath}`);
   }
   const here = resolve(cwd, 'org-kb');
-  const vaultRoot = typeof parsed.vaultRoot === 'string' && parsed.vaultRoot.length > 0
-    ? parsed.vaultRoot
-    : here;
-  // `sfi init` writes the folder the config lives in, so a config naming a
-  // DIFFERENT folder came with a copied or moved vault. Every caller of this
-  // function writes to `vaultRoot` (refresh, snapshots, annotations, vault
-  // git), so honouring it would change the other vault while the user works
-  // on this one — refuse, and say exactly how to fix it.
+  // A relative `vaultRoot` (`sfi init` writes ".") is relative to the vault
+  // folder the config lives in, so a committed config works from any clone.
+  const declared = typeof parsed.vaultRoot === 'string' && parsed.vaultRoot.length > 0 ? parsed.vaultRoot : '.';
+  const vaultRoot = resolve(here, declared);
+  // An ABSOLUTE vaultRoot naming a different folder came with a copied or
+  // moved vault. Every caller of this function writes to `vaultRoot` (refresh,
+  // snapshots, annotations, vault git), so honouring it would change the other
+  // vault while the user works on this one — refuse, and say how to fix it.
   if (realOrResolved(vaultRoot) !== realOrResolved(here)) {
     return err(
-      `Vault config at ${configPath} names vaultRoot '${vaultRoot}', but this vault is '${here}'. ` +
+      `Vault config at ${configPath} names vaultRoot '${declared}', but this vault is '${here}'. ` +
         `It was copied or moved, and running here would write to the other vault. ` +
-        `Set "vaultRoot" in ${configPath} to "${here}" (or delete the key), then re-run.`,
+        `Set "vaultRoot" in ${configPath} to "." (or delete the key), then re-run.`,
     );
   }
   const snapshotOnRefresh = parsed.snapshotOnRefresh !== false;

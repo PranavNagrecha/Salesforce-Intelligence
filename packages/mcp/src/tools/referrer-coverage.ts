@@ -6,13 +6,14 @@
  * for types whose referrers are only partly modeled as graph edges: a custom
  * label used in formula fields, an Apex method called from an Aura controller's
  * JavaScript, a class instantiated by `Type.forName`. The only structural
- * blind-spot list (`UNWALKED_REFERRER_CLASSES`) covered CustomField and
+ * blind-spot list (a four-name constant, since deleted) covered CustomField and
  * CustomObject.
  *
  * This table is the single source for "which referrer kinds of this type does
  * the graph model, and how well". A result may claim completeness only when
  * every APPLICABLE kind for the root type is tier `edge`. Consumers derive their
- * blind spots from {@link unmodeledReferrerKinds}; nothing restates the list.
+ * blind spots from {@link unmodeledReferrerKinds}; nothing restates the list —
+ * a prose copy of it is how a caveat outlived the edge it denied.
  *
  * Tiers:
  *   - `edge`              — modeled as incoming graph edges.
@@ -76,11 +77,38 @@ const prop = (root: Node, key: string): unknown =>
   (root.properties as Record<string, unknown>)[key];
 
 /**
- * The field/object referrer classes that were the original structural blind
- * spots (D3-soundness-overclaim). Named verbatim — `soundness.ts` re-exports
- * them as `UNWALKED_REFERRER_CLASSES`.
+ * CustomField referrer kinds (D3-soundness-overclaim, re-measured for
+ * REFERRER-STATUS). Each is an incoming edge onto the field on a current vault:
+ * `usedInLayout` from Layout / CompactLayout / FieldSet (and related-list
+ * columns, resolved at import) since the first release; a `references` edge
+ * carrying `rollupRole` from the roll-up field, and a `readsFrom` edge from the
+ * firer's ConditionalContext (Flow entry criteria and decisions, validation,
+ * workflow, approval and rule criteria), both since 0.3.0 — an older vault
+ * holds those two at `none`. A field is never a tab or app member, so that kind
+ * does not apply here. Measured on a real vault: 6,151 `usedInLayout`, 735
+ * condition `readsFrom` and 33 roll-up edges.
  */
-const FIELD_OBJECT_UNWALKED: readonly ReferrerKind[] = [
+const CUSTOM_FIELD_KINDS: readonly ReferrerKind[] = [
+  {
+    kind: 'roll-up source coupling',
+    tier: 'edge',
+    since: { version: edgeFamilySince('roll-up coupling edges'), olderTier: 'none' },
+  },
+  { kind: 'layout placement', tier: 'edge' },
+  {
+    kind: 'flow decision/filter reads',
+    tier: 'edge',
+    since: { version: edgeFamilySince('condition (criteria) field edges'), olderTier: 'none' },
+  },
+];
+
+/**
+ * CustomObject referrer kinds. None of these reaches the OBJECT as an incoming
+ * edge: a layout's only edge to its object is the structural `parentOf` (object
+ * -> layout), an object tab mints no edge (`TAB_TARGET_TYPE.object` is null),
+ * and roll-up and condition edges land on the object's FIELDS.
+ */
+const CUSTOM_OBJECT_UNWALKED: readonly ReferrerKind[] = [
   { kind: 'roll-up source coupling', tier: 'none' },
   { kind: 'layout placement', tier: 'none' },
   { kind: 'flow decision/filter reads', tier: 'none' },
@@ -142,8 +170,8 @@ const CUSTOM_LABEL_KINDS: readonly ReferrerKind[] = [
 
 /** The table. Types absent from it make no structural blind-spot claim. */
 export const REFERRER_COVERAGE: Readonly<Partial<Record<ComponentType, readonly ReferrerKind[]>>> = {
-  CustomField: FIELD_OBJECT_UNWALKED,
-  CustomObject: FIELD_OBJECT_UNWALKED,
+  CustomField: CUSTOM_FIELD_KINDS,
+  CustomObject: CUSTOM_OBJECT_UNWALKED,
   ApexClass: APEX_CLASS_KINDS,
   CustomLabel: CUSTOM_LABEL_KINDS,
 };

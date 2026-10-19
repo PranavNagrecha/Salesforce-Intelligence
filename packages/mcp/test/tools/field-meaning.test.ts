@@ -604,7 +604,7 @@ describe('fieldMeaningHandler — value-consuming edge vocabulary (FIX 5)', () =
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.data.usageFrequency.note).toBe(
-      "`incomingReads` counts every inbound edge that CONSUMES this field's value: `readsFrom` (Apex, Flow, condition contexts) and `references` (formulas, validation rules, list views, report types, Lightning pages, quick actions, web links). `usedInLayout` (placement) and `grantedBy` (permission) are not reads and are excluded — their counts are in `excludedByEdgeType`.",
+      "`incomingReads` counts every inbound edge that CONSUMES this field's value: `readsFrom` (Apex, Flow, condition contexts, Lightning page visibility rules) and `references` (formulas, validation rules, list views, report types, Lightning page field items and related lists, quick actions, web links). `usedInLayout` (placement) and `grantedBy` (permission) are not reads and are excluded — their counts are in `excludedByEdgeType`.",
     );
   });
 

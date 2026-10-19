@@ -919,8 +919,8 @@ describe('techDebtScoreHandler — QUALITY-SCAN-SKIPS-TRIGGERS-AND-FLOWS', () =>
       r.value.data.excludedCategories.map((e) => e.category),
     ).not.toContain('codeQuality');
     expect(r.value.data.qualityScanCoverage).toEqual([
-      { type: 'ApexClass', nodes: 1, scanned: 1 },
-      { type: 'ApexTrigger', nodes: 1, scanned: 0 },
+      { type: 'ApexClass', candidates: 1, scanned: 1 },
+      { type: 'ApexTrigger', candidates: 1, scanned: 0 },
     ]);
     expect(r.value.data.boundaries.join(' ')).toContain(
       'NOT SCANNED IN THIS VAULT',
@@ -1188,7 +1188,7 @@ describe('techDebtScoreHandler — unchecked zero vs checked zero', () => {
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     expect(r.value.data.qualityScanCoverage).toEqual(
-      expect.arrayContaining([{ type: 'ApexTrigger', nodes: 1, scanned: 0 }]),
+      expect.arrayContaining([{ type: 'ApexTrigger', candidates: 1, scanned: 0 }]),
     );
     const codeQualityRec = r.value.data.recommendedActions.find((a) =>
       a.startsWith('address code-quality findings'),

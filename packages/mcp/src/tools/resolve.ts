@@ -15,12 +15,13 @@
  * risk explicitly.
  */
 
-import type {
-  ComponentId,
-  ComponentType,
-  McpError,
-  McpResponse,
-  UntrustedOrgText,
+import {
+  DEMO_ORG_ALIAS,
+  type ComponentId,
+  type ComponentType,
+  type McpError,
+  type McpResponse,
+  type UntrustedOrgText,
 } from '@sf-intelligence/contracts';
 import { err, ok, type Result } from '@sf-intelligence/core';
 import {
@@ -55,7 +56,7 @@ const RESOLVE_MAX_LIMIT = 50;
  * resolution is similarity, not proof.
  */
 const RESOLVE_DISCLOSURE =
-  "These are typo-tolerant, fuzzy-ranked guesses at which component you meant — heuristic, not declared. disposition 'exact' = one confident match; 'ambiguous' = several plausible candidates, confirm the right one before acting; 'none' = nothing matched confidently (any listed items are weak near-misses). A high score is string similarity, not proof — verify the candidate's canonical id and label.";
+  "These are typo-tolerant, fuzzy-ranked guesses at which component you meant — heuristic, not declared. disposition 'exact' = one confident match; 'ambiguous' = several plausible candidates, confirm the right one before acting; 'none' = nothing matched confidently, `candidates` is empty and any `lookalikes` are weak near-misses that are not matches — do not present one as the component asked about. A high score is string similarity, not proof — verify the candidate's canonical id and label.";
 
 /**
  * Zod schema for `sfi.resolve`.
@@ -119,7 +120,14 @@ const withLabelOrgText = (
 /** Payload wrapped inside the `McpResponse` envelope on success. */
 export interface ResolveOutput {
   readonly disposition: ResolveDisposition;
+  /** Plausible matches. Always empty when `disposition` is `none`. */
   readonly candidates: readonly ResolveToolCandidate[];
+  /**
+   * Only when `disposition` is `none` and the resolver saw weak near-misses:
+   * the rows it considered and rejected, so a host can say "did you mean…"
+   * without presenting one as a match. Never a match.
+   */
+  readonly lookalikes?: readonly ResolveToolCandidate[];
   readonly queryTokens: readonly string[];
   /** Always 'heuristic' — resolution is similarity, never a declared fact. */
   readonly confidence: 'heuristic';
@@ -132,7 +140,8 @@ export interface ResolveOutput {
   readonly clarification: Clarification | null;
   /**
    * Suggested next steps the client can offer the user — e.g. `refresh` (with
-   * `/sfi-refresh`) or `stop` when nothing matched, `narrow` when ambiguous.
+   * the CLI command `sfi refresh`; never offered on the demo vault) or `stop`
+   * when nothing matched, `narrow` when ambiguous.
    */
   readonly nextActions: readonly NextAction[];
   /**
@@ -286,7 +295,7 @@ export const resolveHandler = async (
   // negative — the component does not exist (false premise) — NOT a coverage
   // gap. Only true when `types` was supplied AND every requested type is fully
   // covered; an unscoped or partially-covered resolve stays inconclusive and
-  // keeps leading with `/sfi-refresh`.
+  // keeps leading with `refresh`.
   const scopedCoverageComplete =
     disposition === 'none' &&
     input.types !== undefined &&
@@ -296,18 +305,26 @@ export const resolveHandler = async (
   const clarify = buildClarify(input.query, aliasResolution, {
     refreshedAt: ctx.manifest.refreshedAt,
     scopedCoverageComplete,
+    demo: ctx.manifest.sourceOrg === DEMO_ORG_ALIAS,
   });
 
   const rendered = renderResolveMarkdown({
     disposition,
     candidates,
     clarification: clarify.clarification,
+    nextActions: clarify.nextActions,
   });
+
+  // On `none` the resolver's rows are rejected near-misses, not matches: a
+  // host that read them from `candidates` offered a lookup field as "a fee
+  // field" that does not exist. Keep them, under a name that says what they are.
+  const lookalikes = disposition === 'none' ? candidates : [];
 
   return ok({
     data: {
       disposition,
-      candidates,
+      candidates: disposition === 'none' ? [] : candidates,
+      ...(lookalikes.length > 0 ? { lookalikes } : {}),
       queryTokens: result.value.queryTokens,
       confidence: 'heuristic',
       disclosure: scopedCoverageComplete

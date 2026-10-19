@@ -498,7 +498,7 @@ describe('extractFlow', () => {
         // The fast-xml-parser error message names the overflow cause; we
         // assert the substring rather than the exact text so a parser
         // version bump that rewords the message doesn't break the test.
-        expect(result.error.message).toMatch(/[Ee]ntity expansion limit/);
+        expect(result.error.message).toMatch(/[Ee]ntity expansion/);
       } finally {
         await rm(dir, { recursive: true, force: true });
       }

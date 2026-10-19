@@ -28,8 +28,11 @@
  * Boot anyway, in a deliberately tiny mode: advertise MCP `instructions` (hosts
  * surface these without a tool call) and expose a single read-only tool,
  * `sfi.setup_status`, that reports exactly what is missing and the exact next
- * command — platform-correct, and naming the authenticated orgs when we know
- * them. The chat can then walk the user through setup, which is the whole point.
+ * command — platform-correct. It says how many orgs the local `sf` CLI is
+ * authenticated to and names only the sf default org (the one alias the user
+ * already chose); the alias list stays on the terminal, where `sfi init` prints
+ * it to the person. The chat can then walk the user through setup, which is the
+ * whole point.
  *
  * ## What this deliberately does NOT do
  *
@@ -73,8 +76,11 @@ export interface SetupState {
   readonly expectedVaultRoot: string;
   /** How that location was chosen — `--vault`, `SFI_VAULT`, or the cwd default. */
   readonly bindSource: string;
-  /** Salesforce orgs the local `sf` CLI is authenticated to, if discoverable. */
-  readonly authedOrgs: readonly string[];
+  /**
+   * How many Salesforce orgs the local `sf` CLI is authenticated to, when the
+   * CLI was asked. A count, never the aliases: this payload goes to the model.
+   */
+  readonly authedOrgCount?: number;
   /** The sf CLI's default org, if known — named as the default, never adopted. */
   readonly defaultOrg?: string;
   /** Product version, for the handshake. */
@@ -103,15 +109,15 @@ const quotePath = (p: string): string => (p.includes(' ') ? `"${p}"` : p);
  */
 const setupSteps = (state: SetupState): readonly string[] => {
   // FR-02: never the cwd-derived path (that is where the server already
-  // looked and failed) and never an arbitrary authed org — `authedOrgs[0]` is
-  // just the first row of `sf org list`, not a choice anyone made.
+  // looked and failed) and never an arbitrary authed org — the first row of
+  // `sf org list` is not a choice anyone made.
   const vaultFlag = '--vault <absolute path to your project>/org-kb';
   const org = '<your-org-alias>';
   const orgHint =
     state.defaultOrg !== undefined
       ? ` (your sf default org is \`${state.defaultOrg}\` — use it only if that is the org this project models)`
-      : state.authedOrgs.length > 0
-        ? ' (pick one of the authenticated orgs listed in `authenticatedOrgs`)'
+      : (state.authedOrgCount ?? 0) > 0
+        ? ` (you are authenticated to ${state.authedOrgCount} org${state.authedOrgCount === 1 ? '' : 's'}; \`sf org list\` in your terminal shows the aliases — pick one there)`
         : '';
   if (state.reason === 'vault-path-not-found') {
     return [
@@ -234,7 +240,8 @@ export const setupStatusPayload = (
     lookedForVaultAt: state.expectedVaultRoot,
     vaultBoundVia: state.bindSource,
     serverLaunchDirectory: state.cwd,
-    authenticatedOrgs: state.authedOrgs,
+    authenticatedOrgCount: state.authedOrgCount,
+    defaultOrg: state.defaultOrg,
     nextSteps: setupSteps(state),
     shell: isWindows() ? 'windows' : 'posix',
     /**

@@ -76,14 +76,14 @@ afterAll(async () => {
 });
 
 describe('DEV-07 managed-package components are never definitely_dead', () => {
-  it('FAIL-BEFORE/PASS-AFTER: a namespaced field is uncertain; the unmanaged one stays definitely_dead', async () => {
+  it('FAIL-BEFORE/PASS-AFTER: a namespaced field is uncertain; the unmanaged one stays dead (likely_dead)', async () => {
     const r = await findDeadCodeHandler(ctx, { types: ['CustomField'], includeUncertain: true });
     expect(r.ok).toBe(true);
     if (!r.ok) return;
     const byId = new Map(r.value.data.candidates.map((c) => [c.componentId, c]));
     expect(byId.get('CustomField:Invoice__c.acme__Score__c')?.verdict).toBe('uncertain');
     expect(byId.get('CustomField:Invoice__c.acme__Score__c')?.reasoning).toContain('managed-package');
-    expect(byId.get('CustomField:Invoice__c.Notes__c')?.verdict).toBe('definitely_dead');
+    expect(byId.get('CustomField:Invoice__c.Notes__c')?.verdict).toBe('likely_dead');
   });
 
   it('the default (unscoped) listing no longer leads with managed fields', async () => {

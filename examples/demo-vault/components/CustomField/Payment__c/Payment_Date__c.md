@@ -67,3 +67,9 @@ Date the payment was received.
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `CustomObject:Payment__c` | declared | custom-field-extractor |
+
+### writesTo (incoming, 1)
+
+| Source | Confidence | Producer |
+| --- | --- | --- |
+| `ApexClass:PaymentService` | parsed | apex-ast |

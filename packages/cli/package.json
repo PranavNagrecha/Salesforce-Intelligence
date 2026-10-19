@@ -1,6 +1,6 @@
 {
   "name": "sf-intelligence",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "Salesforce Org Intelligence for AI agents: a read-only, offline, open-source (MIT) MCP server and CLI. Ask about your org's metadata, dependencies, permissions, Apex and Flows \u2014 grounded in real retrieved metadata. Ships the sfi CLI and an MCP server.",
   "license": "MIT",
   "homepage": "https://sfi.auditforce.cloud",
@@ -83,7 +83,7 @@
     "@inquirer/prompts": "^7.0.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
     "commander": "^12.0.0",
-    "fast-xml-parser": "^4.4.0",
+    "fast-xml-parser": "^5.11.2",
     "zod": "^3.23.0"
   },
   "devDependencies": {

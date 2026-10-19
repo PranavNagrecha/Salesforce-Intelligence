@@ -12,45 +12,27 @@
  * `governor_limit_risks`, and `test_coverage_for_method` all carry it.
  *
  * D3-soundness-overclaim — the `dynamic-apex` blind spot is NOT the only thing a
- * graph-edge impact walk is blind to. Whole classes of REFERRERS to a
- * `CustomField` / `CustomObject` are structurally NOT modeled as incoming graph
- * edges, so an edge-walking analysis (`get_impact`) never sees them and must not
- * report `complete: true` / `staticCoverage: 'full'` on their absence:
- *   - ROLL-UP SOURCE COUPLING — a roll-up summary field's `summaryForeignKey`
- *     is stored as a field PROPERTY, no edge (`custom-field.ts`).
- *   - LAYOUT PLACEMENT — Layout sections / related-lists are not incoming edges
- *     onto the placed field (`layout.ts`).
- *   - FLOW DECISION/FILTER READS — a Flow decision or record-trigger filter that
- *     references a field becomes a `firesWhen` edge to a `ConditionalContext`
- *     (with the field on the context's `fieldRefs` PROPERTY), NEVER a `readsFrom`
- *     edge onto the field (`condition-extractor.ts`).
- *   - TAB/APP MEMBERSHIP — `CustomTab` / `CustomApplication` are not traversed.
- * `soundnessForImpactWalk` layers a named `unwalked-referrer-class` blind spot on
- * top of the dynamic-Apex one for field/object roots so "no referrers found" is
- * never presented as certainty.
+ * graph-edge impact walk is blind to. Some REFERRER KINDS of a root type are not
+ * modeled as incoming graph edges on a given vault, so an edge-walking analysis
+ * (`get_impact`) never sees them and must not report `complete: true` /
+ * `staticCoverage: 'full'` on their absence. Which kinds, for which root type,
+ * on which builder version, is decided ONCE in `referrer-coverage.ts`; this file
+ * only reads that table. `soundnessForImpactWalk` layers a named
+ * `unwalked-referrer-class` blind spot on top of the dynamic-Apex one so "no
+ * referrers found" is never presented as certainty.
  */
 import type { ComponentId, ComponentType, EdgeType, Node } from '@sf-intelligence/contracts';
 import { getNodeById, type GraphStore } from '@sf-intelligence/graph';
 
-import { unmodeledReferrerKinds, verdictHedgingReferrerKinds } from './referrer-coverage.js';
-
-/**
- * The referrer classes that CAN reference a `CustomField` / `CustomObject` but
- * are NOT modeled as incoming graph edges — so an edge-walking impact analysis
- * is structurally blind to them. Named VERBATIM (D3-soundness-overclaim) in the
- * `unwalked-referrer-class` blind spot so a caller sees exactly what was not
- * walked. Order is fixed for determinism.
- */
-export const UNWALKED_REFERRER_CLASSES: readonly string[] = unmodeledReferrerKinds('CustomField');
+import { verdictHedgingReferrerKinds } from './referrer-coverage.js';
 
 /** A named static-analysis blind spot affecting a result. */
 export interface SoundnessBlindSpot {
   /**
    * The blind-spot kind. `dynamic-apex` is the runtime-reference blind spot
    * (data-backed by `properties.qualityIssues[]`); `unwalked-referrer-class` is
-   * the STRUCTURAL blind spot for referrer classes not modeled as incoming
-   * edges (roll-ups, layout placement, flow decision/filter reads, tab/app
-   * membership); `unwalked-edge-type` is the STRUCTURAL blind spot for a
+   * the STRUCTURAL blind spot for referrer kinds not modeled as incoming
+   * edges on this vault (from `referrer-coverage.ts`); `unwalked-edge-type` is the STRUCTURAL blind spot for a
    * reachability walk that traversed a strict SUBSET of the usage edge types,
    * so a component reachable only through an un-walked type is absent from the
    * result. Extensible.
@@ -71,8 +53,7 @@ export interface SoundnessBlindSpot {
   readonly note: string;
   /**
    * For `kind: 'unwalked-referrer-class'`: the VERBATIM names of the referrer
-   * classes NOT walked (a subset of {@link UNWALKED_REFERRER_CLASSES}). Absent
-   * for `dynamic-apex`.
+   * kinds NOT walked (from `unmodeledReferrerKinds`). Absent for `dynamic-apex`.
    */
   readonly referrerClasses?: readonly string[];
   /**
@@ -110,21 +91,11 @@ const QUALITY_SCAN_NOT_RUN_NOTE =
   'be built at runtime and invisible to static analysis; this result is NOT proof they are clean. ' +
   'Re-run `sfi refresh` to populate the signal.';
 
-const UNWALKED_REFERRER_NOTE =
-  'This impact analysis follows only referrers modeled as incoming graph edges. Whole classes of ' +
-  'referrer are NOT modeled as edges and were therefore NOT walked: roll-up source coupling (a ' +
-  'roll-up summary field whose summaryForeignKey targets this component — stored as a field ' +
-  'property, no edge), layout placement (Layout sections / related-lists are not incoming edges), ' +
-  'flow decision/filter reads (a Flow decision or record-trigger filter referencing this field ' +
-  'becomes a firesWhen edge to a ConditionalContext, never a readsFrom onto the field), and ' +
-  'tab/app membership (CustomTab / CustomApplication are not traversed). Treat "no referrers ' +
-  'found" as "these classes were not checked", NOT a proven "nothing references this".';
-
 /**
- * The referrer classes structurally not walked for a given root type. Only
- * `CustomField` / `CustomObject` roots are subject to them (the four classes
- * reference fields/objects); every other root type returns `[]` (no false
- * disclosure on an Apex/Flow root).
+ * The referrer kinds structurally not walked for a given root type on a vault
+ * built by `builtBy`; `[]` when every applicable kind is an edge (no false
+ * disclosure on an Apex/Flow root, nor on a field whose layout, roll-up and
+ * condition referrers ARE edges).
  */
 const unwalkedReferrerClassesFor = (
   rootType: ComponentType | null,
@@ -136,8 +107,10 @@ const unwalkedReferrerClassesFor = (
   verdictHedgingReferrerKinds(rootType, root, builtBy);
 
 /**
- * Note for a root type other than CustomField / CustomObject, built from the
- * shared referrer-coverage table (A04 / A05 / C02 / C07).
+ * The blind-spot note, built from the shared referrer-coverage table (A04 /
+ * A05 / C02 / C07) for whatever kinds apply to THIS root on THIS vault's
+ * builder — never a fixed list, which is how "layout placement" stayed in the
+ * note after `usedInLayout` edges existed.
  */
 const referrerNoteFor = (rootType: ComponentType, kinds: readonly string[]): string =>
   `Not every way a ${rootType} can be referenced is modeled as a graph edge. Not walked here: ` +
@@ -278,13 +251,14 @@ export const soundnessFromIds = async (
 /**
  * D3-soundness-overclaim — soundness for an edge-walking IMPACT analysis
  * (`get_impact`). Layers the STRUCTURAL `unwalked-referrer-class` blind spot on
- * top of the `dynamic-apex` one: when the root is a `CustomField` /
- * `CustomObject`, whole classes of referrer (roll-up source coupling, layout
- * placement, flow decision/filter reads, tab/app membership) are NOT modeled as
- * incoming graph edges, so the walk is BLIND to them. Reporting `complete: true`
- * / `staticCoverage: 'full'` on their absence is a false certainty — this
- * function downgrades to `complete: false` / `staticCoverage: 'partial'` and
- * names the un-walked classes verbatim in `referrerClasses`.
+ * top of the `dynamic-apex` one: when the root type has referrer kinds that are
+ * NOT modeled as incoming graph edges on this vault (a `CustomObject`'s layouts,
+ * tabs, roll-ups and conditions; a pre-0.3.0 vault's field roll-ups and
+ * conditions; a label's email-template references), the walk is BLIND to them.
+ * Reporting `complete: true` / `staticCoverage: 'full'` on their absence is a
+ * false certainty — this function downgrades to `complete: false` /
+ * `staticCoverage: 'partial'` and names the un-walked kinds verbatim in
+ * `referrerClasses`.
  *
  * `rootType` is the ComponentType of the impact root (derive from the id prefix
  * or the fetched node). A `null` root type — or any non field/object root —
@@ -308,10 +282,7 @@ export const soundnessForImpactWalk = (
   const referrerBlindSpot: SoundnessBlindSpot = {
     kind: 'unwalked-referrer-class',
     componentIds: [],
-    note:
-      rootType === 'CustomField' || rootType === 'CustomObject'
-        ? UNWALKED_REFERRER_NOTE
-        : referrerNoteFor(rootType, referrerClasses),
+    note: referrerNoteFor(rootType, referrerClasses),
     referrerClasses,
   };
   return {

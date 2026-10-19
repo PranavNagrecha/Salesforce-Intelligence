@@ -92,6 +92,17 @@ describe('scanApexSource — EventBus.subscribe channel capture (P3b)', () => {
     expect(result.value.eventSubscriptions[0]?.resolved).toBe(true);
   });
 
+  it('captures the /data/ CDC channel form, stripping the /data/ prefix', () => {
+    const result = scanApexSource(
+      wrapClass(`EventBus.subscribe('/data/Demo_Channel__ChangeEvent', new H());`),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.eventSubscriptions).toHaveLength(1);
+    expect(result.value.eventSubscriptions[0]?.channel).toBe('Demo_Channel__ChangeEvent');
+    expect(result.value.eventSubscriptions[0]?.resolved).toBe(true);
+  });
+
   it('flags a dynamic / computed channel arg as NOT resolved (no phantom)', () => {
     const result = scanApexSource(
       wrapClass(`String chan = buildChannel(); EventBus.subscribe(chan, this);`),
@@ -495,30 +506,43 @@ describe('scanApexSource — deduplication', () => {
   });
 });
 
-describe('scanApexSource — keyword filter', () => {
-  it('filters System.X as a static helper, not a field access', () => {
+describe('scanApexSource — platform classes', () => {
+  // A platform class is never an sObject (no field access) but its CALLS are
+  // kept: the extractor counts them as `platformCalls` instead of minting an
+  // `ApexClass:System` edge (NO-MINTED-PLATFORM-IDS).
+  it('keeps System.X as a call, not a field access', () => {
     const result = scanApexSource(wrapClass(`System.debug('hi');`));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.fieldAccesses).toEqual([]);
-    expect(result.value.methodCalls).toEqual([]);
+    expect(result.value.methodCalls.map((c) => `${c.className}.${c.methodName}`)).toEqual(['System.debug']);
   });
 
-  it('filters String.X', () => {
+  it('keeps String.X as a call and never as a field access', () => {
     const result = scanApexSource(wrapClass('String s = String.valueOf(x);'));
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.value.fieldAccesses).toEqual([]);
-    expect(result.value.methodCalls).toEqual([]);
+    expect(result.value.methodCalls.map((c) => c.className)).toEqual(['String']);
   });
 
-  it('filters Database.X', () => {
+  it('keeps Database.X as a call, case-insensitively', () => {
     const result = scanApexSource(
-      wrapClass('Database.executeBatch(b, 10);'),
+      wrapClass('database.executeBatch(b, 10);'),
     );
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value.methodCalls).toEqual([]);
+    expect(result.value.methodCalls.map((c) => c.methodName)).toEqual(['executeBatch']);
+  });
+
+  it('drops a platform-class field access and instantiation', () => {
+    const result = scanApexSource(
+      wrapClass("Object t = Schema.SObjectType; PageReference p = new PageReference('/x');"),
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.fieldAccesses).toEqual([]);
+    expect(result.value.instantiations).toEqual([]);
   });
 });
 
@@ -757,7 +781,9 @@ describe('scanApexSource — managed-package namespaced local types (LOCAL_DECL_
 });
 
 describe('scanApexSource — built-in names are case-insensitive (WOW-10)', () => {
-  it('FAIL-BEFORE/PASS-AFTER: lowercase system/string/database calls are not Apex class calls', () => {
+  // The scanner keeps the calls (the extractor classifies them, see
+  // apex-edges.test.ts); what must not happen here is a FIELD access on them.
+  it('lowercase system/string/database are platform receivers, never field accesses', () => {
     const src = `public class Lower {
   public void run(Account a) {
     system.debug('x');
@@ -768,9 +794,7 @@ describe('scanApexSource — built-in names are case-insensitive (WOW-10)', () =
     const result = scanApexSource(src);
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    const classes = result.value.methodCalls.map((c) => c.className.toLowerCase());
-    expect(classes).not.toContain('system');
-    expect(classes).not.toContain('string');
-    expect(classes).not.toContain('database');
+    expect(result.value.fieldAccesses.map((f) => `${f.object}.${f.field}`)).toEqual(['Account.Name']);
+    expect(result.value.methodCalls.map((c) => c.className)).toEqual(['system', 'string', 'database']);
   });
 });

@@ -286,7 +286,6 @@ export interface PreviousTurnContext {
   readonly componentId?: string | undefined;
   readonly objectApiName?: string | undefined;
   readonly tool?: string | undefined;
-  readonly intent?: string | undefined;
   readonly plane?: 'vault' | 'live' | 'hybrid' | undefined;
   readonly question?: string | undefined;
   readonly clarification?:
@@ -345,10 +344,9 @@ export const validatePreviousContext = (
  * Tool ↔ component-type compatibility for CONTEXT CONTINUATION only. A
  * superset of route-question's `TOOL_COMPATIBLE_TYPES` (which stays untouched
  * — extending it would change no-context routing): an inherited tool that is
- * type-incompatible with the substituted entity either gets swapped by
- * `applyComponentTypeGuard` (Flow substitutions) or the continuation is
- * abandoned and the route falls through to funnel-primary — never an
- * executable flow-tool bound to an Apex id.
+ * type-incompatible with the substituted entity is not inherited and the
+ * shortlist stays the funnel's own — never an executable flow-tool bound to
+ * an Apex id.
  */
 const CONTINUATION_TOOL_TYPES: ReadonlyMap<string, ReadonlySet<string>> = new Map([
   ['sfi.call_graph', new Set(['ApexClass', 'ApexTrigger'])],

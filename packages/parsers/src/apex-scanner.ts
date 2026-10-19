@@ -1,5 +1,7 @@
 import { err, ok, type Result } from '@sf-intelligence/core';
 
+import { apexPlatformClassName } from './apex-platform-classes.js';
+
 /**
  * The categorical kinds of `scanApexSource` errors. The scanner is
  * fail-fast: the first detected structural problem wins.
@@ -62,9 +64,9 @@ export interface MethodCallSite {
  * the constructor, not via any `IDENT.IDENT(` shape.
  *
  * `className` is the constructed type as it appears in source (NOT a
- * resolved canonical id). Generic collection built-ins (`List`, `Map`,
- * `Set`, `Iterator`) and the static-helper `KEYWORD_CLASSES` names are
- * filtered out before an `Instantiation` is recorded — see `scanBody`.
+ * resolved canonical id). Platform classes (`List`, `Map`, `PageReference`,
+ * `Database`; see `apex-platform-classes.ts`) are filtered out before an
+ * `Instantiation` is recorded — see `scanBody`.
  *
  * `offset` and `length` describe the span (`new ClassName(`) in the
  * *original* source.
@@ -96,16 +98,19 @@ export interface SoqlFromObject {
  * One `EventBus.subscribe(channel, ...)` registration detected by the
  * heuristic scanner (P3b). `channel` is the FIRST argument's resolved
  * channel/event name when it was a STATIC string literal (a `/event/X__e`
- * form is normalized to `X__e`); it is `''` when the first argument was
+ * form is normalized to `X__e`, a `/data/XChangeEvent` form to
+ * `XChangeEvent`); it is `''` when the first argument was
  * dynamic/computed (a variable, a method call, a concatenation) — string
  * literals are blanked before scanning, so a non-literal arg leaves nothing
  * to capture.
  *
  * `resolved` records whether a static channel string was recovered. The
  * extractor mints a `listensTo` edge ONLY for a `resolved: true` entry whose
- * channel names a real Platform Event (`__e` suffix); a `resolved: false`
+ * channel names a real Platform Event (`__e` suffix) and a `subscribesToChange`
+ * edge for one naming a Change Event (`*ChangeEvent`); a `resolved: false`
  * entry is the honest "dynamic channel — not resolved" signal and produces NO
- * edge (no phantom). This mirrors the EventBus.publish publisher honesty.
+ * edge (no phantom) — the extractor counts it on the owner node instead. This
+ * mirrors the EventBus.publish publisher honesty.
  *
  * `offset` and `length` describe the span of the `EventBus.subscribe(` call in
  * the *original* source.
@@ -185,69 +190,14 @@ export interface ApexScannerOutput {
 }
 
 /**
- * Apex identifiers are case-insensitive: `system.debug(…)` and
- * `string.isBlank(…)` name the same built-ins as `System` / `String`, so a
- * case-sensitive deny-list let them through as phantom `ApexClass:system`
- * call targets (WOW-10).
+ * Platform classes (`System`, `Database`, `List`, `PageReference`, …) are
+ * never SObject receivers and never user classes, so a `Class.field` access,
+ * a local declared with that type, or a `new Class(` on one is dropped here.
+ * Method CALLS on them are kept: the edge extractor counts those on the owner
+ * as `platformCalls` instead of minting an `ApexClass:` edge. Case-insensitive,
+ * as Apex is (`system.debug` once slipped through as `ApexClass:system`).
  */
-const caseInsensitiveNames = (names: readonly string[]): { readonly has: (name: string) => boolean } => {
-  const lower = new Set(names.map((n) => n.toLowerCase()));
-  return { has: (name: string) => lower.has(name.toLowerCase()) };
-};
-
-/**
- * Static-helper / built-in class names whose `Class.method(...)` and
- * `Class.field` shapes must NOT be reported as SObject field accesses.
- * User-defined helper classes are reclassified by the extractor after
- * cross-checking against the org's known Apex set; this set covers the
- * names that cannot be user-defined.
- */
-const KEYWORD_CLASSES = caseInsensitiveNames([
-  'Blob',
-  'Boolean',
-  'Crypto',
-  'Database',
-  'Date',
-  'Datetime',
-  'Decimal',
-  'Double',
-  'EncodingUtil',
-  'Http',
-  'HttpRequest',
-  'HttpResponse',
-  'Id',
-  'Integer',
-  'JSON',
-  'Limits',
-  'Long',
-  'Math',
-  'Object',
-  'Schema',
-  'String',
-  'System',
-  'Test',
-  'Time',
-  'Trigger',
-  'URL',
-  'UserInfo',
-]);
-
-/**
- * Generic-collection type names that are pure noise when captured as a
- * `new {Name}(...)` instantiation. `new List<Account>()` /
- * `new Map<Id,String>()` / `new Set<Id>()` / `new Iterator(...)` name a
- * built-in container, not a user component, so the instantiation sweep
- * drops them (in addition to the `KEYWORD_CLASSES` static-helper set).
- * SObject constructors (`new Account()`) are NOT denylisted — they emit
- * an `ApexClass:Account` edge that import-time `targetMissing` tagging
- * hides from the subgraph, which is acceptable for this heuristic tier.
- */
-const COLLECTION_CLASSES = caseInsensitiveNames([
-  'List',
-  'Map',
-  'Set',
-  'Iterator',
-]);
+const isPlatformClass = (name: string): boolean => apexPlatformClassName(name) !== null;
 
 /**
  * Built-in SObject INSTANCE methods. When a method call's receiver is a local
@@ -328,7 +278,7 @@ const READ_PATTERN =
 // identifier, unlike the `IDENT.IDENT` pair patterns). The trailing `(`
 // is part of the match length so spans are useful for hover
 // diagnostics. A generic suffix like `new List<Account>(` matches
-// `List` here — generic collections are dropped by COLLECTION_CLASSES
+// `List` here — generic collections are dropped as platform classes
 // in the instantiation sweep, so the `<...>` arg is intentionally not
 // part of the capture.
 const NEW_PATTERN = /\bnew\s+([A-Za-z_][A-Za-z_0-9]*)\s*\(/g;
@@ -391,10 +341,12 @@ const EVENT_BUS_SUBSCRIBE_PATTERN =
 // (a variable, method call, or concatenation) does not match → unresolved.
 const EVENT_BUS_CHANNEL_LITERAL_PATTERN = /^\s*'((?:\\[\s\S]|[^'\\])*)'/;
 
-// The Platform Event channel-routing prefix Salesforce uses for the string
-// form of `EventBus.subscribe`. `'/event/Order_Placed__e'` and
-// `'Order_Placed__e'` name the same event; normalize to the bare API name.
-const EVENT_CHANNEL_PREFIX = '/event/';
+// The channel-routing prefixes Salesforce uses for the string form of
+// `EventBus.subscribe`: `/event/` for Platform Events, `/data/` for Change Data
+// Capture streams. `'/event/Order_Placed__e'` and `'Order_Placed__e'` name the
+// same event (likewise `'/data/AccountChangeEvent'`); normalize to the bare
+// API name.
+const EVENT_CHANNEL_PREFIXES = ['/event/', '/data/'] as const;
 
 const blankOut = (text: string): string => text.replace(/[^\n]/g, ' ');
 
@@ -447,7 +399,7 @@ interface DeclaredLocals {
  *    agree). Names declared with conflicting types are dropped (the
  *    alias is kept). Collection types (`List`/`Map`/`Set`/`Iterator` —
  *    `List<Account> accs` captures `List`, not the element type) and
- *    built-in helper / primitive types (`KEYWORD_CLASSES`) are excluded,
+ *    other platform types (`apex-platform-classes.ts`) are excluded,
  *    since a field access on them is not a real SObject field reference.
  *    `var` locals never match `LOCAL_DECL_PATTERN` (lowercase type), so
  *    they are excluded by construction.
@@ -476,7 +428,7 @@ const collectDeclaredLocals = (
   const localTypes = new Map<string, string>();
   for (const [name, type] of firstType) {
     if (conflicting.has(name)) continue;
-    if (KEYWORD_CLASSES.has(type) || COLLECTION_CLASSES.has(type)) continue;
+    if (isPlatformClass(type)) continue;
     localTypes.set(name, type);
   }
   // Types constructed with `new Type(...)` in this body — the strong signal
@@ -564,9 +516,9 @@ interface PairMatch {
 }
 
 // Sweep one `IDENT.IDENT`-shaped pattern across `body` and yield each
-// well-formed, non-keyword match with offsets translated to the
-// original source. Filters out empty captures and any pair whose
-// left identifier is a known static-helper class.
+// well-formed match with offsets translated to the original source.
+// Filters out empty captures only; platform receivers are decided per
+// sweep (`emitAccess` drops them, `emitCall` keeps them for the extractor).
 function* sweepPairs(
   pattern: RegExp,
   body: string,
@@ -578,7 +530,6 @@ function* sweepPairs(
     const left = m[1] ?? '';
     const right = m[2] ?? '';
     if (left === '' || right === '') continue;
-    if (KEYWORD_CLASSES.has(left)) continue;
     yield {
       left,
       right,
@@ -614,6 +565,8 @@ const emitAccess = (
   // `this.x` / `super.x` read or write the current instance's own members,
   // never an sObject field — they can only mint a phantom `CustomField:this.x`.
   if (match.left === 'this' || match.left === 'super') return match.absOffset;
+  // `System.debug` / `Schema.SObjectType`: a platform class, never an sObject.
+  if (isPlatformClass(match.left)) return match.absOffset;
   // Resolve a declared local to its SObject-ish type so `acc.Field` (with
   // `Account acc` in scope) becomes the real `CustomField:Account.Field`
   // instead of the alias phantom `CustomField:acc.Field`. Unknown receivers
@@ -671,7 +624,7 @@ const emitCall = (ctx: BodyContext, match: PairMatch): void => {
 };
 
 // Push an Instantiation for `className` iff it is new AND not a
-// denylisted built-in (static-helper class or generic collection).
+// platform class (static helper, generic collection, platform type).
 // `new ClassName(` yields a single identifier, so this consumes the
 // NEW_PATTERN match directly rather than going through `sweepPairs`.
 const emitInstantiation = (
@@ -680,9 +633,7 @@ const emitInstantiation = (
   absOffset: number,
   length: number,
 ): void => {
-  if (KEYWORD_CLASSES.has(className) || COLLECTION_CLASSES.has(className)) {
-    return;
-  }
+  if (isPlatformClass(className)) return;
   if (ctx.seenInstantiations.has(className)) return;
   ctx.seenInstantiations.add(className);
   ctx.instantiations.push({ className, offset: absOffset, length });
@@ -849,9 +800,8 @@ const scanEventSubscriptions = (
       continue;
     }
     const raw = litMatch[1];
-    const channel = raw.startsWith(EVENT_CHANNEL_PREFIX)
-      ? raw.slice(EVENT_CHANNEL_PREFIX.length)
-      : raw;
+    const prefix = EVENT_CHANNEL_PREFIXES.find((p) => raw.startsWith(p));
+    const channel = prefix === undefined ? raw : raw.slice(prefix.length);
     if (channel.length === 0) {
       out.push({ channel: '', resolved: false, offset: m.index, length: m[0].length });
       continue;
@@ -980,9 +930,9 @@ const scanOmniStudioCalls = (
  * `instantiations`. The lists are deduplicated by `(object, field)`
  * (partitioned by `type`), `(className, methodName)`, and `className`
  * respectively; first occurrence in source order wins (so its `offset`
- * and `length` are the ones reported). `instantiations` additionally
- * drops generic-collection and static-helper built-ins (see
- * `COLLECTION_CLASSES` / `KEYWORD_CLASSES`).
+ * and `length` are the ones reported). `fieldAccesses` and `instantiations`
+ * drop platform classes (`apex-platform-classes.ts`); `methodCalls` keeps
+ * them so the extractor can count platform calls without minting edges.
  *
  * @example
  *   const result = scanApexSource(

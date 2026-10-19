@@ -524,6 +524,14 @@ describe('orgOverviewHandler (seeded graph)', () => {
     // assumed. The old code guessed EVERY ApexTrigger active and read 4 / 6.
     expect(summary.activeRatio).toBeCloseTo(3 / 6, 5);
     expect(summary.activeStatusUnknownCount).toBe(0);
+    // PROSE-FROM-ROWS: the rendered sentence states the numerator and the
+    // denominator it was computed from, instead of a bare percentage hanging
+    // off the workflow-rule count ("2 workflow rules (50% active)").
+    expect(summary.activeCount).toBe(3);
+    expect(summary.measuredCount).toBe(6);
+    const rendered = result.value.data.rendered;
+    expect(rendered).toContain('3 of 6 automation items active (50%)');
+    expect(rendered).not.toContain('workflow rules (');
     // A vault where every automation node carries its status must NOT emit the
     // typed-absence disclosure.
     expect(result.value.data.boundaries.join(' ')).not.toMatch(

@@ -68,3 +68,9 @@ Date by which the invoice balance is due.
 | Source | Confidence | Producer |
 | --- | --- | --- |
 | `CustomObject:Invoice__c` | declared | custom-field-extractor |
+
+### writesTo (incoming, 1)
+
+| Source | Confidence | Producer |
+| --- | --- | --- |
+| `ApexClass:PaymentServiceTest` | parsed | apex-ast |

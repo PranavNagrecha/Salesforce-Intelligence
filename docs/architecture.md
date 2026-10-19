@@ -223,8 +223,9 @@ Commit policy, enforced by the `.gitignore` that `/sfi-init` writes:
 | Path                  | In git?    | Why                                       |
 | --------------------- | ---------- | ----------------------------------------- |
 | `org-kb/components/`  | committed  | Hand-readable vault; the team's shared view of the org. |
-| `org-kb/meta/*.json`  | committed  | Tracks freshness so reviewers see staleness in PRs. |
+| `org-kb/meta/manifest.json`, `meta/config.json` | committed | Tracks freshness so reviewers see staleness in PRs. |
 | `org-kb/meta/version.txt` | committed | Used by upgrade checks (see §8).        |
+| rest of `org-kb/meta/`, `org-kb/snapshots/` | gitignored | Org data (Profile name map, annotations, ledgers, caches); `sfi init` ignores them. |
 | `org-kb/source/`      | gitignored | Large; regenerable by re-running refresh. |
 | `org-kb/graph/graph.duckdb` | gitignored | Build artifact; regenerable from `source/` + extractors. |
 

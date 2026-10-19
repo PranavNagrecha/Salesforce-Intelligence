@@ -21,6 +21,8 @@ properties:
   lineCount: 60
   modifiers:
     - public
+  platformCalls:
+    System: 1
   qualityIssues: []
   sharingModel: with sharing
   sourceBytes: 2019
@@ -51,6 +53,7 @@ type: ApexClass
 | isTest | `false` |
 | lineCount | `60` |
 | modifiers | `public` |
+| platformCalls | `[object Object]` |
 | qualityIssues | `` |
 | sharingModel | `with sharing` |
 | sourceBytes | `2019` |

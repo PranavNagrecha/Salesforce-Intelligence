@@ -81,3 +81,9 @@ Amount of this payment applied to the parent invoice.
 | `CustomField:Invoice__c.Total_Paid__c` | declared | rollup-summary |
 | `ValidationRule:Payment__c.Amount_Positive` | parsed | formula-tokenizer |
 | `ValidationRule:Payment__c.Amount_Positive` | declared | validation-rule-extractor |
+
+### writesTo (incoming, 1)
+
+| Source | Confidence | Producer |
+| --- | --- | --- |
+| `ApexClass:PaymentService` | parsed | apex-ast |

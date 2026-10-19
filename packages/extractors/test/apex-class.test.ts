@@ -94,6 +94,104 @@ describe('extractApexClass', () => {
     });
   });
 
+  describe('platformCalls property (NO-MINTED-PLATFORM-IDS)', () => {
+    it('counts calls on platform classes on the node and mints no edge to them', async () => {
+      const { dir, clsPath } = await writeTempApexClass(
+        'Demo_PlatformCaller',
+        "public class Demo_PlatformCaller { void run(List<Account> a) { Type t = Type.forName('Demo_Helper'); Database.update(a); Database.insert(a); Demo_Helper.run(a); } }",
+      );
+      try {
+        const result = await extractApexClass(clsPath);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.nodes[0]?.properties['platformCalls']).toEqual({ Database: 2, Type: 1 });
+        const calls = result.value.edges.filter((e) => e.edgeType === 'callsApex').map((e) => e.toId);
+        expect(calls).toEqual(['ApexClass:Demo_Helper']);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('is ABSENT when no platform class is called (node shape unchanged)', async () => {
+      const { dir, clsPath } = await writeTempApexClass(
+        'Demo_NoPlatform',
+        'public class Demo_NoPlatform { void run() { Demo_Helper.run(); } }',
+      );
+      try {
+        const result = await extractApexClass(clsPath);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.nodes[0]?.properties).not.toHaveProperty('platformCalls');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('unresolvedDynamicDispatch property (P21-MOAT-apex-frameworks)', () => {
+    it('records the count of Type.forName calls whose operand is not a literal', async () => {
+      const { dir, clsPath } = await writeTempApexClass(
+        'Demo_DynamicDispatcher',
+        'public class Demo_DynamicDispatcher { void run(String n) { Object h = Type.forName(n).newInstance(); } }',
+      );
+      try {
+        const result = await extractApexClass(clsPath);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.nodes[0]?.properties['unresolvedDynamicDispatch']).toBe(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('is ABSENT when every operand is a literal (node shape unchanged)', async () => {
+      const { dir, clsPath } = await writeTempApexClass(
+        'Demo_LiteralDispatcher',
+        "public class Demo_LiteralDispatcher { void run() { Object h = Type.forName('Demo_Handler').newInstance(); } }",
+      );
+      try {
+        const result = await extractApexClass(clsPath);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.nodes[0]?.properties).not.toHaveProperty('unresolvedDynamicDispatch');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe('unresolvedSubscriptions property', () => {
+    it('records the count of EventBus.subscribe calls whose channel is not a literal', async () => {
+      const { dir, clsPath } = await writeTempApexClass(
+        'Demo_DynamicSubscriber',
+        'public class Demo_DynamicSubscriber { void run() { String chan = pick(); EventBus.subscribe(chan, this); } }',
+      );
+      try {
+        const result = await extractApexClass(clsPath);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.nodes[0]?.properties['unresolvedSubscriptions']).toBe(1);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('is ABSENT when every subscription resolved (node shape unchanged)', async () => {
+      const { dir, clsPath } = await writeTempApexClass(
+        'Demo_StaticSubscriber',
+        "public class Demo_StaticSubscriber { void run() { EventBus.subscribe('Demo_Channel__ChangeEvent', this); } }",
+      );
+      try {
+        const result = await extractApexClass(clsPath);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.nodes[0]?.properties).not.toHaveProperty('unresolvedSubscriptions');
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe('error cases', () => {
     it('returns file-not-found when the .cls is missing', async () => {
       const result = await extractApexClass('/does/not/exist/Nope.cls');

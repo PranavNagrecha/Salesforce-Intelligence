@@ -131,8 +131,8 @@ const unrecognizedArgumentMessage = (keys: readonly string[]): string =>
  *
  * `.strict()`: an unrecognized argument is REFUSED rather than stripped. The
  * enumeration the design required was run before flipping it — nothing in
- * `route-question.ts`, `intent-router.ts`, `funnel-utterances.ts`, `eval/`, or
- * the skills forwards any key to this tool but `recordId`.
+ * `route-question.ts`, `funnel-utterances.ts`, `eval/`, or the skills forwards
+ * any key to this tool but `recordId`.
  */
 export const lookupRecordInputSchema = z
   .object(
@@ -270,7 +270,7 @@ const asEntryArray = (raw: unknown): readonly unknown[] | null =>
 export type RecordValuesState = 'read' | 'not-extracted' | 'unreadable';
 
 /** What {@link readRecordValues} resolved, and why. */
-interface RecordValuesRead {
+export interface RecordValuesRead {
   readonly state: RecordValuesState;
   readonly values: readonly RecordFieldValue[];
   readonly valuesCount: number | null;
@@ -288,8 +288,11 @@ interface RecordValuesRead {
  * record that genuinely declares nothing both rendered as `values: []`, and a
  * business user asking what a feature-flag record contains was told it was
  * empty.
+ *
+ * Shared with `explain_field` (per-type record sweep) and `endpoint_catalog`
+ * (URL-shaped stored values) so there is ONE reading of the `values` family.
  */
-const readRecordValues = (node: Node): RecordValuesRead => {
+export const readRecordValues = (node: Node): RecordValuesRead => {
   const countRaw = node.properties[RECORD_VALUES_COUNT_PROPERTY];
   const valuesCount = typeof countRaw === 'number' ? countRaw : null;
   // PRESENCE decides extracted-vs-never-extracted. Shape only ever decides

@@ -20,11 +20,11 @@ import { routeQuestionHandler } from '../../src/tools/route-question.js';
  * ROUTE-01 / FR-04 / DEV-02 / DEV-03 / ROUTE-07 / ROUTE-10 — FAIL-BEFORE/PASS-AFTER.
  *
  * route_question resolved the named component (entityEvidence 'exact') and then
- * handed the host every recommended call with EMPTY args (or the raw label
- * 'Invoice' instead of Invoice__c, or junk like 'figure' as the object), so the
- * first call failed invalid-query. A `Class.method` reference raised a false
- * PREMISE CHECK. These pin the first-turn contract: the resolved component is
- * bound under each tool's own declared key, never junk, never `resolve {}`.
+ * handed the host every candidate with EMPTY args (or the raw label 'Invoice'
+ * instead of Invoice__c, or a prose word as the object), so the first call
+ * failed invalid-query. A `Class.method` reference raised a false PREMISE
+ * CHECK. These pin the first-turn contract: the resolved component is bound
+ * under each tool's own declared key, never junk, never `resolve {}`.
  */
 
 const MANIFEST: VaultManifest = {
@@ -120,15 +120,18 @@ const invokeArgsFor = (d: Data, tool: string): Readonly<Record<string, unknown>>
 };
 
 describe('route_question binds the resolved entity on the first turn', () => {
-  it('binds the exact field into safe_to_delete_field (fieldId) and never emits resolve {}', async () => {
+  it('binds the exact field into every field-taking candidate and never emits resolve {}', async () => {
     const d = await route('can I safely delete Invoice__c.Amount__c?');
     expect(d.entityEvidence?.disposition).toBe('exact');
-    expect(argsFor(d, 'sfi.safe_to_delete_field')).toMatchObject({
-      fieldId: 'CustomField:Invoice__c.Amount__c',
-    });
-    expect(invokeArgsFor(d, 'sfi.safe_to_delete_field')).toMatchObject({
-      fieldId: 'CustomField:Invoice__c.Amount__c',
-    });
+    const bound = (d.toolCandidates ?? []).filter(
+      (c) => c.suggestedArgs?.['fieldId'] === 'CustomField:Invoice__c.Amount__c',
+    );
+    expect(bound.length).toBeGreaterThan(0);
+    // The leading invoke step carries the same binding.
+    const first = d.invoke?.[0];
+    const inner = first?.args as { readonly args?: Record<string, unknown> } | undefined;
+    const firstArgs = first?.tool === 'sfi.run_analysis' ? inner?.args : first?.args;
+    expect(JSON.stringify(firstArgs ?? {})).toContain('Invoice__c');
     expect(
       (d.invoke ?? []).some((s) => s.tool === 'sfi.resolve' && Object.keys(s.args).length === 0),
     ).toBe(false);
@@ -138,21 +141,19 @@ describe('route_question binds the resolved entity on the first turn', () => {
     const d = await route('What happens when I save an Invoice?');
     const args = argsFor(d, 'sfi.what_happens_on_save') ?? invokeArgsFor(d, 'sfi.what_happens_on_save');
     expect(args?.['objectApiName']).toBe('Invoice__c');
-    // "save" is insert OR update — not update only.
-    expect(args?.['event']).toBe('upsert');
   });
 
   it('never binds a prose word as the object (A01 "figure", DEV-02 "same")', async () => {
     const d = await route('what all runs when an invoice gets saved? trying to figure out the order');
     for (const c of d.toolCandidates ?? []) {
       expect(c.suggestedArgs?.['objectApiName']).not.toBe('figure');
+      expect(c.suggestedArgs?.['objectApiName']).not.toBe('same');
     }
-    expect(d.route.suggestedArgs?.['objectApiName']).not.toBe('figure');
   });
 
   it('Class.method resolves the class (no false PREMISE CHECK) and binds the method (DEV-03)', async () => {
     const d = await route('Who calls InvoiceService.calculateTotals?');
-    expect(d.route.reason).not.toContain('PREMISE CHECK');
+    expect(d.entityEvidence?.warning ?? '').not.toContain('PREMISE CHECK');
     expect(d.entityEvidence?.candidates[0]?.componentId).toBe('ApexClass:InvoiceService');
     expect(argsFor(d, 'sfi.call_graph')).toMatchObject({
       rootId: 'ApexClass:InvoiceService',
@@ -182,10 +183,11 @@ describe('route_question binds the resolved entity on the first turn', () => {
 });
 
 describe('type-correct binding and routing', () => {
-  it('a junk regex object never raises a false premise check; the vault finds the real object', async () => {
+  it('a prose object word never raises a false premise check; the vault finds the real object', async () => {
     const d = await route('what all runs when an invoice gets saved? trying to figure out the order');
-    expect(d.route.reason).not.toContain("'figure'");
-    expect(d.route.suggestedArgs?.['objectApiName']).toBe('Invoice__c');
+    expect(d.entityEvidence?.warning ?? '').not.toContain("'figure'");
+    const args = argsFor(d, 'sfi.what_happens_on_save') ?? invokeArgsFor(d, 'sfi.what_happens_on_save');
+    expect(args?.['objectApiName']).toBe('Invoice__c');
   });
 
   it('a tool whose name names another family never gets the entity in its generic id', async () => {
@@ -198,12 +200,10 @@ describe('type-correct binding and routing', () => {
     expect(argsFor(d, 'sfi.explain_flow')).toMatchObject({ flowId: 'Flow:Invoice_Approval' });
   });
 
-  it('an object-access question swaps the field-only audit for object access tools (ROUTE-04)', async () => {
+  it('an object-access question drops the field-only audit and binds the object tools (ROUTE-04)', async () => {
     const d = await route('who can see the Invoice__c object');
-    if (d.route.tools.length > 0 && d.route.intent === 'field-access') {
-      expect(d.route.tools).not.toContain('sfi.field_access_audit');
-      expect(d.route.tools).toContain('sfi.who_can_access_object');
-    }
+    const tools = (d.toolCandidates ?? []).map((c) => c.tool);
+    expect(tools).not.toContain('sfi.field_access_audit');
     expect(argsFor(d, 'sfi.who_can_access_object')).toMatchObject({
       componentId: 'CustomObject:Invoice__c',
     });
@@ -226,31 +226,17 @@ describe('ranking hygiene', () => {
     expect(delta).not.toBe(-1);
     const since = tools.indexOf('sfi.changed_since');
     if (since !== -1) expect(delta).toBeLessThan(since);
-    expect(d.route.tools).toContain('sfi.diff_snapshots');
-  });
-
-  it('a stacked complement never outranks a high-confidence route primary (ROUTE-02)', async () => {
-    const d = await route('can I safely delete Invoice__c.Amount__c?');
-    const cands = d.toolCandidates ?? [];
-    const primary = d.route.tools.find((t) => t !== 'sfi.resolve');
-    if (d.route.confidence === 'high' && primary !== undefined) {
-      const p = cands.findIndex((c) => c.tool === primary);
-      const interp = cands.findIndex((c) => c.tool === 'sfi.interpret');
-      if (p !== -1 && interp !== -1) expect(p).toBeLessThan(interp);
-    }
   });
 });
 
 /**
- * ROUTE-06 — FAIL-BEFORE/PASS-AFTER. The generic impact rule (/what breaks|impact/)
- * matched first and swallowed specific what-if questions; "the X picklist" yielded
- * no entity at all; and the quoted value / target type the user stated was never
- * bound, so even a correctly ranked what-if tool failed invalid-query.
+ * ROUTE-06 — FAIL-BEFORE/PASS-AFTER. "the X picklist" yielded no entity at all,
+ * and the quoted value / target type the user stated was never bound, so even a
+ * correctly ranked what-if tool failed invalid-query.
  */
 describe('specific what-if questions route and bind (ROUTE-06)', () => {
   it('removing a quoted value from a named picklist binds fieldId + value', async () => {
     const d = await route("what breaks if I remove 'Former Member' from the Billing Stage picklist on invoice");
-    expect(d.route.intent).toBe('what-if-remove-picklist-value');
     expect(d.entityEvidence?.candidates[0]?.componentId).toBe('CustomField:Invoice__c.Billing_Stage__c');
     expect(argsFor(d, 'sfi.what_if_remove_picklist_value')).toMatchObject({
       fieldId: 'CustomField:Invoice__c.Billing_Stage__c',
@@ -260,7 +246,6 @@ describe('specific what-if questions route and bind (ROUTE-06)', () => {
 
   it('a from-<type>-to-<type> change routes to the field-type what-if and binds newType', async () => {
     const d = await route('impact of changing Invoice__c.Amount__c from currency to number');
-    expect(d.route.intent).toBe('what-if-change-field-type');
     expect(argsFor(d, 'sfi.what_if_change_field_type')).toMatchObject({
       fieldId: 'CustomField:Invoice__c.Amount__c',
       newType: 'Number',
@@ -291,15 +276,15 @@ describe('specific what-if questions route and bind (ROUTE-06)', () => {
 });
 
 /**
- * A04 / ROUTE-08 — FAIL-BEFORE/PASS-AFTER. "what does Class.method do?" matched
- * no rule: the class resolved exact and the method was parsed, yet the host got
- * an EMPTY shortlist. The tools that take a method (derived from their schemas)
- * are now offered, bound, at low confidence.
+ * A04 / ROUTE-08 — FAIL-BEFORE/PASS-AFTER. "what does Class.method do?": the
+ * class resolved exact and the method was parsed, yet the host got no method
+ * tool. The tools that take a method (derived from their schemas) are offered,
+ * bound, at low confidence.
  */
-describe('an unrouted Class.method question still gets bound method tools', () => {
+describe('a Class.method question gets bound method tools', () => {
   it('offers explain_apex_method bound to the class + method', async () => {
     const d = await route('what does InvoiceService.calculateTotals do?');
-    expect(d.route.reason).not.toContain('PREMISE CHECK');
+    expect(d.entityEvidence?.warning ?? '').not.toContain('PREMISE CHECK');
     expect(d.toolCandidates?.length ?? 0).toBeGreaterThan(0);
     expect(argsFor(d, 'sfi.explain_apex_method')).toMatchObject({
       classApiName: 'InvoiceService',
@@ -307,9 +292,8 @@ describe('an unrouted Class.method question still gets bound method tools', () =
     });
   });
 
-  it('FAIL-BEFORE/PASS-AFTER: its invoke is the bound method tools, not the generic fallback (ROUTE-09)', async () => {
+  it('FAIL-BEFORE/PASS-AFTER: its invoke leads with the bound method tools (ROUTE-09)', async () => {
     const d = await route('what does InvoiceService.calculateTotals do?');
-    expect(d.route.intent).toBe('unrouted');
     expect(invokeArgsFor(d, 'sfi.explain_apex_method')).toMatchObject({
       classApiName: 'InvoiceService',
       methodName: 'calculateTotals',

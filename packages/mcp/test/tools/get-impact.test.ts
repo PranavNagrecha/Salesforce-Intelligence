@@ -331,11 +331,12 @@ describe('getImpactHandler', () => {
     expect(result.value.data.disclosure).toContain('lookup');
   });
 
-  // D3-soundness-overclaim: a CustomField impact walk is structurally blind to
-  // referrer classes not modeled as incoming edges (roll-ups, layout placement,
-  // flow decision/filter reads, tab/app membership). It must NOT report
-  // complete:true / staticCoverage:'full' on their absence.
-  it('does NOT report complete/full for a CustomField root; names the un-walked referrer classes', async () => {
+  // D3-soundness-overclaim: on this fixture vault (built by 0.1.0, before the
+  // roll-up and condition edge families of 0.3.0) a CustomField impact walk is
+  // blind to those two referrer kinds. It must NOT report complete:true /
+  // staticCoverage:'full' on their absence — and must NOT name layout
+  // placement, which `usedInLayout` has always modeled.
+  it('does NOT report complete/full for a CustomField root on a pre-0.3.0 vault; names only the un-walked kinds', async () => {
     const result = await getImpactHandler(ctx, {
       componentId: 'CustomField:Account.Industry__c',
       hops: 1,
@@ -347,15 +348,11 @@ describe('getImpactHandler', () => {
     expect(s.staticCoverage).toBe('partial');
     const referrer = s.blindSpots.find((b) => b.kind === 'unwalked-referrer-class');
     expect(referrer).toBeDefined();
-    expect(referrer?.referrerClasses).toEqual([
-      'roll-up source coupling',
-      'layout placement',
-      'flow decision/filter reads',
-      'tab/app membership',
-    ]);
-    // The prose disclosure also names the un-walked classes.
+    expect(referrer?.referrerClasses).toEqual(['roll-up source coupling', 'flow decision/filter reads']);
+    // The prose disclosure names the SAME un-walked kinds (derived, not restated).
     expect(result.value.data.disclosure).toContain('roll-up source coupling');
     expect(result.value.data.disclosure).toContain('flow decision/filter reads');
+    expect(result.value.data.disclosure).not.toContain('layout placement');
     expect(result.value.data.disclosure).toMatch(/not checked/i);
   });
 

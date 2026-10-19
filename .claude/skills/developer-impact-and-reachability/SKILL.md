@@ -441,12 +441,13 @@ The response carries:
 
 Composes `sfi.call_graph` downstream then, for every reachable
 class, lists outgoing `writesTo` (field-write effects),
-`dispatchesAsync` (async dispatch effects), and `sendsEmail`
-(email effects). Returns `DownstreamEffect[]` categorized by
-edgeType.
+`dispatchesAsync` (async dispatch effects), `sendsEmail`
+(email effects) and NamedCredential `references` (callout effects:
+the `callout:{NamedCredential}` endpoint literal in the class
+source). Returns `DownstreamEffect[]` categorized by edge.
 
-Callouts are NOT a separate edge type (no `Apex.Http.send`
-extractor yet); the disclosure surfaces this gap explicitly.
+A callout to a literal or runtime-built URL mints no edge and is
+not listed; the disclosure says so. Read the source for those.
 
 #### `sfi.test_coverage_for_method`
 
@@ -541,13 +542,18 @@ are invisible.
 
 ### Invisible-dispatch boundary (surface on every reachability response — the response's own `disclosure` string is the authoritative wording; this is a summary of it, not a quotation)
 
-> Dynamic dispatch (`Type.forName('...').newInstance().method(...)`),
-> reflective invocation, same-namespace framework wiring
-> (TriggerHandler / fflib base classes), and managed-package callers
-> are INVISIBLE to the graph edges these tools walk. A class genuinely
-> invoked at runtime via one of these mechanisms will surface as
-> `likely-dead-code` or with an empty `coveringTestClasses[]`. Verify
-> before treating as the answer.
+> A `Type.forName` with a literal class name, or fed from a Custom
+> Metadata cell that names a class, IS a heuristic `references` edge
+> (`mechanism: Type.forName`) and counts as usage. `Type.forName` on any
+> other variable (counted on the dispatching class as
+> `unresolvedDynamicDispatch`, never guessed), calls into platform classes
+> (`Database`, `Type`, `Schema`, `System`…: never a `callsApex` edge,
+> counted on the class as `platformCalls`), reflective invocation,
+> same-namespace framework wiring (TriggerHandler / fflib base classes),
+> and managed-package callers are INVISIBLE to the graph edges these
+> tools walk. A class genuinely invoked at runtime via one of those
+> remaining mechanisms will surface as `likely-dead-code` or with an
+> empty `coveringTestClasses[]`. Verify before treating as the answer.
 
 Two dynamic-registration shapes are the exception: a class extending a
 base class from ANOTHER namespace (a dotted `superclass`) and a class
@@ -775,4 +781,4 @@ Before sending a response, confirm:
 
 ---
 
-**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from) plus a suggested plane and a `route` hint (and whether to `sfi.resolve` a name first). **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.
+**Grounding & routing (shared contract).** For a vague or broad ask, run `sfi.route_question` through `sfi.run_analysis` first — it returns a meaning-ranked `toolCandidates` shortlist (which YOU pick from); each row names its plane and carries any component it resolved as `suggestedArgs`. **Default tool profile is `core`:** only the core spine (including `sfi.live_consent`) is directly invokable. For every other `sfi.*` analysis, call `sfi.run_analysis` with `{ "name": "sfi.<tool>", "args": { … } }` (or follow `route_question.invoke`, which already wraps non-core steps). Optional: `sfi.describe_analysis` first when args are unclear. Every org fact must come from an `sfi.*` tool call, cited by its canonical id — never from memory. Build the answer only from what the tools returned, then pass it through `sfi.synthesize_answer` (via `sfi.run_analysis`), which flags any `hallucinatedIds` (canonical ids no tool produced). Full cascade: `using-sf-intelligence`.

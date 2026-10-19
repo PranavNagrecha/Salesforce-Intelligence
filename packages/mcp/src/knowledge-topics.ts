@@ -38,8 +38,8 @@ const TRAILHEAD: DocLink = { label: 'Trailhead', url: 'https://trailhead.salesfo
 const HELP: DocLink = { label: 'Salesforce Help', url: 'https://help.salesforce.com' };
 
 /**
- * Topic keys are stable, kebab-case, and referenced by the router's `knowledge`
- * rules (`suggestedArgs.topic`). Keep keys stable — they are an API surface.
+ * Topic keys are stable, kebab-case, and passed by hosts as `topic`. Keep keys
+ * stable — they are an API surface.
  */
 export const KNOWLEDGE_TOPICS: Readonly<Record<string, KnowledgeTopic>> = Object.freeze({
   'flow-vs-apex': {
@@ -203,8 +203,8 @@ export const KNOWLEDGE_TOPICS: Readonly<Record<string, KnowledgeTopic>> = Object
 
 /**
  * Resolve a free-text topic argument to a known topic key. Exact key match
- * first, then a loose contains-match on key or title so the router's
- * `suggestedArgs.topic` and a user's phrasing both land. Returns null when
+ * first, then a loose contains-match on key or title so a host's `topic` and
+ * a user's phrasing both land. Returns null when
  * nothing matches confidently (the tool then lists available topics).
  */
 export const resolveTopicKey = (topic: string): string | null => {

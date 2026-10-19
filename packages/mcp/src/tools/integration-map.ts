@@ -112,6 +112,7 @@ import { firstNonEmpty } from './input-aliases.js';
 import { namedCredentialReferences } from './named-credential-references.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
 import { fullScanTruncationNote } from './scan-cap.js';
+import { summarize } from './summarize-rows.js';
 
 /**
  * Inclusive upper bound on `limit`. Mirrors the
@@ -560,6 +561,15 @@ const enumerateNames = (names: readonly string[]): string =>
     : `${names.slice(0, MAX_ENUMERATED_NAMES).join(', ')} … and ${names.length - MAX_ENUMERATED_NAMES} more`;
 
 /**
+ * Only an Active remote site authorizes a callout; an inactive one is dead
+ * metadata. The one predicate behind the authorization note and the martech
+ * connector scan, so the two cannot count different rows.
+ */
+const isActiveRemoteSite = (node: {
+  readonly properties: Readonly<Record<string, unknown>>;
+}): boolean => node.properties['isActive'] === true;
+
+/**
  * Build the grounded `calloutAuthorizationNote` from the components
  * actually present in the map. This is the determinate answer to "which
  * named credential or remote site setting authorizes the outbound
@@ -587,7 +597,18 @@ const buildCalloutAuthorizationNote = (
     readonly namedCredentialInScope: boolean;
   },
 ): string => {
-  const rssNames = remoteSiteSettings.map((n) => n.apiName).sort();
+  // The sentence says "Active", so its number is the length of the ACTIVE row
+  // set, and the inactive rows are named as what they are.
+  const activeRss = summarize(remoteSiteSettings, isActiveRemoteSite);
+  const activeNames = activeRss.rows.map((n) => n.apiName).sort();
+  const inactiveNames = remoteSiteSettings
+    .filter((n) => !isActiveRemoteSite(n))
+    .map((n) => n.apiName)
+    .sort();
+  const inactivePart =
+    inactiveNames.length > 0
+      ? ` The ${inactiveNames.length} inactive (${enumerateNames(inactiveNames)}) authorize nothing.`
+      : '';
   const referencedNcs = namedCredentials
     .filter((n) => n.orphaned !== true)
     .map((n) => n.apiName)
@@ -599,9 +620,11 @@ const buildCalloutAuthorizationNote = (
 
   const rssPart = !scope.remoteSiteSettingInScope
     ? `NOT CHECKED: \`filter: '${scope.filter}'\` excluded RemoteSiteSetting from this call, so this map never read them and CANNOT say whether a hardcoded-URL outbound callout is authorized by a remote site setting. Re-call with \`filter: 'all'\`.`
-    : rssNames.length > 0
-      ? `Active RemoteSiteSettings authorize outbound HTTP callouts to a hardcoded endpoint URL (an Apex \`Http.request\` to a literal host) — ${rssNames.length} in this org: ${enumerateNames(rssNames)}.`
-      : 'This map contains no RemoteSiteSettings, so no hardcoded-URL outbound callout is authorized by a remote site setting.';
+    : activeRss.count > 0
+      ? `Active RemoteSiteSettings authorize outbound HTTP callouts to a hardcoded endpoint URL (an Apex \`Http.request\` to a literal host) — ${activeRss.count} of ${activeRss.total} in this org are active: ${enumerateNames(activeNames)}.${inactivePart}`
+      : activeRss.total > 0
+        ? `This map contains ${activeRss.total} RemoteSiteSetting(s) but none is active, so no hardcoded-URL outbound callout is authorized by a remote site setting.${inactivePart}`
+        : 'This map contains no RemoteSiteSettings, so no hardcoded-URL outbound callout is authorized by a remote site setting.';
 
   const ncPart = !scope.namedCredentialInScope
     ? `NOT CHECKED: \`filter: '${scope.filter}'\` excluded NamedCredential from this call, so this map never read them and CANNOT say whether a callout addresses a \`callout:{alias}\` endpoint. Re-call with \`filter: 'all'\`.`
@@ -924,9 +947,7 @@ const collectMartechConnectors = async (
 
   // Only Active remote sites authorize a callout; an inactive one is dead
   // metadata and must not mint a connector row.
-  const activeRemoteSites = remoteSiteSettings.filter(
-    (node) => node.properties['isActive'] === true,
-  );
+  const activeRemoteSites = remoteSiteSettings.filter(isActiveRemoteSite);
 
   const pkgResult = await scanAllNodesOfTypes(ctx.graph, ['InstalledPackage']);
   if (!pkgResult.ok) {

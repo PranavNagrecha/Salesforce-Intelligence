@@ -49,7 +49,15 @@ const seed: ExtractionResult = {
   nodes: [
     node({ id: OBJ, type: 'CustomObject', apiName: 'Project__c' }),
     node({ id: FIELD, type: 'CustomField', apiName: 'Status__c', parentId: OBJ, properties: { dataType: 'Picklist' } }),
-    node({ id: 'Flow:Closer', type: 'Flow', apiName: 'Closer', properties: { status: 'Active' } }),
+    // The extractor records `entryRequiresRecordChange` on BOTH the Flow node
+    // and its record-trigger context; the gate reads the node, as the
+    // save-order steps do.
+    node({
+      id: 'Flow:Closer',
+      type: 'Flow',
+      apiName: 'Closer',
+      properties: { status: 'Active', entryRequiresRecordChange: true },
+    }),
     node({ id: 'Flow:Opener', type: 'Flow', apiName: 'Opener', properties: { status: 'Active' } }),
     node({ id: 'Flow:Copier', type: 'Flow', apiName: 'Copier', properties: { status: 'Active' } }),
     node({ id: 'Flow:Mixer', type: 'Flow', apiName: 'Mixer', properties: { status: 'Active' } }),

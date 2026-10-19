@@ -1,7 +1,13 @@
-import type { Edge } from '@sf-intelligence/contracts';
-import { scanApexSource, type FrontendResourceRef, type OmniStudioApexCall } from '@sf-intelligence/parsers';
+import { isChangeEventApiName, type Edge } from '@sf-intelligence/contracts';
+import {
+  apexPlatformClassName,
+  scanApexSource,
+  type FrontendResourceRef,
+  type OmniStudioApexCall,
+} from '@sf-intelligence/parsers';
 
 import { MANAGED_OMNISTUDIO_NAMESPACES } from './omnistudio/datapack.js';
+import { STANDARD_OBJECT_FIELD_SNAPSHOT } from './standard-object-describe-fields.js';
 
 const SCANNER_SOURCE = 'apex-scanner';
 const APEX_CLASS_SOURCE = 'apex-class-extractor';
@@ -49,6 +55,26 @@ const UNRESOLVABLE_CALL_CLASSES: ReadonlySet<string> = new Set([
 const CUSTOM_OBJECT_SUFFIX = /__(?:c|mdt|e|b|x)$/;
 const hasCustomObjectSuffix = (token: string): boolean =>
   CUSTOM_OBJECT_SUFFIX.test(token);
+
+const STANDARD_OBJECT_NAMES: ReadonlySet<string> = new Set(STANDARD_OBJECT_FIELD_SNAPSHOT);
+
+/**
+ * A receiver that names an sObject rather than an Apex class, so a static call
+ * (`Account.getSObjectType()`) or a constructor (`new Contact()`) on it is a
+ * reference to the OBJECT node, never `ApexClass:Account` (NO-MINTED-PLATFORM-IDS:
+ * 84 such edges dangled on one real vault). Four same-file signals, no vault
+ * lookup: a reserved metadata suffix, a Change Event name, one of the standard
+ * objects this product models, or an object this very file queries with inline
+ * SOQL. shortcut: a standard object outside those signals (`Attachment` in a
+ * file that never queries it) still mints `ApexClass:Attachment`, hidden by
+ * import-time `targetMissing`; resolve against the node set at import if it
+ * ever matters.
+ */
+const isSObjectName = (token: string, queriedObjects: ReadonlySet<string>): boolean =>
+  hasCustomObjectSuffix(token) ||
+  isChangeEventApiName(token) ||
+  STANDARD_OBJECT_NAMES.has(token) ||
+  queriedObjects.has(token);
 
 /**
  * A receiver token that looks like an Apex CLASS name: PascalCase (upper-initial)
@@ -402,6 +428,51 @@ export const buildApexCalloutEdges = (
   return raw;
 };
 
+/** Every `Type.forName(` call site, on comment-stripped source. */
+const DYNAMIC_DISPATCH_CALL = /\bType\s*\.\s*forName\s*\(/g;
+/**
+ * The call sites whose operand is resolvable without running the code: one
+ * string literal (`Type.forName('Demo_Handler')`) or the two-argument form
+ * with a literal namespace and name (`Type.forName('', 'Demo_Handler')`).
+ */
+const DYNAMIC_DISPATCH_LITERAL =
+  /\bType\s*\.\s*forName\s*\(\s*(?:'([A-Za-z0-9_]*)'\s*,\s*)?'([A-Za-z_][A-Za-z0-9_]*)'\s*\)/g;
+
+/**
+ * P21-MOAT-apex-frameworks: a `Type.forName` whose operand is a string literal
+ * names the class it instantiates as plainly as `new X()` does, so it is a
+ * heuristic `references` edge (`properties.mechanism: 'Type.forName'`) rather
+ * than a caveat. The scanner blanks string literals, so this runs on the
+ * comment-stripped, string-KEPT source like {@link buildApexCalloutEdges}.
+ *
+ * A variable operand is never guessed: it is COUNTED as `unresolved`, which the
+ * extractors write to the owner node as `unresolvedDynamicDispatch` and the
+ * refresh pipeline joins through Custom Metadata cells where it can.
+ */
+export const buildApexDynamicDispatchEdges = (
+  ownerId: string,
+  source: string,
+): { readonly edges: readonly Edge[]; readonly unresolved: number } => {
+  const scanned = stripApexCommentsOnly(source);
+  const edges: Edge[] = [];
+  DYNAMIC_DISPATCH_LITERAL.lastIndex = 0;
+  let m: RegExpExecArray | null;
+  while ((m = DYNAMIC_DISPATCH_LITERAL.exec(scanned)) !== null) {
+    const namespace = m[1] ?? '';
+    const name = m[2] as string;
+    edges.push({
+      fromId: ownerId,
+      toId: `ApexClass:${namespace.length > 0 ? `${namespace}.${name}` : name}`,
+      edgeType: 'references',
+      confidence: 'heuristic',
+      source: SCANNER_SOURCE,
+      properties: { mechanism: 'Type.forName', offset: m.index, length: m[0].length },
+    });
+  }
+  const callSites = scanned.match(DYNAMIC_DISPATCH_CALL)?.length ?? 0;
+  return { edges, unresolved: callSites - edges.length };
+};
+
 /**
  * `System.Label.Name` / `Label.Name` (and the managed `Label.ns.Name` form).
  * Apex resolves the `Label` class case-insensitively, but a lowercase bare
@@ -466,6 +537,29 @@ const isLabelReceiver = (object: string, field: string): boolean =>
 export interface ApexEdgesResult {
   readonly edges: readonly Edge[];
   readonly warnings: readonly string[];
+  /**
+   * `EventBus.subscribe(...)` calls whose channel argument is not a string
+   * literal, so no edge could be minted for them. The extractors surface a
+   * non-zero count as `properties.unresolvedSubscriptions` on the owner node:
+   * the honest "this code subscribes to SOMETHING we cannot name" signal that
+   * keeps an empty subscriber list from reading as "nothing subscribes".
+   */
+  readonly unresolvedSubscriptions: number;
+  /**
+   * `Type.forName(...)` calls whose operand is not a string literal, so no
+   * edge could be minted for them (see {@link buildApexDynamicDispatchEdges}).
+   * Surfaced as `properties.unresolvedDynamicDispatch` on the owner node; the
+   * refresh pipeline reads it to join a Custom Metadata-fed dispatcher to the
+   * classes its records name.
+   */
+  readonly unresolvedDynamicDispatch: number;
+  /**
+   * Distinct platform methods called per platform class (`{ Database: 2,
+   * Type: 1 }`, canonical spelling, sorted). A platform class is never an
+   * `ApexClass` node, so these calls mint no edge; the owner node carries
+   * the count as `properties.platformCalls` instead (non-empty only).
+   */
+  readonly platformCalls: Readonly<Record<string, number>>;
 }
 
 /**
@@ -607,11 +701,16 @@ export const mergeAndSortEdges = (edges: readonly Edge[]): readonly Edge[] => {
  *     `methods` is the complete sorted set of that target's methods this
  *     owner calls (method-level), `methodName` the first for
  *     back-compat, `offset`/`length` the span of the first call site.
- *     EXCEPTION (APEX-SOBJECT-REF-MINTED-AS-APEXCLASS): when `className` is an
- *     object-suffixed api name (`Custom_Setting__c.getOrgDefaults()`), the call
+ *     EXCEPTION (APEX-SOBJECT-REF-MINTED-AS-APEXCLASS): when `className` names
+ *     an sObject (`Custom_Setting__c.getOrgDefaults()`, `Account.getSObjectType()`,
+ *     an object this file queries; see {@link isSObjectName}), the call
  *     is a static reference to that sObject / custom setting — emitted as
  *     `references` → `CustomObject:{className}`
  *     (`properties.mechanism: 'apexStaticObjectRef'`), NOT `callsApex ApexClass`.
+ *     EXCEPTION (NO-MINTED-PLATFORM-IDS): a call on a platform class
+ *     (`Type.forName`, `Database.update`, `Schema.getGlobalDescribe`; the list
+ *     is `apex-platform-classes.ts` in parsers) mints NO edge — no vault holds
+ *     `ApexClass:Type` — and is counted in `platformCalls` instead.
  *   - `Instantiation`                 → `references` from `ownerId` to
  *     `ApexClass:{className}` with
  *     `properties: { mechanism: 'instantiation', offset, length }`.
@@ -619,9 +718,9 @@ export const mergeAndSortEdges = (edges: readonly Edge[]): readonly Edge[] => {
  *     `IDENT.IDENT(` method-call sweep is blind to (e.g. a `new X()`
  *     passed as a method argument). `references` is the right edge
  *     here: `dispatchesAsync` is async-only and `callsApex` would
- *     conflate constructor invocations with method calls. An object-suffixed
- *     `new Widget__c()` targets `CustomObject:{className}` instead of
- *     `ApexClass:` (APEX-SOBJECT-REF-MINTED-AS-APEXCLASS).
+ *     conflate constructor invocations with method calls. An sObject
+ *     `new Widget__c()` / `new Contact()` targets `CustomObject:{className}`
+ *     instead of `ApexClass:` (APEX-SOBJECT-REF-MINTED-AS-APEXCLASS).
  *   - `SoqlFromObject`                → `readsFrom` from `ownerId` to
  *     `CustomObject:{object}` with
  *     `properties: { mechanism: 'soql', offset, length }` — the primary
@@ -636,6 +735,11 @@ export const mergeAndSortEdges = (edges: readonly Edge[]): readonly Edge[] => {
  *     {@link buildApexCalloutEdges}) — the one Apex reference that lives
  *     inside a string literal and is therefore invisible to the field/call
  *     sweeps, which blank strings.
+ *   - `Type.forName('X')` literal operand → `references` from `ownerId` to
+ *     `ApexClass:X` with `properties: { mechanism: 'Type.forName', offset,
+ *     length }` (heuristic; same string-KEPT scan, see
+ *     {@link buildApexDynamicDispatchEdges}). A variable operand mints no
+ *     edge and is counted in `unresolvedDynamicDispatch`.
  *
  * The scanner does no symbol resolution: `object` is a variable name as
  * it appears in source (e.g., `this`, `acc`, `mainMarketoSetting`). The
@@ -713,6 +817,9 @@ export const buildApexScannerEdges = (
   ownerId: string,
 ): ApexEdgesResult => {
   const scanResult = scanApexSource(source);
+  // Literal `Type.forName('X')` is a raw string scan like the callouts: it
+  // does not depend on the brace-balanced scan succeeding.
+  const dynamicDispatch = buildApexDynamicDispatchEdges(ownerId, source);
   if (!scanResult.ok) {
     const { kind, offset, message } = scanResult.error;
     return {
@@ -722,10 +829,14 @@ export const buildApexScannerEdges = (
       edges: mergeAndSortEdges([
         ...buildApexCalloutEdges(ownerId, source),
         ...buildApexLabelEdges(ownerId, source),
+        ...dynamicDispatch.edges,
       ]),
       // Format documented in the wiring spec; consumers parse this
       // by prefix to surface scanner failures in the vault UI.
       warnings: [`apex-scanner: ${kind} at offset ${offset}: ${message}`],
+      unresolvedSubscriptions: 0,
+      unresolvedDynamicDispatch: dynamicDispatch.unresolved,
+      platformCalls: {},
     };
   }
 
@@ -734,6 +845,7 @@ export const buildApexScannerEdges = (
   // references (string-literal endpoints the scanner blanks) → heuristic
   // `references` edges to the Named Credential node.
   raw.push(...buildApexCalloutEdges(ownerId, source));
+  raw.push(...dynamicDispatch.edges);
   // APEX-LABEL-UNGRAPHED: `System.Label.X` / `Label.X` → CustomLabel.
   raw.push(...buildApexLabelEdges(ownerId, source));
   // Apex → OmniStudio runtime calls. The generic `Class.method(` / `Obj.field`
@@ -751,6 +863,16 @@ export const buildApexScannerEdges = (
       .filter((key) => omniCalls.every((c) => `${c.className}.${c.methodName}` !== key || isOmniStudioRuntimeCall(c))),
   );
 
+  // APEX-SOBJECT-REF-MINTED-AS-APEXCLASS: a static call or member on an sObject
+  // name (`Custom_Setting__c.getOrgDefaults()`, `Account.getSObjectType()`,
+  // `Opportunity.sObjectType`) is a reference to that sObject / custom setting,
+  // NOT an Apex class. Route it to the object node (deduped by object; first
+  // site's span wins) instead of an `ApexClass:{Object}` phantom.
+  const objectRefs = new Map<string, { offset: number; length: number }>();
+  const queriedObjects = new Set(scanResult.value.soqlFromObjects.map((s) => s.object));
+  const noteObjectRef = (object: string, offset: number, length: number): void => {
+    if (!objectRefs.has(object)) objectRefs.set(object, { offset, length });
+  };
   for (const access of scanResult.value.fieldAccesses) {
     // Drop field accesses on unresolvable receivers (Trigger context / this / super).
     if (UNRESOLVABLE_FIELD_RECEIVERS.has(access.object)) continue;
@@ -772,6 +894,12 @@ export const buildApexScannerEdges = (
       isApexMemberFieldName(access.field) &&
       looksLikeApexClassName(access.object)
     ) {
+      // `Opportunity.sObjectType` is a describe member on an sObject, not an
+      // Apex static field: reference the object, never `ApexClass:Opportunity`.
+      if (isSObjectName(access.object, queriedObjects)) {
+        noteObjectRef(access.object, access.offset, access.length);
+        continue;
+      }
       raw.push({
         fromId: ownerId,
         toId: `ApexClass:${access.object}`,
@@ -810,24 +938,21 @@ export const buildApexScannerEdges = (
     string,
     { methods: Set<string>; offset: number; length: number }
   >();
-  // APEX-SOBJECT-REF-MINTED-AS-APEXCLASS: a static call whose receiver is an
-  // object-suffixed token (`Custom_Setting__c.getOrgDefaults()`,
-  // `ns__Widget__c.foo()`) is a reference to that sObject / custom setting, NOT a
-  // call to an Apex class. Route it to the object node (deduped by object; first
-  // call site's span wins) instead of an `ApexClass:{__c}` phantom.
-  const objectRefs = new Map<string, { offset: number; length: number }>();
+  const platformCalls = new Map<string, number>();
   for (const call of scanResult.value.methodCalls) {
     // Drop calls on unresolvable pseudo-classes (Trigger.newMap → `newMap`, etc.).
     if (UNRESOLVABLE_CALL_CLASSES.has(call.className)) continue;
+    // NO-MINTED-PLATFORM-IDS: `Type.forName` / `Database.update` call the
+    // platform, not an org class. Count, never mint `ApexClass:Type`.
+    const platform = apexPlatformClassName(call.className);
+    if (platform !== null) {
+      platformCalls.set(platform, (platformCalls.get(platform) ?? 0) + 1);
+      continue;
+    }
     // OmniStudio's runtime service, not an org class (see above).
     if (runtimeOnlyMethods.has(`${call.className}.${call.methodName}`)) continue;
-    if (hasCustomObjectSuffix(call.className)) {
-      if (!objectRefs.has(call.className)) {
-        objectRefs.set(call.className, {
-          offset: call.offset,
-          length: call.length,
-        });
-      }
+    if (isSObjectName(call.className, queriedObjects)) {
+      noteObjectRef(call.className, call.offset, call.length);
       continue;
     }
     const existing = callsByClass.get(call.className);
@@ -872,13 +997,12 @@ export const buildApexScannerEdges = (
     });
   }
   for (const inst of scanResult.value.instantiations) {
-    // APEX-SOBJECT-REF-MINTED-AS-APEXCLASS: `new Widget__c()` constructs an
-    // sObject record, not an Apex class instance — route the reference to the
-    // real `CustomObject:{name}` node instead of an `ApexClass:{__c}` phantom.
-    // A standard-object / user-class instantiation (`new Account()`, `new
-    // Handler()`) keeps the `ApexClass:` target (import-time targetMissing hides
-    // the standard-object case, as before).
-    const toId = hasCustomObjectSuffix(inst.className)
+    // APEX-SOBJECT-REF-MINTED-AS-APEXCLASS: `new Widget__c()` / `new Contact()`
+    // constructs an sObject record, not an Apex class instance — route the
+    // reference to the real `CustomObject:{name}` node instead of an
+    // `ApexClass:` phantom. A user-class instantiation (`new Handler()`) keeps
+    // the `ApexClass:` target.
+    const toId = isSObjectName(inst.className, queriedObjects)
       ? `CustomObject:${inst.className}`
       : `ApexClass:${inst.className}`;
     raw.push({
@@ -915,30 +1039,58 @@ export const buildApexScannerEdges = (
   }
   // P3b: `EventBus.subscribe('X__e', ...)` → a heuristic `listensTo` edge to the
   // Platform Event node, REUSING the existing `listensTo` EdgeType (the same
-  // slot `Triggerable<X__e>` and Flow PlatformEvent triggers fill). HONESTY:
-  // emit ONLY when the scanner RESOLVED a static channel that names a real
-  // Platform Event (`__e` suffix). A dynamic/computed channel arg
-  // (`resolved: false`) mints NO edge — no phantom — mirroring the
-  // EventBus.publish publisher honesty. Non-`__e` channels (e.g. CDC
-  // `*ChangeEvent` streams) are skipped here so `listensTo` stays
-  // Platform-Event-only, matching `buildClassListensToEdge`'s `__e` gate; CDC
-  // subscription has its own `subscribesToChange` modeling path.
+  // slot `Triggerable<X__e>` and Flow PlatformEvent triggers fill). A channel
+  // naming a Change Event (`XChangeEvent` / `X__ChangeEvent`, the `/data/`
+  // prefix already stripped by the scanner) → a heuristic `subscribesToChange`
+  // edge to the same dangling `CustomObject:{ChangeEvent}` id a CDC trigger's
+  // `triggersOn` points at, so `listensTo` stays Platform-Event-only (matching
+  // `buildClassListensToEdge`'s `__e` gate). HONESTY: emit ONLY when the
+  // scanner RESOLVED a static channel. A dynamic/computed channel arg
+  // (`resolved: false`) mints NO edge — no phantom — and is COUNTED instead, so
+  // the owner node can say it subscribes to something unnamed.
+  let unresolvedSubscriptions = 0;
   for (const sub of scanResult.value.eventSubscriptions) {
-    if (!sub.resolved) continue;
-    if (!sub.channel.endsWith('__e')) continue;
-    raw.push({
-      fromId: ownerId,
-      toId: `CustomObject:${sub.channel}`,
-      edgeType: 'listensTo',
-      confidence: 'heuristic',
-      source: SCANNER_SOURCE,
-      properties: {
-        mechanism: 'eventBusSubscribe',
-        eventName: sub.channel,
-        offset: sub.offset,
-        length: sub.length,
-      },
-    });
+    if (!sub.resolved) {
+      unresolvedSubscriptions += 1;
+      continue;
+    }
+    if (sub.channel.endsWith('__e')) {
+      raw.push({
+        fromId: ownerId,
+        toId: `CustomObject:${sub.channel}`,
+        edgeType: 'listensTo',
+        confidence: 'heuristic',
+        source: SCANNER_SOURCE,
+        properties: {
+          mechanism: 'eventBusSubscribe',
+          eventName: sub.channel,
+          offset: sub.offset,
+          length: sub.length,
+        },
+      });
+    } else if (isChangeEventApiName(sub.channel)) {
+      raw.push({
+        fromId: ownerId,
+        toId: `CustomObject:${sub.channel}`,
+        edgeType: 'subscribesToChange',
+        confidence: 'heuristic',
+        source: SCANNER_SOURCE,
+        properties: {
+          mechanism: 'eventBusSubscribe',
+          changeEventName: sub.channel,
+          offset: sub.offset,
+          length: sub.length,
+        },
+      });
+    }
   }
-  return { edges: mergeAndSortEdges(raw), warnings: [] };
+  return {
+    edges: mergeAndSortEdges(raw),
+    warnings: [],
+    unresolvedSubscriptions,
+    unresolvedDynamicDispatch: dynamicDispatch.unresolved,
+    platformCalls: Object.fromEntries(
+      [...platformCalls].sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)),
+    ),
+  };
 };

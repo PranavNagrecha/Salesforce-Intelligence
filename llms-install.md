@@ -26,7 +26,7 @@ Add this server to the MCP settings file (for Cline: `cline_mcp_settings.json`):
 }
 ```
 
-The first start unpacks a synthetic demo org to `~/.sf-intelligence/demo`. The server lists its core tools (`sfi.health_check`, `sfi.org_overview` and `sfi.search_components` among them). Suggested first question: "What happens when an Opportunity is saved?"
+The first start builds a synthetic demo org under `~/.sf-intelligence/demo` (10-20 s). The server lists its core tools (`sfi.health_check`, `sfi.org_overview` and `sfi.search_components` among them). Suggested first question: "What happens when I save a Project?"
 
 ## Step 2B: the user's own org
 

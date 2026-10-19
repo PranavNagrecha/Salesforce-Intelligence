@@ -383,6 +383,59 @@ describe('extractApexTrigger', () => {
     });
   });
 
+  // Change Data Capture subscriber recognition. A trigger on a
+  // `*ChangeEvent` object is a CDC subscriber; it emits a declared
+  // `subscribesToChange` edge in addition to `triggersOn`, mirroring the
+  // `__e` → `listensTo` rule above. Before this the edge type existed only in
+  // a comment and `cdc_subscribers` could see the trigger solely through its
+  // object-lifecycle `triggersOn` edge.
+  describe('Change Event (CDC) subscriber recognition', () => {
+    it('emits subscribesToChange alongside triggersOn for a *ChangeEvent object', async () => {
+      const { dir, triggerPath } = await writeTempApexTrigger(
+        'Demo_AccountChangeTrigger',
+        `trigger Demo_AccountChangeTrigger on AccountChangeEvent (after insert) {
+  for (AccountChangeEvent evt : Trigger.New) {}
+}`,
+      );
+      try {
+        const result = await extractApexTrigger(triggerPath);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        const triggersOn = result.value.edges.find((e) => e.edgeType === 'triggersOn');
+        const subscribes = result.value.edges.find((e) => e.edgeType === 'subscribesToChange');
+        expect(triggersOn?.toId).toBe('CustomObject:AccountChangeEvent');
+        expect(subscribes).toBeDefined();
+        expect(subscribes?.toId).toBe('CustomObject:AccountChangeEvent');
+        expect(subscribes?.confidence).toBe('declared');
+        expect(subscribes?.source).toBe('apex-trigger-extractor');
+        expect(subscribes?.properties).toMatchObject({
+          changeEventName: 'AccountChangeEvent',
+          mechanism: 'triggerOnChangeEvent',
+        });
+        // A CDC trigger is not a Platform Event subscriber.
+        expect(result.value.edges.some((e) => e.edgeType === 'listensTo')).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+
+    it('does NOT emit subscribesToChange for a plain sObject trigger', async () => {
+      const { dir, triggerPath } = await writeTempApexTrigger(
+        'Demo_AccountTrigger',
+        'trigger Demo_AccountTrigger on Account (after insert) {}',
+      );
+      try {
+        const result = await extractApexTrigger(triggerPath);
+        expect(result.ok).toBe(true);
+        if (!result.ok) return;
+        expect(result.value.edges.some((e) => e.edgeType === 'subscribesToChange')).toBe(false);
+      } finally {
+        await rm(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
+
   // Platform Event subscriber recognition. A trigger on an
   // `__e`-suffixed object is a Platform Event subscriber; this emits
   // a `listensTo` edge in addition to the existing `triggersOn`. The

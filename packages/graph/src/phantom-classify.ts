@@ -10,31 +10,19 @@
  * inbound edge kinds, and the manifest coverage of its ComponentType.
  */
 
-import type { ComponentId, PhantomClassification } from '@sf-intelligence/contracts';
+import {
+  CHANGE_EVENT_SUFFIX,
+  isChangeEventApiName,
+  type ComponentId,
+  type PhantomClassification,
+} from '@sf-intelligence/contracts';
+
+// Re-exported so `@sf-intelligence/graph` consumers keep their import path;
+// the rule itself lives in `contracts` (the extractors read it too).
+export { isChangeEventApiName };
 
 /** Coverage of a ComponentType in the manifest: covered / partial / not-modeled / absent. */
 export type CoverageStatus = 'covered' | 'partial' | 'notModeled' | 'absent';
-
-/**
- * The Change Data Capture (CDC) stream-entity name suffix. A CDC entity is
- * `{StandardObject}ChangeEvent` (`AccountChangeEvent`) or
- * `{CustomObjectWithout__c}__ChangeEvent` (`Order__ChangeEvent`); both end in
- * this literal, and neither carries a `__c` / `__e` object suffix.
- */
-const CHANGE_EVENT_SUFFIX = 'ChangeEvent';
-
-/**
- * True when `apiName` names a Change Data Capture stream entity
- * (`AccountChangeEvent`, `Order__ChangeEvent`, `ns__Widget__ChangeEvent`).
- *
- * Single source of truth for the CDC name-pattern rule: the MCP CDC tools, the
- * phantom classifier, and the refresh's auto-expansion gate all read it, so
- * "is this a Change Event?" cannot drift between the surface that reports one
- * and the surface that tries to retrieve one.
- */
-export const isChangeEventApiName = (apiName: string): boolean =>
-  apiName.length > CHANGE_EVENT_SUFFIX.length &&
-  apiName.endsWith(CHANGE_EVENT_SUFFIX);
 
 /**
  * True when `id` is a `CustomObject:` id naming a Change Data Capture stream

@@ -181,3 +181,44 @@ describe('check-concept-model anyElement inner leak-guard', () => {
     expect(flagged.map(([, label]) => label)).toContain('w[0].anyElement.neq');
   });
 });
+
+// Probe the shipped `writerSlotUngated` predicate on a synthetic rule (JSON in
+// `PROBE`); the child prints the reason string or 'null'.
+const PROBE_WRITER_SLOT =
+  "import(process.env.SCRIPT).then(m => process.stdout.write(String(m.writerSlotUngated(JSON.parse(process.env.PROBE)))))";
+
+const writerSlotReason = (rule: unknown): string => {
+  const out = execSync(`node -e ${JSON.stringify(PROBE_WRITER_SLOT)}`, {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    env: { ...process.env, SCRIPT: scriptUrl, PROBE: JSON.stringify(rule) },
+  });
+  return out.trim();
+};
+
+describe('check-concept-model {0} writer-slot gate (RM-MIXED-DML-ROOT-GATE)', () => {
+  const base = {
+    id: 'rule:test/writer',
+    interpretation: '{0} writes {1}',
+    bind: { edgeType: 'writesTo', componentTypes: ['ApexClass', 'CustomField'] },
+  };
+
+  it('flags a cited-type edge rule with no fromTypeIn (the shipped mixed-DML shape before the fix)', () => {
+    expect(writerSlotReason(base)).toContain('no fromTypeIn');
+  });
+
+  it('flags a fromTypeIn writer that componentTypes never cites', () => {
+    const rule = { ...base, bind: { ...base.bind, fromTypeIn: ['Flow'] } };
+    expect(writerSlotReason(rule)).toContain('"Flow"');
+  });
+
+  it('passes once every fromTypeIn writer is a cited type', () => {
+    const rule = { ...base, bind: { ...base.bind, fromTypeIn: ['ApexClass'] } };
+    expect(writerSlotReason(rule)).toBe('null');
+  });
+
+  it('ignores templates without {0} and rules with their own fill contract', () => {
+    expect(writerSlotReason({ ...base, interpretation: '{ids} writes' })).toBe('null');
+    expect(writerSlotReason({ ...base, bind: { ...base.bind, join: {} } })).toBe('null');
+  });
+});

@@ -105,6 +105,7 @@ import {
 import { phantomAwareNotFoundMessage } from './phantom-node.js';
 import { isActiveSoeFirer } from './soe-active.js';
 import { classifyAfterSaveFlowTiming } from './soe-flow-timing.js';
+import { surfaceStepCondition } from './soe-step-condition.js';
 import {
   findUnreferencedFieldUpdates,
   UNREFERENCED_FIELD_UPDATES_NOTE,
@@ -502,41 +503,28 @@ const resolveWhyFieldScope = (
 };
 
 /**
- * Surface the first `firesWhen` ConditionalContext for a writer
- * node. Returns `undefined` when the writer has no `firesWhen`
- * edges. The condition carries the synthetic id and the parsed
- * expression — enough for the caller to render the gating predicate
- * without an extra round trip.
+ * The writer's gating `firesWhen` ConditionalContext, through the save-order
+ * tools' shared `surfaceStepCondition`: a Flow's `<start>` ENTRY criteria,
+ * never one of its decisions. Returns `undefined` when nothing gates the
+ * writer — including a record-triggered Flow with decisions but no entry
+ * criteria, which this tool used to report as gated by its first decision.
+ * `onlyWhenChangedToMeet` is the Flow node's own `entryRequiresRecordChange`,
+ * the same property the save-order steps read.
  */
-const surfaceFirstCondition = async (
+const surfaceGate = async (
   ctx: Context,
-  writerId: ComponentId,
+  writerNode: Node,
 ): Promise<Result<WhyFieldChangedCondition | undefined, string>> => {
-  const edgesResult = await listEdges(ctx.graph, writerId, {
-    direction: 'out',
-    edgeType: 'firesWhen',
-  });
-  if (!edgesResult.ok) return err(edgesResult.error.message);
-  // Prefer the record-trigger ENTRY criteria (the condition that decides
-  // whether the writer runs at all) over the first decision.
-  let chosen: Node | null = null;
-  for (const e of edgesResult.value) {
-    const n = await getNodeById(ctx.graph, e.toId);
-    if (!n.ok) return err(n.error.message);
-    if (n.value === null) continue;
-    if (chosen === null) chosen = n.value;
-    if (n.value.properties['kind'] === 'flow-recordtrigger') {
-      chosen = n.value;
-      break;
-    }
-  }
-  if (chosen === null) return ok(undefined);
-  const expression = chosen.properties['expression'];
-  const onlyWhenChanged = chosen.properties['entryRequiresRecordChange'];
+  const facts = await surfaceStepCondition(ctx.graph, writerNode);
+  if (!facts.ok) return err(facts.error);
+  const chosen = facts.value.conditional;
+  if (chosen === undefined) return ok(undefined);
   return ok({
-    conditionContextId: chosen.id,
-    expression: typeof expression === 'string' ? expression : '',
-    ...(onlyWhenChanged === true ? { onlyWhenChangedToMeet: true } : {}),
+    conditionContextId: chosen.conditionContextId,
+    expression: chosen.expression,
+    ...(writerNode.properties['entryRequiresRecordChange'] === true
+      ? { onlyWhenChangedToMeet: true }
+      : {}),
   });
 };
 
@@ -608,7 +596,7 @@ const buildWriter = async (
   edge: Edge,
   writerNode: Node,
 ): Promise<Result<BuiltWriter, string>> => {
-  const conditionResult = await surfaceFirstCondition(ctx, writerNode.id);
+  const conditionResult = await surfaceGate(ctx, writerNode);
   if (!conditionResult.ok) return err(conditionResult.error);
   const triggerEvent = surfaceTriggerEvent(writerNode);
   const dlrs = dlrsRollupWriterDetail(edge);

@@ -68,7 +68,8 @@ claude mcp add --scope project sf-intelligence -- \
 
 The `--` separator is required: it tells Claude Code where its own flags stop
 and the server's begin. `--scope project` writes `.mcp.json` at the repo root
-(commit it to share with your team); `--scope user` makes it available in every
+(it embeds the absolute `--vault` path, so teammates run the same command once
+instead of committing it; the VS Code form below is the portable one); `--scope user` makes it available in every
 project; the default `local` keeps it private to you in this project.
 
 Verify with `/mcp` inside Claude Code, or `claude mcp list`.
@@ -100,6 +101,22 @@ Hand-written `.mcp.json` equivalent:
 > The per-server `timeout` field is a **per-tool-call** limit, not a startup
 > timeout. If a cold `npx` download is timing out at startup, raise
 > `MCP_TIMEOUT` instead (PowerShell: `$env:MCP_TIMEOUT = "60000"; claude`).
+
+### Headless `claude -p`
+
+A non-interactive run (`claude -p "…"`) auto-denies MCP tools unless the
+invocation allows them. Put the question first, then the flag (`--allowedTools`
+takes a list and would swallow a question that follows it):
+
+```bash
+claude -p "What happens when I save a Project?" --allowedTools mcp__sf-intelligence-demo
+```
+
+The name is the server you registered, prefixed `mcp__`. Without the flag the
+assistant answers from grep and reports that the permission request was
+declined. A project-scope server (`.mcp.json`) also needs one interactive
+`claude` run to approve it, or pass `--mcp-config .mcp.json` to the headless run.
+An interactive session asks once and remembers your answer.
 
 ## Claude Desktop
 
@@ -193,8 +210,8 @@ If you run Codex from inside the ChatGPT desktop app rather than a terminal, the
 ## Cursor
 
 Cursor reads the Claude-style JSON. Create `.cursor/mcp.json` in your
-Salesforce project (project scope; commit it to share with your team) or
-`~/.cursor/mcp.json` (every project):
+Salesforce project (project scope; it embeds an absolute vault path, so each
+teammate writes their own) or `~/.cursor/mcp.json` (every project):
 
 ```json
 {

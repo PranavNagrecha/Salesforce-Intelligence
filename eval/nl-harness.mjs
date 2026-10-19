@@ -1,5 +1,5 @@
 // NL question harness — routes a natural-language battery through the front
-// door (sfi.route_question), EXECUTES the concrete tool the router picks, and
+// door (sfi.route_question), EXECUTES the leading shortlist candidate, and
 // compares routing + outcomes across BOTH sandboxes side by side. This is the
 // "every question is built, harnessed, and answers compared" net: a question
 // that BUGs, or routes differently on two orgs, is flagged by question text.
@@ -148,17 +148,6 @@ const synthArgs = (tool, sample) => {
 
 const toolByName = new Map(V01_TOOLS.map((t) => [t.name, t]));
 
-// list_components needs a `type`, which is optional in its schema and so not
-// produced by generic synthesis. The router knows the intent, so pick the right
-// type per intent → the structural questions return real data to compare.
-const LIST_TYPE_BY_INTENT = {
-  schema: 'CustomObject',
-  'layout-access': 'Layout',
-  'reports-usage': 'Report',
-  'folder-access': 'Report',
-  'email-template-usage': 'EmailTemplate',
-};
-
 // Live tools get SAFE universal (standard-object) targets, so a LIVE run proves
 // the live path executes without false BUGs from a mismatched object/field pair
 // (e.g. an INVALID_FIELD from gluing a random CustomField onto a random object).
@@ -172,41 +161,14 @@ const LIVE_SAFE_ARGS = {
 };
 
 /**
- * THE HARNESS WAS MEASURING ITSELF, NOT THE PRODUCT.
- *
- * `sfi.route_question` returns `suggestedArgs` — the arguments its own `reason`
- * tells the host to supply ("what_happens_on_save needs an explicit DML event —
- * default to 'update' … when none is stated", and it hands back
- * `{event: 'insert'}` for "What happens when a Case is created?"). This function
- * ignored them and synthesized args from the tool's advertised `required` list
- * instead, so eight of the sixteen offline questions in the battery executed
- * WITHOUT the argument the router had just supplied, came back `invalid-query`,
- * and were tallied as product failures.
- *
- * Measured against a real 9,264-node org: those same eight questions ANSWER when
- * called the way the router instructs. The routing was never the problem — the
- * hand-off in this file was. A gate that under-reports is as dishonest as one
- * that over-reports, and this one was telling the owner half his front-page
- * questions did not work.
- *
- * Router-supplied args WIN over synthesized ones: the router read the question,
- * the synthesizer only read the schema.
- */
-/**
- * THE OTHER HALF OF THE HAND-OFF: `route.needsResolve`.
- *
- * The router does not only suggest args — it says "resolve the named component
- * first" and lists `sfi.resolve` as step one of its plan. This harness executed
- * the CONCRETE tool and skipped that step, so a question that names an object
- * ("What happens when a Case is created?") reached a tool that had never been
- * told which object, and answered `invalid-query`. The product was fine; the
- * question was being asked with the subject removed.
- *
- * This resolves the subject the way a host does: find the vault component the
- * question actually names, then fill whichever selector the tool advertises.
- * Deliberately conservative — it fills ONLY a selector the tool advertises and
- * that nothing has already supplied, so it can add a subject and never override
- * the router's own judgement or a live-safe fixture.
+ * THE HARNESS MUST NOT MEASURE ITSELF. The shortlist row carries
+ * `suggestedArgs` (the component route_question resolved from the question,
+ * bound under the tool's own key); synthesizing args from the schema instead
+ * once tallied eight answerable questions as product failures. Shortlist args
+ * WIN over synthesized ones. When the row still names `missingArgs`, the
+ * subject is resolved the way a host does: find the vault component the
+ * question names, then fill whichever selector the tool advertises and nothing
+ * has already supplied.
  */
 const SELECTOR_ORDER = [
   'objectApiName',
@@ -249,18 +211,18 @@ const withResolvedSubject = (question, tool, comps, args) => {
   return { ...args, [slot]: value };
 };
 
-const realizeArgs = (route, tool, sample, comps = []) => {
-  const suggested = route.suggestedArgs ?? {};
+const realizeArgs = (question, candidate, tool, sample, comps = []) => {
+  const suggested = candidate.suggestedArgs ?? {};
   if (tool.name === 'sfi.list_components') {
-    return { type: LIST_TYPE_BY_INTENT[route.intent] ?? 'CustomObject', limit: 50, ...suggested };
+    return { type: 'CustomObject', limit: 50, ...suggested };
   }
   if (tool.name in LIVE_SAFE_ARGS) {
     return { ...LIVE_SAFE_ARGS[tool.name], ...suggested, liveEnabled: LIVE };
   }
   const args = { ...synthArgs(tool, sample), ...suggested };
   if (tool.name.startsWith('sfi.live')) args.liveEnabled = LIVE;
-  return route.needsResolve === true
-    ? withResolvedSubject(route.question ?? '', tool, comps, args)
+  return candidate.missingArgs !== undefined
+    ? withResolvedSubject(question, tool, comps, args)
     : args;
 };
 
@@ -300,13 +262,15 @@ const runVault = async ({ name, path }) => {
     const rows = [];
     for (const q of QUESTIONS) {
       const rr = parse(await dispatchTool(ctx, 'sfi.route_question', { question: q, logGap: false }));
-      const route = rr?.data?.route;
-      if (!route) { rows.push({ q, status: 'BUG', detail: 'route-failed', plane: '?', intent: '?', tool: '' }); continue; }
-      const concrete = route.tools.find((t) => t !== 'sfi.resolve' && t !== 'sfi.capabilities');
+      const data = rr?.data;
+      if (!data) { rows.push({ q, status: 'BUG', detail: 'route-failed', plane: '?', tool: '' }); continue; }
+      // A refusal has nothing to run; otherwise the leading candidate is the pick.
+      const lead = data.refusal ? undefined : data.toolCandidates?.[0];
+      const concrete = lead?.tool;
       let exec = { status: 'routed-only', detail: '', sig: '' };
       if (concrete && toolByName.has(concrete)) {
         const tool = toolByName.get(concrete);
-        const args = realizeArgs(route, tool, sample, comps);
+        const args = realizeArgs(q, lead, tool, sample, comps);
         const t0 = performance.now();
         const r = parse(await dispatchTool(ctx, concrete, args));
         const ms = +(performance.now() - t0).toFixed(0);
@@ -316,7 +280,7 @@ const runVault = async ({ name, path }) => {
           exec.status = 'live-closed';
         }
       }
-      rows.push({ q, intent: route.intent, plane: route.plane, tool: concrete ?? '(none)', gap: route.gap?.category ?? '', needsResolve: route.needsResolve, ...exec });
+      rows.push({ q, plane: lead?.plane ?? 'unknown', tool: concrete ?? '(none)', gap: data.gap?.category ?? '', needsResolve: lead?.missingArgs !== undefined, ...exec });
     }
     return { name, comps: comps.length, rows };
   } finally {
@@ -326,19 +290,20 @@ const runVault = async ({ name, path }) => {
 
 const main = async () => {
   // Routing-only gate (NL_ROUTING_ONLY=1): no vaults needed, so it runs in CI.
-  // Asserts every question routes deterministically to REAL registered tools and
-  // that no rule points at a dead tool name — catching router/roster drift.
+  // Asserts the funnel places every battery question deterministically on REAL,
+  // advertised tools — catching funnel/roster drift (a renamed tool whose
+  // utterances still index under the old name would surface a dead candidate).
   if (process.env.NL_ROUTING_ONLY === '1') {
-    const { classifyQuestion, allRoutableTools } = await import('../packages/mcp/dist/src/intent-router.js');
-    const registered = new Set(V01_TOOLS.map((t) => t.name));
-    const dead = allRoutableTools().filter((t) => !registered.has(t));
+    const { semanticCandidates } = await import('../packages/mcp/dist/src/semantic-funnel.js');
+    const registered = new Set(V01_TOOLS.filter((t) => t.hidden !== true).map((t) => t.name));
+    const dead = new Set();
     let bad = 0;
     for (const q of QUESTIONS) {
-      const a = classifyQuestion(q);
-      const b = classifyQuestion(q);
-      const deterministic = a.intent === b.intent && a.plane === b.plane;
-      const realTools = a.tools.every((t) => registered.has(t));
-      if (!deterministic || !realTools) { bad++; console.log(`✗ ${q} -> ${a.intent}/${a.plane} [${a.tools.join(', ')}]`); }
+      const a = semanticCandidates(q, 8);
+      const b = semanticCandidates(q, 8);
+      const deterministic = JSON.stringify(a.map((c) => c.tool)) === JSON.stringify(b.map((c) => c.tool));
+      for (const c of a) if (!registered.has(c.tool)) dead.add(c.tool);
+      if (!deterministic || a.length === 0) { bad++; console.log(`✗ ${q} -> [${a.map((c) => c.tool).join(', ')}]`); }
     }
     const manifest = productManifestIdentity();
     console.log(
@@ -349,10 +314,10 @@ const main = async () => {
         (manifest.identityHash ? ` identity=${manifest.identityHash}` : '') +
         (manifest.catalogHash ? ` catalog=${manifest.catalogHash}` : ''),
     );
-    console.log(`routing-only gate: ${QUESTIONS.length} questions · ${allRoutableTools().length} routable tools`);
-    console.log(`dead router targets: ${dead.length}${dead.length ? ` (${dead.join(', ')})` : ''}`);
-    console.log(`bad routes: ${bad}  ${bad === 0 && dead.length === 0 ? '✅' : '❌'}`);
-    process.exit(bad === 0 && dead.length === 0 ? 0 : 1);
+    console.log(`routing-only gate: ${QUESTIONS.length} questions · ${registered.size} advertised tools`);
+    console.log(`dead shortlist targets: ${dead.size}${dead.size ? ` (${[...dead].join(', ')})` : ''}`);
+    console.log(`bad routes: ${bad}  ${bad === 0 && dead.size === 0 ? '✅' : '❌'}`);
+    process.exit(bad === 0 && dead.size === 0 ? 0 : 1);
   }
 
   console.log(`NL harness — ${QUESTIONS.length} questions × ${vaults.length} vault(s); LIVE=${LIVE}\n`);
@@ -370,7 +335,7 @@ const main = async () => {
   for (let i = 0; i < QUESTIONS.length; i++) {
     const q = QUESTIONS[i];
     const perVault = results.map((res) => res.rows[i]);
-    const planes = new Set(perVault.map((r) => `${r.plane}/${r.intent}`));
+    const planes = new Set(perVault.map((r) => `${r.plane}/${r.tool}`));
     const consistent = planes.size === 1;
     if (!consistent) routingInconsistent++;
     const r0 = perVault[0];
@@ -380,14 +345,14 @@ const main = async () => {
     if (perVault.every((r) => r.status === 'data')) dataBoth++;
     if (perVault.some((r) => r.status === 'live-closed')) liveClosed++;
     // A structural (non-live, non-gap, non-resolve) tool returning ok-error is
-    // worth a look. needsResolve intents legitimately ok-error here because the
-    // harness feeds a synthetic entity instead of running the resolve step.
+    // worth a look. A row with missingArgs legitimately ok-errors here because
+    // the harness feeds a synthetic entity instead of running the resolve step.
     if (!r0.gap && !r0.needsResolve && !String(r0.tool).startsWith('sfi.live') && perVault.some((r) => r.status === 'ok-error')) {
       unexpected.push(`${q}  (${r0.tool}: ${perVault.map((r) => r.detail).filter(Boolean).join('/')})`);
     }
     const flag = anyBug ? ' ❌BUG' : !consistent ? ' ⚠️ROUTE-DRIFT' : '';
     const outcomesByVault = perVault.map((r, vi) => `${results[vi].name}:${r.status}${r.sig ? `(${r.sig})` : ''}`).join('  ');
-    console.log(`• ${q}\n    → ${r0.plane}/${r0.intent} via ${r0.tool}${r0.gap ? ` [gap:${r0.gap}]` : ''}${flag}\n    ${outcomesByVault}`);
+    console.log(`• ${q}\n    → ${r0.plane} via ${r0.tool}${r0.gap ? ` [gap:${r0.gap}]` : ''}${flag}\n    ${outcomesByVault}`);
   }
 
   const manifest = productManifestIdentity();

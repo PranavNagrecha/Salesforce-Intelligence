@@ -97,7 +97,7 @@ const BOUNDARY_CLASSIFICATION_MISSING =
  * tell what a number counted without reading the source.
  */
 const USAGE_FREQUENCY_NOTE =
-  '`incomingReads` counts every inbound edge that CONSUMES this field\'s value: `readsFrom` (Apex, Flow, condition contexts) and `references` (formulas, validation rules, list views, report types, Lightning pages, quick actions, web links). `usedInLayout` (placement) and `grantedBy` (permission) are not reads and are excluded — their counts are in `excludedByEdgeType`.';
+  '`incomingReads` counts every inbound edge that CONSUMES this field\'s value: `readsFrom` (Apex, Flow, condition contexts, Lightning page visibility rules) and `references` (formulas, validation rules, list views, report types, Lightning page field items and related lists, quick actions, web links). `usedInLayout` (placement) and `grantedBy` (permission) are not reads and are excluded — their counts are in `excludedByEdgeType`.';
 /** Extra boundary when `incomingReads` is zero — the zero must read as CHECKED. */
 const BOUNDARY_ZERO_READS =
   'A zero here means no value-consuming edge was found among the metadata families this vault retrieved. It is not proof the field is unused — reports, dashboards, list-view filters, and dynamic Apex are named in `boundaries` where they are not covered.';

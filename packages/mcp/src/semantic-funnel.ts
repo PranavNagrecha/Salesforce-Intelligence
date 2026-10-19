@@ -1,8 +1,7 @@
 /**
- * Offline semantic FUNNEL for the question router (CAE-01).
+ * Offline semantic FUNNEL behind `sfi.route_question` (CAE-01).
  *
- * The regex router decides nothing here: this module turns "170 tools" into a
- * meaning-ranked SHORTLIST of ~8 candidate tools for a natural-language question,
+ * This module turns the whole tool roster into a meaning-ranked SHORTLIST of ~8 candidate tools for a natural-language question,
  * which the host LLM (already in the loop, free) then reads and chooses from. It
  * is an ADVISOR, not a decider — its job is to surface the right tools to read,
  * not to pick the final one.
@@ -19,16 +18,21 @@
  * Pure + lazily memoized: the index is built once on first query (which also
  * sidesteps any import-cycle init order — `V01_TOOLS` is only read at call time).
  */
-// TYPE-ONLY import: erased at runtime, so it introduces NO runtime import cycle
-// even though intent-router.ts and this module both read the tool roster. (And
-// intent-router.ts does not import this funnel, so no cycle exists in either
-// direction — verified at build time by the I1 contract test + tsc.)
-import { FUNNEL_UTTERANCES, INTERPRET_CONCEPT_CARDS, LIST_COMPONENTS_TYPE_CARDS } from './funnel-utterances.js';
-import type { Plane } from './intent-router.js';
+import {
+  FUNNEL_UTTERANCES,
+  FIND_COMPONENT_USAGES_CARDS,
+  INTERPRET_CONCEPT_CARDS,
+  LIST_COMPONENTS_TYPE_CARDS,
+  LIVE_MARKERS,
+  WHO_CAN_ACCESS_OBJECT_CARDS,
+} from './funnel-utterances.js';
 import { fuseScoresRrf, staticEmbedRanking, staticIndexAvailable } from './static-embed.js';
 import { CATEGORIES } from './tools/capabilities.js';
 import { stripCorpusBoilerplate } from './tools/corpus-boilerplate.js';
 import { V01_TOOLS, retrievalDocument } from './tools/index.js';
+
+/** The intelligence plane a tool answers from. */
+export type Plane = 'vault' | 'live' | 'hybrid' | 'knowledge' | 'unknown';
 
 /** Funnel-local confidence in the shortlist itself (I2a-calibrated band). */
 export type FunnelConfidence = 'high' | 'medium' | 'low';
@@ -44,8 +48,8 @@ export interface ToolCandidate {
   /**
    * The intelligence plane this candidate is answered from — `vault` | `live` |
    * `hybrid` (`knowledge`/`unknown` never reach a scored row). Carried on the
-   * candidate ITSELF (not just the demoted regex route) so a host LLM can read
-   * the consent requirement from the shortlist alone. I1 keystone for I2/I3.
+   * candidate ITSELF so a host LLM can read the consent requirement from the
+   * shortlist alone. I1 keystone for I2/I3.
    */
   readonly plane: Plane;
   /**
@@ -62,10 +66,12 @@ export interface ToolCandidate {
    * often as vault shortlists, without truncating either.
    */
   readonly confidence: FunnelConfidence;
-  /** Heuristic args when the regex route bound this tool (hybrid mode hint). */
+  /**
+   * Args route_question bound for this tool: the component it resolved from
+   * the question, under the tool's own declared key, plus any literal the
+   * question states. Present only when non-empty.
+   */
   readonly suggestedArgs?: Readonly<Record<string, unknown>>;
-  /** True when this row was promoted from the deterministic regex route hint. */
-  readonly fromRoute?: boolean;
   /**
    * Required args of this tool that route_question could NOT bind (no resolved
    * component, or no declared key fits it). Present only when non-empty: the
@@ -73,13 +79,10 @@ export interface ToolCandidate {
    */
   readonly missingArgs?: readonly string[];
   /**
-   * Raw PRE-FUSION cosine similarity (router-v2 P2 §4). For a funnel-scored row
-   * this equals `score` at scoring time; when route_question fuses the regex
-   * bonus, `score` moves but `cosine` stays the semantic evidence — and a row
-   * INSERTED purely from the regex route hint carries `cosine: 0` (zero
-   * semantic support; its 0.25 score is regex assertion, not meaning).
-   * Downstream calibration must read THIS field, never sniff the 0.25 magic
-   * number, to tell real semantic support from a regex assertion.
+   * Raw lexical cosine similarity. For a funnel-scored row this equals `score`;
+   * a row route_question inserts without funnel evidence (a tool inherited from
+   * host-passed context, a method tool bound from a `Class.method` reference)
+   * carries `cosine: 0` — zero semantic support, listed for a stated reason.
    */
   readonly cosine?: number;
   /**
@@ -282,7 +285,9 @@ const SYNONYMS: Readonly<Record<string, readonly string[]>> = {
   confident: ['risk', 'report', 'health'],
   shape: ['health', 'risk', 'overview'],
   // cleanup / dead-code family
-  unused: ['dead', 'usages', 'components', 'cleanup'],
+  // Not `usages`: "unused X" asks about absence, and that bridge handed every
+  // "unused" question a find_*_usages row that needs a target id.
+  unused: ['dead', 'components', 'cleanup'],
   dead: ['unused', 'code', 'usages'],
   cleanup: ['unused', 'dead', 'delete', 'candidates'],
   // freshness / coverage stragglers
@@ -376,6 +381,12 @@ const PHRASE_SYNONYMS: readonly (readonly [string, string])[] = (
     ['kicks in', 'fires'],
     ['kick in', 'fire'],
     ['reference sheet', 'dictionary'],
+    // FUNNEL-CMDT-AND-TYPO: "where is <component>?" is the admin's "where is
+    // <component> used?" — `where` and `is` are stopwords, so without the
+    // bridge only the component's own nouns reach the funnel and the usage
+    // finders are absent from the shortlist.
+    ['where is', 'where is used'],
+    ["where's", 'where is used'],
   ] as [string, string][]
 ).sort((a, b) => b[0].length - a[0].length);
 
@@ -403,6 +414,10 @@ const applyPhraseSynonyms = (lower: string): string => {
  * tips borderline gold queries out of the top-K (the F1 router-recall
  * regression). The doc corpus is tokenized verbatim.
  */
+/** Light plural stem: apps→app, objects→object; null for a non-plural or a short word. */
+const pluralStem = (t: string): string | null =>
+  t.length > 3 && t.endsWith('s') && !t.endsWith('ss') ? t.slice(0, -1) : null;
+
 export const tokenize = (text: string, expandPhrases = false): string[] => {
   const lowered = text.toLowerCase().replace(/[‘’ʼ']/g, "'");
   const raw = (expandPhrases ? applyPhraseSynonyms(lowered) : lowered)
@@ -415,7 +430,8 @@ export const tokenize = (text: string, expandPhrases = false): string[] => {
   const out: string[] = [];
   for (const t of raw) {
     out.push(t);
-    if (t.length > 3 && t.endsWith('s') && !t.endsWith('ss')) out.push(t.slice(0, -1));
+    const stem = pluralStem(t);
+    if (stem !== null) out.push(stem);
   }
   return out;
 };
@@ -477,27 +493,19 @@ const TOOL_KEYWORDS: Readonly<Record<string, string>> = {
 
 /**
  * Tools whose plane is NOT derivable from the `live_` name prefix, classified
- * explicitly. The values are baked from intent-router.ts's RULES (the
- * authoritative plane source) but COPIED here as a literal so the funnel stays
- * cycle-free — it does NOT import the 188 RULES. A contract test
+ * explicitly. This map is the authoritative plane source; a contract test
  * (`test/tool-plane-coverage.test.ts`) guards live coverage.
  *
- * Derivation (audited against the compiled RULES on 2026-06-30):
- *  - `blast_radius_live` is NOT routed by any rule, but it issues a live COUNT
- *    (its live magnitude is an opt-in enrichment over the static impact graph),
- *    so it is the documented non-`live_`-prefixed LIVE tool. Spec-mandated.
- *  - `fleet_drift_ranking` — every rule routes it `plane: 'live', liveRequired:
- *    true`. Genuinely live.
- *  - `field_cleanup_candidates`, `unused_fields_deep` — routed ONLY as
- *    `plane: 'hybrid'` (no vault rule); they fuse vault candidates with live
- *    field-population. Classified `hybrid`.
+ *  - `blast_radius_live` issues a live COUNT (its live magnitude is an opt-in
+ *    enrichment over the static impact graph), so it is the documented
+ *    non-`live_`-prefixed LIVE tool.
+ *  - `fleet_drift_ranking` is genuinely live.
+ *  - `field_cleanup_candidates`, `unused_fields_deep` fuse vault candidates
+ *    with live field-population. Classified `hybrid`.
  *
- * DELIBERATELY OMITTED (kept at the `vault` DEFAULT despite appearing in a
- * minority of hybrid rules): `resolve`, `list_components`, `integration_map`.
- * Each is routed `vault`/`liveRequired:false` by the overwhelming majority of
- * its rules (resolve: ~80 vault vs 2 hybrid; list_components: ~22 vs 2;
- * integration_map: 3 vs 1) and answers fully from the vault — live is an
- * OPTIONAL enrichment, never a requirement. Marking them `hybrid`/liveRequired
+ * DELIBERATELY OMITTED (kept at the `vault` DEFAULT): `resolve`,
+ * `list_components`, `integration_map`. Each answers fully from the vault —
+ * live is an OPTIONAL enrichment, never a requirement. Marking them `hybrid`/liveRequired
  * would be a consent FALSE-POSITIVE (telling a host it must grant the live
  * plane to enumerate components or resolve a name), which directly undermines
  * the I3 honesty/consent goal this keystone exists to enable.
@@ -660,7 +668,12 @@ export const buildToolDocs = (): Map<string, string> => {
     // perm set"). NOTE the standing invariant: docs are tokenized VERBATIM (no
     // phrase-synonym rewrite — see tokenize) and any corpus edit shifts every
     // term's IDF, so the funnel-recall / semantic-funnel tests referee changes.
-    const utterances = (FUNNEL_UTTERANCES[tool.name] ?? []).join(' ');
+    // A live_* tool answers "the org right now"; the shared markers put that
+    // vocabulary in every live document once instead of thirty hand edits.
+    const utterances = [
+      ...(FUNNEL_UTTERANCES[tool.name] ?? []),
+      ...(tool.name.startsWith('sfi.live_') ? LIVE_MARKERS : []),
+    ].join(' ');
     // Repeated boilerplate is stripped before indexing. `description` is both
     // the host-facing CONTRACT (wants exhaustive caveats, repeated verbatim
     // wherever they apply) and the RETRIEVAL DOCUMENT (wants vocabulary that
@@ -709,6 +722,8 @@ export const buildToolDocs = (): Map<string, string> => {
 const TOOL_CONCEPT_CARDS: Readonly<Record<string, Readonly<Record<string, readonly string[]>>>> = {
   'sfi.interpret': INTERPRET_CONCEPT_CARDS,
   'sfi.list_components': LIST_COMPONENTS_TYPE_CARDS,
+  'sfi.who_can_access_object': WHO_CAN_ACCESS_OBJECT_CARDS,
+  'sfi.find_component_usages': FIND_COMPONENT_USAGES_CARDS,
 };
 
 /**
@@ -807,6 +822,92 @@ export const resetFunnelIndex = (): void => {
 };
 
 /**
+ * One-edit typo tolerance for the user's own words. A query token the corpus
+ * has never seen ("acount", "permision", "accoutn") is read as the corpus term
+ * one edit away — a dropped, added, swapped or transposed letter — when the
+ * token is at least {@link TYPO_MIN_LENGTH} letters, long enough for a single
+ * edit to be a slip rather than a different word. Among several neighbours
+ * the most common corpus term (lowest IDF) wins. Short tokens, tokens with
+ * digits and tokens with no corpus word one edit away stay as typed, so
+ * gibberish stays gibberish and a name the catalog does not know stays a name.
+ * Coverage and the evidence floor both read the corrected tokens: a typo'd
+ * in-scope question is understood, not called out of scope. Exact one-edit
+ * rather than the resolver's `jaroWinkler` threshold: the funnel wants the
+ * tightest predicate, since a wrong "correction" adds a full-weight term.
+ */
+const TYPO_MIN_LENGTH = 5;
+
+/** Exactly one insertion, deletion, substitution or adjacent transposition apart. */
+const oneEditApart = (a: string, b: string): boolean => {
+  if (a === b) return false;
+  if (a.length === b.length) {
+    let first = -1;
+    let diffs = 0;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] === b[i]) continue;
+      diffs += 1;
+      if (diffs > 2) return false;
+      if (first < 0) first = i;
+      else if (i !== first + 1 || a[i] !== b[first] || a[first] !== b[i]) return false;
+    }
+    return diffs === 1 || diffs === 2;
+  }
+  if (Math.abs(a.length - b.length) !== 1) return false;
+  const [short, long] = a.length < b.length ? [a, b] : [b, a];
+  let i = 0;
+  let j = 0;
+  let skipped = false;
+  while (i < short.length) {
+    if (short[i] === long[j]) {
+      i += 1;
+      j += 1;
+    } else if (skipped) return false;
+    else {
+      skipped = true;
+      j += 1;
+    }
+  }
+  return true;
+};
+
+const correctTypo = (token: string, idf: ReadonlyMap<string, number>): string | null => {
+  if (token.length < TYPO_MIN_LENGTH || !/^[a-z]+$/.test(token)) return null;
+  let best: string | null = null;
+  let bestIdf = Number.POSITIVE_INFINITY;
+  for (const [term, weight] of idf) {
+    if (Math.abs(term.length - token.length) > 1 || !oneEditApart(token, term)) continue;
+    // Lowest IDF = most common corpus word; ties break on the longer term (the
+    // corpus holds stem artefacts such as `statu` beside `status`), then the
+    // lexically smaller, so the pick never depends on map order.
+    if (
+      weight < bestIdf ||
+      (weight === bestIdf && best !== null && (term.length > best.length || (term.length === best.length && term < best)))
+    ) {
+      best = term;
+      bestIdf = weight;
+    }
+  }
+  return best;
+};
+
+/** A plural whose singular the corpus knows: `tokenize` already pushed the stem beside it. */
+const knownThroughStem = (t: string, idf: ReadonlyMap<string, number>): boolean => {
+  const stem = pluralStem(t);
+  return stem !== null && idf.has(stem);
+};
+
+/**
+ * The user's own tokens (phrase-expanded, pre-synonym), one-edit typos read as
+ * the corpus word. A plural the corpus knows only in the singular is left as
+ * typed: its stem already carries it, and "correcting" it to the stem would
+ * count that word twice.
+ */
+const queryTokens = (question: string, idf: ReadonlyMap<string, number>): string[] =>
+  tokenize(question, true).map((t) =>
+    idf.has(t) || knownThroughStem(t, idf) ? t : (correctTypo(t, idf) ?? t),
+  );
+
+/**
  * I2a — funnel-confidence thresholds, CALIBRATED against the real corpus-gen
  * distributions (QA scripts/corpus-gen.mjs, --seed 1/2 --per 4). Per the Phase-0
  * finding, absolute top-score alone is a BLUNT signal — the vault-positive and
@@ -828,12 +929,35 @@ export const resetFunnelIndex = (): void => {
 const CONF_HIGH_TOP1 = 0.27;
 const CONF_HIGH_MARGIN = 0.05;
 const CONF_HIGH_COVERAGE = 0.8;
-// Conservative absolute gap FLOOR — set BELOW the gap median (0.17) so it only
-// catches the CLEAREST non-matches; it does NOT truncate, it forces `low`.
-const CONF_FLOOR_TOP1 = 0.09;
+// Absolute evidence FLOOR on the best cosine — set BELOW the gap median (0.17)
+// so it only catches the clearest non-matches; it does NOT truncate, it forces
+// `low` and route_question adds an out-of-scope gap. 2026-10-17 recalibration
+// on the 344-question gold set: real questions sit at p5 = 0.178, p10 = 0.204;
+// nonsense that survives on one stray prose word ("the the the and and but",
+// "what is 2 plus 2", "is my org good or bad") scores 0.09–0.136. At 0.14 the
+// floor turns 3 of 344 gold questions low (all at 0.115–0.128) and none of the
+// recall suite's. Questions a vault word still carries ("describe my
+// PostgreSQL indexes" 0.169, "what do my users think of the UI" 0.197) are
+// inside the real distribution; no floor separates them without costing a
+// dozen real questions, so they stay medium.
+const CONF_FLOOR_TOP1 = 0.14;
 // Near-zero coverage: most of the user's words were unknown to the corpus.
-// Exported: the advisory-route gate in route_question reads the same floor.
 export const CONF_MIN_COVERAGE = 0.34;
+
+/** The clearest non-match: best cosine under the floor, or the corpus knew almost none of the words. */
+const belowEvidenceFloor = (top1: number, coverage: number): boolean =>
+  top1 < CONF_FLOOR_TOP1 || coverage < CONF_MIN_COVERAGE;
+
+/**
+ * Does this shortlist rest on evidence under the floor? The same test that
+ * stamps its rows `low`, read from the rows' own lexical cosines so a caller
+ * that reordered or filtered them (route_question) reaches the same verdict.
+ */
+export const shortlistBelowEvidenceFloor = (
+  question: string,
+  cands: readonly ToolCandidate[],
+): boolean =>
+  belowEvidenceFloor(Math.max(0, ...cands.map((c) => c.cosine ?? c.score)), queryCoverage(question));
 // `low` band: a thin top1−top2 lead (the #1 tool barely beats #2) UNLESS rescued
 // by a strong absolute lead or strong coverage; or sub-vault-median coverage.
 const CONF_LOW_MARGIN = 0.045;
@@ -854,8 +978,7 @@ const CONF_LOW_COVERAGE = 0.72;
  */
 const funnelConfidence = (top1: number, top2: number, coverage: number): FunnelConfidence => {
   const margin = top1 - top2;
-  // Conservative gap floor + near-zero coverage → the clearest non-matches.
-  if (top1 < CONF_FLOOR_TOP1 || coverage < CONF_MIN_COVERAGE) return 'low';
+  if (belowEvidenceFloor(top1, coverage)) return 'low';
   if (top1 >= CONF_HIGH_TOP1 && margin >= CONF_HIGH_MARGIN && coverage >= CONF_HIGH_COVERAGE) {
     return 'high';
   }
@@ -978,13 +1101,17 @@ const fuseStaticEmbeddings = (question: string, lexical: ScoredRow[]): ScoredRow
  * what the user actually typed was understood, independent of how high any
  * one tool scored.
  */
+/** Fraction of the distinct query tokens the corpus knows (has an IDF entry for). */
+const coverageOf = (tokens: ReadonlySet<string>, idf: ReadonlyMap<string, number>): number => {
+  if (tokens.size === 0) return 0;
+  let hits = 0;
+  for (const t of tokens) if (idf.has(t)) hits += 1;
+  return hits / tokens.size;
+};
+
 export const queryCoverage = (question: string): number => {
   const idx = getFunnelIndex();
-  const raw = new Set(tokenize(question, true));
-  if (raw.size === 0) return 0;
-  let hits = 0;
-  for (const t of raw) if (idx.idf.has(t)) hits += 1;
-  return hits / raw.size;
+  return coverageOf(new Set(queryTokens(question, idx.idf)), idx.idf);
 };
 
 export const semanticCandidates = (question: string, k = 8): ToolCandidate[] => {
@@ -994,22 +1121,19 @@ export const semanticCandidates = (question: string, k = 8): ToolCandidate[] => 
   // words. COVERAGE is the fraction of these distinct tokens the corpus knows
   // (appears in ≥1 doc, i.e. has an IDF entry). Computed on the raw query, NOT
   // the synonym-expanded set, so confidence reflects how much of what the user
-  // actually typed was understood — not how many synonyms we bolted on.
-  const rawQueryTokens = new Set(tokenize(question, true));
+  // actually typed was understood — not how many synonyms we bolted on. A
+  // token one edit from a corpus word is read as that word (queryTokens).
+  const corrected = queryTokens(question, idx.idf);
+  const rawQueryTokens = new Set(corrected);
   // Expand multi-word phrases on the QUERY only — the doc corpus (buildIndex)
   // is tokenized verbatim so the corpus IDF stays intact (F1 regression fix).
   // Synonym expansion is WEIGHTED (Quartermaster backport): originals weigh 1
   // per occurrence, expanded terms EXPANSION_WEIGHT, so a grown synonym table
   // cannot wash out an exact-vocabulary match.
-  const qWeights = expandWeighted(tokenize(question, true));
+  const qWeights = expandWeighted(corrected);
   if (qWeights.size === 0) return [];
 
-  let coverage = 0;
-  if (rawQueryTokens.size > 0) {
-    let hits = 0;
-    for (const t of rawQueryTokens) if (idx.idf.has(t)) hits += 1;
-    coverage = hits / rawQueryTokens.size;
-  }
+  const coverage = coverageOf(rawQueryTokens, idx.idf);
 
   const qvec = new Map<string, number>();
   let qnorm = 0;
@@ -1061,8 +1185,7 @@ export const semanticCandidates = (question: string, k = 8): ToolCandidate[] => 
     scored.push({
       tool,
       score: rounded,
-      // Pre-fusion semantic evidence — identical to `score` here; preserved
-      // verbatim through route_question's regex-bonus fusion (P2 §4).
+      // Identical to `score` for a funnel-scored row (see ToolCandidate.cosine).
       cosine: rounded,
       category: idx.toolCategory.get(tool) ?? null,
       plane: planeEntry.plane,

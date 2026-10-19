@@ -10,6 +10,7 @@ import type {
 } from '@sf-intelligence/contracts';
 import { err, ok, splitPathSegments} from '@sf-intelligence/core';
 
+import { localBundleName } from './bundle-id.js';
 import {
   deriveComponentApiName,
   deriveNestedObjectAndApiName,
@@ -167,15 +168,14 @@ interface EnterpriseExtractorConfig {
    * REPORT-TYPE-OMITS-BASE-OBJECT-JOIN-AND-COLUMNS: parse a ReportType's
    * `<baseObject>` (the primary SObject the report type is built on),
    * `<join><relationship>` tree (the joined relationships — Contacts,
-   * `pkg__Related_Items__r`, …), and a COUNT of `<sections><columns>` entries.
-   * Set ONLY for `ReportType`. Without this the node was description-only:
-   * "what objects does this report type cover?" and join/affiliation report
-   * types read as empty. HONEST MINIMUM by design — surfaces the base object
-   * (with an edge), the join relationships, and a column COUNT with a
-   * `columnsModeled: false` caveat; the full per-column identity graph
-   * (potentially hundreds of `<field>`/`<table>` pairs) is a deferred
-   * follow-up, disclosed via the caveat rather than silently implied complete.
-   * See {@link extractReportTypeDetail}.
+   * `pkg__Related_Items__r`, …), and its `<sections><columns>` grouped by
+   * `<table>` path as `columnRefs`. Set ONLY for `ReportType`. The generic
+   * field sweep is suppressed for this type: a column's object is the LAST hop
+   * of a relationship path (`Account.Contacts`) and a dotted `<field>` is a
+   * lookup traversal spelled with the lookup FIELD (`Owner__c.Name`), neither
+   * knowable from one file. The import-time relationship resolver walks them
+   * and mints the field edges, recording what it cannot walk as
+   * `unresolvedColumns`. See {@link extractReportTypeDetail}.
    */
   readonly reportTypeDetail?: boolean;
   /**
@@ -1149,12 +1149,14 @@ interface ReportTypeDetailResult {
  *     `CustomObject:Contacts` would be a phantom, mirroring this file's
  *     discipline for pseudo/relationship tokens elsewhere.
  *
- *   - a COUNT of `<sections><columns>` blocks — `properties.columnCount`, with
- *     `properties.columnsModeled: false` disclosing that the per-column
- *     `<field>`/`<table>` identity graph (potentially hundreds of entries) is a
- *     deferred follow-up. This is the HONEST MINIMUM: the count answers "how
- *     big is this report type" without falsely implying the sparse generic
- *     fieldRefs sweep is the complete column model.
+ *   - every `<sections><columns>` block — `properties.columnCount` plus
+ *     `properties.columnRefs: [{ table, fields }]`, the `<field>` tokens grouped
+ *     under their `<table>` path in file order. No field edge is minted here:
+ *     `<table>` is `Base.Rel__r.Rel2__r` (relationship names, resolved
+ *     childward) and a dotted `<field>` walks a lookup spelled by its FIELD api
+ *     name (`Owner__c.Name`, resolved parentward). Both need every object in
+ *     view, so `mintRelationshipTraversalEdges` in `@sf-intelligence/graph`
+ *     owns them and parks the unwalkable rest on `unresolvedColumns`.
  */
 const extractReportTypeDetail = (xml: string, nodeId: string): ReportTypeDetailResult => {
   const edges: Edge[] = [];
@@ -1179,9 +1181,22 @@ const extractReportTypeDetail = (xml: string, nodeId: string): ReportTypeDetailR
   const joinRelationships = [...new Set(extractXmlValues(xml, 'relationship'))].sort();
   if (joinRelationships.length > 0) properties['joinRelationships'] = joinRelationships;
 
-  const columnCount = [...xml.matchAll(/<columns>/g)].length;
+  const columnRefs = new Map<string, string[]>();
+  let columnCount = 0;
+  for (const match of xml.matchAll(/<columns>([\s\S]*?)<\/columns>/g)) {
+    columnCount += 1;
+    const block = match[1] ?? '';
+    const field = extractXmlValues(block, 'field')[0];
+    const table = extractXmlValues(block, 'table')[0];
+    if (field === undefined || table === undefined || field.length === 0 || table.length === 0) continue;
+    const fields = columnRefs.get(table) ?? [];
+    if (!fields.includes(field)) fields.push(field);
+    columnRefs.set(table, fields);
+  }
   properties['columnCount'] = columnCount;
-  properties['columnsModeled'] = false;
+  if (columnRefs.size > 0) {
+    properties['columnRefs'] = [...columnRefs].map(([table, fields]) => ({ table, fields }));
+  }
 
   return { properties, edges };
 };
@@ -1371,10 +1386,15 @@ const extractEnterpriseMetadata = async (
     if (fromXml !== undefined && fromXml.length > 0) parentObjectApiName = fromXml;
   }
 
-  const fieldRefResult = extractFieldRefs(text.value, parentObjectApiName, {
-    listViewFilterScoped: config.parseListViewFilters === true,
-    reportCriteriaColumns: config.type === 'Report',
-  });
+  // A ReportType's columns are owned by `extractReportTypeDetail` + the
+  // import-time resolver: the generic sweep would mint `CustomField:` ids from
+  // relationship paths and lookup-field-spelled traversals that no node has.
+  const fieldRefResult: FieldRefSweepResult = config.reportTypeDetail === true
+    ? { refs: [], skippedLegacyDotted: 0 }
+    : extractFieldRefs(text.value, parentObjectApiName, {
+        listViewFilterScoped: config.parseListViewFilters === true,
+        reportCriteriaColumns: config.type === 'Report',
+      });
   const fieldRefs = fieldRefResult.refs;
   // list-view filter-predicate field identity. `filterFieldRefs` is
   // the set of well-formed fields a `<filters>` block predicates on; a field
@@ -1894,6 +1914,16 @@ const extractFlexiPageEmbeddedFlows = (xml: string): readonly string[] => {
  * FlexiPage -> `Flow:{flowName}` (plus a `embeddedFlows` node property) for each,
  * so an active embedded Flow no longer reads as 0-usage / safe-to-delete.
  *
+ * FLEXI-REFS: Lightning pages count as use. A visibility rule `{!Record.Field}`
+ * mints a `parsed` `readsFrom` edge (`referenceKind: 'visibilityRule'`) onto the
+ * field on `sobjectType`. A `{!Record.Rel__r.Field}` visibility token or a dotted
+ * `Record.` field item is parked as `recordTraversalRefs` and the org's own
+ * `componentName` placements as `componentRefs` (platform namespaces are counted
+ * in `standardComponents`); `relationship-refs.ts` in the graph package resolves
+ * both at import time and records what it cannot resolve on the node as
+ * `unresolvedVisibilityRefs` / `unresolvedFieldRefs` / `unresolvedComponentRefs`.
+ * No `CustomField:Record.*` id is minted.
+ *
  * HONESTY: the profile/recordType/app/form-factor ACTIVATION (which user sees
  * which page) is NOT in the retrieved FlexiPage metadata. It is modeled on the
  * assigning side instead — `recordPageOverrides` on the CustomObject (org
@@ -1965,6 +1995,45 @@ const extractFlexiPageRelatedListFieldRefs = (
   return out;
 };
 
+/**
+ * FLEXI-REFS: the record-context tokens a Lightning page reads in its
+ * `<visibilityRule><criteria><leftValue>{!Record.X}</leftValue>` blocks. The
+ * same `Record.` pseudo-object head as a `<fieldItem>`, so the same split: a
+ * single segment is a field on the page's `sobjectType`; a dotted path is a
+ * relationship traversal only the import-time relationship map can resolve.
+ */
+const extractFlexiPageVisibilityRecordRefs = (xml: string): readonly string[] => {
+  const re = /<leftValue>\s*\{!Record\.([A-Za-z0-9_.]+)\}\s*<\/leftValue>/g;
+  return [...new Set([...xml.matchAll(re)].map((m) => m[1] ?? '').filter((t) => t.length > 0))].sort();
+};
+
+/** A page's `Record.<Rel>.<Field>` paths, parked for `relationship-refs.ts` (graph) to resolve or record. */
+interface RecordTraversalRef {
+  readonly path: string;
+  /** The edge the resolved path becomes: a visibility rule reads, a field item references. */
+  readonly use: 'visibilityRule' | 'fieldRef';
+}
+
+/**
+ * FLEXI-REFS: every `<componentName>` on the page. A bare name or `c:name` is one
+ * of the org's own bundles (both LWC and Aura are placed by bare name); the
+ * extractor cannot tell which bundle type holds the name, so it parks the names
+ * and the import-time pass mints the edge onto the bundle node that exists.
+ * Any other namespace (`flexipage:`, `force:`, `lightning:`, a managed package)
+ * names a component outside this source tree: counted, never minted.
+ */
+const extractFlexiPageComponentRefs = (
+  xml: string,
+): { readonly componentRefs: readonly string[]; readonly standardComponents: number } => {
+  const custom = new Set<string>();
+  let standardComponents = 0;
+  for (const name of extractXmlValues(xml, 'componentName')) {
+    if (name.includes(':') && !name.startsWith('c:')) standardComponents += 1;
+    else custom.add(localBundleName(name));
+  }
+  return { componentRefs: [...custom].sort(), standardComponents };
+};
+
 export const extractFlexiPage = async (
   path: string,
 ): Promise<Result<ExtractionResult, ExtractorError>> => {
@@ -1976,7 +2045,26 @@ export const extractFlexiPage = async (
   const masterLabel = extractXmlValues(text.value, 'masterLabel')[0] ?? null;
   const pageType =
     extractXmlValues(text.value, 'type').find((t) => FLEXIPAGE_PAGE_TYPES.has(t)) ?? null;
-  const fieldRefs = extractFieldRefs(text.value, sobjectType).refs;
+  // FLEXI-REFS: a `Record.<Rel>.<Field>` fieldItem survives the sweep as a
+  // `CustomField:Record.*` id that names no node; park the path for the
+  // import-time relationship resolver instead (resolve or record, never guess).
+  const recordTraversalRefs: RecordTraversalRef[] = [];
+  const fieldRefs = extractFieldRefs(text.value, sobjectType).refs.filter((id) => {
+    if (!id.startsWith(`CustomField:${RECORD_CONTEXT_PREFIX}`)) return true;
+    recordTraversalRefs.push({
+      path: id.slice(`CustomField:${RECORD_CONTEXT_PREFIX}`.length),
+      use: 'fieldRef',
+    });
+    return false;
+  });
+  const unresolvedVisibilityRefs: string[] = [];
+  const visibilityFieldIds: string[] = [];
+  for (const token of extractFlexiPageVisibilityRecordRefs(text.value)) {
+    if (token.includes('.')) recordTraversalRefs.push({ path: token, use: 'visibilityRule' });
+    else if (sobjectType !== null) visibilityFieldIds.push(`CustomField:${sobjectType}.${token}`);
+    else unresolvedVisibilityRefs.push(`${RECORD_CONTEXT_PREFIX}${token}`);
+  }
+  const { componentRefs, standardComponents } = extractFlexiPageComponentRefs(text.value);
   // visibility-rule custom-permission references.
   const permissionRefs = extractFlexiPagePermissionRefs(text.value);
   // FLEXIPAGE-EMBEDDED-FLOW-UNGRAPHED: Screen Flows embedded via
@@ -2017,6 +2105,18 @@ export const extractFlexiPage = async (
       properties: { referenceKind: 'flexiPageObject' },
     });
   }
+  // FLEXI-REFS: a visibility rule READS the field it compares; `parsed` because
+  // the token is regex-scraped and scoped to the page object by this extractor.
+  for (const fieldId of visibilityFieldIds) {
+    edges.push({
+      fromId: nodeId,
+      toId: fieldId,
+      edgeType: 'readsFrom',
+      confidence: 'parsed',
+      source: EXTRACTOR_SOURCE,
+      properties: { referenceKind: 'visibilityRule' },
+    });
+  }
   // emit one declared `references` edge per custom-permission gate.
   for (const permId of permissionRefs) {
     edges.push({
@@ -2038,7 +2138,11 @@ export const extractFlexiPage = async (
     rawReferenceCount: fieldRefs.length,
     permissionRefs,
     embeddedFlows,
+    componentRefs,
+    standardComponents,
     ...(relatedListFieldRefs.length > 0 ? { relatedListFieldRefs } : {}),
+    ...(recordTraversalRefs.length > 0 ? { recordTraversalRefs } : {}),
+    ...(unresolvedVisibilityRefs.length > 0 ? { unresolvedVisibilityRefs } : {}),
   });
   return ok({ nodes: [node], edges });
 };

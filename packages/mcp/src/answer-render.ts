@@ -14,6 +14,10 @@
  * all 120+ tools would be redundant bloat.
  */
 
+import type { NextAction } from './clarify.js';
+import type { AutomationSummary } from './tools/org-overview.js';
+import { percent } from './tools/summarize-rows.js';
+
 /** Escape a Markdown table cell (pipes + newlines would break the table). */
 const cell = (v: unknown): string =>
   String(v ?? '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ').trim();
@@ -176,13 +180,16 @@ interface ResolveLike {
   readonly disposition: 'exact' | 'ambiguous' | 'none';
   readonly candidates: readonly ResolveCandidateLike[];
   readonly clarification: { readonly question: string } | null;
+  /** Suggests `sfi refresh` only when a `refresh` action is on offer (never on the demo vault). */
+  readonly nextActions?: readonly NextAction[];
 }
 
 /** Render a resolve result: a verdict line + (when ambiguous) a candidate table. */
 export const renderResolveMarkdown = (data: ResolveLike): string => {
   const { disposition, candidates } = data;
   if (disposition === 'none' || candidates.length === 0) {
-    return 'No confident match. Try the exact API name, add the object name, or `/sfi-refresh` if it may be new.';
+    const refresh = data.nextActions?.some((a) => a.action === 'refresh') === true;
+    return `No confident match. Try the exact API name or add the object name${refresh ? ', or run `sfi refresh` if it may be new' : ''}.`;
   }
   const where = (c: ResolveCandidateLike): string =>
     c.parentApiName !== null ? `${c.apiName} on ${c.parentApiName}` : c.apiName;
@@ -207,7 +214,7 @@ interface NamedCount {
 interface OrgOverviewLike {
   readonly componentCounts: Readonly<Record<string, number>>;
   readonly topObjects: readonly (NamedCount & { readonly inboundReferences: number })[];
-  readonly automationSummary: { readonly flows: number; readonly apexTriggers: number; readonly workflowRules: number; readonly activeRatio: number };
+  readonly automationSummary: AutomationSummary;
   readonly integrationSummary: { readonly total: number };
   readonly coverage?: {
     readonly integrationRetrieved: boolean;
@@ -269,9 +276,17 @@ export const renderOrgOverviewMarkdown = (data: OrgOverviewLike): string => {
     cov && !cov.integrationRetrieved
       ? 'integration not retrieved'
       : `${data.integrationSummary.total} integration surfaces`;
+  // The percentage names the rows it was computed over (every automation
+  // family with a known status), instead of hanging off the workflow-rule count.
+  const activePart =
+    a.measuredCount === 0
+      ? 'active status not extracted'
+      : `${a.activeCount} of ${a.measuredCount} automation items active ` +
+        `(${percent(a.activeCount, a.measuredCount)}%)` +
+        (a.activeStatusUnknownCount > 0 ? ` · ${a.activeStatusUnknownCount} without a status` : '');
   parts.push(
-    `### Automation\n${a.flows} flows · ${a.apexTriggers} triggers · ${workflowPart}` +
-      ` (${Math.round(a.activeRatio * 100)}% active) · ${integrationPart}`,
+    `### Automation\n${a.flows} flows · ${a.apexTriggers} triggers · ` +
+      `${a.approvalProcesses} approval processes · ${workflowPart} · ${activePart} · ${integrationPart}`,
   );
 
   const ra = data.recentActivity;
@@ -364,37 +379,7 @@ export const renderInactiveUsersMarkdown = (data: InactiveUsersLike): string => 
 
 // --- route_question --------------------------------------------------------
 
-interface RouteLike {
-  readonly question: string;
-  readonly plane: 'vault' | 'live' | 'hybrid' | 'knowledge' | 'unknown';
-  readonly intent: string;
-  readonly tools: readonly string[];
-  readonly liveRequired: boolean;
-  readonly needsResolve: boolean;
-  readonly reason: string;
-  readonly gap: { readonly category: string; readonly note: string } | null;
-  readonly confidence?: 'high' | 'medium' | 'low';
-  readonly risk?: 'informational' | 'change-planning' | 'security-sensitive' | 'destructive';
-  readonly alternatives?: readonly { readonly intent: string }[];
-  readonly clarification?: {
-    readonly required: boolean;
-    readonly question: string;
-    readonly fallback?: {
-      readonly intent: string;
-      readonly warning: string;
-    };
-  } | null;
-  readonly plan?: readonly {
-    readonly stepId?: string;
-    readonly dependsOn?: readonly string[];
-    readonly question: string;
-    readonly intent: string;
-    readonly tools: readonly string[];
-  }[];
-  readonly contextApplied?: ContextAppliedLike;
-}
-
-/** Router-v2 P5: host-passed context disclosure attached to a route. */
+/** Host-passed context disclosure attached to a route_question response. */
 interface ContextAppliedLike {
   readonly anaphor: string;
   readonly substitutedComponentId?: string;
@@ -404,7 +389,7 @@ interface ContextAppliedLike {
 
 /**
  * One-line disclosure of how host-passed conversation context changed the
- * route, e.g. "Context applied: 'it' → Flow:Order_Sync (from previous turn);
+ * response, e.g. "Context applied: 'it' → Flow:Order_Sync (from previous turn);
  * tool inherited: sfi.explain_flow." Exported so route_question can append it
  * to an already-rendered inner response (clarification continuation, where the
  * inner rendered text — candidate list included — is reused verbatim).
@@ -422,61 +407,74 @@ export const renderContextApplied = (contextApplied: ContextAppliedLike): string
   );
 };
 
-/** Render a routing verdict: plane + the tool plan + honest gap note. */
-export const renderRouteMarkdown = (route: RouteLike): string => {
-  const contextLine =
-    route.contextApplied !== undefined
-      ? `\n\n${renderContextApplied(route.contextApplied)}`
-      : '';
-  if (route.plane === 'unknown') {
-    return (
-      `I don't have a tool for **"${route.question}"** yet — ${route.reason} ` +
-      `${route.gap ? `(logged as \`${route.gap.category}\`).` : ''}` +
-      contextLine
+interface ShortlistLike {
+  readonly question: string;
+  readonly toolCandidates?: readonly {
+    readonly tool: string;
+    readonly score: number;
+    readonly plane: string;
+    readonly liveRequired: boolean;
+    readonly answers: string;
+    readonly suggestedArgs?: Readonly<Record<string, unknown>>;
+    readonly missingArgs?: readonly string[];
+  }[];
+  readonly clarification: { readonly required: boolean; readonly question: string; readonly options: readonly string[] } | null;
+  readonly refusal?: { readonly disclosure: string; readonly readOnlyAlternative?: string };
+  readonly gap: { readonly category: string; readonly note: string } | null;
+  readonly entityEvidence?: { readonly warning: string | null };
+  readonly contextApplied?: ContextAppliedLike;
+}
+
+/**
+ * Render a route_question response: the ranked shortlist (the host picks),
+ * then whatever must be read before running anything — a stop-and-ask, a
+ * refusal, an honest gap, a premise warning, the context disclosure.
+ */
+export const renderShortlistMarkdown = (data: ShortlistLike): string => {
+  const parts: string[] = [];
+  const cands = data.toolCandidates ?? [];
+  if (data.refusal !== undefined) {
+    parts.push(
+      `**"${data.question}"** — ${data.refusal.disclosure}` +
+        (data.refusal.readOnlyAlternative !== undefined
+          ? ` Read-only alternative: \`${data.refusal.readOnlyAlternative}\`.`
+          : ''),
+    );
+    if (cands.length > 0) {
+      parts.push(
+        `**Candidate tools (transparency only — the request itself is refused/gapped; do not execute them to satisfy it):** ${cands.map((c) => `\`${c.tool}\``).join(', ')}`,
+      );
+    }
+  } else if (cands.length === 0) {
+    parts.push(
+      `I don't have a tool for **"${data.question}"**${data.gap ? ` — ${data.gap.note}` : '.'}`,
+    );
+  } else {
+    const rows = cands.map((c, i) => {
+      const live = c.liveRequired ? ' · needs the opt-in live plane' : '';
+      const args =
+        c.suggestedArgs !== undefined ? ` · args ${JSON.stringify(c.suggestedArgs)}` : '';
+      const missing =
+        c.missingArgs !== undefined ? ` · still needs: ${c.missingArgs.join(', ')}` : '';
+      return `${i + 1}. \`${c.tool}\` (${c.score.toFixed(3)}, ${c.plane}${live}) — ${c.answers}${args}${missing}`;
+    });
+    parts.push(
+      `**Candidate tools for "${data.question}" (ranked by meaning; you pick, then run):**\n${rows.join('\n')}`,
     );
   }
-  const steps: string[] = [];
-  // When the route asks to resolve first, a leading `sfi.resolve` in tools
-  // would otherwise be listed twice — drop it so the plan reads cleanly.
-  let plannedTools = route.tools;
-  if (route.needsResolve) {
-    steps.push('`sfi.resolve` the named component first');
-    if (plannedTools[0] === 'sfi.resolve') plannedTools = plannedTools.slice(1);
+  if (data.clarification?.required === true) {
+    parts.push(
+      `**Stop before executing:** ${data.clarification.question} Options: ${data.clarification.options.map((o) => `\`${o}\``).join(', ')}`,
+    );
   }
-  steps.push(...plannedTools.map((t) => `\`${t}\``));
-  const live = route.liveRequired
-    ? ' Needs the opt-in live plane (`sfi.live_consent { grant: true }`).'
-    : '';
-  const enterprise =
-    `\n\nConfidence: **${route.confidence ?? 'high'}**` +
-    (route.risk !== undefined ? ` · risk: **${route.risk}**` : '') +
-    (route.alternatives !== undefined && route.alternatives.length > 0
-      ? ` · alternatives: ${route.alternatives.map((alternative) => `\`${alternative.intent}\``).join(', ')}`
-      : '');
-  const clarification =
-    route.clarification?.required === true
-      ? `\n\n**Stop before executing:** ${route.clarification.question}` +
-        (route.clarification.fallback !== undefined
-          ? `\n\nFallback warning: ${route.clarification.fallback.warning}`
-          : '')
-      : '';
-  const compoundPlan =
-    route.plan !== undefined && route.plan.length > 1
-      ? `\n\nCompound plan:\n${route.plan.map((step, i) => {
-          const dependency =
-            step.dependsOn !== undefined && step.dependsOn.length > 0
-              ? ` (after ${step.dependsOn.map((id) => `\`${id}\``).join(', ')})`
-              : ' (independent)';
-          return `${i + 1}. \`${step.stepId ?? `step-${i + 1}`}\` · \`${step.intent}\`${dependency}: ${step.tools.map((tool) => `\`${tool}\``).join(' → ')}`;
-        }).join('\n')}`
-      : '';
-  return (
-    `**${route.plane}** plane · intent \`${route.intent}\`. ${route.reason}${live}\n\n` +
-    `Plan: ${steps.join(' → ')}` +
-    enterprise +
-    clarification +
-    compoundPlan +
-    (route.gap ? `\n\n_Partial: ${route.gap.note}_` : '') +
-    contextLine
-  );
+  if (data.refusal === undefined && data.gap !== null && cands.length > 0) {
+    parts.push(`_Gap (\`${data.gap.category}\`): ${data.gap.note}_`);
+  }
+  if (data.entityEvidence?.warning) {
+    parts.push(data.entityEvidence.warning);
+  }
+  if (data.contextApplied !== undefined) {
+    parts.push(renderContextApplied(data.contextApplied));
+  }
+  return parts.join('\n\n');
 };

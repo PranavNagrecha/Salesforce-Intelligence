@@ -1116,3 +1116,94 @@ describe('findComponentUsagesHandler — inputAssignments object scoping', () =>
     expect(d.summary.hasStaticEvidence).toBe(true);
   });
 });
+
+// REFERRER-STATUS: a usage row that does not say whether its referrer runs
+// let a host warn that an Obsolete Flow and an Active one "may overwrite each
+// other". Every row carries `status` from the shared helper; the summary counts
+// distinct referrers per status; and the "layout placement not modeled" caveat
+// is gone because `usedInLayout` IS an incoming edge.
+describe('findComponentUsagesHandler — referrer status and evidence-conditional caveats', () => {
+  const FIELD_S = 'CustomField:Demo_Obj__c.Demo_Status__c';
+  let sdir: string; let sstore: GraphStore; let sctx: Context;
+  beforeAll(async () => {
+    sdir = mkdtempSync(join(tmpdir(), 'sfi-fcu-status-'));
+    const o = await openGraph(join(sdir, 'g.db')); if (!o.ok) throw new Error(o.error.message);
+    sstore = o.value;
+    const i = await importExtractionResults(sstore, [{
+      nodes: [
+        node({ id: FIELD_S, type: 'CustomField', apiName: 'Demo_Obj__c.Demo_Status__c' }),
+        node({ id: 'Flow:Demo_Obsolete_Writer', type: 'Flow', apiName: 'Demo_Obsolete_Writer', properties: { status: 'Obsolete' } }),
+        node({ id: 'Flow:Demo_Active_Writer', type: 'Flow', apiName: 'Demo_Active_Writer', properties: { status: 'Active' } }),
+        node({ id: 'Flow:Demo_Draft_Reader', type: 'Flow', apiName: 'Demo_Draft_Reader', properties: { status: 'Draft' } }),
+        node({ id: 'ApexTrigger:Demo_Trigger', type: 'ApexTrigger', apiName: 'Demo_Trigger', properties: { status: 'Active' } }),
+        node({ id: 'ValidationRule:Demo_Obj__c.Demo_Rule', type: 'ValidationRule', apiName: 'Demo_Rule', properties: { active: false } }),
+        node({ id: 'Layout:Demo_Obj__c-Demo Layout', type: 'Layout', apiName: 'Demo_Obj__c-Demo Layout' }),
+        // ApexClass:Demo_Phantom is referenced by an edge but has no node row.
+      ],
+      edges: [
+        edge({ fromId: 'Flow:Demo_Obsolete_Writer', toId: FIELD_S, edgeType: 'writesTo', confidence: 'parsed' }),
+        edge({ fromId: 'Flow:Demo_Active_Writer', toId: FIELD_S, edgeType: 'writesTo', confidence: 'parsed' }),
+        edge({ fromId: 'Flow:Demo_Draft_Reader', toId: FIELD_S, edgeType: 'readsFrom', confidence: 'parsed' }),
+        edge({ fromId: 'ApexTrigger:Demo_Trigger', toId: FIELD_S, edgeType: 'writesTo', confidence: 'parsed' }),
+        edge({ fromId: 'ValidationRule:Demo_Obj__c.Demo_Rule', toId: FIELD_S, edgeType: 'readsFrom' }),
+        edge({ fromId: 'Layout:Demo_Obj__c-Demo Layout', toId: FIELD_S, edgeType: 'usedInLayout' }),
+        edge({ fromId: 'ApexClass:Demo_Phantom', toId: FIELD_S, edgeType: 'readsFrom', confidence: 'heuristic' }),
+      ],
+    }]);
+    if (!i.ok) throw new Error(i.error.message);
+    sctx = { vaultRoot: sdir, manifest: MANIFEST, graph: sstore };
+  });
+  afterAll(async () => { await closeGraph(sstore); rmSync(sdir, { recursive: true, force: true }); });
+
+  const statusOf = (d: { graphReferrers: readonly { sample: readonly { referrerId: string; status: string }[] }[] }, id: string) =>
+    d.graphReferrers.flatMap((g) => g.sample).find((s) => s.referrerId === id)?.status;
+
+  it('every graph referrer row carries the referrer status read from its own node', async () => {
+    const r = await findComponentUsagesHandler(sctx, { componentId: FIELD_S, includeGrep: false });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(statusOf(d, 'Flow:Demo_Obsolete_Writer')).toBe('obsolete');
+    expect(statusOf(d, 'Flow:Demo_Active_Writer')).toBe('active');
+    expect(statusOf(d, 'Flow:Demo_Draft_Reader')).toBe('draft');
+    expect(statusOf(d, 'ApexTrigger:Demo_Trigger')).toBe('active');
+    expect(statusOf(d, 'ValidationRule:Demo_Obj__c.Demo_Rule')).toBe('inactive');
+    // No activation concept (Layout) and no node row (phantom) both read `unknown`.
+    expect(statusOf(d, 'Layout:Demo_Obj__c-Demo Layout')).toBe('unknown');
+    expect(statusOf(d, 'ApexClass:Demo_Phantom')).toBe('unknown');
+    // The summary counts DISTINCT referrers per status.
+    expect(d.summary.referrerStatus).toEqual({ active: 2, inactive: 1, obsolete: 1, draft: 1, unknown: 2 });
+    expect(d.boundaries.join(' ')).toMatch(/2 active/);
+    expect(d.boundaries.join(' ')).toMatch(/1 obsolete/);
+  });
+
+  it('never claims layout placement is unmodeled — `usedInLayout` is the incoming edge', async () => {
+    const r = await findComponentUsagesHandler(sctx, { componentId: FIELD_S, includeGrep: false });
+    expect(r.ok).toBe(true); if (!r.ok) return;
+    const d = r.value.data;
+    expect(d.graphReferrers.map((g) => g.referrerType)).toContain('Layout');
+    expect(d.boundaries.join(' ')).not.toMatch(/layout placement/);
+    expect(d.referrerCoverage?.unmodeledKinds ?? []).not.toContain('layout placement');
+    // The fixture vault was built by 0.1.0, before roll-up and condition edges
+    // existed (0.3.0), so THOSE two are still honestly named; a 0.3.0 vault has
+    // every CustomField referrer kind modeled and carries no referrerCoverage.
+    expect(d.referrerCoverage?.unmodeledKinds).toEqual(['roll-up source coupling', 'flow decision/filter reads']);
+    const r2 = await findComponentUsagesHandler(
+      { ...sctx, manifest: { ...MANIFEST, version: '0.3.0' } },
+      { componentId: FIELD_S, includeGrep: false },
+    );
+    expect(r2.ok).toBe(true); if (!r2.ok) return;
+    expect('referrerCoverage' in r2.value.data).toBe(false);
+  });
+
+  it('describes the grep tier as leads only when it actually ran', async () => {
+    const off = await findComponentUsagesHandler(sctx, { componentId: FIELD_S, includeGrep: false });
+    expect(off.ok).toBe(true); if (!off.ok) return;
+    expect(off.value.data.grepSupplement.ran).toBe(false);
+    expect(off.value.data.boundaries.join(' ')).not.toMatch(/Treat it as leads/);
+    expect(off.value.data.boundaries.join(' ')).toMatch(/grep supplement did not run/i);
+    const on = await findComponentUsagesHandler(sctx, { componentId: FIELD_S });
+    expect(on.ok).toBe(true); if (!on.ok) return;
+    expect(on.value.data.grepSupplement.ran).toBe(true);
+    expect(on.value.data.boundaries.join(' ')).toMatch(/Treat it as leads/);
+  });
+});

@@ -24,7 +24,6 @@ import {
   soundnessFromNodes,
   soundnessFromDynamicApexIds,
   UNWALKED_EDGE_TYPE_NOTE,
-  UNWALKED_REFERRER_CLASSES,
 } from '../../src/tools/soundness.js';
 
 /** Minimal Apex node; `qualityIssues` carries the persisted dynamic-apex signal. */
@@ -154,21 +153,30 @@ describe('soundnessFromDynamicApexIds', () => {
 // CustomObject is structurally blind to referrer classes not modeled as edges —
 // it must NOT report complete/full on their absence.
 describe('soundnessForImpactWalk', () => {
-  it('a CustomField root is NOT complete/full — carries an unwalked-referrer-class blind spot naming the classes verbatim', () => {
-    const s = soundnessForImpactWalk([typedNode('CustomField:Account.Status__c', 'CustomField')], 'CustomField');
+  it('a CustomField root on a pre-0.3.0 vault is NOT complete/full — names the kinds that vault cannot hold, never layout placement', () => {
+    const field = typedNode('CustomField:Account.Status__c', 'CustomField');
+    const s = soundnessForImpactWalk([field], 'CustomField', field, '0.2.5');
     expect(s.complete).toBe(false);
     expect(s.staticCoverage).toBe('partial');
     const referrer = s.blindSpots.find((b) => b.kind === 'unwalked-referrer-class');
     expect(referrer).toBeDefined();
-    // Structural blind spot: no specific componentIds, names the classes instead.
+    // Structural blind spot: no specific componentIds, names the kinds instead.
     expect(referrer?.componentIds).toEqual([]);
-    expect(referrer?.referrerClasses).toEqual([...UNWALKED_REFERRER_CLASSES]);
-    // The four classes the walk cannot see, verbatim.
-    expect(referrer?.referrerClasses).toContain('roll-up source coupling');
-    expect(referrer?.referrerClasses).toContain('layout placement');
-    expect(referrer?.referrerClasses).toContain('flow decision/filter reads');
-    expect(referrer?.referrerClasses).toContain('tab/app membership');
+    // Roll-up and condition edges arrived in 0.3.0; `usedInLayout` has always
+    // been an edge and a field is never a tab member.
+    expect(referrer?.referrerClasses).toEqual(['roll-up source coupling', 'flow decision/filter reads']);
     expect(referrer?.note).toMatch(/not checked/i);
+    expect(referrer?.note).not.toMatch(/layout placement/);
+  });
+
+  it('a CustomField root on a current vault is fully walked — layout, roll-up and condition referrers ARE edges', () => {
+    const field = typedNode('CustomField:Account.Status__c', 'CustomField');
+    for (const builtBy of [undefined, '0.3.0', '0.8.0']) {
+      const s = soundnessForImpactWalk([field], 'CustomField', field, builtBy);
+      expect(s.complete, `builtBy=${String(builtBy)}`).toBe(true);
+      expect(s.staticCoverage).toBe('full');
+      expect(s.blindSpots).toEqual([]);
+    }
   });
 
   it('a CustomObject root is also NOT complete/full', () => {
@@ -193,7 +201,7 @@ describe('soundnessForImpactWalk', () => {
   it('PRESERVES a dynamic-apex blind spot AND adds the referrer one on a field root (never weakens a true positive)', () => {
     const dyn = { ...apexNode('ApexClass:Dyn', [DYNAMIC_ISSUE]), type: 'ApexClass' as ComponentType };
     const field = typedNode('CustomField:Account.Status__c', 'CustomField');
-    const s = soundnessForImpactWalk([dyn, field], 'CustomField');
+    const s = soundnessForImpactWalk([dyn, field], 'CustomField', field, '0.2.5');
     expect(s.complete).toBe(false);
     expect(s.blindSpots.some((b) => b.kind === 'dynamic-apex')).toBe(true);
     expect(s.blindSpots.some((b) => b.kind === 'unwalked-referrer-class')).toBe(true);
@@ -384,8 +392,11 @@ describe('soundnessForImpactWalk: referrer-coverage table (A05/C07/C02)', () => 
     ).not.toContain('Apex System.Label references');
   });
 
-  it('keeps the field/object referrer classes byte-identical (derived from the same table)', () => {
-    expect(UNWALKED_REFERRER_CLASSES).toEqual([
+  it('a CustomObject root still names the four kinds no incoming edge reaches', () => {
+    const s = soundnessForImpactWalk([typedNode('CustomObject:Account', 'CustomObject')], 'CustomObject');
+    expect(
+      s.blindSpots.find((b) => b.kind === 'unwalked-referrer-class')?.referrerClasses,
+    ).toEqual([
       'roll-up source coupling',
       'layout placement',
       'flow decision/filter reads',

@@ -57,29 +57,20 @@ Skip the prompts by passing flags:
 
 ### What gets created
 
-A successful `/sfi-init` leaves the following layout in your repo:
+A successful `/sfi-init` creates two files and touches one:
 
 ```
 your-dx-repo/
 ├── force-app/                      # untouched
 ├── org-kb/
-│   ├── source/                     # empty for now; refresh fills this
-│   ├── components/                 # empty for now
-│   ├── graph/                      # empty for now
 │   └── meta/
 │       ├── config.json             # { targetOrg, vaultRoot, version, createdAt }
-│       └── version.txt             # "0.1.0\n"
-└── .gitignore                      # gains two new entries
+│       └── version.txt             # the sf-intelligence version that created the vault
+└── .gitignore                      # ignores org-kb/source/, graph/, snapshots/ and meta/ except manifest, config, version
 ```
 
-`/sfi-init` appends `org-kb/source/` and `org-kb/graph/` to
-`.gitignore`. Both directories hold regenerable artifacts — the raw DX
-retrieve output and the DuckDB graph file — so they don't belong in git.
-If you commit the vault, commit `org-kb/components/` plus
-`org-kb/meta/manifest.json`, `meta/config.json` and `meta/version.txt`.
-Do not commit the rest of `meta/`: `profile-name-map.json` (Profile Ids and
-labels), annotations and the demand queue hold org data, and `sfi init` does
-not ignore them for you.
+`source/`, `components/` and `graph/` appear on the first refresh. What to
+commit is one list, in [§ 6](#6-first-commit).
 
 A summary at the end confirms what was done:
 
@@ -271,51 +262,40 @@ org-kb/
 
 Brief tour:
 
-- **`source/`** — gitignored. Raw `sf project retrieve` output. Used
-  by the extractors as input, and by `sfi.search_apex_source` /
-  `sfi.search_flow_metadata` as the corpus for grep tools. Regenerate
-  any time with the next refresh.
-- **`components/`** — committed. This is the value the team shares.
-  One Markdown file per component, organised by type. A `git diff`
-  here after a refresh shows exactly what changed in the org since the
-  last refresh; reviewers read it as a metadata changelog.
-- **`graph/graph.duckdb`** — gitignored. The DuckDB graph backing
-  `sfi.get_edges` and `sfi.get_subgraph`. Regenerable by re-running
-  refresh against the same `source/` tree (try `--no-pull`).
-- **`meta/`** — committed. `config.json` is the persisted target-org
-  alias and vault root. `version.txt` is the version stamp. The
-  `manifest.json` written by the refresh contains:
-  - `version` — the SfIntelligence version that last refreshed.
-  - `refreshedAt` — ISO-8601 timestamp.
-  - `sourceOrg` — the alias that was used.
-  - `components` — per-type counts.
-  - `edges` — per-edge-type counts.
-  - `sourceTreeHash` — content hash of `org-kb/source/`. Mismatches
-    with the on-disk source indicate drift.
+- **`source/`** — raw `sf project retrieve` output; the extractors' input
+  and the corpus for `sfi.search_apex_source` / `sfi.search_flow_metadata`.
+- **`components/`** — one Markdown file per component, organised by type. A
+  `git diff` here after a refresh shows what changed in the org; reviewers
+  read it as a metadata changelog.
+- **`graph/graph.duckdb`** — the DuckDB graph behind `sfi.get_edges` and
+  `sfi.get_subgraph`; regenerable from `source/` with `sfi refresh --no-pull`.
+- **`meta/`** — `config.json` (target-org alias and vault root),
+  `version.txt`, and `manifest.json` written by the refresh: `version`,
+  `refreshedAt`, `sourceOrg`, per-type `components` and per-edge-type `edges`
+  counts, and `sourceTreeHash` (a mismatch with the on-disk source means
+  drift). Other `meta/` files hold org data (see § 6).
 
 Run `/sfi-status` at any time to print the manifest's key fields in a
 compact form.
 
 ## 6. First commit
 
-Once refresh prints `success` (or `partial` with errors you've read),
-commit two paths:
+One rule for what goes into git, the same whether this is the first
+commit or the hundredth:
+
+| Commit | Do not commit |
+| --- | --- |
+| `org-kb/components/` (the Markdown the team shares) | `org-kb/source/` and `org-kb/graph/` (regenerable, large; `sfi init` ignores them) |
+| `org-kb/meta/manifest.json`, `meta/config.json`, `meta/version.txt` | the rest of `org-kb/meta/` — `profile-name-map.json` (Profile Ids and labels), annotations, the demand queue, history and retrieval ledgers hold org data; `sfi init` ignores them (only `manifest.json`, `config.json` and `version.txt` are let through) |
 
 ```sh
 git add org-kb/components/ org-kb/meta/manifest.json org-kb/meta/config.json org-kb/meta/version.txt
-git commit -m "Initial SfIntelligence vault for my-org-prod"
+git commit -m "Initial sf-intelligence vault for my-org-prod"
 ```
 
-Don't add `org-kb/source/` or `org-kb/graph/` — both are in
-`.gitignore`. The source tree is large raw XML; the graph is a binary
-DuckDB file. Both are regenerable, so committing them slows clones and
-produces noisy diffs. If you `git add` one by accident, undo with
-`git reset HEAD org-kb/source/`; the `.gitignore` entries prevent it
-on subsequent adds.
-
-A `partial` vault is still commitable — what got rendered is real.
-Note the missing types in the commit message so future readers
-understand the scope.
+If you `git add` something from the right-hand column by accident, undo with
+`git reset HEAD <path>`. A `partial` vault is still commitable; note the missing
+types in the commit message so future readers understand the scope.
 
 ## 7. Asking your first question
 

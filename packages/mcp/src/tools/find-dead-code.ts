@@ -16,10 +16,14 @@
  *     type-name usage (`Other.CONST`, `List<Other>`,
  *     `JSON.deserialize(.., List<Other>.class)`) — which the parser does
  *     not model as an inbound edge — is downgraded to `uncertain` rather
- *     than reported dead. For
- *     CustomField, no incoming references at all (no formula refs, no
- *     Apex reads/writes, no Flow record-ops, no layout placements). For an
- *     Activity/Task/Event-family CustomField specifically (a shared
+ *     than reported dead. A CustomField is NEVER `definitely_dead`: every
+ *     row is `confidence: 'heuristic'`, so a field with no incoming usage
+ *     edge (no formula refs, no Apex reads/writes, no Flow record-ops, no
+ *     layout placements) caps at `likely_dead`; the CustomField entry in
+ *     `boundaries` names the referrer families this call did not check
+ *     (analytics / list-view families the vault never retrieved, and the
+ *     standing blind spots) and each field row points to it.
+ *     For an Activity/Task/Event-family CustomField specifically (a shared
  *     Activity custom field can be materialized as up to three graph
  *     nodes — `CustomField:Activity/Task/Event.<field>` — that are ONE
  *     physical field), this verdict additionally survives an
@@ -81,18 +85,21 @@
  * one or more ComponentTypes. Default is `['ApexClass', 'ApexTrigger',
  * 'Flow', 'CustomField']` — the four scope-relevant types.
  *
- * **Honesty axis (inherited):** dynamic dispatch
- * (`Type.forName(...)`), reflective invocation, framework wiring
- * (TriggerHandler / fflib base classes), managed-package callers, and
- * every registration that lives in DATA rather than metadata — a
- * `CronTrigger` record written by Setup > Schedule Apex, a Custom
- * Metadata dispatch row, anonymous Apex — are INVISIBLE to the graph
- * edges this tool walks, and no refresh changes that. A class genuinely
- * invoked at runtime via one of these mechanisms has zero incoming edges
- * by construction. The recognisable shapes are routed to `uncertain`
- * (async dispatch, framework subclass, `Callable`); the rest can still
- * surface as `definitely_dead` or `likely_dead`. The `boundaries` array
- * surfaces the verbatim disclosure.
+ * **Honesty axis (inherited):** a `Type.forName` the extractors can
+ * resolve — a string-literal class name, or a Custom Metadata cell naming
+ * the class joined at refresh — IS a heuristic `references` edge
+ * (`mechanism: Type.forName`, `DYNAMIC_DISPATCH_MECHANISM`) and is read
+ * as usage BEFORE the registration shapes below. Everything else stays
+ * invisible: `Type.forName` on any other variable (counted on the
+ * dispatching class as `unresolvedDynamicDispatch`, never guessed),
+ * reflective invocation, framework wiring (TriggerHandler / fflib base
+ * classes), managed-package callers, and every registration that lives in
+ * DATA rather than metadata — a `CronTrigger` record written by Setup >
+ * Schedule Apex, anonymous Apex. A class genuinely invoked at runtime via
+ * one of those has zero incoming edges by construction. The recognisable
+ * shapes are routed to `uncertain` (async dispatch, framework subclass,
+ * `Callable`); the rest can still surface as `definitely_dead` or
+ * `likely_dead`. The `boundaries` array surfaces the verbatim disclosure.
  *
  * **Performance:** the original implementation issued one
  * `listEdges` plus one `getNodeById` per incoming edge — an N+1
@@ -114,7 +121,7 @@ import type {
   McpResponse,
   PageInfo,
 } from '@sf-intelligence/contracts';
-import { err, ok, type Result, splitPathSegments} from '@sf-intelligence/core';
+import { err, ok, type Result } from '@sf-intelligence/core';
 import {
   ACTIVITY_POLYMORPHIC_SLOTS,
   getNodeById,
@@ -127,7 +134,9 @@ import type { Context } from '../server.js';
 import {
   ASYNC_DISPATCH_PROPERTY_KEYS,
   CALLABLE_INTERFACE,
+  DYNAMIC_DISPATCH_MECHANISM,
   NOT_USAGE_EDGE_TYPES,
+  staticallyReferencedApex,
   UNPROVEN_REGISTRATION_DISCLOSURE,
 } from './apex-reachability.js';
 import { buildCoverageCaveat, type CoverageCaveat } from './coverage-trust.js';
@@ -147,7 +156,6 @@ import {
 } from './quality-scan-coverage.js';
 import { REPORT_DASHBOARD_USAGE_CAVEAT } from './report-dashboard-usage.js';
 import { scanAllNodesOfTypes } from './scan-all-nodes.js';
-import { grepVaultSource } from './search-apex-source.js';
 import { soundnessFromNodes, type Soundness } from './soundness.js';
 
 const MAX_LIMIT = 500;
@@ -156,7 +164,7 @@ const DEFAULT_LIMIT = 100;
 const FIND_DEAD_CODE_TOOL = 'sfi.find_dead_code';
 
 const DEAD_CODE_DISCLOSURE =
-  'dead-code detection is heuristic: dynamic dispatch (`Type.forName(...)`), reflective invocation, framework wiring (TriggerHandler / fflib base classes), and managed-package callers are invisible to the graph edges this tool walks. A class genuinely invoked at runtime via one of these mechanisms will surface as `definitely_dead` or `likely_dead`. Verify before deleting.';
+  'dead-code detection is heuristic: dynamic dispatch via `Type.forName` with a string-literal class name, or fed from a Custom Metadata cell naming a class, IS resolved into a heuristic `references` edge (`mechanism: Type.forName`) and counts as usage; a `Type.forName` on any other variable is NOT guessed (counted on the dispatching class as `unresolvedDynamicDispatch`), and reflective invocation, framework wiring (TriggerHandler / fflib base classes) and managed-package callers stay invisible to the graph edges this tool walks. A class genuinely invoked at runtime via one of those remaining mechanisms can surface as `definitely_dead` or `likely_dead`. Verify before deleting.';
 const TEST_DISCLOSURE =
   'test classes (properties.isTest === true) are NEVER flagged as dead — they ARE entry points for the test-runner.';
 const MANAGED_PACKAGE_DISCLOSURE =
@@ -165,8 +173,19 @@ const FLOW_DISCLOSURE =
   'Flow dead-detection (R2-12): a Flow is flagged definitely_dead ONLY when its status is Obsolete or InvalidDraft. An Active, Draft, or unknown-status Flow is NEVER definitely_dead — Flow graph edges are mostly OUTGOING (triggersOn / listensTo / callsApex / writesTo), so a live flow has ~0 incoming edges by nature and fires on its own trigger/schedule; it surfaces as `uncertain` (suppressed unless includeUncertain). R6-02: subflow invocation (flow-calls-flow) IS now modeled as an incoming `references` edge, so an Obsolete/InvalidDraft flow still invoked by another flow as a subflow now reads `uncertain` (it has a live dependent), not definitely_dead — delete the referencing flow first. The still-invisible path is Apex `Flow.Interview` invocation and non-metadata launch points; verify a flow before deleting it.';
 const ASYNC_DISPATCH_DISCLOSURE =
   'async-dispatch (Queueable/Batchable/Schedulable) is NEVER reported dead on metadata evidence alone. The dispatch that starts such a class does not have to exist in metadata: an admin who schedules a class through Setup > Schedule Apex creates a `CronTrigger` RECORD, and CronTrigger is DATA, not metadata — it is never retrieved into the vault, mints no node and no edge, and NO refresh can close that gap; `System.enqueueJob` / `Database.executeBatch` / `System.schedule` run from ANONYMOUS Apex (Developer Console, deployment script) just as well. So an absent dispatch site is the EXPECTED reading for a live scheduled job, not evidence against it, and these classes are reported `uncertain` — suppressed unless includeUncertain — never `definitely_dead` and never `likely_dead`. What the vault CAN say is reported in `reasoning`: a PRODUCTION dispatch site (`System.enqueueJob` / `Database.executeBatch` / `System.schedule` from a non-@isTest class, including one guarded only by `!Test.isRunningTest()`) means the class is live at runtime; @isTest-only dispatch and no dispatch at all are both stated as "no production dispatch site is VISIBLE in this vault", which is not the same claim as "none exists". Further blind spots on the visible side: helper-wrapper dispatch (`MyHelper.enqueue(new MyJob())`), reflective dispatch (`Type.forName`), and managed-package dispatchers. Confirm the job in Setup > Scheduled Jobs / Apex Jobs before deleting anything here.';
-const CUSTOM_FIELD_DISCLOSURE =
-  'CustomField dead-detection: Apex field reads/writes (incl. field-level SOQL in constant strings) are PARSED graph edges on vaults refreshed at 0.1.9+, and Flow assignments, formula references, and layout placements are modeled — so a field referenced only in Apex/Flow no longer reads dead (permission grants stay EXCLUDED: access is not usage). REMAINING blind spots an absence verdict cannot rule out: Flow formula-TEXT references, report columns beyond the usage-ranked pull, list-view filters, DYNAMIC SOQL built at runtime, and reflective access. Cross-check with `sfi.field_360` or `sfi.find_field_anywhere` before deleting any field.';
+/**
+ * The CustomField boundary, printed once per response. `notRetrieved` is the
+ * analytics / list-view families this vault never retrieved (from the
+ * manifest); the standing blind spots follow. Every field row points here, so
+ * the list is not repeated on each of them.
+ */
+const customFieldDisclosure = (notRetrieved: readonly string[], notRetrievedWhy: string): string =>
+  'CustomField dead-detection: Apex field reads/writes (incl. field-level SOQL in constant strings) are PARSED graph edges on vaults refreshed at 0.1.9+, and Flow assignments, formula references, and layout placements are modeled — so a field referenced only in Apex/Flow no longer reads dead (permission grants stay EXCLUDED: access is not usage). A field verdict is heuristic, so it is never `definitely_dead`: it caps at `likely_dead`. Not checked before any field verdict here: ' +
+  [
+    ...(notRetrieved.length > 0 ? [`${notRetrieved.join(', ')} (${notRetrievedWhy})`] : []),
+    'Flow formula-TEXT references, report columns beyond the usage-ranked pull, list-view filters, DYNAMIC SOQL built at runtime, and reflective access',
+  ].join('; ') +
+  '. Cross-check with `sfi.safe_to_delete_field`, `sfi.field_360` or `sfi.find_field_anywhere` before deleting any field.';
 /**
  * Activity/Task/Event-family CustomField disclosure (D2 parity with
  * `safe_to_delete_field`'s "Polymorphic Activity attribution" limitation). A
@@ -193,7 +212,7 @@ const CUSTOM_FIELD_DISCLOSURE =
  * deleting any field in this family.
  */
 const ACTIVITY_POLYMORPHIC_DISCLOSURE =
-  'Activity-family CustomField re-check: a shared Activity custom field can be materialized as up to three graph nodes — `CustomField:Activity/Task/Event.<field>` — that are ONE physical field (see `sfi.safe_to_delete_field`\'s "Polymorphic Activity attribution" limitation). Before reporting `definitely_dead` on one of these three nodes, this tool queries the OTHER EXISTING representations\' own incoming usage edges directly — not the precomputed import-time mirror alone, which is a heuristic name-based alias that under-mints on the incremental apply-change-set path, is absent entirely on a vault refreshed before it existed, and only ever covers readsFrom/writesTo/references (a Layout placement or ListView reference on one sibling never propagates to the others) — and downgrades to `uncertain` when a sibling has a real dependent this candidate does not. A `definitely_dead` verdict that survives this check found NO incoming usage edge on ANY existing representation of the field. Residual blind spot: a representation that is not itself vaulted as a node cannot be cross-checked. Cross-check with `sfi.safe_to_delete_field` before deleting any field in this family.';
+  'Activity-family CustomField re-check: a shared Activity custom field can be materialized as up to three graph nodes — `CustomField:Activity/Task/Event.<field>` — that are ONE physical field (see `sfi.safe_to_delete_field`\'s "Polymorphic Activity attribution" limitation). Before reporting `likely_dead` on one of these three nodes, this tool queries the OTHER EXISTING representations\' own incoming usage edges directly — not the precomputed import-time mirror alone, which is a heuristic name-based alias that under-mints on the incremental apply-change-set path, is absent entirely on a vault refreshed before it existed, and only ever covers readsFrom/writesTo/references (a Layout placement or ListView reference on one sibling never propagates to the others) — and downgrades to `uncertain` when a sibling has a real dependent this candidate does not. A `likely_dead` verdict that survives this check found NO incoming usage edge on ANY existing representation of the field. Residual blind spot: a representation that is not itself vaulted as a node cannot be cross-checked. Cross-check with `sfi.safe_to_delete_field` before deleting any field in this family.';
 /**
  * THIS TOOL'S verdict framing for an unproven dynamic registration. The claim
  * itself — what the two predicates establish and what they do not — lives ONCE
@@ -594,6 +613,14 @@ interface DeadCodeRow {
    * is rolled back at runtime and does not keep the class alive.
    */
   readonly has_production_dispatch: boolean;
+  /**
+   * At least one inbound edge from a non-test class carries
+   * `properties.mechanism === DYNAMIC_DISPATCH_MECHANISM`: a `Type.forName` the
+   * extractors RESOLVED (literal operand or Custom Metadata cell). Read before
+   * `is_unproven_registration`, because a framework subclass reached this way
+   * is in use, not a registration whose empty in-degree is expected.
+   */
+  readonly has_dynamic_dispatch_reach: boolean;
   /** Flow only: TRUE when the Flow's status is NOT Obsolete/InvalidDraft
    *  (active, Draft, or unknown/missing status — all treated as in-use). An
    *  active flow fires on its own trigger and has ~0 incoming edges by nature,
@@ -805,6 +832,16 @@ ${UNPROVEN_REGISTRATION_SQL} AS is_unproven_registration,
                      AND json_extract_string(r.properties_json, '$.isTest') = 'true',
                    FALSE),
                FALSE) AS from_is_production_dispatch,
+             -- A RESOLVED dynamic dispatch (apex-reachability
+             -- DYNAMIC_DISPATCH_MECHANISM) from a non-test class: a usage edge
+             -- that outranks the unproven-registration shape below.
+             COALESCE(
+               json_extract_string(e.properties_json, '$.mechanism') = '${DYNAMIC_DISPATCH_MECHANISM}'
+                 AND NOT COALESCE(
+                   r.type = 'ApexClass'
+                     AND json_extract_string(r.properties_json, '$.isTest') = 'true',
+                   FALSE),
+               FALSE) AS from_is_dynamic_dispatch,
              r.id IS NULL AS from_is_null
       FROM edges e
       LEFT JOIN nodes r ON r.id = e.from_id
@@ -828,7 +865,8 @@ ${NON_USAGE_EDGE_EXCLUSION_SQL}
            COUNT(i.cid) AS incoming_count,
            COALESCE(BOOL_OR(i.from_is_null OR NOT i.from_is_test), FALSE) AS has_non_test_reach,
            COALESCE(BOOL_OR(NOT i.from_is_test AND i.from_is_entry), FALSE) AS has_entry_point_reach,
-           COALESCE(BOOL_OR(i.from_is_production_dispatch), FALSE) AS has_production_dispatch
+           COALESCE(BOOL_OR(i.from_is_production_dispatch), FALSE) AS has_production_dispatch,
+           COALESCE(BOOL_OR(i.from_is_dynamic_dispatch), FALSE) AS has_dynamic_dispatch_reach
     FROM candidates c
     LEFT JOIN incoming i ON i.cid = c.id
     GROUP BY c.id, c.type, c.api_name, c.is_test, c.is_own_entry_point, c.is_unproven_registration, c.is_async_dispatch_entry, c.is_active_entry_point, c.used_in_analytics
@@ -871,10 +909,6 @@ const compareCandidates = (
   return a.componentId < b.componentId ? -1 : 1;
 };
 
-/** Escape a string for literal use inside a `new RegExp(...)`. */
-const escapeForRegex = (s: string): string =>
-  s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
 /** Canonical id prefix for a CustomField node. */
 const CUSTOM_FIELD_ID_PREFIX = 'CustomField:';
 
@@ -916,7 +950,7 @@ const isActivityPolymorphicFieldId = (id: string): boolean => {
 };
 
 /**
- * For a `definitely_dead` Activity/Task/Event-family CustomField candidate,
+ * For a `likely_dead` Activity/Task/Event-family CustomField candidate,
  * check whether any OTHER EXISTING representation of the same physical field
  * (case-insensitive field-name match, restricted to the Activity/Task/Event
  * object family — see {@link isActivityPolymorphicFieldId}) has a real
@@ -961,46 +995,6 @@ ${NON_USAGE_EDGE_EXCLUSION_SQL}
     // found" so the candidate's own (already-computed) verdict stands rather
     // than silently downgrading on an error this caller cannot see.
     return false;
-  }
-};
-
-/**
- * Derive the ApexClass / ApexTrigger api name from a vault source path.
- * Source files are named `{ApiName}.cls` / `{ApiName}.trigger` (flat or
- * DX-nested), so the basename minus the suffix is the referencing component's
- * api name — used to attribute a grep hit to its file and to skip test /
- * self references.
- */
-const sourceFileApiName = (vaultRelativePath: string): string => {
-  const base = splitPathSegments(vaultRelativePath).at(-1) ?? vaultRelativePath;
-  return base.replace(/\.(cls|trigger)$/i, '');
-};
-
-/**
- * Lower-cased api names of every ApexClass whose `isTest` property is true.
- * Used to exclude test classes from the static-type-usage re-check: a class
- * referenced only from @isTest code is NOT kept alive (test references do not
- * count as production usage — the same posture the graph cascade takes). Apex
- * identifiers are case-insensitive, so the set is lower-cased for comparison.
- */
-const fetchTestClassApiNames = async (
-  store: GraphStore,
-): Promise<Set<string>> => {
-  try {
-    const reader = await store.connection.runAndReadAll(
-      `SELECT api_name FROM nodes
-       WHERE type = 'ApexClass'
-         AND json_extract_string(properties_json, '$.isTest') = 'true'`,
-    );
-    const rows = reader.getRowObjectsJS() as unknown as ReadonlyArray<{
-      api_name: string;
-    }>;
-    return new Set(rows.map((r) => String(r.api_name).toLowerCase()));
-  } catch {
-    // A query failure must not fake death — fall back to "no known test
-    // classes" so a reference in a test file is (conservatively) counted as
-    // usage rather than silently dropped.
-    return new Set<string>();
   }
 };
 
@@ -1124,6 +1118,21 @@ export const findDeadCodeHandler = async (
     });
   }
 
+  // A field's referrers outside metadata edges are not checked here: the
+  // analytics / list-view families this vault never retrieved (from the
+  // manifest) are named once in the CustomField boundary, before any verdict.
+  const fieldCoverage = buildCoverageCaveat(
+    ctx,
+    ['Report', 'Dashboard', 'ListView'],
+    'field usage outside metadata edges',
+  );
+  const fieldFamiliesNotRetrieved = fieldCoverage?.missingCoverage ?? [];
+  // A manifest with no coverage rows cannot say "not retrieved"; it says unknown.
+  const fieldFamiliesWhy =
+    fieldCoverage?.status === 'unknown'
+      ? 'coverage not recorded in this vault'
+      : 'not retrieved into this vault';
+
   let candidates: DeadCodeCandidate[] = [];
   for (const row of rowsResult.value) {
     // Tests are NEVER flagged as dead.
@@ -1209,6 +1218,17 @@ export const findDeadCodeHandler = async (
       reasoning = ownEntryPoint
         ? 'component is its own entry point (REST/Aura/Invocable or trigger); platform invokes it'
         : 'reached by an entry-point class (REST resource / AuraEnabled / InvocableMethod / async-dispatch)';
+    } else if (row.has_dynamic_dispatch_reach) {
+      // Must sit ABOVE `is_unproven_registration`: a framework subclass or
+      // Callable the extractors saw instantiated through a RESOLVED
+      // `Type.forName` (literal operand, or a Custom Metadata cell joined at
+      // refresh) is in use. The shape-based branch below would call its
+      // in-degree "expected to be zero" when it is not zero.
+      verdict = 'uncertain';
+      reasoning =
+        'in use via resolved dynamic dispatch: a production (non-@isTest) class instantiates it through ' +
+        '`Type.forName` with a literal class name or a Custom Metadata cell naming it (heuristic edge, ' +
+        '`mechanism: Type.forName`). Not dead; no recognized entry point reaches the dispatcher in this vault.';
     } else if (row.is_unproven_registration) {
       // Must sit ABOVE the incomingCount === 0 branch. These classes have zero
       // incoming edges BY CONSTRUCTION — that is the whole point of dynamic
@@ -1236,6 +1256,18 @@ export const findDeadCodeHandler = async (
       reasoning =
         `managed-package component (namespace ${namespaceOf(row.id) ?? ''}): it cannot be deleted from this org, ` +
         'and the package code that uses it is not in the vault, so no incoming edge is expected. Not dead code.';
+    } else if (incomingCount === 0 && row.type === 'CustomField') {
+      // Every row is `confidence: 'heuristic'`; a heuristic field verdict
+      // cannot read `definitely_dead` next to it. Cap, and say what was not
+      // checked before the verdict word.
+      // shortcut: the families not checked and the confirm step live once in the
+      // CustomField boundary, not on the row — ~120 extra bytes per row pushed a
+      // 72-row page over the byte budget; put them back on the row if rows get
+      // their own paging budget.
+      verdict = 'likely_dead';
+      reasoning =
+        'no incoming usage edge in the modeled families; heuristic field verdict, capped at likely_dead ' +
+        '(not checked: see the CustomField boundary)';
     } else if (incomingCount === 0) {
       verdict = 'definitely_dead';
       reasoning =
@@ -1286,57 +1318,30 @@ export const findDeadCodeHandler = async (
       c.componentType === 'ApexClass' &&
       (c.verdict === 'definitely_dead' || c.verdict === 'likely_dead'),
   );
-  if (deadApexClasses.length > 0) {
-    const testClassApiNames = await fetchTestClassApiNames(ctx.graph);
-    // componentId → vault-relative path of the first production referrer.
-    const staticallyUsed = new Map<ComponentId, string>();
-    for (const candidate of deadApexClasses) {
-      const selfLower = candidate.apiName.toLowerCase();
-      // limit:1 — existence is all that matters. The pathFilter drops the
-      // class's own file (a class references its own name) and every test
-      // file, so any surviving match is a production static reference.
-      const grep = await grepVaultSource(ctx, {
-        query: `\\b${escapeForRegex(candidate.apiName)}\\b`,
-        regex: true,
-        limit: 1,
-        suffixes: ['.cls', '.trigger'],
-        pathFilter: (vaultRelativePath) => {
-          const refName = sourceFileApiName(vaultRelativePath).toLowerCase();
-          if (refName === selfLower) return false; // self-reference
-          if (testClassApiNames.has(refName)) return false; // test class
-          return true;
-        },
-      });
-      if (grep.ok && grep.value.matches.length > 0) {
-        const hit = grep.value.matches[0];
-        if (hit !== undefined) {
-          staticallyUsed.set(candidate.componentId, hit.path);
-        }
-      }
-    }
-    if (staticallyUsed.size > 0) {
-      candidates = candidates.map((c) => {
-        const referrerPath = staticallyUsed.get(c.componentId);
-        if (referrerPath === undefined) return c;
-        return {
-          ...c,
-          verdict: 'uncertain' as const,
-          reasoning:
-            `referenced by non-test production Apex in \`${referrerPath}\` via a static-field or ` +
-            'type-name usage (`Other.CONST`, `List<Other>`, `JSON.deserialize(.., List<Other>.class)`) ' +
-            'that the parser does not model as an inbound edge; not dead — delete the referencing code first',
-        };
-      });
-      staticUsageDowngrades = staticallyUsed.size;
-      // The downgrade to `uncertain` is all that is needed: the ONE
-      // `includeUncertain` filter below removes it from the listing, and the
-      // tallies keep counting it. Filtering it out a second time here is what
-      // made a statically-used class vanish from `byVerdict` as well as from
-      // the list.
-    }
+  // ONE predicate, two callers: the same grep `unused_components` runs.
+  const staticallyUsed = await staticallyReferencedApex(ctx, deadApexClasses);
+  if (staticallyUsed.size > 0) {
+    candidates = candidates.map((c) => {
+      const referrerPath = staticallyUsed.get(c.componentId);
+      if (referrerPath === undefined) return c;
+      return {
+        ...c,
+        verdict: 'uncertain' as const,
+        reasoning:
+          `referenced by non-test production Apex in \`${referrerPath}\` via a static-field or ` +
+          'type-name usage (`Other.CONST`, `List<Other>`, `JSON.deserialize(.., List<Other>.class)`) ' +
+          'that the parser does not model as an inbound edge; not dead — delete the referencing code first',
+      };
+    });
+    staticUsageDowngrades = staticallyUsed.size;
+    // The downgrade to `uncertain` is all that is needed: the ONE
+    // `includeUncertain` filter below removes it from the listing, and the
+    // tallies keep counting it. Filtering it out a second time here is what
+    // made a statically-used class vanish from `byVerdict` as well as from
+    // the list.
   }
 
-  // ---- ACTIVITY-POLYMORPHIC re-check (definitely_dead CustomField only) --
+  // ---- ACTIVITY-POLYMORPHIC re-check (likely_dead CustomField only) --
   //
   // See {@link ACTIVITY_POLYMORPHIC_DISCLOSURE} for the full rationale. In
   // short: a shared Activity custom field can be materialized as up to three
@@ -1349,16 +1354,16 @@ export const findDeadCodeHandler = async (
   // under-mounted on the incremental apply-change-set path) or structurally
   // incomplete (it only ever covers readsFrom/writesTo/references — a Layout
   // placement never propagates). So rather than trust the precomputed
-  // `incoming` join alone, a `definitely_dead` CustomField candidate in this
+  // `incoming` join alone, a `likely_dead` CustomField candidate in this
   // family is re-checked directly against its siblings' OWN incoming edges
-  // before the verdict is certified. Scoped to `definitely_dead` CustomField
+  // before the verdict is certified. Scoped to `likely_dead` CustomField
   // candidates whose object is Activity/Task/Event — a small slice of any
   // vault's fields — so every other candidate costs nothing.
   let activityPolymorphicDowngrades = 0;
   const deadActivityFields = candidates.filter(
     (c) =>
       c.componentType === 'CustomField' &&
-      c.verdict === 'definitely_dead' &&
+      c.verdict === 'likely_dead' &&
       isActivityPolymorphicFieldId(c.componentId),
   );
   if (deadActivityFields.length > 0) {
@@ -1529,11 +1534,11 @@ export const findDeadCodeHandler = async (
         (c.verdict === 'definitely_dead' || c.verdict === 'likely_dead'),
     )
   ) {
-    boundaries.push(CUSTOM_FIELD_DISCLOSURE);
+    boundaries.push(customFieldDisclosure(fieldFamiliesNotRetrieved, fieldFamiliesWhy));
     boundaries.push(REPORT_DASHBOARD_USAGE_CAVEAT);
   }
   // Disclose the Activity-polymorphic re-check whenever it downgraded a
-  // candidate OR a definitely_dead Activity/Task/Event-family CustomField
+  // candidate OR a likely_dead Activity/Task/Event-family CustomField
   // survived it — so a surviving verdict is understood to have passed the
   // sibling cross-check, and any suppression is transparent (same posture as
   // the static-type-usage disclosure above).
@@ -1542,7 +1547,7 @@ export const findDeadCodeHandler = async (
     candidates.some(
       (c) =>
         c.componentType === 'CustomField' &&
-        c.verdict === 'definitely_dead' &&
+        c.verdict === 'likely_dead' &&
         isActivityPolymorphicFieldId(c.componentId),
     )
   ) {
